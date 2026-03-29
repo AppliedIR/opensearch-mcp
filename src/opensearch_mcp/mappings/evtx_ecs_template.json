@@ -1,0 +1,31 @@
+{
+  "index_patterns": ["case-*-evtx-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "event.code": {"type": "integer"},
+        "winlog.event_id": {"type": "integer"},
+        "@timestamp": {"type": "date"},
+        "source.ip": {"type": "ip", "ignore_malformed": true},
+        "host.name": {"type": "keyword"},
+        "user.name": {"type": "keyword"},
+        "user.effective.name": {"type": "keyword"},
+        "winlog.channel": {"type": "keyword"},
+        "winlog.provider_name": {"type": "keyword"},
+        "winlog.logon.type": {"type": "keyword"},
+        "process.name": {"type": "keyword"},
+        "process.command_line": {
+          "type": "text",
+          "fields": {"keyword": {"type": "keyword", "ignore_above": 2048}}
+        },
+        "process.parent.name": {"type": "keyword"},
+        "file.path": {"type": "keyword"},
+        "script_block_text": {"type": "text"},
+        "winlog.event_data": {"type": "flat_object"},
+        "pipeline_version": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"}
+      }
+    }
+  }
+}

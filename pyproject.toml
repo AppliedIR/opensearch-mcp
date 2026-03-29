@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opensearch-mcp"
+version = "0.1.0"
+description = "OpenSearch MCP server for forensic evidence indexing and querying"
+requires-python = ">=3.10"
+dependencies = [
+    "opensearch-py>=2.4",
+    "evtx>=0.8",
+    "mcp>=1.26",
+    "pyyaml>=6.0",
+    "sift-common",
+]
+
+[project.scripts]
+opensearch-mcp = "opensearch_mcp.server:main"
+opensearch-ingest = "opensearch_mcp.ingest_cli:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/opensearch_mcp"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+markers = [
+    "integration: tests requiring OpenSearch Docker container",
+]
