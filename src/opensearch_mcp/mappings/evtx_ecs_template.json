@@ -24,7 +24,8 @@
         "winlog.event_data": {"type": "flat_object"},
         "pipeline_version": {"type": "keyword"},
         "vhir.source_file": {"type": "keyword"},
-        "vhir.ingest_audit_id": {"type": "keyword"}
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.vss_id": {"type": "keyword"}
       }
     }
   }

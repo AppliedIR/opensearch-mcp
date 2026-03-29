@@ -13,6 +13,8 @@ def make_windows_tree(
     recycle_bin: bool = False,
     usn: bool = False,
     timeline: bool = False,
+    prefetch: bool = False,
+    srum: bool = False,
 ) -> None:
     """Create a realistic Windows directory structure.
 
@@ -74,6 +76,18 @@ def make_windows_tree(
         if timeline:
             cdp = profile / "AppData" / "Local" / "ConnectedDevicesPlatform"
             cdp.mkdir(parents=True)
+
+    # Prefetch
+    if prefetch:
+        pf_dir = root / "Windows" / "Prefetch"
+        pf_dir.mkdir(parents=True, exist_ok=True)
+        (pf_dir / "CMD.EXE-89305D47.pf").touch()
+
+    # SRUM
+    if srum:
+        sru_dir = root / "Windows" / "System32" / "SRU"
+        sru_dir.mkdir(parents=True, exist_ok=True)
+        (sru_dir / "SRUDB.dat").touch()
 
     # Skipped profiles
     for skip in ("Public", "Default", "All Users"):

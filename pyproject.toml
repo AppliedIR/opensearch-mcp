@@ -19,6 +19,9 @@ dependencies = [
 opensearch-mcp = "opensearch_mcp.server:main"
 opensearch-ingest = "opensearch_mcp.ingest_cli:main"
 
+[project.entry-points."vhir.plugins"]
+opensearch = "opensearch_mcp.vhir_plugin:register"
+
 [project.optional-dependencies]
 test = [
     "pytest>=7.0",

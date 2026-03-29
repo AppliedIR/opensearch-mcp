@@ -141,10 +141,13 @@ def run_and_ingest(
     pipeline_version: str = "",
     time_from=None,
     time_to=None,
+    vss_id: str = "",
+    natural_key_override: str | None = None,
 ) -> tuple[int, int, int]:
     """Run an EZ tool against an artifact and ingest the CSV output.
 
     Returns (count_indexed, count_skipped, count_bulk_failed).
+    natural_key_override: if set, overrides cfg.natural_key (used for VSS MFT).
     """
     cfg = TOOLS.get(tool_name)
     if cfg is None:
@@ -152,6 +155,7 @@ def run_and_ingest(
 
     index_name = f"case-{case_id}-{cfg.index_suffix}-{hostname}".lower()
     tmpdir = tempfile.mkdtemp(prefix=f"vhir-{tool_name}-")
+    natural_key = natural_key_override if natural_key_override is not None else cfg.natural_key
 
     try:
         # Build command
@@ -194,10 +198,11 @@ def run_and_ingest(
                 ingest_audit_id=ingest_audit_id,
                 pipeline_version=pipeline_version,
                 table_name=table_name,
-                natural_key=cfg.natural_key,
+                natural_key=natural_key,
                 time_field=cfg.time_field,
                 time_from=time_from,
                 time_to=time_to,
+                vss_id=vss_id,
             )
             total_count += count
             total_skipped += sk
@@ -279,10 +284,20 @@ def _build_command(cfg: ToolConfig, tool_name: str, artifact_path: Path, tmpdir:
 def get_active_tools(
     include: set[str] | None = None,
     exclude: set[str] | None = None,
+    full: bool = False,
 ) -> list[ToolConfig]:
-    """Get the list of tools to run based on tier and include/exclude flags."""
+    """Get the list of tools to run based on tier and include/exclude flags.
+
+    full=True includes all tiers (1+2+3), equivalent to --full flag.
+    """
     active = []
     for name, cfg in TOOLS.items():
+        # --full: include all tiers
+        if full:
+            if exclude and name in exclude:
+                continue
+            active.append(cfg)
+            continue
         # Tier 3 only if explicitly included
         if cfg.tier == 3 and (not include or name not in include):
             continue

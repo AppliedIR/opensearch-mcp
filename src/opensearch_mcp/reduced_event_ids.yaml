@@ -1,0 +1,114 @@
+# High-value Event IDs for --reduced mode
+# Covers core IR detection across ATT&CK tactics
+#
+# IMPORTANT: Some Event IDs appear in multiple channels with different
+# meanings (e.g., ID 21 is RDP logon in TerminalServices AND WMI
+# consumer binding in Sysmon; ID 25 is RDP reconnection AND Sysmon
+# process tampering). The reduced mode filter matches on Event ID
+# alone — this means including ID 21 keeps BOTH the RDP and Sysmon
+# events. This is acceptable: false inclusions are safe (extra data),
+# while false exclusions would lose evidence. Channel-aware filtering
+# would require (channel, event_id) tuples — added complexity for
+# minimal benefit in reduced mode.
+
+authentication:
+  - 4624   # successful logon
+  - 4625   # failed logon
+  - 4634   # logoff
+  - 4648   # explicit credentials
+  - 4672   # special privileges assigned
+  - 4768   # Kerberos TGT requested
+  - 4769   # Kerberos service ticket
+  - 4770   # Kerberos service ticket renewed
+  - 4771   # Kerberos pre-auth failed
+  - 4776   # NTLM authentication
+
+account_management:
+  - 4720   # account created
+  - 4722   # account enabled
+  - 4724   # password reset
+  - 4728   # member added to global group
+  - 4732   # member added to local group
+  - 4740   # account locked out
+  - 4756   # member added to universal group
+
+persistence:
+  - 7045   # service installed (System log)
+  - 4697   # service installed (Security log)
+  - 4698   # scheduled task created
+  - 4699   # scheduled task deleted
+  - 106    # task registered (TaskScheduler)
+  - 140    # task updated
+  - 141    # task removed
+  - 200    # task action started
+  - 201    # task action completed
+
+execution:
+  - 1      # Sysmon process create
+  - 4688   # process creation (Security)
+  - 4103   # PowerShell module logging
+  - 4104   # PowerShell script block
+  - 400    # PowerShell engine start
+  - 800    # PowerShell pipeline execution
+  - 5861   # WMI activity
+
+lateral_movement:
+  - 4778   # RDP session reconnected
+  - 4779   # RDP session disconnected
+  - 1024   # RDP client ActiveX
+  - 131    # RDP connection attempt
+  - 21     # RDP logon (TerminalServices)
+  - 25     # RDP reconnection
+  - 5140   # network share accessed
+  - 5145   # share object access checked
+
+defense_evasion:
+  - 1102   # audit log cleared (Security)
+  - 104    # audit log cleared (System)
+  - 2      # Sysmon file creation time changed (timestomping)
+  - 15     # Sysmon FileCreateStreamHash (alternate data streams)
+
+sysmon:
+  - 3      # network connection
+  - 6      # driver loaded (BYOVD detection)
+  - 7      # image loaded
+  - 8      # create remote thread
+  - 10     # process access
+  - 11     # file create
+  - 12     # registry create/delete
+  - 13     # registry value set
+  - 17     # pipe created
+  - 18     # pipe connected
+  - 19     # WMI filter activity
+  - 20     # WMI consumer activity
+  - 21     # WMI consumer binding
+  - 22     # DNS query
+  - 23     # file delete
+  - 25     # process tampering
+
+network:
+  - 5156   # WFP connection allowed
+  - 5158   # WFP bind
+
+defender:
+  - 1006   # malware detected (scan)
+  - 1007   # malware action taken (platform)
+  - 1013   # malware history deleted
+  - 1116   # detection
+  - 1117   # action taken
+  - 1118   # action success
+  - 1119   # action failure
+  - 5001   # real-time protection disabled
+  - 5004   # config changed
+  - 5007   # platform config changed
+  - 5012   # scanning disabled
+
+bits:
+  - 59     # BITS transfer started
+  - 60     # BITS transfer completed
+  - 61     # BITS transfer stopped
+
+firewall:
+  - 2003   # firewall profile changed
+  - 2004   # rule added
+  - 2006   # rule deleted

@@ -19,6 +19,9 @@ from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 
+# Artifacts handled by Plaso (not EZ tools)
+_PLASO_ARTIFACTS = {"prefetch", "srum"}
+
 
 def _artifact_to_tool(artifact_name: str) -> str | None:
     """Map discovery artifact name to tool name."""
@@ -36,6 +39,8 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
         "jumplists": "jumplists",
         "lnk": "lnk",
         "timeline": "timeline",
+        "prefetch": "prefetch",
+        "srum": "srum",
     }
     return mapping.get(artifact_name)
 
@@ -76,8 +81,10 @@ def ingest(
     case_id: str,
     include: set[str] | None = None,
     exclude: set[str] | None = None,
+    full: bool = False,
     time_from=None,
     time_to=None,
+    reduced_ids: set[int] | None = None,
     status_pid: int = 0,
     status_run_id: str = "",
     on_progress: object = None,
@@ -88,15 +95,26 @@ def ingest(
       Events: "host_start", "evtx_file", "evtx_done", "artifact_start",
               "artifact_done", "artifact_failed"
     status_pid/status_run_id: if nonzero, write progress to status file.
+    reduced_ids: if set, only ingest evtx events with these Event IDs.
     """
-    active_tools = get_active_tools(include=include, exclude=exclude)
+    active_tools = get_active_tools(include=include, exclude=exclude, full=full)
     active_names = {t.cli_name for t in active_tools}
+
+    # Plaso artifacts: enabled unless explicitly excluded
+    active_plaso = set()
+    for pa in _PLASO_ARTIFACTS:
+        if exclude and pa in exclude:
+            continue
+        if include and pa not in include:
+            continue
+        active_plaso.add(pa)
+
     start = time.monotonic()
     started_ts = datetime.now(timezone.utc).isoformat()
     result = IngestResult(pipeline_version=_PIPELINE_VERSION)
 
     # Build status host structure for tracking
-    status_hosts = _build_status_hosts(hosts, active_names)
+    status_hosts = _build_status_hosts(hosts, active_names, active_plaso)
 
     def _progress(event: str, **kwargs) -> None:
         if callable(on_progress):
@@ -155,6 +173,8 @@ def ingest(
                             ingest_audit_id=aid,
                             time_from=time_from,
                             time_to=time_to,
+                            reduced_ids=reduced_ids,
+                            vss_id=host.vss_id,
                         )
                         ar.indexed += cnt
                         ar.skipped += sk
@@ -210,15 +230,38 @@ def ingest(
 
                 host_result.artifacts.append(ar)
 
-        # EZ tool artifacts
+        # EZ tool artifacts + Plaso artifacts
         seen_runs: set[tuple[str, str]] = set()
         for artifact_name, artifact_path in host.artifacts:
             tool_name = _artifact_to_tool(artifact_name)
-            if tool_name is None or tool_name not in active_names:
+            if tool_name is None:
+                continue
+
+            # Route Plaso artifacts separately
+            if tool_name in _PLASO_ARTIFACTS:
+                if tool_name not in active_plaso:
+                    continue
+                _ingest_plaso_artifact(
+                    tool_name=tool_name,
+                    artifact_path=artifact_path,
+                    client=client,
+                    audit=audit,
+                    case_id=case_id,
+                    host=host,
+                    host_idx=host_idx,
+                    host_result=host_result,
+                    status_hosts=status_hosts,
+                    _progress=_progress,
+                    _update_status=_update_status,
+                )
+                continue
+
+            if tool_name not in active_names:
                 continue
 
             # Deduplicate: RECmd runs on the directory (config/), not individual
             # hive files. Use parent dir for registry to avoid 4 runs.
+            # Discovery always returns individual hive files for registry.
             if tool_name == "registry":
                 run_key = (tool_name, str(artifact_path.parent))
             else:
@@ -232,6 +275,11 @@ def ingest(
             existing = _safe_count(client, index_name)
             file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
             aid = audit._next_audit_id()
+
+            # MFT natural key: add vss_id as 5th component when VSS is active
+            natural_key = cfg.natural_key
+            if tool_name == "mft" and host.vss_id and natural_key:
+                natural_key = natural_key + ":vhir.vss_id"
 
             ar = ArtifactResult(
                 artifact=tool_name,
@@ -259,6 +307,8 @@ def ingest(
                     pipeline_version=_PIPELINE_VERSION,
                     time_from=time_from,
                     time_to=time_to,
+                    vss_id=host.vss_id,
+                    natural_key_override=natural_key,
                 )
                 ar.indexed = cnt
                 ar.skipped = sk
@@ -331,6 +381,102 @@ def ingest(
     return result
 
 
+def _ingest_plaso_artifact(
+    tool_name: str,
+    artifact_path: Path,
+    client: OpenSearch,
+    audit: AuditWriter,
+    case_id: str,
+    host: DiscoveredHost,
+    host_idx: int,
+    host_result: HostResult,
+    status_hosts: list[dict],
+    _progress,
+    _update_status,
+) -> None:
+    """Ingest a Plaso-based artifact (prefetch or SRUM)."""
+    from opensearch_mcp.parse_plaso import parse_prefetch, parse_srum
+
+    index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
+    existing = _safe_count(client, index_name)
+    aid = audit._next_audit_id()
+
+    ar = ArtifactResult(
+        artifact=tool_name,
+        index=index_name,
+        existing_before=existing,
+        source_files=[str(artifact_path)],
+    )
+
+    tool_status = _find_artifact_status(status_hosts, host_idx, tool_name)
+    if tool_status:
+        tool_status["status"] = "running"
+        _update_status()
+    _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
+
+    try:
+        if tool_name == "prefetch":
+            cnt, bf = parse_prefetch(
+                prefetch_dir=artifact_path,
+                client=client,
+                index_name=index_name,
+                hostname=host.hostname,
+                ingest_audit_id=aid,
+                pipeline_version=_PIPELINE_VERSION,
+                vss_id=host.vss_id,
+            )
+        else:
+            cnt, bf = parse_srum(
+                srum_path=artifact_path,
+                client=client,
+                index_name=index_name,
+                hostname=host.hostname,
+                ingest_audit_id=aid,
+                pipeline_version=_PIPELINE_VERSION,
+                vss_id=host.vss_id,
+            )
+        ar.indexed = cnt
+        ar.bulk_failed = bf
+        audit.log(
+            tool=f"ingest_{tool_name}",
+            audit_id=aid,
+            params={
+                "hostname": host.hostname,
+                "tool": tool_name,
+                "path": str(artifact_path),
+            },
+            result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
+            input_files=[str(artifact_path)],
+            source_evidence=str(artifact_path),
+        )
+        if tool_status:
+            tool_status["status"] = "complete"
+            tool_status["indexed"] = cnt
+            tool_status["bulk_failed"] = bf
+            _update_status()
+        _progress(
+            "artifact_done",
+            hostname=host.hostname,
+            artifact=tool_name,
+            indexed=cnt,
+            skipped=0,
+        )
+    except Exception as e:
+        ar.error = str(e)
+        if tool_status:
+            tool_status["status"] = "failed"
+            tool_status["error"] = str(e)
+            _update_status()
+        _progress(
+            "artifact_failed",
+            hostname=host.hostname,
+            artifact=tool_name,
+            error=str(e),
+        )
+
+    host_result.artifacts.append(ar)
+
+
 def _safe_count(client: OpenSearch, index_name: str) -> int:
     try:
         r = client.count(index=index_name)
@@ -339,8 +485,14 @@ def _safe_count(client: OpenSearch, index_name: str) -> int:
         return 0
 
 
-def _build_status_hosts(hosts: list[DiscoveredHost], active_names: set[str]) -> list[dict]:
+def _build_status_hosts(
+    hosts: list[DiscoveredHost],
+    active_names: set[str],
+    active_plaso: set[str] | None = None,
+) -> list[dict]:
     """Build the initial status host structure with all artifacts pending."""
+    if active_plaso is None:
+        active_plaso = set()
     status_hosts = []
     for host in hosts:
         artifacts = []
@@ -349,7 +501,13 @@ def _build_status_hosts(hosts: list[DiscoveredHost], active_names: set[str]) -> 
         seen = set()
         for aname, _ in host.artifacts:
             tool = _artifact_to_tool(aname)
-            if tool and tool in active_names and tool not in seen:
+            if not tool or tool in seen:
+                continue
+            if tool in _PLASO_ARTIFACTS:
+                if tool in active_plaso:
+                    seen.add(tool)
+                    artifacts.append({"name": tool, "status": "pending"})
+            elif tool in active_names:
                 seen.add(tool)
                 artifacts.append({"name": tool, "status": "pending"})
         status_hosts.append({"hostname": host.hostname, "artifacts": artifacts})

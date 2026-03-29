@@ -26,6 +26,7 @@ def parse_and_index(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     reduced_ids: set[int] | None = None,
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse evtx file and bulk index into OpenSearch.
 
@@ -79,6 +80,8 @@ def parse_and_index(
             doc["vhir.source_file"] = source_file
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id
+        if vss_id:
+            doc["vhir.vss_id"] = vss_id
 
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 

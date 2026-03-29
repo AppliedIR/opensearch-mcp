@@ -29,9 +29,9 @@ def _detect_encoding(path: Path) -> str:
     return "utf-8-sig"
 
 
-# Fields containing per-run volatile data (temp dir paths).
+# Fields containing per-run volatile data (temp dir paths) or VSS metadata.
 # Excluded from content hash to ensure dedup stability across re-ingests.
-_VOLATILE_KEYS = {"PluginDetailFile", "SourceFile"}
+_VOLATILE_KEYS = {"PluginDetailFile", "SourceFile", "vhir.vss_id"}
 
 
 def _doc_id(
@@ -45,6 +45,10 @@ def _doc_id(
     If natural_key is provided (e.g., MFT 4-field key), use it directly.
     Falls back to content hash if any natural key part is empty.
     volatile_keys are excluded from content hash (temp dir paths, etc.).
+
+    ORDERING: natural key check MUST precede volatile key stripping
+    (VSS MFT dedup depends on this — vhir.vss_id is in _VOLATILE_KEYS
+    but used as 5th natural key component for MFT when VSS is active).
     """
     if natural_key:
         key_parts = [row.get(k, "") for k in natural_key.split(":")]
@@ -71,6 +75,7 @@ def ingest_csv(
     time_field: str | None = None,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -116,6 +121,12 @@ def ingest_csv(
             row["host.name"] = hostname
             if table_name:
                 row["vhir.table"] = table_name
+
+            # VSS: for natural key tools (MFT), inject vss_id BEFORE _doc_id
+            # so it becomes part of the natural key. For content-hash tools,
+            # vhir.vss_id is in _VOLATILE_KEYS and stripped from the hash.
+            if vss_id:
+                row["vhir.vss_id"] = vss_id
 
             # Compute dedup ID BEFORE adding provenance fields.
             # Provenance differs across re-ingests (different source_file),

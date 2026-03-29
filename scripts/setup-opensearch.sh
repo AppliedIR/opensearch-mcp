@@ -90,6 +90,25 @@ if [ -f "$CSV_TEMPLATE" ]; then
         -d @"$CSV_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
 fi
 
+# Register Plaso index templates (Phase 3)
+PREFETCH_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/prefetch_template.json"
+if [ -f "$PREFETCH_TEMPLATE" ]; then
+    echo "Registering Prefetch index template..."
+    curl -sk -u "admin:$OS_PASSWORD" \
+        -X PUT "$OS_URL/_index_template/vhir-prefetch" \
+        -H "Content-Type: application/json" \
+        -d @"$PREFETCH_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
+fi
+
+SRUM_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/srum_template.json"
+if [ -f "$SRUM_TEMPLATE" ]; then
+    echo "Registering SRUM index template..."
+    curl -sk -u "admin:$OS_PASSWORD" \
+        -X PUT "$OS_URL/_index_template/vhir-srum" \
+        -H "Content-Type: application/json" \
+        -d @"$SRUM_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
+fi
+
 # --- 6. Smoke test ---
 echo "Running smoke test..."
 # Index a test doc

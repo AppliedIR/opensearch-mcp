@@ -16,6 +16,8 @@ ARTIFACT_PATHS: dict[str, str] = {
     "mft": "$MFT",
     "usn": "$Extend/$J",
     "recyclebin": "$Recycle.Bin",
+    "prefetch": "Windows/Prefetch",
+    "srum": "Windows/System32/SRU/SRUDB.dat",
 }
 
 # Per-user artifact paths relative to a user profile directory (Users/*/)
@@ -39,6 +41,7 @@ class DiscoveredHost:
     artifacts: list[tuple[str, Path]] = field(default_factory=list)
     evtx_dir: Path | None = None
     user_profiles: list[Path] = field(default_factory=list)
+    vss_id: str = ""  # "live", "vss1", "vss2", etc. Empty = non-VSS
 
 
 def find_volume_root(host_dir: Path) -> Path | None:
@@ -73,7 +76,7 @@ def discover_artifacts(host: DiscoveredHost) -> None:
     # System artifacts
     for artifact_name, rel_path in ARTIFACT_PATHS.items():
         full_path = vr / rel_path
-        if artifact_name == "recyclebin":
+        if artifact_name in ("recyclebin", "prefetch"):
             if full_path.is_dir():
                 host.artifacts.append((artifact_name, full_path))
         elif full_path.is_file():
