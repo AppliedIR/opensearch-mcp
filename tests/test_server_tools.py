@@ -313,9 +313,19 @@ class TestIdxFieldValues:
 class TestIdxStatus:
     def test_filters_to_case_indices_only(self, mock_client):
         mock_client.cat.indices.return_value = [
-            {"index": "case-test-evtx-host1", "docs.count": "1000", "store.size": "5mb", "status": "open"},
+            {
+                "index": "case-test-evtx-host1",
+                "docs.count": "1000",
+                "store.size": "5mb",
+                "status": "open",
+            },
             {"index": ".kibana_1", "docs.count": "10", "store.size": "1mb", "status": "open"},
-            {"index": "case-inc2-amcache-host2", "docs.count": "50", "store.size": "100kb", "status": "open"},
+            {
+                "index": "case-inc2-amcache-host2",
+                "docs.count": "50",
+                "store.size": "100kb",
+                "status": "open",
+            },
         ]
         mock_client.cluster.health.return_value = {"status": "green"}
         resp = idx_status()
@@ -350,15 +360,14 @@ class TestIdxIngest:
 
         make_windows_tree(tmp_path)
 
-        active_case = tmp_path / "active_case"
+        # Create the active_case file under the fake home
+        vhir_dir = tmp_path / ".vhir"
+        vhir_dir.mkdir()
+        active_case = vhir_dir / "active_case"
         active_case.write_text("TEST-CASE\n")
-        monkeypatch.setattr(
-            "opensearch_mcp.server.Path",
-            _PatchedPath(tmp_path, active_case),
-        )
 
-        # Patch home() and allowed paths for tmp_path
-        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path.parent)
+        # Patch Path.home to return tmp_path so idx_ingest finds active_case
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
         mock_client.count.side_effect = Exception("no index")
 
@@ -366,8 +375,7 @@ class TestIdxIngest:
         assert resp.get("status") == "preview"
         assert len(resp.get("hosts", [])) >= 1
 
-    @patch("opensearch_mcp.server.discover")
-    def test_not_a_directory_returns_error(self, mock_discover, mock_client, tmp_path):
+    def test_not_a_directory_returns_error(self, mock_client, tmp_path):
         """Non-directory path returns error."""
         f = tmp_path / "not_a_dir.txt"
         f.write_text("test")
@@ -378,28 +386,9 @@ class TestIdxIngest:
     def test_ingest_status_returns_empty_when_no_status(self, mock_client):
         """idx_ingest_status returns empty when no status files exist."""
         with patch(
-            "opensearch_mcp.server.read_active_ingests",
+            "opensearch_mcp.ingest_status.read_active_ingests",
             return_value=[],
         ):
             resp = idx_ingest_status()
         assert resp["ingests"] == []
         assert "No active" in resp["message"]
-
-
-# ---------------------------------------------------------------------------
-# Helper for path manipulation in tests
-# ---------------------------------------------------------------------------
-
-
-class _PatchedPath:
-    """Helper to override Path.home() for idx_ingest tests."""
-
-    def __init__(self, home_dir, active_case_path):
-        self._home = home_dir
-        self._active_case = active_case_path
-
-    def home(self):
-        return self._home
-
-    def __call__(self, *args, **kwargs):
-        return Path(*args, **kwargs)

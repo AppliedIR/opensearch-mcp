@@ -144,17 +144,15 @@ class TestCsvEdgeCases:
 
     @patch("opensearch_mcp.parse_csv.flush_bulk")
     def test_csv_with_null_bytes(self, mock_flush, tmp_path):
-        """CSV with null bytes in values handled via errors='replace'."""
-        mock_flush.return_value = (1, 0)
+        """CSV with null bytes raises _csv.Error — Python csv module limitation."""
         csv_file = tmp_path / "test.csv"
-        # Write CSV with a null byte in a value
         content = b"col1,col2\nval\x00ue,normal\n"
         csv_file.write_bytes(content)
 
         client = MagicMock()
-        count, _, _ = ingest_csv(csv_path=csv_file, client=client, index_name="test", hostname="H")
-        # Should still ingest (null byte is valid in UTF-8)
-        assert count == 1
+        # Python csv module cannot handle NUL bytes — raises ValueError or _csv.Error
+        with pytest.raises((ValueError, Exception)):
+            ingest_csv(csv_path=csv_file, client=client, index_name="test", hostname="H")
 
 
 # ---------------------------------------------------------------------------

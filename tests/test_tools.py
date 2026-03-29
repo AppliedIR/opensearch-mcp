@@ -310,7 +310,9 @@ class TestRunAndIngest:
         # Mock tempfile to use tmp_path
         with patch("opensearch_mcp.tools.tempfile.mkdtemp", return_value=str(tmp_path)):
             # Create a fake CSV output file in tmp_path
-            (tmp_path / "shimcache.csv").write_text("Path,LastModifiedTimeUTC\nC:\\a.exe,2024-01-01\n")
+            (tmp_path / "shimcache.csv").write_text(
+                "Path,LastModifiedTimeUTC\nC:\\a.exe,2024-01-01\n"
+            )
             cnt, sk, bf = run_and_ingest(
                 tool_name="shimcache",
                 artifact_path=Path("/evidence/SYSTEM"),

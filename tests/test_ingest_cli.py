@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +14,6 @@ from opensearch_mcp.ingest_cli import (
     _resolve_case_id,
     main,
 )
-
 
 # ---------------------------------------------------------------------------
 # _resolve_case_id
@@ -157,21 +154,35 @@ class TestCliParsing:
     def test_csv_with_unknown_tool_name_calls_cmd_csv(self, mock_cmd):
         """CSV subcommand dispatches to cmd_csv even with unknown tool."""
         # cmd_csv itself validates the tool name and exits
-        with patch("sys.argv", [
-            "opensearch-ingest", "csv", "bogus_tool", "/tmp/test.csv",
-            "--hostname", "HOST1",
-        ]):
+        with patch(
+            "sys.argv",
+            [
+                "opensearch-ingest",
+                "csv",
+                "bogus_tool",
+                "/tmp/test.csv",
+                "--hostname",
+                "HOST1",
+            ],
+        ):
             main()
         mock_cmd.assert_called_once()
 
     @patch("opensearch_mcp.ingest_cli.cmd_scan")
     def test_scan_with_include_exclude_flags(self, mock_cmd):
         """--include and --exclude flags are parsed correctly."""
-        with patch("sys.argv", [
-            "opensearch-ingest", "scan", "/tmp/evidence",
-            "--include", "mft,usn",
-            "--exclude", "jumplists",
-        ]):
+        with patch(
+            "sys.argv",
+            [
+                "opensearch-ingest",
+                "scan",
+                "/tmp/evidence",
+                "--include",
+                "mft,usn",
+                "--exclude",
+                "jumplists",
+            ],
+        ):
             main()
         mock_cmd.assert_called_once()
         args = mock_cmd.call_args[0][0]
@@ -181,9 +192,15 @@ class TestCliParsing:
     @patch("opensearch_mcp.ingest_cli.cmd_scan")
     def test_scan_with_yes_flag(self, mock_cmd):
         """--yes flag parsed correctly."""
-        with patch("sys.argv", [
-            "opensearch-ingest", "scan", "/tmp/evidence", "--yes",
-        ]):
+        with patch(
+            "sys.argv",
+            [
+                "opensearch-ingest",
+                "scan",
+                "/tmp/evidence",
+                "--yes",
+            ],
+        ):
             main()
         args = mock_cmd.call_args[0][0]
         assert args.yes is True
@@ -191,9 +208,16 @@ class TestCliParsing:
     @patch("opensearch_mcp.ingest_cli.cmd_scan")
     def test_scan_with_hostname_flag(self, mock_cmd):
         """--hostname flag parsed correctly."""
-        with patch("sys.argv", [
-            "opensearch-ingest", "scan", "/tmp/evidence", "--hostname", "MYHOST",
-        ]):
+        with patch(
+            "sys.argv",
+            [
+                "opensearch-ingest",
+                "scan",
+                "/tmp/evidence",
+                "--hostname",
+                "MYHOST",
+            ],
+        ):
             main()
         args = mock_cmd.call_args[0][0]
         assert args.hostname == "MYHOST"
