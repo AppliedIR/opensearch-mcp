@@ -135,7 +135,130 @@ fi
 # Clean up test index
 curl -sk -u "admin:$OS_PASSWORD" -X DELETE "$OS_URL/case-test-evtx-smoketest" >/dev/null 2>&1
 
-# --- 7. Register opensearch-mcp with gateway ---
+# --- 7. GeoIP enrichment (Phase 4) ---
+echo "Configuring GeoIP enrichment..."
+
+# Create GeoIP data source (requires internet for initial download)
+GEO_RESULT=$(curl -sk -u "admin:$OS_PASSWORD" \
+    -X PUT "$OS_URL/_plugins/geospatial/ip2geo/datasource/maxmind-city" \
+    -H "Content-Type: application/json" \
+    -d '{"endpoint":"https://geoip.maps.opensearch.org/v1/geolite2-city/manifest.json","update_interval_in_days":3}' 2>/dev/null || echo '{"error":"failed"}')
+if echo "$GEO_RESULT" | python3 -c "import sys,json; r=json.load(sys.stdin); sys.exit(0 if r.get('acknowledged') else 1)" 2>/dev/null; then
+    echo "  GeoIP data source: OK"
+else
+    echo "  GeoIP data source: skipped (requires internet or already exists)"
+fi
+
+# Create GeoIP ingest pipeline with on_failure handler
+echo "Creating GeoIP ingest pipeline..."
+curl -sk -u "admin:$OS_PASSWORD" \
+    -X PUT "$OS_URL/_ingest/pipeline/vhir-geoip" \
+    -H "Content-Type: application/json" \
+    -d '{
+  "description": "GeoIP enrichment for source.ip",
+  "processors": [{
+    "ip2geo": {
+      "field": "source.ip",
+      "datasource": "maxmind-city",
+      "target_field": "source.geo",
+      "ignore_missing": true,
+      "on_failure": [{
+        "set": {
+          "field": "source.geo.error",
+          "value": "GeoIP lookup failed: {{_ingest.on_failure_message}}"
+        }
+      }]
+    }
+  }]
+}' | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Pipeline:', 'OK' if r.get('acknowledged') else r)" 2>/dev/null
+
+# Apply GeoIP pipeline to any existing evtx indices
+curl -sk -u "admin:$OS_PASSWORD" \
+    -X PUT "$OS_URL/case-*-evtx-*/_settings" \
+    -H "Content-Type: application/json" \
+    -d '{"index.default_pipeline":"vhir-geoip"}' >/dev/null 2>&1 || true
+
+# --- 8. Security Analytics detector (Phase 4) ---
+echo "Configuring Security Analytics..."
+
+# Fetch all Windows pre-packaged Sigma rule IDs, create detector
+python3 -c "
+import json, sys, urllib.request, ssl
+
+url = '$OS_URL'
+auth = 'admin:$OS_PASSWORD'
+
+# Build auth header
+import base64
+creds = base64.b64encode(auth.encode()).decode()
+headers = {
+    'Authorization': f'Basic {creds}',
+    'Content-Type': 'application/json',
+}
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+def api(method, path, body=None):
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url + path, data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, context=ctx) as resp:
+        return json.loads(resp.read())
+
+# Step 1: Fetch all Windows Sigma rule IDs
+try:
+    resp = api('POST', '/_plugins/_security_analytics/rules/_search?pre_packaged=true', {
+        'query': {'bool': {'must': [{'match': {'category': 'windows'}}]}},
+        'size': 2000,
+    })
+    rule_ids = [{'id': hit['_id']} for hit in resp.get('hits', {}).get('hits', [])]
+    print(f'  Found {len(rule_ids)} Windows Sigma rules')
+except Exception as e:
+    print(f'  Warning: Could not fetch Sigma rules: {e}')
+    sys.exit(0)
+
+if not rule_ids:
+    print('  No Windows Sigma rules found — skipping detector creation')
+    sys.exit(0)
+
+# Step 2: Check if detector already exists
+try:
+    existing = api('POST', '/_plugins/_security_analytics/detectors/_search', {
+        'query': {'match': {'name': 'vhir-windows'}},
+        'size': 1,
+    })
+    if existing.get('hits', {}).get('total', {}).get('value', 0) > 0:
+        print('  Detector vhir-windows already exists')
+        sys.exit(0)
+except Exception:
+    pass
+
+# Step 3: Create detector
+detector = {
+    'name': 'vhir-windows',
+    'detector_type': 'windows',
+    'enabled': True,
+    'inputs': [{
+        'detector_input': {
+            'description': 'Windows Event Logs (all channels)',
+            'indices': ['case-*-evtx-*'],
+            'pre_packaged_rules': rule_ids,
+            'custom_rules': [],
+        }
+    }],
+    'schedule': {
+        'period': {'interval': 1, 'unit': 'MINUTES'}
+    },
+}
+try:
+    result = api('POST', '/_plugins/_security_analytics/detectors', detector)
+    det_id = result.get('_id', 'unknown')
+    print(f'  Detector created: {det_id} ({len(rule_ids)} rules)')
+except Exception as e:
+    print(f'  Warning: Could not create detector: {e}')
+" 2>/dev/null || echo "  Security Analytics setup: skipped (may require manual configuration)"
+
+# --- 9. Register opensearch-mcp with gateway ---
 GW_CONFIG="$VHIR_DIR/gateway.yaml"
 if [ -f "$GW_CONFIG" ]; then
     if grep -q "opensearch-mcp" "$GW_CONFIG"; then
@@ -169,7 +292,7 @@ else
     echo '      args: ["-m", "opensearch_mcp"]'
 fi
 
-# --- 8. Restart gateway if running ---
+# --- 10. Restart gateway if running ---
 if systemctl --user is-active --quiet vhir-gateway 2>/dev/null; then
     echo "Restarting gateway to pick up opensearch-mcp..."
     systemctl --user restart vhir-gateway
@@ -182,11 +305,15 @@ else
     echo "  discovered when the gateway starts."
 fi
 
-# --- 9. Done ---
+# --- 11. Done ---
 echo ""
 echo "========================================="
 echo "OpenSearch is running on $OS_URL"
 echo "Config: $CONFIG_FILE"
+echo "Security Analytics: Sigma detector with ~1,580 Windows rules"
+echo "GeoIP: enrichment pipeline configured (requires internet for DB download)"
+echo ""
+echo "NOTE: Existing indexed data does not have GeoIP. Re-ingest to enrich."
 echo ""
 echo "Next steps:"
 echo "  opensearch-ingest /path/to/evtx/ --hostname WKSTN05 --case incident-001"

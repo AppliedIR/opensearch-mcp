@@ -1,4 +1,4 @@
-"""OpenSearch MCP server — 9 tools (7 query + idx_ingest + idx_ingest_status)."""
+"""OpenSearch MCP server — 10 tools for forensic evidence querying and ingest."""
 
 from __future__ import annotations
 
@@ -579,6 +579,75 @@ def idx_ingest_status() -> dict:
         summaries.append(s)
 
     return {"ingests": summaries}
+
+
+@server.tool()
+def idx_list_detections(
+    severity: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List Sigma detection findings from Security Analytics.
+
+    Args:
+        severity: Filter by severity (critical, high, medium, low).
+                  Empty = all severities.
+        limit: Max results (default 50).
+        offset: Starting position for pagination (default 0).
+    """
+    client = _get_os()
+
+    params: dict = {
+        "detectorType": "windows",
+        "size": limit,
+        "startIndex": offset,
+        "sortOrder": "desc",
+    }
+    if severity:
+        params["severity"] = severity.lower()
+
+    response = _os_call(
+        client.transport.perform_request,
+        "GET",
+        "/_plugins/_security_analytics/findings/_search",
+        params=params,
+    )
+
+    findings = []
+    for finding in response.get("findings", []):
+        rules = []
+        for q in finding.get("queries", []):
+            rules.append(
+                {
+                    "name": q.get("name"),
+                    "tags": q.get("tags", []),
+                }
+            )
+
+        findings.append(
+            {
+                "id": finding.get("id"),
+                "timestamp": finding.get("timestamp"),
+                "index": finding.get("index"),
+                "rules": rules,
+                "matched_docs": len(finding.get("related_doc_ids", [])),
+            }
+        )
+
+    resp = {
+        "findings": findings,
+        "total": response.get("total_findings", 0),
+        "returned": len(findings),
+        "offset": offset,
+    }
+    aid = audit.log(
+        tool="idx_list_detections",
+        params={"severity": severity, "limit": limit, "offset": offset},
+        result_summary=f"{len(findings)} findings",
+    )
+    if aid:
+        resp["audit_id"] = aid
+    return resp
 
 
 def main():

@@ -2,7 +2,8 @@
   "index_patterns": ["case-*-evtx-*"],
   "template": {
     "settings": {
-      "index.mapping.total_fields.limit": 2000
+      "index.mapping.total_fields.limit": 2000,
+      "default_pipeline": "vhir-geoip"
     },
     "mappings": {
       "dynamic_templates": [
@@ -39,7 +40,12 @@
         "pipeline_version": {"type": "keyword"},
         "vhir.source_file": {"type": "keyword"},
         "vhir.ingest_audit_id": {"type": "keyword"},
-        "vhir.vss_id": {"type": "keyword"}
+        "vhir.vss_id": {"type": "keyword"},
+        "source.geo.country_name": {"type": "keyword"},
+        "source.geo.city_name": {"type": "keyword"},
+        "source.geo.continent_name": {"type": "keyword"},
+        "source.geo.region_name": {"type": "keyword"},
+        "source.geo.location": {"type": "geo_point"}
       }
     }
   }
