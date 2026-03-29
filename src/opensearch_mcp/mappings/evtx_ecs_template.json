@@ -1,7 +1,19 @@
 {
   "index_patterns": ["case-*-evtx-*"],
   "template": {
+    "settings": {
+      "index.mapping.total_fields.limit": 2000
+    },
     "mappings": {
+      "dynamic_templates": [
+        {
+          "winlog_event_data_strings": {
+            "path_match": "winlog.event_data.*",
+            "match_mapping_type": "string",
+            "mapping": {"type": "keyword", "ignore_above": 1024}
+          }
+        }
+      ],
       "properties": {
         "event.code": {"type": "integer"},
         "winlog.event_id": {"type": "integer"},
@@ -21,7 +33,9 @@
         "process.parent.name": {"type": "keyword"},
         "file.path": {"type": "keyword"},
         "script_block_text": {"type": "text"},
-        "winlog.event_data": {"type": "flat_object"},
+        "winlog.event_data.ScriptBlockText": {
+          "type": "keyword", "ignore_above": 32766
+        },
         "pipeline_version": {"type": "keyword"},
         "vhir.source_file": {"type": "keyword"},
         "vhir.ingest_audit_id": {"type": "keyword"},

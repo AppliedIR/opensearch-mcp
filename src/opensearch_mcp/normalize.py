@@ -5,6 +5,32 @@ from __future__ import annotations
 _INVALID_IPS = {"", "-", "LOCAL", "::"}
 
 
+def _coerce_list_item(item):
+    """Coerce a list element: recurse dicts, stringify scalars."""
+    if isinstance(item, dict):
+        return _coerce_scalars(item)
+    if isinstance(item, list):
+        return [_coerce_list_item(i) for i in item]
+    if item is not None:
+        return str(item)
+    return item
+
+
+def _coerce_scalars(d: dict) -> dict:
+    """Coerce scalar values to strings, recurse into nested dicts."""
+    result = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            result[k] = _coerce_scalars(v)
+        elif isinstance(v, list):
+            result[k] = [_coerce_list_item(i) for i in v]
+        elif v is not None:
+            result[k] = str(v)
+        else:
+            result[k] = v
+    return result
+
+
 def _clean_ip(value: str | None) -> str | None:
     """Return IP string or None if invalid/placeholder.
 
@@ -75,6 +101,7 @@ def normalize_event(data: dict) -> dict:
     # Store both for searchability
     stored_data = event_data if event_data else user_data
 
+    # Extract top-level ECS fields from ORIGINAL uncoerced payload first
     doc = {
         "event.code": eid,
         "winlog.event_id": eid,
@@ -82,7 +109,6 @@ def normalize_event(data: dict) -> dict:
         "host.name": system.get("Computer"),
         "@timestamp": tc,
         "winlog.provider_name": provider_name,
-        "winlog.event_data": stored_data,
         "user.name": payload.get("TargetUserName") or payload.get("User"),
         "user.effective.name": payload.get("SubjectUserName"),
         "source.ip": _clean_ip(payload.get("IpAddress") or payload.get("Address")),
@@ -91,10 +117,17 @@ def normalize_event(data: dict) -> dict:
         "process.command_line": payload.get("CommandLine"),
         "process.parent.name": payload.get("ParentImage", payload.get("ParentProcessName")),
         "file.path": payload.get("TargetFilename"),
-        # Long text fields promoted to top-level with text type.
-        # Can't be under winlog.event_data (flat_object can't have typed sub-fields).
         "script_block_text": payload.get("ScriptBlockText"),
     }
+
+    # Coerce EventData/UserData scalar values to strings for consistent dynamic
+    # mapping. Prevents type conflicts across Event IDs (e.g., LogonType: "3" vs 3).
+    # Top-level ECS fields above keep their proper types (int, ip, keyword).
+    # Nested dicts/lists are left as-is (UserData wrappers, Data elements).
+    if stored_data:
+        doc["winlog.event_data"] = _coerce_scalars(stored_data)
+    else:
+        doc["winlog.event_data"] = stored_data
 
     # Strip None values — most events only populate 5-6 of the ~15 mapped fields.
     # Saves ~60% of field storage at scale. Keeps empty dict {} and empty string "".
