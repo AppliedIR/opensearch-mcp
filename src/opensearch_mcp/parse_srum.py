@@ -24,7 +24,7 @@ def parse_srum(
     SRUDB.dat from KAPE triage is frequently dirty/locked — SrumECmd
     handles this (built-in repair), Plaso's esedb parser does not.
     """
-    from opensearch_mcp.wintools import wintools_available
+    from opensearch_mcp.wintools import mark_wintools_down, wintools_available
 
     if wintools_available():
         try:
@@ -39,6 +39,8 @@ def parse_srum(
             )
         except Exception as e:
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
+            if "connection" in str(e).lower() or "timeout" in str(e).lower():
+                mark_wintools_down()
 
     try:
         return _parse_srum_plaso(
@@ -94,6 +96,7 @@ def _parse_srum_wintools(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            parse_method="SrumECmd",
         )
         total_count += count
         total_failed += bf
@@ -111,9 +114,9 @@ def _parse_srum_plaso(
     vss_id: str = "",
 ) -> tuple[int, int]:
     """Parse SRUM via Plaso esedb/srum parser."""
-    from opensearch_mcp.parse_plaso import parse_srum as _plaso_parse_srum
+    from opensearch_mcp.parse_plaso import parse_srum as _plaso_srum
 
-    return _plaso_parse_srum(
+    return _plaso_srum(
         srum_path=srum_path,
         client=client,
         index_name=index_name,

@@ -82,6 +82,7 @@ def parse_and_index(
             doc["vhir.ingest_audit_id"] = ingest_audit_id
         if vss_id:
             doc["vhir.vss_id"] = vss_id
+        doc["vhir.parse_method"] = "pyevtx-rs"
 
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 

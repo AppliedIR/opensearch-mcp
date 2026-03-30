@@ -76,6 +76,7 @@ def ingest_csv(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     vss_id: str = "",
+    parse_method: str = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -141,6 +142,8 @@ def ingest_csv(
                 row["vhir.ingest_audit_id"] = ingest_audit_id
             if pipeline_version:
                 row["pipeline_version"] = pipeline_version
+            if parse_method:
+                row["vhir.parse_method"] = parse_method
 
             actions.append({"_index": index_name, "_id": _id, "_source": row})
 

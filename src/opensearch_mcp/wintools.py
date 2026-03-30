@@ -30,12 +30,24 @@ def _load_gateway_config() -> dict | None:
         return None
 
 
+_wintools_down = False
+
+
 def wintools_available() -> bool:
-    """Check if wintools-mcp is configured and reachable."""
+    """Check if wintools-mcp is configured. Caches failure to avoid repeated timeouts."""
+    global _wintools_down
+    if _wintools_down:
+        return False
     config = _load_gateway_config()
     if not config or not config.get("url"):
         return False
     return True
+
+
+def mark_wintools_down() -> None:
+    """Mark wintools as unreachable for the rest of this process."""
+    global _wintools_down
+    _wintools_down = True
 
 
 def run_windows_tool(

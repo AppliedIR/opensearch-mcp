@@ -23,7 +23,7 @@ def parse_prefetch(
     Strategy: wintools-first (PECmd on Windows), Plaso fallback.
     PECmd produces richer output than Plaso's prefetch parser.
     """
-    from opensearch_mcp.wintools import wintools_available
+    from opensearch_mcp.wintools import mark_wintools_down, wintools_available
 
     if wintools_available():
         try:
@@ -38,6 +38,8 @@ def parse_prefetch(
             )
         except Exception as e:
             print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
+            if "connection" in str(e).lower() or "timeout" in str(e).lower():
+                mark_wintools_down()
 
     try:
         return _parse_prefetch_plaso(
@@ -89,6 +91,7 @@ def _parse_prefetch_wintools(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            parse_method="PECmd",
         )
         total_count += count
         total_failed += bf
@@ -106,9 +109,9 @@ def _parse_prefetch_plaso(
     vss_id: str = "",
 ) -> tuple[int, int]:
     """Parse prefetch via Plaso prefetch parser."""
-    from opensearch_mcp.parse_plaso import parse_prefetch as _plaso_parse_prefetch
+    from opensearch_mcp.parse_plaso import parse_prefetch as _plaso_prefetch
 
-    return _plaso_parse_prefetch(
+    return _plaso_prefetch(
         prefetch_dir=prefetch_dir,
         client=client,
         index_name=index_name,

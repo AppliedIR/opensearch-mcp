@@ -112,6 +112,7 @@ def _ingest_jsonl(
                 record["pipeline_version"] = pipeline_version
             if vss_id:
                 record["vhir.vss_id"] = vss_id
+            record["vhir.parse_method"] = "plaso"
             actions.append({"_index": index_name, "_id": _id, "_source": record})
 
             if len(actions) >= 1000:
