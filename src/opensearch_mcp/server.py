@@ -601,14 +601,14 @@ def idx_list_detections(
     """
     client = _get_os()
 
+    # Fetch more than requested when filtering by severity (API doesn't support it)
+    fetch_size = limit * 3 if severity else limit
     params: dict = {
         "detectorType": "windows",
-        "size": limit,
+        "size": fetch_size,
         "startIndex": offset,
         "sortOrder": "desc",
     }
-    if severity:
-        params["severity"] = severity.lower()
 
     response = _os_call(
         client.transport.perform_request,
@@ -617,6 +617,7 @@ def idx_list_detections(
         params=params,
     )
 
+    sev_filter = severity.lower() if severity else ""
     findings = []
     for finding in response.get("findings", []):
         rules = []
@@ -628,6 +629,11 @@ def idx_list_detections(
                 }
             )
 
+        # Python-side severity filter — API doesn't support severity param
+        if sev_filter and rules:
+            if not any(sev_filter in t.lower() for r in rules for t in r.get("tags", [])):
+                continue
+
         findings.append(
             {
                 "id": finding.get("id"),
@@ -637,6 +643,9 @@ def idx_list_detections(
                 "matched_docs": len(finding.get("related_doc_ids", [])),
             }
         )
+
+        if len(findings) >= limit:
+            break
 
     resp = {
         "findings": findings,

@@ -140,29 +140,47 @@ class TestDetectionsAPIParams:
         params = call_args[1].get("params", {})
         assert params["detectorType"] == "windows"
 
-    def test_severity_filter_passed(self, mock_client):
-        mock_client.transport.perform_request.return_value = _empty_response()
-        idx_list_detections(severity="high")
-        params = mock_client.transport.perform_request.call_args[1].get("params", {})
-        assert params["severity"] == "high"
+    def test_severity_filter_python_side(self, mock_client):
+        """Severity filtering is done in Python (API doesn't support it)."""
+        mock_client.transport.perform_request.return_value = {
+            "total_findings": 2,
+            "findings": [
+                _make_finding("f1", queries=[{"name": "R1", "tags": ["high"]}]),
+                _make_finding("f2", queries=[{"name": "R2", "tags": ["low"]}]),
+            ],
+        }
+        resp = idx_list_detections(severity="high")
+        assert resp["returned"] == 1
+        assert resp["findings"][0]["id"] == "f1"
 
-    def test_severity_lowercased(self, mock_client):
-        mock_client.transport.perform_request.return_value = _empty_response()
-        idx_list_detections(severity="HIGH")
-        params = mock_client.transport.perform_request.call_args[1].get("params", {})
-        assert params["severity"] == "high"
+    def test_severity_filter_case_insensitive(self, mock_client):
+        mock_client.transport.perform_request.return_value = {
+            "total_findings": 1,
+            "findings": [
+                _make_finding("f1", queries=[{"name": "R1", "tags": ["HIGH"]}]),
+            ],
+        }
+        # Sigma tags are typically lowercase, but test case-insensitive matching
+        resp = idx_list_detections(severity="high")
+        assert resp["returned"] == 1
 
-    def test_severity_critical(self, mock_client):
+    def test_severity_not_in_api_params(self, mock_client):
+        """Severity is NOT passed to the API — filtered in Python."""
         mock_client.transport.perform_request.return_value = _empty_response()
         idx_list_detections(severity="critical")
         params = mock_client.transport.perform_request.call_args[1].get("params", {})
-        assert params["severity"] == "critical"
-
-    def test_no_severity_param_when_empty(self, mock_client):
-        mock_client.transport.perform_request.return_value = _empty_response()
-        idx_list_detections(severity="")
-        params = mock_client.transport.perform_request.call_args[1].get("params", {})
         assert "severity" not in params
+
+    def test_no_severity_returns_all(self, mock_client):
+        mock_client.transport.perform_request.return_value = {
+            "total_findings": 2,
+            "findings": [
+                _make_finding("f1", queries=[{"name": "R1", "tags": ["high"]}]),
+                _make_finding("f2", queries=[{"name": "R2", "tags": ["low"]}]),
+            ],
+        }
+        resp = idx_list_detections(severity="")
+        assert resp["returned"] == 2
 
     def test_limit_passed_as_size(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()

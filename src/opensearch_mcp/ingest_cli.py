@@ -104,6 +104,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     """Scan a directory for artifacts, run EZ tools, index."""
     from opensearch_mcp.containers import (
         MountContext,
+        cleanup_orphaned_mounts,
         cleanup_tmpdir,
         detect_container,
         extract_container,
@@ -139,8 +140,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
         reduced_ids = load_reduced_ids()
         print(f"Reduced mode: {len(reduced_ids)} high-value Event IDs")
 
-    # Detect container type
+    # Detect container type and clean up orphaned mounts from prior failures
     container_type = detect_container(input_path)
+    if container_type in ("ewf", "raw", "nbd", "archive"):
+        cleanup_orphaned_mounts()
     mount_ctx = MountContext()
     tmpdir = None
     scan_root = input_path

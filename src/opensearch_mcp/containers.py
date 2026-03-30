@@ -405,6 +405,27 @@ def make_ingest_tmpdir(case_id: str) -> Path:
     return tmp
 
 
+def cleanup_orphaned_mounts() -> None:
+    """Clean up orphaned nbd connections and mounts from prior failed ingests."""
+    import sys
+
+    # Disconnect any connected nbd devices
+    for i in range(8):
+        size_path = Path(f"/sys/block/nbd{i}/size")
+        if size_path.exists():
+            try:
+                size = int(size_path.read_text().strip())
+            except (OSError, ValueError):
+                continue
+            if size > 0:
+                dev = f"/dev/nbd{i}"
+                # Try to unmount any partitions first
+                for part in sorted(glob.glob(f"{dev}p*")):
+                    subprocess.run(["sudo", "umount", part], capture_output=True)
+                subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
+                print(f"  Cleaned orphaned nbd: {dev}", file=sys.stderr)
+
+
 def cleanup_tmpdir(tmpdir: Path, force: bool = False) -> None:
     """Clean up temp directory. On failure, preserve with warning."""
     try:
