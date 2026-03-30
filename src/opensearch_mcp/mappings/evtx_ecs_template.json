@@ -2,7 +2,7 @@
   "index_patterns": ["case-*-evtx-*"],
   "template": {
     "settings": {
-      "index.mapping.total_fields.limit": 2000,
+      "index.mapping.total_fields.limit": 5000,
       "default_pipeline": "vhir-geoip"
     },
     "mappings": {

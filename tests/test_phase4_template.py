@@ -145,7 +145,7 @@ class TestScriptBlockTextOverride:
 
 class TestFieldLimit:
     def test_total_fields_limit(self, settings):
-        assert settings["index.mapping.total_fields.limit"] == 2000
+        assert settings["index.mapping.total_fields.limit"] == 5000
 
     def test_limit_is_integer(self, settings):
         assert isinstance(settings["index.mapping.total_fields.limit"], int)
