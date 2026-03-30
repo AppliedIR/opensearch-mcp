@@ -347,18 +347,30 @@ def cmd_scan(args: argparse.Namespace) -> None:
         )
 
         # Summary
-        failed = []
+        errors = []
+        total_bulk_failed = 0
         for h in result.hosts:
             for a in h.artifacts:
                 if a.error:
-                    failed.append(f"{h.hostname}/{a.artifact}: {a.error}")
+                    errors.append(f"{h.hostname}/{a.artifact}: {a.error}")
+                if a.bulk_failed:
+                    total_bulk_failed += a.bulk_failed
+                    errors.append(
+                        f"{h.hostname}/{a.artifact}: {a.bulk_failed:,} events not indexed"
+                    )
         minutes = result.elapsed_seconds / 60
         print(f"\nDone in {minutes:.1f} minutes. ", end="")
         print(f"{len(result.hosts)} host(s), {result.total_indexed:,} entries indexed.")
-        if failed:
-            print(f"\n{len(failed)} artifact(s) failed:")
-            for fail_msg in failed:
-                print(f"  {fail_msg}")
+        if total_bulk_failed:
+            print(
+                f"\n*** {total_bulk_failed:,} events failed to index. ***"
+                f"\n  Re-run ingest on the same evidence to recover"
+                f" — dedup prevents duplicates."
+            )
+        if errors:
+            print(f"\n{len(errors)} issue(s):")
+            for msg in errors:
+                print(f"  {msg}")
 
     finally:
         mount_ctx.cleanup()
