@@ -146,6 +146,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
     scan_root = input_path
     vss_volumes: list = []
 
+    # Register cleanup for abnormal exit (OOM kill, unhandled exception)
+    import atexit
+
+    atexit.register(mount_ctx.cleanup)
+
     try:
         if container_type == "archive":
             tmpdir = make_ingest_tmpdir(case_id)
