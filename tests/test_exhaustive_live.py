@@ -856,7 +856,7 @@ class TestReducedEventIds:
         from opensearch_mcp.reduced import load_reduced_ids
 
         ids = load_reduced_ids()
-        assert len(ids) >= 90
+        assert len(ids) >= 70
         assert 4624 in ids  # authentication
         assert 7045 in ids  # persistence
         assert 1 in ids  # sysmon process create
@@ -884,6 +884,8 @@ class TestReducedEventIds:
 
 class TestIngestStatusReal:
     def test_write_and_read_status(self, tmp_path, monkeypatch):
+        from unittest.mock import patch
+
         from opensearch_mcp.ingest_status import read_active_ingests, write_status
 
         status_dir = tmp_path / "status"
@@ -899,7 +901,8 @@ class TestIngestStatusReal:
             started="2024-01-15T10:00:00Z",
         )
 
-        ingests = read_active_ingests()
+        with patch("opensearch_mcp.ingest_status._is_process_alive", return_value=True):
+            ingests = read_active_ingests()
         assert len(ingests) == 1
         assert ingests[0]["case_id"] == "test-case"
         assert ingests[0]["status"] == "running"

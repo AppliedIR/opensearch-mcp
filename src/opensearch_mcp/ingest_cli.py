@@ -160,6 +160,28 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         print(f"  Hostname from collection: {hostname}")
                 scan_root = normalize_velociraptor(tmpdir)
             else:
+                # Check if extraction produced a disk image (e.g., VHDX.7z, E01.7z)
+                _IMAGE_EXTS = {".vhdx", ".vhd", ".vmdk", ".e01", ".ex01", ".dd", ".raw", ".img"}
+                extracted_images = [
+                    f for f in tmpdir.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
+                ]
+                if extracted_images:
+                    img = extracted_images[0]
+                    print(f"  Found disk image: {img.name}")
+                    volumes = mount_image(img, tmpdir, mount_ctx)
+                    if not volumes:
+                        print(
+                            "Error: No NTFS partitions in extracted image.",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+                    print(f"  Mounted {len(volumes)} volume(s)")
+
+                    if vss_flag:
+                        vss_volumes = mount_vss(img, tmpdir, mount_ctx)
+                        if vss_volumes:
+                            print(f"  Found {len(vss_volumes)} volume shadow copies")
+
                 scan_root = tmpdir
 
         elif container_type in ("ewf", "raw", "nbd"):
