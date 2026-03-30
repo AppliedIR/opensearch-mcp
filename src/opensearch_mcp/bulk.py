@@ -8,10 +8,7 @@ import time
 from opensearchpy import OpenSearch, helpers
 from opensearchpy.exceptions import ConnectionTimeout, TransportError
 
-# Circuit breaker: pause after this many consecutive timeouts
-_MAX_CONSECUTIVE_TIMEOUTS = 5
 _BACKOFF_SECONDS = 10
-_CIRCUIT_BREAKER_SECONDS = 30
 
 
 def flush_bulk(client: OpenSearch, actions: list[dict]) -> tuple[int, int]:
