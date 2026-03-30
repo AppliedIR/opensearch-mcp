@@ -117,6 +117,15 @@ TOOLS: dict[str, ToolConfig] = {
         natural_key=None,
         multi_csv=False,
     ),
+    "evtxecmd": ToolConfig(
+        cli_name="evtxecmd",
+        binary="",  # CSV-only — no binary to run
+        tier=1,
+        index_suffix="evtx",  # same index as pyevtx-rs output
+        time_field="TimeCreated",
+        natural_key=None,
+        multi_csv=False,
+    ),
 }
 
 # RECmd batch file path
@@ -292,6 +301,9 @@ def get_active_tools(
     """
     active = []
     for name, cfg in TOOLS.items():
+        # CSV-only tools (no binary) are excluded from scan mode
+        if not cfg.binary:
+            continue
         # --full: include all tiers
         if full:
             if exclude and name in exclude:

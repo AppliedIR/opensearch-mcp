@@ -15,7 +15,17 @@
         "vhir.ingest_audit_id": {"type": "keyword"},
         "vhir.table": {"type": "keyword"},
         "vhir.vss_id": {"type": "keyword"},
-        "pipeline_version": {"type": "keyword"}
+        "pipeline_version": {"type": "keyword"},
+        "FileKeyLastWriteTimestamp": {"type": "date", "ignore_malformed": true},
+        "LastModifiedTimeUTC": {"type": "date", "ignore_malformed": true},
+        "LastWriteTimestamp": {"type": "date", "ignore_malformed": true},
+        "LastInteracted": {"type": "date", "ignore_malformed": true},
+        "LastModified": {"type": "date", "ignore_malformed": true},
+        "TargetModified": {"type": "date", "ignore_malformed": true},
+        "DeletedOn": {"type": "date", "ignore_malformed": true},
+        "Created0x10": {"type": "date", "ignore_malformed": true},
+        "UpdateTimestamp": {"type": "date", "ignore_malformed": true},
+        "LastModifiedTime": {"type": "date", "ignore_malformed": true}
       }
     }
   },

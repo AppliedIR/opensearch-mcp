@@ -113,13 +113,10 @@ fi
 echo "Running smoke test..."
 # Index a test doc
 curl -sk -u "admin:$OS_PASSWORD" \
-    -X POST "$OS_URL/case-test-evtx-smoketest/_doc/test-1" \
+    -X POST "$OS_URL/case-test-evtx-smoketest/_doc/test-1?refresh=true" \
     -H "Content-Type: application/json" \
     -d '{"event.code":4624,"@timestamp":"2024-01-01T00:00:00Z","host.name":"test"}' \
     >/dev/null 2>&1
-
-# Wait for index refresh
-sleep 1
 
 # Search for it
 FOUND=$(curl -sk -u "admin:$OS_PASSWORD" \
@@ -208,11 +205,12 @@ def api(method, path, body=None):
 # Step 1: Fetch all Windows Sigma rule IDs
 try:
     resp = api('POST', '/_plugins/_security_analytics/rules/_search?pre_packaged=true', {
-        'query': {'bool': {'must': [{'match': {'category': 'windows'}}]}},
-        'size': 2000,
+        'query': {'match_all': {}},
+        'size': 5000,
     })
-    rule_ids = [{'id': hit['_id']} for hit in resp.get('hits', {}).get('hits', [])]
-    print(f'  Found {len(rule_ids)} Windows Sigma rules')
+    hits = resp.get('hits', {}).get('hits', [])
+    rule_ids = [{'id': h['_id']} for h in hits if h.get('_source', {}).get('category') == 'windows']
+    print(f'  Found {len(rule_ids)} Windows Sigma rules (from {len(hits)} total)')
 except Exception as e:
     print(f'  Warning: Could not fetch Sigma rules: {e}')
     sys.exit(0)

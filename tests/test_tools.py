@@ -21,8 +21,8 @@ from opensearch_mcp.tools import (
 
 
 class TestToolsDict:
-    def test_has_all_10_tools(self):
-        """TOOLS dict contains all 10 expected tools."""
+    def test_has_all_tools(self):
+        """TOOLS dict contains all expected tools."""
         expected = {
             "amcache",
             "shimcache",
@@ -34,6 +34,7 @@ class TestToolsDict:
             "mft",
             "usn",
             "timeline",
+            "evtxecmd",
         }
         assert set(TOOLS.keys()) == expected
 
