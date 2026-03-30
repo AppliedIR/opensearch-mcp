@@ -16,6 +16,7 @@
         "vhir.table": {"type": "keyword"},
         "vhir.vss_id": {"type": "keyword"},
         "pipeline_version": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
         "FileKeyLastWriteTimestamp": {"type": "date", "ignore_malformed": true},
         "LastModifiedTimeUTC": {"type": "date", "ignore_malformed": true},
         "LastWriteTimestamp": {"type": "date", "ignore_malformed": true},

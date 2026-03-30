@@ -1,0 +1,124 @@
+"""SRUM parsing — wintools-first (SrumECmd), Plaso fallback."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+from opensearchpy import OpenSearch
+
+
+def parse_srum(
+    srum_path: Path,
+    client: OpenSearch,
+    index_name: str,
+    hostname: str,
+    ingest_audit_id: str = "",
+    pipeline_version: str = "",
+    vss_id: str = "",
+) -> tuple[int, int]:
+    """Parse SRUM database. Returns (count_indexed, count_bulk_failed).
+
+    Strategy: wintools-first (SrumECmd on Windows), Plaso fallback.
+    SRUDB.dat from KAPE triage is frequently dirty/locked — SrumECmd
+    handles this (built-in repair), Plaso's esedb parser does not.
+    """
+    from opensearch_mcp.wintools import wintools_available
+
+    if wintools_available():
+        try:
+            return _parse_srum_wintools(
+                srum_path,
+                client,
+                index_name,
+                hostname,
+                ingest_audit_id=ingest_audit_id,
+                pipeline_version=pipeline_version,
+                vss_id=vss_id,
+            )
+        except Exception as e:
+            print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
+
+    try:
+        return _parse_srum_plaso(
+            srum_path,
+            client,
+            index_name,
+            hostname,
+            ingest_audit_id=ingest_audit_id,
+            pipeline_version=pipeline_version,
+            vss_id=vss_id,
+        )
+    except subprocess.CalledProcessError:
+        print(
+            "  srum: skipped — dirty database, needs Windows workstation",
+            file=sys.stderr,
+        )
+        return 0, 0
+
+
+def _parse_srum_wintools(
+    srum_path: Path,
+    client: OpenSearch,
+    index_name: str,
+    hostname: str,
+    ingest_audit_id: str = "",
+    pipeline_version: str = "",
+    vss_id: str = "",
+) -> tuple[int, int]:
+    """Parse SRUM via SrumECmd on Windows (wintools-mcp)."""
+
+    from opensearch_mcp.parse_csv import ingest_csv
+    from opensearch_mcp.wintools import run_tool_and_get_csv
+
+    csv_files = run_tool_and_get_csv(
+        tool_binary="SrumECmd.exe",
+        input_flag="-f",
+        evidence_path=str(srum_path),
+        purpose="Parse SRUM database for resource usage monitoring",
+    )
+
+    if not csv_files:
+        raise RuntimeError("SrumECmd produced no CSV output")
+
+    total_count = 0
+    total_failed = 0
+    for csv_file in csv_files:
+        count, _sk, bf = ingest_csv(
+            csv_path=csv_file,
+            client=client,
+            index_name=index_name,
+            hostname=hostname,
+            source_file=str(srum_path),
+            ingest_audit_id=ingest_audit_id,
+            pipeline_version=pipeline_version,
+            vss_id=vss_id,
+        )
+        total_count += count
+        total_failed += bf
+
+    return total_count, total_failed
+
+
+def _parse_srum_plaso(
+    srum_path: Path,
+    client: OpenSearch,
+    index_name: str,
+    hostname: str,
+    ingest_audit_id: str = "",
+    pipeline_version: str = "",
+    vss_id: str = "",
+) -> tuple[int, int]:
+    """Parse SRUM via Plaso esedb/srum parser."""
+    from opensearch_mcp.parse_plaso import parse_srum as _plaso_parse_srum
+
+    return _plaso_parse_srum(
+        srum_path=srum_path,
+        client=client,
+        index_name=index_name,
+        hostname=hostname,
+        ingest_audit_id=ingest_audit_id,
+        pipeline_version=pipeline_version,
+        vss_id=vss_id,
+    )

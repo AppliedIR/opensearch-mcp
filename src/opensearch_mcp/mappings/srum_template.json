@@ -15,6 +15,7 @@
         "vhir.ingest_audit_id": { "type": "keyword" },
         "vhir.vss_id": { "type": "keyword" },
         "pipeline_version": { "type": "keyword" },
+        "vhir.parse_method": { "type": "keyword" },
         "message": { "type": "text" }
       }
     }

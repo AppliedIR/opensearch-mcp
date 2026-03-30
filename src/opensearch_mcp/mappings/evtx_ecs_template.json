@@ -41,6 +41,7 @@
         "vhir.source_file": {"type": "keyword"},
         "vhir.ingest_audit_id": {"type": "keyword"},
         "vhir.vss_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
         "source.geo.country_name": {"type": "keyword"},
         "source.geo.city_name": {"type": "keyword"},
         "source.geo.continent_name": {"type": "keyword"},

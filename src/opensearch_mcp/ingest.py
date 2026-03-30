@@ -394,8 +394,9 @@ def _ingest_plaso_artifact(
     _progress,
     _update_status,
 ) -> None:
-    """Ingest a Plaso-based artifact (prefetch or SRUM)."""
-    from opensearch_mcp.parse_plaso import parse_prefetch, parse_srum
+    """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback)."""
+    from opensearch_mcp.parse_prefetch import parse_prefetch
+    from opensearch_mcp.parse_srum import parse_srum
 
     index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
     existing = _safe_count(client, index_name)
