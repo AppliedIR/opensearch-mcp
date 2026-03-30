@@ -511,7 +511,11 @@ def idx_ingest(
         "run_id": run_id,
         "hosts": host_names,
         "case_id": case_id,
-        "message": "Ingest running. Use idx_ingest_status() to check progress.",
+        "message": (
+            "Ingest started. IMPORTANT: Call idx_ingest_status() every 30 seconds "
+            "to monitor progress and report it to the examiner as a checklist. "
+            "Continue polling until status is 'complete' or 'failed'."
+        ),
     }
     if aid:
         resp["audit_id"] = aid
@@ -522,7 +526,11 @@ def idx_ingest(
 def idx_ingest_status() -> dict:
     """Check status of running or recent ingest operations.
 
-    Call this when the examiner asks about ingest progress.
+    IMPORTANT: Present the checklist to the examiner showing each host
+    and artifact with its status icon. If status is 'running', call
+    this tool again in 30 seconds to get updated progress. Continue
+    polling until all ingests show 'complete' or 'failed'.
+
     Cleans up status files older than 24 hours.
     """
     from opensearch_mcp.ingest_status import read_active_ingests
@@ -534,51 +542,79 @@ def idx_ingest_status() -> dict:
     summaries = []
     for ing in ingests:
         status = ing.get("status", "unknown")
+        elapsed = ing.get("elapsed_seconds", 0)
+        minutes = int(elapsed // 60)
+
+        totals = ing.get("totals", {})
         s = {
             "case_id": ing.get("case_id"),
             "status": status,
             "pid": ing.get("pid"),
-            "elapsed_seconds": ing.get("elapsed_seconds", 0),
+            "elapsed": f"{minutes}m",
+            "total_indexed": totals.get("indexed", 0),
+            "hosts_complete": totals.get("hosts_complete", 0),
+            "hosts_total": totals.get("hosts_total", 0),
+            "artifacts_complete": totals.get("artifacts_complete", 0),
+            "artifacts_total": totals.get("artifacts_total", 0),
         }
 
-        totals = ing.get("totals", {})
-        s["total_indexed"] = totals.get("indexed", 0)
-        s["artifacts_complete"] = totals.get("artifacts_complete", 0)
-        s["artifacts_total"] = totals.get("artifacts_total", 0)
-        s["hosts_complete"] = totals.get("hosts_complete", 0)
-        s["hosts_total"] = totals.get("hosts_total", 0)
+        # Build per-host checklist for the LLM to present
+        checklist = []
+        for h in ing.get("hosts", []):
+            hostname = h.get("hostname", "?")
+            for a in h.get("artifacts", []):
+                a_status = a.get("status", "pending")
+                indexed = a.get("indexed", 0)
+                if a_status == "complete":
+                    icon = "done"
+                    detail = f"{indexed:,} entries"
+                elif a_status == "running":
+                    files_done = a.get("files_done", 0)
+                    files_total = a.get("files_total", 0)
+                    if files_total:
+                        detail = f"{files_done}/{files_total} files, {indexed:,} so far"
+                    else:
+                        detail = f"{indexed:,} so far" if indexed else "starting"
+                    icon = "running"
+                elif a_status == "failed":
+                    icon = "failed"
+                    detail = a.get("error", "unknown error")
+                else:
+                    icon = "pending"
+                    detail = "waiting"
+                checklist.append(
+                    {
+                        "host": hostname,
+                        "artifact": a["name"],
+                        "status": icon,
+                        "detail": detail,
+                    }
+                )
+        s["checklist"] = checklist
 
-        # Build progress string
         if status == "running":
-            parts = []
-            for h in ing.get("hosts", []):
-                hostname = h.get("hostname", "?")
-                for a in h.get("artifacts", []):
-                    if a.get("status") == "running":
-                        files_done = a.get("files_done", 0)
-                        files_total = a.get("files_total", 0)
-                        indexed = a.get("indexed", 0)
-                        if files_total:
-                            parts.append(
-                                f"{hostname}/{a['name']} [{files_done}/{files_total}] {indexed:,}"
-                            )
-                        else:
-                            parts.append(f"{hostname}/{a['name']} running")
-                    elif a.get("status") == "complete":
-                        parts.append(f"{hostname}/{a['name']} done ({a.get('indexed', 0):,})")
-            s["progress"] = ", ".join(parts) if parts else "starting..."
-
-        if status == "killed":
-            s["message"] = "Ingest process died. Re-run to continue — dedup prevents duplicates."
-
-        if status in ("complete", "failed"):
-            errors = []
-            for h in ing.get("hosts", []):
-                for a in h.get("artifacts", []):
-                    if a.get("status") == "failed":
-                        errors.append(f"{h['hostname']}/{a['name']}: {a.get('error', '?')}")
+            s["message"] = (
+                "Ingest in progress. Present the checklist above to the examiner. "
+                "Call idx_ingest_status() again in 30 seconds for updated progress."
+            )
+        elif status == "killed":
+            s["message"] = (
+                "Ingest process died unexpectedly. Re-run to continue — dedup prevents duplicates."
+            )
+        elif status == "complete":
+            errors = [
+                f"{item['host']}/{item['artifact']}: {item['detail']}"
+                for item in checklist
+                if item["status"] == "failed"
+            ]
             if errors:
+                s["message"] = f"Ingest complete with {len(errors)} error(s)."
                 s["errors"] = errors
+            else:
+                s["message"] = (
+                    f"Ingest complete. {totals.get('indexed', 0):,} entries indexed "
+                    f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
+                )
 
         summaries.append(s)
 
