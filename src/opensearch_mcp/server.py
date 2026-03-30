@@ -379,13 +379,17 @@ def idx_ingest(
     if not evidence_path.is_dir():
         return {"error": f"Not a directory: {path}"}
     # Restrict to reasonable evidence locations
-    home = Path.home().resolve()
+    from opensearch_mcp.paths import vhir_home
+
+    home = vhir_home().resolve()
     allowed = [home, Path("/mnt").resolve(), Path("/evidence").resolve(), Path("/tmp").resolve()]
     if not any(evidence_path.is_relative_to(a) for a in allowed):
         return {"error": f"Path not in allowed locations (~/, /mnt/, /evidence/, /tmp/): {path}"}
 
     # Read case from active_case
-    active_case = Path.home() / ".vhir" / "active_case"
+    from opensearch_mcp.paths import vhir_dir
+
+    active_case = vhir_dir() / "active_case"
     if not active_case.exists():
         return {"error": "No active case. Run 'vhir case activate' first."}
     raw = active_case.read_text().strip()

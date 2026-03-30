@@ -5,12 +5,12 @@ from pathlib import Path
 import yaml
 from opensearchpy import OpenSearch
 
-_CONFIG_PATH = Path.home() / ".vhir" / "opensearch.yaml"
+from opensearch_mcp.paths import vhir_dir
 
 
 def get_client(config_path: Path | None = None) -> OpenSearch:
     """Create OpenSearch client from ~/.vhir/opensearch.yaml."""
-    path = config_path or _CONFIG_PATH
+    path = config_path or (vhir_dir() / "opensearch.yaml")
     if not path.exists():
         raise FileNotFoundError(
             f"OpenSearch config not found: {path}\n"

@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from opensearch_mcp.paths import resolve_case_insensitive
+
 # Artifact paths relative to the volume root (directory containing Windows/)
+# Components are case-insensitive — resolved via resolve_case_insensitive()
 ARTIFACT_PATHS: dict[str, str] = {
     "amcache": "Windows/appcompat/Programs/Amcache.hve",
     "shimcache": "Windows/System32/config/SYSTEM",
@@ -47,35 +50,41 @@ class DiscoveredHost:
 def find_volume_root(host_dir: Path) -> Path | None:
     """Find the volume root within a host directory.
 
-    Scans for Windows/System32/config/ at any depth to handle:
-    - host/Windows/... (flat)
-    - host/C/Windows/... (KAPE with drive letter)
-    - host/C%3A/Windows/... (Velociraptor URL-encoded)
+    Uses case-insensitive path resolution to handle NTFS case variations
+    in KAPE, Velociraptor, and other triage tools.
     """
     # Direct check: host_dir itself is the volume root
-    if (host_dir / _WINDOWS_SENTINEL).is_dir():
+    if resolve_case_insensitive(host_dir, _WINDOWS_SENTINEL) is not None:
         return host_dir
 
     # One level deep: drive-letter dirs like C/, C%3A/, D/
-    for child in host_dir.iterdir():
-        if not child.is_dir() or child.name.startswith("."):
-            continue
-        # Only check short names (drive letters: C, D, C%3A, etc.)
-        if len(child.name) > 4:
-            continue
-        if (child / _WINDOWS_SENTINEL).is_dir():
-            return child
+    try:
+        for child in host_dir.iterdir():
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if len(child.name) > 4:
+                continue
+            if resolve_case_insensitive(child, _WINDOWS_SENTINEL) is not None:
+                return child
+    except OSError:
+        pass
 
     return None
 
 
 def discover_artifacts(host: DiscoveredHost) -> None:
-    """Populate a DiscoveredHost with found artifacts."""
+    """Populate a DiscoveredHost with found artifacts.
+
+    All path lookups are case-insensitive to handle NTFS case variations
+    on Linux mounts.
+    """
     vr = host.volume_root
 
     # System artifacts
     for artifact_name, rel_path in ARTIFACT_PATHS.items():
-        full_path = vr / rel_path
+        full_path = resolve_case_insensitive(vr, rel_path)
+        if full_path is None:
+            continue
         if artifact_name in ("recyclebin", "prefetch"):
             if full_path.is_dir():
                 host.artifacts.append((artifact_name, full_path))
@@ -83,37 +92,32 @@ def discover_artifacts(host: DiscoveredHost) -> None:
             host.artifacts.append((artifact_name, full_path))
 
     # Event logs directory
-    evtx_dir = vr / "Windows/System32/winevt/Logs"
-    if evtx_dir.is_dir():
+    evtx_dir = resolve_case_insensitive(vr, "Windows/System32/winevt/Logs")
+    if evtx_dir is not None and evtx_dir.is_dir():
         evtx_count = sum(1 for f in evtx_dir.iterdir() if f.suffix.lower() == ".evtx")
         if evtx_count > 0:
             host.evtx_dir = evtx_dir
 
     # User profiles
-    users_dir = vr / "Users"
-    if users_dir.is_dir():
+    users_dir = resolve_case_insensitive(vr, "Users")
+    if users_dir is not None and users_dir.is_dir():
+        skip_names = {"public", "default", "default user", "all users"}
         for profile in sorted(users_dir.iterdir()):
-            if profile.is_dir() and profile.name not in (
-                "Public",
-                "Default",
-                "Default User",
-                "All Users",
-            ):
+            if profile.is_dir() and profile.name.lower() not in skip_names:
                 host.user_profiles.append(profile)
 
                 # Per-user artifacts
                 for artifact_name, rel_paths in USER_ARTIFACTS.items():
                     if isinstance(rel_paths, list):
                         for rp in rel_paths:
-                            full = profile / rp
-                            if full.is_dir():
+                            full = resolve_case_insensitive(profile, rp)
+                            if full is not None and full.is_dir():
                                 host.artifacts.append((artifact_name, full))
                     elif rel_paths == "":
-                        # SBECmd takes the profile directory itself
                         host.artifacts.append((artifact_name, profile))
                     else:
-                        full = profile / rel_paths
-                        if full.is_dir() or full.is_file():
+                        full = resolve_case_insensitive(profile, rel_paths)
+                        if full is not None and (full.is_dir() or full.is_file()):
                             host.artifacts.append((artifact_name, full))
 
 

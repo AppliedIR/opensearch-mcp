@@ -397,7 +397,9 @@ def make_ingest_tmpdir(case_id: str) -> Path:
     from datetime import datetime, timezone
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    case_dir = Path.home() / ".vhir" / "cases" / case_id
+    from opensearch_mcp.paths import vhir_dir
+
+    case_dir = vhir_dir() / "cases" / case_id
     tmp = case_dir / "tmp" / f"ingest-{ts}"
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp

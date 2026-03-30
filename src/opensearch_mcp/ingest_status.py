@@ -8,7 +8,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-_STATUS_DIR = Path.home() / ".vhir" / "ingest-status"
+from opensearch_mcp.paths import vhir_dir
+
+_STATUS_DIR = vhir_dir() / "ingest-status"
 
 
 def write_status(

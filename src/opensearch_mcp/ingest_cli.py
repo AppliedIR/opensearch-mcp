@@ -14,10 +14,11 @@ from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_csv import ingest_csv
+from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.tools import TOOLS
 
-_ACTIVE_CASE_FILE = Path.home() / ".vhir" / "active_case"
-_VHIR_CONFIG = Path.home() / ".vhir" / "config.yaml"
+_ACTIVE_CASE_FILE = vhir_dir() / "active_case"
+_VHIR_CONFIG = vhir_dir() / "config.yaml"
 
 
 def _resolve_case_id(args_case: str | None) -> str:
