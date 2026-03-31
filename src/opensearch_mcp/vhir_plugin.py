@@ -20,6 +20,7 @@ def register(subparsers, registered: set) -> None:
         p.add_argument(
             "--reduced", action="store_true", dest="reduced_ids", help=argparse.SUPPRESS
         )
+        p.add_argument("--timezone", help="System timezone for local-time artifacts")
         p.add_argument("--include", help="Artifact types (comma-separated)")
         p.add_argument("--exclude", help="Artifact types (comma-separated)")
         p.add_argument("--full", action="store_true", help="Include all tiers")

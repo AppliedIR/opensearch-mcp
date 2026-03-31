@@ -209,6 +209,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     hostname = getattr(args, "hostname", None)
     vss_flag = getattr(args, "vss", False)
     password = getattr(args, "password", None)
+    tz_override = getattr(args, "timezone", None)
 
     # Log file filter — ON by default, --all-logs disables
     reduced_log_names = None
@@ -372,6 +373,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
             arts = ", ".join(artifact_names)
             vss_tag = f" [{host.vss_id}]" if host.vss_id else ""
             print(f"  {host.hostname}{vss_tag}: {evtx_note}{arts}")
+
+        # Apply --timezone override to all hosts (priority 1)
+        if tz_override:
+            for h in hosts:
+                h.system_timezone = tz_override
 
         if not getattr(args, "yes", False):
             try:
@@ -630,6 +636,10 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         dest="reduced_ids",
         help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--timezone",
+        help="System timezone for local-time artifacts (e.g., 'Eastern Standard Time')",
     )
     p.add_argument("--include", help="Artifact types (comma-sep)")
     p.add_argument("--exclude", help="Artifact types (comma-sep)")
