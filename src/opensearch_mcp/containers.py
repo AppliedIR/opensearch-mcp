@@ -150,32 +150,35 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
     )
     partitions = _parse_fdisk_output(result.stdout)
 
+    # If fdisk found no partitions at all, skip the partition loop —
+    # this is likely a volume image (no MBR/GPT), go straight to direct mount.
     mounted = []
-    for idx, part in enumerate(partitions):
-        if part["type"] not in ("NTFS", "Microsoft basic data", "7"):
-            continue
-        mount_point = dest / f"vol{idx}"
-        mount_point.mkdir()
-        offset = part["start"] * part["sector_size"]
-        try:
-            subprocess.run(
-                [
-                    "sudo",
-                    "mount",
-                    "-o",
-                    f"ro,loop,offset={offset},noexec",
-                    str(raw_path),
-                    str(mount_point),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            ctx.add_mount(mount_point)
-            mounted.append(mount_point)
-        except subprocess.CalledProcessError:
-            mount_point.rmdir()
+    if partitions:
+        for idx, part in enumerate(partitions):
+            if part["type"] not in ("NTFS", "Microsoft basic data", "7"):
+                continue
+            mount_point = dest / f"vol{idx}"
+            mount_point.mkdir()
+            offset = part["start"] * part["sector_size"]
+            try:
+                subprocess.run(
+                    [
+                        "sudo",
+                        "mount",
+                        "-o",
+                        f"ro,loop,offset={offset},noexec",
+                        str(raw_path),
+                        str(mount_point),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                ctx.add_mount(mount_point)
+                mounted.append(mount_point)
+            except subprocess.CalledProcessError:
+                mount_point.rmdir()
 
-    # Fallback: try direct mount (volume image without partition table)
+    # Fallback: direct mount for volume images without partition table
     if not mounted:
         mount_point = dest / "vol0"
         mount_point.mkdir(exist_ok=True)
