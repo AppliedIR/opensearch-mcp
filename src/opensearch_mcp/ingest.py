@@ -202,7 +202,7 @@ def ingest(
     for ca in _CUSTOM_ARTIFACTS:
         if exclude and ca in exclude:
             continue
-        if include and ca not in include and include:
+        if include and ca not in include:
             continue
         active_custom.add(ca)
 

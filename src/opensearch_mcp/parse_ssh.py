@@ -85,10 +85,12 @@ def parse_ssh_log(
                     try:
                         ts = datetime.fromisoformat(doc["@timestamp"].replace("Z", "+00:00"))
                         if time_from and ts < time_from:
+                            skipped += 1
                             continue
                         if time_to and ts > time_to:
+                            skipped += 1
                             continue
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
 
                 accepted = _AUTH_ACCEPTED.search(message)
