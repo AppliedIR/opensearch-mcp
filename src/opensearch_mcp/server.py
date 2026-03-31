@@ -355,7 +355,7 @@ def idx_ingest(
     hostname: str = "",
     include: list[str] | None = None,
     exclude: list[str] | None = None,
-    timezone: str = "",
+    source_timezone: str = "",
     all_logs: bool = False,
     reduced_ids: bool = False,
     dry_run: bool = True,
@@ -487,8 +487,8 @@ def idx_ingest(
         cmd.extend(["--include", ",".join(include)])
     if exclude:
         cmd.extend(["--exclude", ",".join(exclude)])
-    if timezone:
-        cmd.extend(["--timezone", timezone])
+    if source_timezone:
+        cmd.extend(["--source-timezone", source_timezone])
     if all_logs:
         cmd.append("--all-logs")
     if reduced_ids:

@@ -209,7 +209,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     hostname = getattr(args, "hostname", None)
     vss_flag = getattr(args, "vss", False)
     password = getattr(args, "password", None)
-    tz_override = getattr(args, "timezone", None)
+    tz_override = getattr(args, "source_timezone", None)
 
     # Log file filter — ON by default, --all-logs disables
     reduced_log_names = None
@@ -638,8 +638,9 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
         help=argparse.SUPPRESS,
     )
     p.add_argument(
-        "--timezone",
-        help="System timezone for local-time artifacts (e.g., 'Eastern Standard Time')",
+        "--source-timezone",
+        help="Evidence system's local timezone (e.g., 'Eastern Standard Time'). "
+        "Used to convert local-time artifacts (SSH, transcripts, tasks, firewall) to UTC.",
     )
     p.add_argument("--include", help="Artifact types (comma-sep)")
     p.add_argument("--exclude", help="Artifact types (comma-sep)")
