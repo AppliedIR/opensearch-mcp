@@ -210,6 +210,19 @@ def cmd_scan(args: argparse.Namespace) -> None:
     vss_flag = getattr(args, "vss", False)
     password = getattr(args, "password", None)
     tz_override = getattr(args, "source_timezone", None)
+    if tz_override:
+        from opensearch_mcp.paths import resolve_timezone
+
+        resolved = resolve_timezone(tz_override)
+        if resolved:
+            tz_override = resolved
+        else:
+            print(
+                f"WARNING: Unknown timezone '{tz_override}' — "
+                f"local-time artifacts will be skipped",
+                file=sys.stderr,
+            )
+            tz_override = None
 
     # Log file filter — ON by default, --all-logs disables
     reduced_log_names = None

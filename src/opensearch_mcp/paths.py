@@ -61,6 +61,115 @@ def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:
     return current
 
 
+# Windows timezone names → IANA (from Unicode CLDR windowsZones.xml)
+_WIN_TZ_MAP = {
+    "AUS Central Standard Time": "Australia/Darwin",
+    "AUS Eastern Standard Time": "Australia/Sydney",
+    "Afghanistan Standard Time": "Asia/Kabul",
+    "Alaskan Standard Time": "America/Anchorage",
+    "Arab Standard Time": "Asia/Riyadh",
+    "Arabian Standard Time": "Asia/Dubai",
+    "Arabic Standard Time": "Asia/Baghdad",
+    "Atlantic Standard Time": "America/Halifax",
+    "Canada Central Standard Time": "America/Regina",
+    "Central America Standard Time": "America/Guatemala",
+    "Central Asia Standard Time": "Asia/Almaty",
+    "Central Europe Standard Time": "Europe/Budapest",
+    "Central European Standard Time": "Europe/Warsaw",
+    "Central Pacific Standard Time": "Pacific/Guadalcanal",
+    "Central Standard Time": "America/Chicago",
+    "Central Standard Time (Mexico)": "America/Mexico_City",
+    "China Standard Time": "Asia/Shanghai",
+    "E. Africa Standard Time": "Africa/Nairobi",
+    "E. Australia Standard Time": "Australia/Brisbane",
+    "E. Europe Standard Time": "Europe/Chisinau",
+    "E. South America Standard Time": "America/Sao_Paulo",
+    "Eastern Standard Time": "America/New_York",
+    "Egypt Standard Time": "Africa/Cairo",
+    "FLE Standard Time": "Europe/Kiev",
+    "GMT Standard Time": "Europe/London",
+    "GTB Standard Time": "Europe/Bucharest",
+    "Georgian Standard Time": "Asia/Tbilisi",
+    "Greenwich Standard Time": "Atlantic/Reykjavik",
+    "Hawaiian Standard Time": "Pacific/Honolulu",
+    "India Standard Time": "Asia/Kolkata",
+    "Iran Standard Time": "Asia/Tehran",
+    "Israel Standard Time": "Asia/Jerusalem",
+    "Japan Standard Time": "Asia/Tokyo",
+    "Korea Standard Time": "Asia/Seoul",
+    "Mountain Standard Time": "America/Denver",
+    "Mountain Standard Time (Mexico)": "America/Chihuahua",
+    "Myanmar Standard Time": "Asia/Rangoon",
+    "N. Central Asia Standard Time": "Asia/Novosibirsk",
+    "Nepal Standard Time": "Asia/Kathmandu",
+    "New Zealand Standard Time": "Pacific/Auckland",
+    "Newfoundland Standard Time": "America/St_Johns",
+    "North Asia East Standard Time": "Asia/Irkutsk",
+    "North Asia Standard Time": "Asia/Krasnoyarsk",
+    "Pacific SA Standard Time": "America/Santiago",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Pacific Standard Time (Mexico)": "America/Tijuana",
+    "Romance Standard Time": "Europe/Paris",
+    "Russian Standard Time": "Europe/Moscow",
+    "SA Eastern Standard Time": "America/Cayenne",
+    "SA Pacific Standard Time": "America/Bogota",
+    "SA Western Standard Time": "America/La_Paz",
+    "SE Asia Standard Time": "Asia/Bangkok",
+    "Singapore Standard Time": "Asia/Singapore",
+    "South Africa Standard Time": "Africa/Johannesburg",
+    "Sri Lanka Standard Time": "Asia/Colombo",
+    "Taipei Standard Time": "Asia/Taipei",
+    "Tasmania Standard Time": "Australia/Hobart",
+    "Tokyo Standard Time": "Asia/Tokyo",
+    "Turkey Standard Time": "Europe/Istanbul",
+    "US Eastern Standard Time": "America/Indianapolis",
+    "US Mountain Standard Time": "America/Phoenix",
+    "UTC": "UTC",
+    "UTC+12": "Pacific/Fiji",
+    "UTC-02": "America/Noronha",
+    "UTC-11": "Pacific/Pago_Pago",
+    "W. Australia Standard Time": "Australia/Perth",
+    "W. Central Africa Standard Time": "Africa/Lagos",
+    "W. Europe Standard Time": "Europe/Berlin",
+    "West Asia Standard Time": "Asia/Tashkent",
+    "West Pacific Standard Time": "Pacific/Port_Moresby",
+    "Yakutsk Standard Time": "Asia/Yakutsk",
+}
+
+
+def resolve_timezone(tz_name: str | None) -> str | None:
+    """Resolve a timezone name to IANA format.
+
+    Handles:
+    - Windows names from registry ("Eastern Standard Time" → "America/New_York")
+    - IANA names passed through ("America/New_York" → "America/New_York")
+    - None → None
+    """
+    if not tz_name:
+        return None
+
+    from dateutil.tz import gettz
+
+    # Try direct resolution first (works for IANA names on all platforms,
+    # and Windows names on Windows)
+    if gettz(tz_name) is not None:
+        return tz_name
+
+    # Map Windows name to IANA
+    iana = _WIN_TZ_MAP.get(tz_name)
+    if iana and gettz(iana) is not None:
+        return iana
+
+    # Case-insensitive fallback
+    lower = tz_name.lower()
+    for win_name, iana_name in _WIN_TZ_MAP.items():
+        if win_name.lower() == lower:
+            if gettz(iana_name) is not None:
+                return iana_name
+
+    return None
+
+
 def relative_evidence_path(file_path: Path, volume_root: Path) -> str:
     """Compute a volume-root-relative path for dedup IDs.
 

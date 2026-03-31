@@ -129,7 +129,9 @@ def discover_artifacts(host: DiscoveredHost) -> None:
         )
 
         gp_dir, tz = _read_transcript_config(vr)
-        host.system_timezone = tz
+        from opensearch_mcp.paths import resolve_timezone
+
+        host.system_timezone = resolve_timezone(tz)
         transcript_files = discover_transcripts(vr, gp_transcript_dir=gp_dir)
         if transcript_files:
             # Store volume_root as the artifact path (prefetch pattern) —
