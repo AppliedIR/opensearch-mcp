@@ -89,6 +89,7 @@ def parse_tasks_dir(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    volume_root: Path | None = None,
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
@@ -120,7 +121,10 @@ def parse_tasks_dir(
         if vss_id:
             doc["vhir.vss_id"] = vss_id
 
-        id_input = f"{index_name}:{task_file}"
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(task_file, volume_root) if volume_root else str(task_file)
+        id_input = f"{index_name}:{rel}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 

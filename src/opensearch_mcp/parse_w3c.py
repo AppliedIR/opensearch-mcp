@@ -49,8 +49,10 @@ def parse_w3c_log(
     if not timestamp_is_utc and system_timezone:
         tz_info = dateutil_tz.gettz(system_timezone)
 
+    line_number = 0
     with open(file_path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
+            line_number += 1
             if line.startswith("#Fields:"):
                 fields = line[8:].strip().split()
                 continue
@@ -106,14 +108,19 @@ def parse_w3c_log(
                     row[ecs_name] = row[w3c_name]
 
             # Deterministic ID — computed BEFORE provenance injection
+            # Line number ensures uniqueness for high-volume IIS logs
+            # (multiple requests in same second from same IP to same URI)
             id_parts = [
                 index_name,
                 source_file,
+                str(line_number),
                 row.get("@timestamp", ""),
                 row.get("source.ip", row.get("c-ip", "")),
                 row.get("cs-uri-stem", row.get("dst-port", "")),
                 row.get("cs-uri-query", ""),
                 row.get("s-port", ""),
+                row.get("dst-ip", row.get("destination.ip", "")),
+                row.get("action", ""),
             ]
             id_str = ":".join(str(p) for p in id_parts)
             doc_hash = hashlib.sha256(id_str.encode()).hexdigest()[:20]

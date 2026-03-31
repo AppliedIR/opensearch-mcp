@@ -26,6 +26,7 @@ def parse_mplog(
     hostname: str,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    volume_root: Path | None = None,
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
@@ -36,7 +37,10 @@ def parse_mplog(
     bulk_failed = 0
     actions: list[dict] = []
 
+    from opensearch_mcp.paths import relative_evidence_path
+
     for log_file in sorted(mplog_dir.glob("MPLog-*.log")):
+        rel_file = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
         current_ts = None
 
         with open(log_file, encoding="utf-8-sig", errors="replace") as f:
@@ -104,7 +108,8 @@ def parse_mplog(
                 if vss_id:
                     doc["vhir.vss_id"] = vss_id
 
-                id_input = f"{index_name}:{log_file}:{current_ts or ''}:{line_body[:100]}"
+                line_hash = hashlib.md5(line_body.encode()).hexdigest()
+                id_input = f"{index_name}:{rel_file}:{current_ts or ''}:{line_hash}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
                 actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 

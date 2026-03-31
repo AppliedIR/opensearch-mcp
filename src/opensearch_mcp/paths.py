@@ -59,3 +59,16 @@ def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:
         if not found:
             return None
     return current
+
+
+def relative_evidence_path(file_path: Path, volume_root: Path) -> str:
+    """Compute a volume-root-relative path for dedup IDs.
+
+    Normalizes absolute mount paths so the same evidence file produces
+    the same relative path regardless of where the volume is mounted.
+    Falls back to the filename if the file isn't under volume_root.
+    """
+    try:
+        return str(file_path.relative_to(volume_root))
+    except ValueError:
+        return file_path.name

@@ -216,6 +216,7 @@ def ingest_transcripts(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    volume_root: Path | None = None,
     system_timezone: str | None = None,
     source_file: str = "",
     ingest_audit_id: str = "",
@@ -247,7 +248,10 @@ def ingest_transcripts(
             doc["vhir.vss_id"] = vss_id
         doc["vhir.parse_method"] = "transcript-parser"
 
-        _id = _doc_id(index_name, {"source_file": str(f)})
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
+        _id = _doc_id(index_name, {"source_file": rel})
         actions.append({"_index": index_name, "_id": _id, "_source": doc})
 
         if len(actions) >= 100:

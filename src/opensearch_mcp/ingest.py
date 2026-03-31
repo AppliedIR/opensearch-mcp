@@ -355,11 +355,14 @@ def _ingest_hosts(
                     file_hash = sha256_file(evtx_file)
                     aid = audit._next_audit_id()
                     try:
+                        from opensearch_mcp.paths import relative_evidence_path
+
+                        rel_path = relative_evidence_path(evtx_file, host.volume_root)
                         cnt, sk, bf = parse_and_index(
                             evtx_path=evtx_file,
                             client=client,
                             index_name=index_name,
-                            source_file=str(evtx_file),
+                            source_file=rel_path,
                             ingest_audit_id=aid,
                             time_from=time_from,
                             time_to=time_to,
@@ -761,6 +764,8 @@ def _run_custom_parser(
     tool_name, artifact_path, client, index_name, host, aid, time_from, time_to
 ):
     """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed)."""
+    from opensearch_mcp.paths import relative_evidence_path
+
     kw: dict = {
         "client": client,
         "index_name": index_name,
@@ -770,12 +775,14 @@ def _run_custom_parser(
     }
     if host.vss_id:
         kw["vss_id"] = host.vss_id
+    vr = host.volume_root
 
     if tool_name == "transcripts":
         from opensearch_mcp.parse_transcripts import ingest_transcripts
 
         cnt, bf = ingest_transcripts(
             transcript_dir=artifact_path,
+            volume_root=vr,
             system_timezone=host.system_timezone,
             **kw,
         )
@@ -784,7 +791,13 @@ def _run_custom_parser(
     if tool_name == "defender":
         from opensearch_mcp.parse_defender import parse_mplog
 
-        return parse_mplog(mplog_dir=artifact_path, time_from=time_from, time_to=time_to, **kw)
+        return parse_mplog(
+            mplog_dir=artifact_path,
+            volume_root=vr,
+            time_from=time_from,
+            time_to=time_to,
+            **kw,
+        )
 
     if tool_name == "iis":
         from opensearch_mcp.parse_w3c import parse_w3c_log
@@ -796,7 +809,7 @@ def _run_custom_parser(
                 timestamp_is_utc=True,
                 time_from=time_from,
                 time_to=time_to,
-                source_file=str(log_file),
+                source_file=relative_evidence_path(log_file, vr),
                 parse_method="iis-w3c",
                 **kw,
             )
@@ -815,7 +828,7 @@ def _run_custom_parser(
                 timestamp_is_utc=True,
                 time_from=time_from,
                 time_to=time_to,
-                source_file=str(log_file),
+                source_file=relative_evidence_path(log_file, vr),
                 parse_method="httperr-w3c",
                 **kw,
             )
@@ -827,12 +840,12 @@ def _run_custom_parser(
     if tool_name == "tasks":
         from opensearch_mcp.parse_tasks import parse_tasks_dir
 
-        return parse_tasks_dir(tasks_dir=artifact_path, **kw)
+        return parse_tasks_dir(tasks_dir=artifact_path, volume_root=vr, **kw)
 
     if tool_name == "wer":
         from opensearch_mcp.parse_wer import parse_wer_dir
 
-        return parse_wer_dir(wer_dir=artifact_path, **kw)
+        return parse_wer_dir(wer_dir=artifact_path, volume_root=vr, **kw)
 
     if tool_name == "firewall":
         from opensearch_mcp.parse_w3c import parse_w3c_log
@@ -843,7 +856,7 @@ def _run_custom_parser(
             system_timezone=host.system_timezone,
             time_from=time_from,
             time_to=time_to,
-            source_file=str(artifact_path),
+            source_file=relative_evidence_path(artifact_path, vr),
             parse_method="firewall-w3c",
             **kw,
         )
@@ -853,6 +866,7 @@ def _run_custom_parser(
 
         return parse_ssh_log(
             ssh_dir=artifact_path,
+            volume_root=vr,
             time_from=time_from,
             time_to=time_to,
             **kw,

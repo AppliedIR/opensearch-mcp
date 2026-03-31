@@ -23,6 +23,7 @@ def parse_ssh_log(
     hostname: str,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    volume_root: Path | None = None,
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
@@ -90,7 +91,13 @@ def parse_ssh_log(
                 if vss_id:
                     doc["vhir.vss_id"] = vss_id
 
-                id_input = f"{index_name}:{log_file}:{doc['@timestamp']}:{message[:100]}"
+                from opensearch_mcp.paths import relative_evidence_path
+
+                rel = (
+                    relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
+                )
+                msg_hash = hashlib.md5(message.encode()).hexdigest()
+                id_input = f"{index_name}:{rel}:{doc['@timestamp']}:{msg_hash}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
                 actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 
