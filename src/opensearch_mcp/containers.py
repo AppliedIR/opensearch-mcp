@@ -174,6 +174,29 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
             mounted.append(mount_point)
         except subprocess.CalledProcessError:
             mount_point.rmdir()
+
+    # Fallback: try direct mount (volume image without partition table)
+    if not mounted:
+        mount_point = dest / "vol0"
+        mount_point.mkdir(exist_ok=True)
+        try:
+            subprocess.run(
+                [
+                    "sudo",
+                    "mount",
+                    "-o",
+                    "ro,loop,noexec",
+                    str(raw_path),
+                    str(mount_point),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            ctx.add_mount(mount_point)
+            mounted.append(mount_point)
+        except subprocess.CalledProcessError:
+            mount_point.rmdir()
+
     return mounted
 
 

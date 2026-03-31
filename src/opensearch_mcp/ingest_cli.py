@@ -374,8 +374,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
             vss_tag = f" [{host.vss_id}]" if host.vss_id else ""
             print(f"  {host.hostname}{vss_tag}: {evtx_note}{arts}")
 
-        # Apply --timezone override to all hosts (priority 1)
+        # Apply --source-timezone override to all hosts (priority 1)
         if tz_override:
+            print(f"  Source timezone: {tz_override}")
             for h in hosts:
                 h.system_timezone = tz_override
 
