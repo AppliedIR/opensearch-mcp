@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,16 +14,11 @@ from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_evtx import parse_and_index
+from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
 from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
-
-
-def _sanitize_index_component(value: str) -> str:
-    """Sanitize a hostname or case_id for use in OpenSearch index names."""
-    return re.sub(r"[^a-z0-9._-]", "-", value.lower())
-
 
 # Artifacts handled by Plaso/wintools (not EZ tools on Linux)
 _PLASO_ARTIFACTS = {"prefetch", "srum"}

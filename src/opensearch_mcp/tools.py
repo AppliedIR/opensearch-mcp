@@ -165,7 +165,7 @@ def run_and_ingest(
     if cfg is None:
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    from opensearch_mcp.ingest import _sanitize_index_component
+    from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
     index_name = (
         f"case-{_sanitize_index_component(case_id)}"

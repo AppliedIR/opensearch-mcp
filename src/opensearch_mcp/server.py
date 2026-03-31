@@ -666,6 +666,111 @@ def idx_ingest_status() -> dict:
 
 
 @server.tool()
+def idx_ingest_memory(
+    path: str,
+    hostname: str,
+    tier: int = 1,
+    plugins: list[str] | None = None,
+    dry_run: bool = True,
+) -> dict:
+    """Parse a memory image with Volatility 3 and index results.
+
+    Args:
+        path: Path to memory image (.raw, .vmem, .dmp, etc.)
+        hostname: Source hostname for the memory image.
+        tier: Analysis depth (1=fast/essential, 2=moderate, 3=deep).
+        plugins: Override tier — run only these specific plugins.
+        dry_run: Preview which plugins would run (default True).
+    """
+    from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3
+
+    if plugins:
+        plugin_list = plugins
+    elif tier >= 3:
+        plugin_list = TIER_3
+    elif tier >= 2:
+        plugin_list = TIER_2
+    else:
+        plugin_list = TIER_1
+
+    if dry_run:
+        resp = {
+            "status": "preview",
+            "tier": tier,
+            "plugins": plugin_list,
+            "plugin_count": len(plugin_list),
+        }
+        aid = audit.log(
+            tool="idx_ingest_memory",
+            params={"path": path, "dry_run": True, "tier": tier},
+            result_summary=f"preview: {len(plugin_list)} plugins",
+        )
+        if aid:
+            resp["audit_id"] = aid
+        return resp
+
+    # dry_run=False: launch as subprocess
+    import subprocess as _sp
+    import sys as _sys
+
+    active_case = _get_active_case()
+    if not active_case:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+
+    cmd = [
+        _sys.executable,
+        "-m",
+        "opensearch_mcp.ingest_cli",
+        "memory",
+        path,
+        "--hostname",
+        hostname,
+        "--case",
+        active_case,
+        "--tier",
+        str(tier),
+        "--yes",
+    ]
+    if plugins:
+        cmd.extend(["--plugins", ",".join(plugins)])
+
+    proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+
+    resp = {
+        "status": "started",
+        "pid": proc.pid,
+        "tier": tier,
+        "plugins": plugin_list,
+        "message": (
+            f"Memory analysis started ({len(plugin_list)} plugins). "
+            "This may take several minutes. Use idx_ingest_status() to monitor."
+        ),
+    }
+    aid = audit.log(
+        tool="idx_ingest_memory",
+        params={"path": path, "tier": tier, "pid": proc.pid},
+        result_summary=f"started tier {tier} ({len(plugin_list)} plugins)",
+    )
+    if aid:
+        resp["audit_id"] = aid
+    return resp
+
+
+def _get_active_case() -> str | None:
+    """Read active case ID."""
+    from opensearch_mcp.paths import vhir_dir
+
+    active_case = vhir_dir() / "active_case"
+    if active_case.exists():
+        raw = active_case.read_text().strip()
+        if raw:
+            from pathlib import Path
+
+            return Path(raw).name
+    return None
+
+
+@server.tool()
 def idx_list_detections(
     severity: str = "",
     limit: int = 50,

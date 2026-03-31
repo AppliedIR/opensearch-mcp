@@ -592,6 +592,107 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 
 
 # ---------------------------------------------------------------------------
+# cmd_ingest_memory — memory forensics entry point
+# ---------------------------------------------------------------------------
+
+
+def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    """Parse a memory image with Volatility 3 and index results."""
+    from opensearch_mcp import __version__
+    from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3, ingest_memory
+
+    image_path = Path(args.path)
+    if not image_path.is_file():
+        print(f"Error: {image_path} is not a file.", file=sys.stderr)
+        sys.exit(1)
+
+    case_id = _resolve_case_id(getattr(args, "case", None))
+    _ensure_case_active(case_id)
+    hostname = args.hostname
+    tier = getattr(args, "tier", 1)
+    plugins_str = getattr(args, "plugins", None)
+    plugins = [p.strip() for p in plugins_str.split(",")] if plugins_str else None
+
+    # Show what will run
+    if plugins:
+        plugin_list = plugins
+    elif tier >= 3:
+        plugin_list = TIER_3
+    elif tier >= 2:
+        plugin_list = TIER_2
+    else:
+        plugin_list = TIER_1
+
+    print(f"Memory image: {image_path.name}")
+    print(f"Hostname: {hostname}")
+    print(f"Tier {tier}: {len(plugin_list)} plugins")
+
+    if not getattr(args, "yes", False):
+        try:
+            answer = input(f"\nRun {len(plugin_list)} vol3 plugins? [y/N] ")
+            if answer.lower() not in ("y", "yes"):
+                print("Aborted.")
+                return
+        except EOFError:
+            print("Non-interactive mode. Use --yes to skip.", file=sys.stderr)
+            sys.exit(1)
+
+    client = get_client()
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    aid = audit._next_audit_id()
+
+    def _progress(event: str, **kw) -> None:
+        if event == "plugin_start":
+            print(f"  {kw['plugin']}...", end=" ", flush=True)
+        elif event == "plugin_done":
+            cnt = kw.get("indexed", 0)
+            if cnt:
+                print(f"{cnt:,} entries")
+            else:
+                print("empty")
+        elif event == "plugin_failed":
+            print(f"FAILED: {kw['error']}")
+
+    def _audit_log(tool, params, result_summary):
+        audit.log(tool=tool, audit_id=aid, params=params, result_summary=result_summary)
+
+    timeout = getattr(args, "timeout", 3600)
+    results = ingest_memory(
+        image_path=image_path,
+        client=client,
+        case_id=case_id,
+        hostname=hostname,
+        tier=tier,
+        plugins=plugins,
+        timeout=timeout,
+        ingest_audit_id=aid,
+        pipeline_version=f"opensearch-mcp-{__version__}",
+        on_progress=_progress,
+        audit_log=_audit_log,
+    )
+
+    # Summary
+    total = sum(r.get("indexed", 0) for r in results.values())
+    failed = [p for p, r in results.items() if r.get("status") == "failed"]
+    print(f"\nDone. {total:,} entries indexed from {len(results)} plugins.")
+    if failed:
+        print(f"{len(failed)} plugin(s) failed: {', '.join(failed)}")
+
+    # Audit the overall operation
+    audit.log(
+        tool="ingest_memory",
+        audit_id=aid,
+        params={
+            "image": str(image_path),
+            "hostname": hostname,
+            "tier": tier,
+        },
+        result_summary=f"{total} indexed, {len(failed)} failed",
+        input_files=[str(image_path)],
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -616,6 +717,17 @@ def main() -> None:
     p_csv.add_argument("--case", help="Case ID")
     p_csv.add_argument("--examiner", help="Examiner name")
     p_csv.set_defaults(func=cmd_csv)
+
+    # memory subcommand
+    p_mem = sub.add_parser("memory", help="Parse memory image with Volatility 3")
+    p_mem.add_argument("path", help="Path to memory image")
+    p_mem.add_argument("--hostname", required=True, help="Source hostname")
+    p_mem.add_argument("--case", help="Case ID")
+    p_mem.add_argument("--tier", type=int, default=1, choices=[1, 2, 3], help="Analysis depth")
+    p_mem.add_argument("--plugins", help="Specific plugins (comma-separated)")
+    p_mem.add_argument("--timeout", type=int, default=3600, help="Per-plugin timeout")
+    p_mem.add_argument("--yes", action="store_true", help="Skip confirmation")
+    p_mem.set_defaults(func=cmd_ingest_memory)
 
     args = parser.parse_args()
 

@@ -415,8 +415,8 @@ class TestDetectionsToolRegistration:
         """idx_list_detections is registered as an MCP tool."""
         assert hasattr(srv, "idx_list_detections")
 
-    def test_tool_count_is_10(self):
-        """Phase 4 brings total to 10 tools."""
+    def test_tool_count(self):
+        """All idx_* tools registered."""
         import inspect
 
         tool_names = [
@@ -424,4 +424,4 @@ class TestDetectionsToolRegistration:
             for name, obj in inspect.getmembers(srv)
             if callable(obj) and name.startswith("idx_") and not name.startswith("_")
         ]
-        assert len(tool_names) == 10
+        assert len(tool_names) == 11

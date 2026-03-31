@@ -31,12 +31,43 @@ def register(subparsers, registered: set) -> None:
         p.set_defaults(func=_cmd_ingest)
         registered.add("ingest")
 
+    if "ingest-memory" not in registered:
+        p = subparsers.add_parser("ingest-memory", help="Parse memory image with Volatility 3")
+        p.add_argument("path", help="Path to memory image")
+        p.add_argument(
+            "--hostname",
+            required=True,
+            help="Source hostname (required)",
+        )
+        p.add_argument("--case", help="Case ID")
+        p.add_argument(
+            "--tier",
+            type=int,
+            default=1,
+            choices=[1, 2, 3],
+            help="Analysis depth (1=fast, 2=default, 3=deep)",
+        )
+        p.add_argument("--plugins", help="Specific plugins (comma-separated)")
+        p.add_argument(
+            "--timeout",
+            type=int,
+            default=3600,
+            help="Per-plugin timeout in seconds",
+        )
+        p.add_argument("--yes", action="store_true", help="Skip confirmation")
+        p.set_defaults(func=_cmd_ingest_memory)
+        registered.add("ingest-memory")
+
 
 def _cmd_ingest(args, identity) -> None:
-    """Delegate to opensearch_mcp ingest logic.
-
-    vhir calls handler(args, identity). We pass both through.
-    """
+    """Delegate to opensearch_mcp ingest logic."""
     from opensearch_mcp.ingest_cli import cmd_ingest
 
     cmd_ingest(args, examiner=identity.get("name", "unknown"))
+
+
+def _cmd_ingest_memory(args, identity) -> None:
+    """Delegate to opensearch_mcp memory ingest logic."""
+    from opensearch_mcp.ingest_cli import cmd_ingest_memory
+
+    cmd_ingest_memory(args, examiner=identity.get("name", "unknown"))

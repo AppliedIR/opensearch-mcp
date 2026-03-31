@@ -170,6 +170,13 @@ def resolve_timezone(tz_name: str | None) -> str | None:
     return None
 
 
+def sanitize_index_component(value: str) -> str:
+    """Sanitize a hostname or case_id for use in OpenSearch index names."""
+    import re
+
+    return re.sub(r"[^a-z0-9._-]", "-", value.lower())
+
+
 def relative_evidence_path(file_path: Path, volume_root: Path) -> str:
     """Compute a volume-root-relative path for dedup IDs.
 
