@@ -589,6 +589,7 @@ def _ingest_plaso_artifact(
 
     index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
     existing = _safe_count(client, index_name)
+    plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()
 
     ar = ArtifactResult(
@@ -638,6 +639,7 @@ def _ingest_plaso_artifact(
             },
             result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
             input_files=[str(artifact_path)],
+            input_sha256s=[plaso_hash] if plaso_hash else [],
             source_evidence=str(artifact_path),
         )
         if tool_status:
@@ -686,6 +688,7 @@ def _ingest_custom_artifact(
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
     index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
     existing = _safe_count(client, index_name)
+    file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()
 
     ar = ArtifactResult(
@@ -723,6 +726,7 @@ def _ingest_custom_artifact(
             + (f", {sk} skipped" if sk else "")
             + (f", {bf} bulk failed" if bf else ""),
             input_files=[str(artifact_path)],
+            input_sha256s=[file_hash] if file_hash else [],
             source_evidence=str(artifact_path),
         )
         if tool_status:
@@ -773,7 +777,6 @@ def _run_custom_parser(
         cnt, bf = ingest_transcripts(
             transcript_dir=artifact_path,
             system_timezone=host.system_timezone,
-            vss_id=host.vss_id,
             **kw,
         )
         return cnt, 0, bf

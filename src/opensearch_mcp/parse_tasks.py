@@ -89,7 +89,6 @@ def parse_tasks_dir(
     client: OpenSearch,
     index_name: str,
     hostname: str,
-    source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",

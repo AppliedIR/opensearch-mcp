@@ -23,7 +23,6 @@ def parse_ssh_log(
     hostname: str,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
-    source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",

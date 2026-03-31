@@ -97,15 +97,28 @@ def parse_w3c_log(
                     except ValueError:
                         pass
 
-            # Replace W3C dash placeholders with None
-            row = {k: (v if v != "-" else None) for k, v in row.items()}
+            # Replace W3C dash placeholders and strip None values
+            row = {k: v for k, v in row.items() if v != "-" and v is not None}
 
             # Map W3C IP fields to ECS names for GeoIP enrichment
             for w3c_name, ecs_name in _ECS_IP_REMAP.items():
-                if w3c_name in row and row[w3c_name] is not None:
+                if w3c_name in row:
                     row[ecs_name] = row[w3c_name]
 
-            # Provenance
+            # Deterministic ID — computed BEFORE provenance injection
+            id_parts = [
+                index_name,
+                source_file,
+                row.get("@timestamp", ""),
+                row.get("source.ip", row.get("c-ip", "")),
+                row.get("cs-uri-stem", row.get("dst-port", "")),
+                row.get("cs-uri-query", ""),
+                row.get("s-port", ""),
+            ]
+            id_str = ":".join(str(p) for p in id_parts)
+            doc_hash = hashlib.sha256(id_str.encode()).hexdigest()[:20]
+
+            # Provenance (after ID computation)
             row["host.name"] = hostname
             if source_file:
                 row["vhir.source_file"] = source_file
@@ -117,19 +130,6 @@ def parse_w3c_log(
                 row["vhir.parse_method"] = parse_method
             if vss_id:
                 row["vhir.vss_id"] = vss_id
-
-            # Deterministic ID
-            id_parts = [
-                index_name,
-                source_file,
-                row.get("@timestamp", ""),
-                row.get("source.ip", row.get("c-ip", "")),
-                row.get("cs-uri-stem", row.get("dst-port", "")),
-                row.get("cs-uri-query", ""),
-                row.get("s-port", ""),
-            ]
-            id_str = ":".join(str(p or "") for p in id_parts)
-            doc_hash = hashlib.sha256(id_str.encode()).hexdigest()[:20]
 
             actions.append({"_index": index_name, "_id": doc_hash, "_source": row})
 
