@@ -1,0 +1,85 @@
+# Forensically relevant Windows event log files for --reduced-logs mode.
+# ~53 logs from ~335 typical in KAPE triage.
+# Matched case-insensitively against evtx filename stem (no .evtx extension).
+# Covers: authentication, lateral movement, execution, persistence,
+# defense evasion, network, remoting, and endpoint protection.
+
+core:
+  - Security
+  - System
+  - Application
+  - Setup
+  - ForwardedEvents
+
+sysmon:
+  - Microsoft-Windows-Sysmon%4Operational
+
+powershell:
+  - Microsoft-Windows-PowerShell%4Operational
+  - Microsoft-Windows-PowerShell%4Admin
+  - Microsoft-Windows-PowerShell-DesiredStateConfiguration-FileDownloadManager%4Operational
+  - Windows PowerShell
+
+rdp_and_terminal_services:
+  - Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational
+  - Microsoft-Windows-TerminalServices-LocalSessionManager%4Admin
+  - Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Operational
+  - Microsoft-Windows-TerminalServices-RemoteConnectionManager%4Admin
+  - Microsoft-Windows-TerminalServices-RDPClient%4Operational
+  - Microsoft-Windows-TerminalServices-SessionBroker-Client%4Operational
+  - Microsoft-Windows-TerminalServices-SessionBroker-Client%4Admin
+  - Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Operational
+  - Microsoft-Windows-RemoteDesktopServices-RdpCoreTS%4Admin
+  - Microsoft-Windows-RemoteDesktopServices-SessionServices%4Operational
+
+smb:
+  - Microsoft-Windows-SMBClient%4Operational
+  - Microsoft-Windows-SMBServer%4Operational
+  - Microsoft-Windows-SMBServer%4Audit
+  - Microsoft-Windows-SMBServer%4Security
+  - Microsoft-Windows-SMBServer%4Connectivity
+  - Microsoft-Windows-SmbClient%4Audit
+  - Microsoft-Windows-SmbClient%4Connectivity
+  - Microsoft-Windows-SmbClient%4Security
+
+remoting:
+  - Microsoft-Windows-WinRM%4Operational
+  - Microsoft-Windows-Forwarding%4Operational
+  - Microsoft-Windows-EventCollector%4Operational
+  - OpenSSH%4Operational
+  - OpenSSH%4Admin
+
+persistence_and_execution:
+  - Microsoft-Windows-TaskScheduler%4Operational
+  - Microsoft-Windows-WMI-Activity%4Operational
+  - Microsoft-Windows-Regsvr32%4Operational
+
+defense_and_protection:
+  - Microsoft-Windows-Windows Defender%4Operational
+  - Microsoft-Windows-Windows Firewall With Advanced Security%4Firewall
+  - Microsoft-Windows-CodeIntegrity%4Operational
+  - Microsoft-Windows-AppLocker%4EXE and DLL
+  - Microsoft-Windows-AppLocker%4MSI and Script
+  - Microsoft-Windows-AppLocker%4Packaged app-Execution
+  - Microsoft-Windows-SENSE%4Operational
+  - Microsoft-Windows-SenseIR%4Operational
+  - Microsoft-Windows-Security-Mitigations%4KernelMode
+  - Microsoft-Windows-Security-Mitigations%4UserMode
+
+network:
+  - Microsoft-Windows-NTLM%4Operational
+  - Microsoft-Windows-Bits-Client%4Operational
+  - Microsoft-Windows-DNS-Client%4Operational
+  - Microsoft-Windows-TCPIP%4Operational
+
+auth_and_identity:
+  - Microsoft-Windows-Winlogon%4Operational
+  - Microsoft-Windows-User Profile Service%4Operational
+  - Microsoft-Windows-GroupPolicy%4Operational
+  - Microsoft-Windows-Security-Netlogon%4Operational
+
+other_forensic:
+  - Microsoft-Windows-Privacy-Auditing%4Operational
+  - Microsoft-Windows-VHDMP-Operational
+  - Microsoft-Windows-PrintService%4Operational
+  - Microsoft-Windows-DriverFrameworks-UserMode%4Operational
