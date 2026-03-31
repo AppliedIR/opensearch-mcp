@@ -165,12 +165,13 @@ def run_and_ingest(
     if cfg is None:
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    import re
+    from opensearch_mcp.ingest import _sanitize_index_component
 
-    def _san(v: str) -> str:
-        return re.sub(r"[^a-z0-9._-]", "-", v.lower())
-
-    index_name = f"case-{_san(case_id)}-{cfg.index_suffix}-{_san(hostname)}"
+    index_name = (
+        f"case-{_sanitize_index_component(case_id)}"
+        f"-{cfg.index_suffix}"
+        f"-{_sanitize_index_component(hostname)}"
+    )
     tmpdir = tempfile.mkdtemp(prefix=f"vhir-{tool_name}-")
     natural_key = natural_key_override if natural_key_override is not None else cfg.natural_key
 
