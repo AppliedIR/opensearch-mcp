@@ -31,7 +31,7 @@ def _detect_encoding(path: Path) -> str:
 
 # Fields containing per-run volatile data (temp dir paths) or VSS metadata.
 # Excluded from content hash to ensure dedup stability across re-ingests.
-_VOLATILE_KEYS = {"PluginDetailFile", "SourceFile", "vhir.vss_id"}
+_VOLATILE_KEYS = {"PluginDetailFile", "SourceFile", "HivePath", "vhir.vss_id"}
 
 
 def _doc_id(
