@@ -81,8 +81,9 @@ def parse_w3c_log(
                     except ValueError:
                         row["@timestamp"] = f"{date_val}T{time_val}"
                 else:
-                    row["@timestamp"] = f"{date_val}T{time_val}"
-                    row["timezone_warning"] = "Local time — system timezone unknown"
+                    # Timezone unknown — skip entry (unreliable timestamp)
+                    skipped += 1
+                    continue
 
             # Time range filter
             if time_from or time_to:
@@ -90,13 +91,17 @@ def parse_w3c_log(
                 if ts_str:
                     try:
                         ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            from datetime import timezone as _tz
+
+                            ts = ts.replace(tzinfo=_tz.utc)
                         if time_from and ts < time_from:
                             skipped += 1
                             continue
                         if time_to and ts > time_to:
                             skipped += 1
                             continue
-                    except ValueError:
+                    except (ValueError, TypeError):
                         pass
 
             # Replace W3C dash placeholders and strip None values

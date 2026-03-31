@@ -111,9 +111,10 @@ def _parse_transcript_time(time_str: str, system_tz_name: str | None) -> str:
             if tz:
                 aware = naive.replace(tzinfo=tz)
                 return aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
-        return naive.isoformat() + "Z"
+        # Timezone unknown — cannot produce reliable UTC timestamp
+        return None
     except Exception:
-        return time_str
+        return None
 
 
 def _detect_session_type(host_app: str) -> str:
@@ -205,9 +206,6 @@ def parse_transcript(file_path: Path, system_timezone: str | None = None) -> dic
         except Exception:
             pass
 
-    if not system_timezone:
-        doc["transcript.timezone_warning"] = "Local time — system timezone unknown"
-
     return doc
 
 
@@ -238,6 +236,15 @@ def ingest_transcripts(
 
     for f in files:
         doc = parse_transcript(f, system_timezone=system_timezone)
+        # Skip documents with unreliable timestamps — wrong data is not evidence
+        if doc.get("@timestamp") is None:
+            import sys
+
+            print(
+                f"  transcripts: skipped {f.name} — timezone unknown, timestamps unreliable",
+                file=sys.stderr,
+            )
+            continue
         doc["host.name"] = hostname
         doc["vhir.source_file"] = str(f)
         if ingest_audit_id:

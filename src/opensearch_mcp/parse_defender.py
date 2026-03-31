@@ -26,6 +26,7 @@ def parse_mplog(
     hostname: str,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    system_timezone: str | None = None,
     volume_root: Path | None = None,
     ingest_audit_id: str = "",
     pipeline_version: str = "",
@@ -37,7 +38,11 @@ def parse_mplog(
     bulk_failed = 0
     actions: list[dict] = []
 
+    from dateutil.tz import gettz, tzutc
+
     from opensearch_mcp.paths import relative_evidence_path
+
+    tz_info = gettz(system_timezone) if system_timezone else None
 
     for log_file in sorted(mplog_dir.glob("MPLog-*.log")):
         rel_file = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
@@ -59,7 +64,22 @@ def parse_mplog(
                     line_body = line
 
                 if current_ts:
-                    doc["@timestamp"] = current_ts
+                    # Convert non-UTC timestamps to UTC
+                    if current_ts.endswith("Z"):
+                        doc["@timestamp"] = current_ts
+                    elif tz_info:
+                        try:
+                            naive = datetime.fromisoformat(current_ts)
+                            aware = naive.replace(tzinfo=tz_info)
+                            utc_ts = aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
+                            doc["@timestamp"] = utc_ts
+                            current_ts = utc_ts  # use converted for filtering
+                        except ValueError:
+                            doc["@timestamp"] = current_ts
+                    else:
+                        # No timezone, no Z — skip this line (unreliable timestamp)
+                        skipped += 1
+                        continue
 
                 # Time range filter
                 if current_ts and (time_from or time_to):

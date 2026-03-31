@@ -793,6 +793,7 @@ def _run_custom_parser(
 
         return parse_mplog(
             mplog_dir=artifact_path,
+            system_timezone=host.system_timezone,
             volume_root=vr,
             time_from=time_from,
             time_to=time_to,
@@ -840,7 +841,12 @@ def _run_custom_parser(
     if tool_name == "tasks":
         from opensearch_mcp.parse_tasks import parse_tasks_dir
 
-        return parse_tasks_dir(tasks_dir=artifact_path, volume_root=vr, **kw)
+        return parse_tasks_dir(
+            tasks_dir=artifact_path,
+            system_timezone=host.system_timezone,
+            volume_root=vr,
+            **kw,
+        )
 
     if tool_name == "wer":
         from opensearch_mcp.parse_wer import parse_wer_dir
@@ -866,6 +872,7 @@ def _run_custom_parser(
 
         return parse_ssh_log(
             ssh_dir=artifact_path,
+            system_timezone=host.system_timezone,
             volume_root=vr,
             time_from=time_from,
             time_to=time_to,

@@ -89,12 +89,20 @@ def parse_tasks_dir(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    system_timezone: str | None = None,
     volume_root: Path | None = None,
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
 ) -> tuple[int, int, int]:
-    """Parse all task XML files in the directory tree."""
+    """Parse all task XML files in the directory tree.
+
+    Task timestamps are local system time. Converts to UTC using
+    system_timezone. Skips if timezone is unknown.
+    """
+    from dateutil.tz import gettz, tzutc
+
+    tz_info = gettz(system_timezone) if system_timezone else None
     count = 0
     skipped = 0
     bulk_failed = 0
@@ -103,13 +111,31 @@ def parse_tasks_dir(
     for task_file in sorted(tasks_dir.rglob("*")):
         if not task_file.is_file():
             continue
-        # Task XML files have no extension or .xml extension
         if task_file.suffix.lower() not in ("", ".xml"):
             continue
         doc = parse_task_xml(task_file)
         if doc is None:
             skipped += 1
             continue
+
+        # Convert local timestamp to UTC
+        if "@timestamp" in doc:
+            ts_str = doc["@timestamp"]
+            if ts_str and not ts_str.endswith("Z") and "+" not in ts_str:
+                if tz_info:
+                    try:
+                        from datetime import datetime
+
+                        naive = datetime.fromisoformat(ts_str)
+                        aware = naive.replace(tzinfo=tz_info)
+                        doc["@timestamp"] = (
+                            aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
+                        )
+                    except ValueError:
+                        del doc["@timestamp"]
+                else:
+                    # Timezone unknown — remove unreliable timestamp
+                    del doc["@timestamp"]
 
         doc["host.name"] = hostname
         doc["vhir.source_file"] = str(task_file)

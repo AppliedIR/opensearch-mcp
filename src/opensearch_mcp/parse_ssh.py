@@ -21,6 +21,7 @@ def parse_ssh_log(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    system_timezone: str | None = None,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     volume_root: Path | None = None,
@@ -28,7 +29,24 @@ def parse_ssh_log(
     pipeline_version: str = "",
     vss_id: str = "",
 ) -> tuple[int, int, int]:
-    """Parse sshd.log files — extract auth events."""
+    """Parse sshd.log files — extract auth events.
+
+    SSH timestamps are local system time. Requires system_timezone for
+    UTC conversion. Skipped entirely if timezone is unknown — wrong
+    timestamps are not acceptable evidence.
+    """
+    from dateutil.tz import gettz, tzutc
+
+    tz_info = gettz(system_timezone) if system_timezone else None
+    if not tz_info:
+        import sys
+
+        print(
+            "  ssh: skipped — system timezone unknown, timestamps would be unreliable",
+            file=sys.stderr,
+        )
+        return 0, 0, 0
+
     count = 0
     skipped = 0
     bulk_failed = 0
@@ -49,8 +67,17 @@ def parse_ssh_log(
                 ts_match = _SSH_LINE.match(line)
                 if not ts_match:
                     continue
-                # Convert "2023-01-17 14:30:00.000" to ISO 8601
-                doc["@timestamp"] = ts_match.group(1).strip().replace(" ", "T") + "Z"
+                # Convert local timestamp to UTC
+                raw_ts = ts_match.group(1).strip()
+                try:
+                    fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in raw_ts else "%Y-%m-%d %H:%M:%S"
+                    naive = datetime.strptime(raw_ts, fmt)
+                    aware = naive.replace(tzinfo=tz_info)
+                    doc["@timestamp"] = (
+                        aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
+                    )
+                except ValueError:
+                    continue
                 message = ts_match.group(2)
 
                 # Time range filter
