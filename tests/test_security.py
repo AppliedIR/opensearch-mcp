@@ -205,3 +205,100 @@ class TestDocIdSecurity:
         doc_id = _doc_id("index", row)
         assert len(doc_id) == 20
         assert all(c in "0123456789abcdef" for c in doc_id)
+
+
+# ---------------------------------------------------------------------------
+# _validate_index — system index access prevention (S1)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateIndex:
+    def test_case_prefix_passes(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("case-inc001-evtx-wkstn05") is None
+
+    def test_case_wildcard_passes(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("case-*") is None
+
+    def test_case_vol_passes(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("case-*-vol-pslist-*") is None
+
+    def test_opendistro_security_blocked(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index(".opendistro_security") is not None
+
+    def test_security_auditlog_blocked(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("security-auditlog-2026") is not None
+
+    def test_dot_prefix_blocked(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index(".kibana") is not None
+
+    def test_empty_blocked(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("") is not None
+
+    def test_star_only_blocked(self):
+        from opensearch_mcp.server import _validate_index
+
+        assert _validate_index("*") is not None
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_index_component — hostname/case_id sanitization (S5)
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeIndexComponent:
+    def test_lowercase(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("WKSTN05") == "wkstn05"
+
+    def test_spaces_replaced(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("WKSTN 05") == "wkstn-05"
+
+    def test_slashes_replaced(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("host/name") == "host-name"
+
+    def test_dots_preserved(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("host.domain.com") == "host.domain.com"
+
+    def test_hyphens_preserved(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("inc-2026-001") == "inc-2026-001"
+
+    def test_special_chars_replaced(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("host*name?") == "host-name-"
+
+    def test_empty_string(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        assert _sanitize_index_component("") == ""
+
+    def test_path_traversal_sanitized(self):
+        from opensearch_mcp.ingest import _sanitize_index_component
+
+        result = _sanitize_index_component("../../etc/passwd")
+        assert "/" not in result
+        # Dots preserved (safe in index names), slashes stripped
+        assert result == "..-..-etc-passwd"
