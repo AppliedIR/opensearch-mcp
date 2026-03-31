@@ -15,7 +15,11 @@ def register(subparsers, registered: set) -> None:
         p.add_argument("--password", help="Archive password")
         p.add_argument("--from", dest="time_from", help="Start date (ISO)")
         p.add_argument("--to", dest="time_to", help="End date (ISO)")
-        p.add_argument("--reduced", action="store_true", help="High-value Event IDs only")
+        p.add_argument("--all-logs", action="store_true", help="Parse all evtx files")
+        p.add_argument("--reduced-ids", action="store_true", help="Filter to high-value Event IDs")
+        p.add_argument(
+            "--reduced", action="store_true", dest="reduced_ids", help=argparse.SUPPRESS
+        )
         p.add_argument("--include", help="Artifact types (comma-separated)")
         p.add_argument("--exclude", help="Artifact types (comma-separated)")
         p.add_argument("--full", action="store_true", help="Include all tiers")

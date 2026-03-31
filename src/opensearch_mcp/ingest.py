@@ -19,8 +19,71 @@ from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 
-# Artifacts handled by Plaso (not EZ tools)
+# Artifacts handled by Plaso/wintools (not EZ tools on Linux)
 _PLASO_ARTIFACTS = {"prefetch", "srum"}
+
+# Artifacts with custom parsers (not EZ tools, not Plaso)
+_CUSTOM_ARTIFACTS = {"transcripts"}
+
+
+def _pause_sigma_detector(client: OpenSearch) -> str | None:
+    """Disable vhir-windows detector during ingest. Returns detector_id or None.
+
+    Silently returns None if Security Analytics is not configured.
+    Uses match_all + Python filter (not match query — same B1 lesson).
+    """
+    try:
+        resp = client.transport.perform_request(
+            "POST",
+            "/_plugins/_security_analytics/detectors/_search",
+            body={"query": {"match_all": {}}, "size": 10},
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        target = None
+        for hit in hits:
+            if hit.get("_source", {}).get("name") == "vhir-windows":
+                target = hit
+                break
+        if not target:
+            return None
+        detector_id = target["_id"]
+        detector = target["_source"]
+        if not detector.get("enabled", False):
+            return None
+        detector["enabled"] = False
+        client.transport.perform_request(
+            "PUT",
+            f"/_plugins/_security_analytics/detectors/{detector_id}",
+            body=detector,
+            params={"timeout": "30s"},
+        )
+        return detector_id
+    except Exception:
+        return None
+
+
+def _resume_sigma_detector(client: OpenSearch, detector_id: str) -> None:
+    """Re-enable detector after ingest."""
+    try:
+        resp = client.transport.perform_request(
+            "GET",
+            f"/_plugins/_security_analytics/detectors/{detector_id}",
+        )
+        detector = resp.get("_source", resp.get("detector", {}))
+        detector["enabled"] = True
+        client.transport.perform_request(
+            "PUT",
+            f"/_plugins/_security_analytics/detectors/{detector_id}",
+            body=detector,
+        )
+    except Exception as e:
+        import sys
+
+        print(
+            f"WARNING: Could not re-enable Sigma detector: {e}\n"
+            "  Re-enable manually via OpenSearch Dashboards.",
+            file=sys.stderr,
+        )
 
 
 def _artifact_to_tool(artifact_name: str) -> str | None:
@@ -41,17 +104,24 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
         "timeline": "timeline",
         "prefetch": "prefetch",
         "srum": "srum",
+        "transcripts": "transcripts",
     }
     return mapping.get(artifact_name)
 
 
-def discover(path: Path, hostname: str | None = None) -> list[DiscoveredHost]:
+def discover(
+    path: Path, hostname: str | None = None, force_hostname: bool = False
+) -> list[DiscoveredHost]:
     """Discover hosts and artifacts in a directory."""
     hosts = scan_triage_directory(path)
 
-    # --hostname override: if exactly one host found and hostname provided, use it
-    if hosts and hostname and len(hosts) == 1:
-        hosts[0].hostname = hostname
+    # --hostname override
+    if hosts and hostname:
+        if force_hostname:
+            for h in hosts:
+                h.hostname = hostname
+        elif len(hosts) == 1:
+            hosts[0].hostname = hostname
 
     if not hosts and hostname:
         from opensearch_mcp.discover import discover_artifacts, find_volume_root
@@ -85,6 +155,7 @@ def ingest(
     time_from=None,
     time_to=None,
     reduced_ids: set[int] | None = None,
+    reduced_log_names: set[str] | None = None,
     status_pid: int = 0,
     status_run_id: str = "",
     on_progress: object = None,
@@ -93,9 +164,10 @@ def ingest(
 
     on_progress: optional callable(event, **kwargs) for CLI output.
       Events: "host_start", "evtx_file", "evtx_done", "artifact_start",
-              "artifact_done", "artifact_failed"
+              "artifact_done", "artifact_failed", "sigma_paused", "sigma_resumed"
     status_pid/status_run_id: if nonzero, write progress to status file.
     reduced_ids: if set, only ingest evtx events with these Event IDs.
+    reduced_log_names: if set, only parse evtx files matching these names.
     """
     active_tools = get_active_tools(include=include, exclude=exclude, full=full)
     active_names = {t.cli_name for t in active_tools}
@@ -109,12 +181,21 @@ def ingest(
             continue
         active_plaso.add(pa)
 
+    # Custom artifacts (transcripts): tier 2 — enabled by default
+    active_custom = set()
+    for ca in _CUSTOM_ARTIFACTS:
+        if exclude and ca in exclude:
+            continue
+        if include and ca not in include and include:
+            continue
+        active_custom.add(ca)
+
     start = time.monotonic()
     started_ts = datetime.now(timezone.utc).isoformat()
     result = IngestResult(pipeline_version=_PIPELINE_VERSION)
 
     # Build status host structure for tracking
-    status_hosts = _build_status_hosts(hosts, active_names, active_plaso)
+    status_hosts = _build_status_hosts(hosts, active_names, active_plaso, active_custom)
 
     def _progress(event: str, **kwargs) -> None:
         if callable(on_progress):
@@ -138,13 +219,106 @@ def ingest(
 
     _update_status()
 
+    # Pause Sigma detector during ingest — percolate queries at scale
+    # consume 80% CPU and make ingest 6x slower (B20).
+    detector_id = _pause_sigma_detector(client)
+    if detector_id:
+        _progress("sigma_paused")
+
+    try:
+        _ingest_hosts(
+            hosts=hosts,
+            client=client,
+            audit=audit,
+            case_id=case_id,
+            active_names=active_names,
+            active_plaso=active_plaso,
+            active_custom=active_custom,
+            full=full,
+            time_from=time_from,
+            time_to=time_to,
+            reduced_ids=reduced_ids,
+            reduced_log_names=reduced_log_names,
+            status_hosts=status_hosts,
+            _progress=_progress,
+            _update_status=_update_status,
+            result=result,
+            start=start,
+        )
+    finally:
+        if detector_id:
+            _resume_sigma_detector(client, detector_id)
+            _progress("sigma_resumed")
+
+    result.elapsed_seconds = time.monotonic() - start
+
+    # Final status
+    if status_pid:
+        totals = _compute_totals(status_hosts)
+        has_errors = any(
+            a.get("status") == "failed" for h in status_hosts for a in h.get("artifacts", [])
+        )
+        write_status(
+            case_id=case_id,
+            pid=status_pid,
+            run_id=status_run_id,
+            status="complete",
+            hosts=status_hosts,
+            totals=totals,
+            started=started_ts,
+            error="Some artifacts failed" if has_errors else "",
+            elapsed_seconds=result.elapsed_seconds,
+        )
+
+    return result
+
+
+_MIN_EVTX_SIZE = 69632  # One 64KB chunk + header — files under this are empty
+
+
+def _ingest_hosts(
+    hosts,
+    client,
+    audit,
+    case_id,
+    active_names,
+    active_plaso,
+    active_custom,
+    full,
+    time_from,
+    time_to,
+    reduced_ids,
+    reduced_log_names,
+    status_hosts,
+    _progress,
+    _update_status,
+    result,
+    start,
+):
+    """Inner ingest loop — extracted so ingest() can wrap with Sigma pause/resume."""
     for host_idx, host in enumerate(hosts):
         host_result = HostResult(hostname=host.hostname, volume_root=str(host.volume_root))
         _progress("host_start", hostname=host.hostname)
 
-        # Evtx files
+        # Evtx files — filter by log name and size
         if host.evtx_dir:
-            evtx_files = sorted(f for f in host.evtx_dir.iterdir() if f.suffix.lower() == ".evtx")
+            all_evtx = sorted(f for f in host.evtx_dir.iterdir() if f.suffix.lower() == ".evtx")
+            if not all_evtx:
+                import sys
+
+                print(
+                    f"WARNING: {host.hostname}: evtx directory found but no .evtx files",
+                    file=sys.stderr,
+                )
+
+            # Apply log file filter (--reduced-logs, ON by default)
+            evtx_files = all_evtx
+            if reduced_log_names is not None:
+                evtx_files = [f for f in evtx_files if f.stem.lower() in reduced_log_names]
+
+            # Skip empty files (header-only, no events)
+            evtx_files = [f for f in evtx_files if f.stat().st_size >= _MIN_EVTX_SIZE]
+
             if evtx_files:
                 index_name = f"case-{case_id}-evtx-{host.hostname}".lower()
                 existing = _safe_count(client, index_name)
@@ -243,6 +417,24 @@ def ingest(
                     continue
                 _ingest_plaso_artifact(
                     tool_name=tool_name,
+                    artifact_path=artifact_path,
+                    client=client,
+                    audit=audit,
+                    case_id=case_id,
+                    host=host,
+                    host_idx=host_idx,
+                    host_result=host_result,
+                    status_hosts=status_hosts,
+                    _progress=_progress,
+                    _update_status=_update_status,
+                )
+                continue
+
+            # Route transcript artifacts to custom parser
+            if tool_name in _CUSTOM_ARTIFACTS:
+                if tool_name not in active_custom:
+                    continue
+                _ingest_transcript_artifact(
                     artifact_path=artifact_path,
                     client=client,
                     audit=audit,
@@ -358,28 +550,6 @@ def ingest(
 
         result.hosts.append(host_result)
 
-    result.elapsed_seconds = time.monotonic() - start
-
-    # Final status
-    if status_pid:
-        totals = _compute_totals(status_hosts)
-        has_errors = any(
-            a.get("status") == "failed" for h in status_hosts for a in h.get("artifacts", [])
-        )
-        write_status(
-            case_id=case_id,
-            pid=status_pid,
-            run_id=status_run_id,
-            status="complete",
-            hosts=status_hosts,
-            totals=totals,
-            started=started_ts,
-            error="Some artifacts failed" if has_errors else "",
-            elapsed_seconds=result.elapsed_seconds,
-        )
-
-    return result
-
 
 def _ingest_plaso_artifact(
     tool_name: str,
@@ -432,6 +602,7 @@ def _ingest_plaso_artifact(
                 client=client,
                 index_name=index_name,
                 hostname=host.hostname,
+                case_id=case_id,
                 ingest_audit_id=aid,
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
@@ -478,6 +649,90 @@ def _ingest_plaso_artifact(
     host_result.artifacts.append(ar)
 
 
+def _ingest_transcript_artifact(
+    artifact_path: Path,
+    client: OpenSearch,
+    audit: AuditWriter,
+    case_id: str,
+    host: DiscoveredHost,
+    host_idx: int,
+    host_result: HostResult,
+    status_hosts: list[dict],
+    _progress,
+    _update_status,
+) -> None:
+    """Ingest PowerShell transcript files."""
+    from opensearch_mcp.parse_transcripts import ingest_transcripts
+
+    index_name = f"case-{case_id}-transcripts-{host.hostname}".lower()
+    existing = _safe_count(client, index_name)
+    aid = audit._next_audit_id()
+
+    ar = ArtifactResult(
+        artifact="transcripts",
+        index=index_name,
+        existing_before=existing,
+        source_files=[str(artifact_path)],
+    )
+
+    tool_status = _find_artifact_status(status_hosts, host_idx, "transcripts")
+    if tool_status:
+        tool_status["status"] = "running"
+        _update_status()
+    _progress("artifact_start", hostname=host.hostname, artifact="transcripts")
+
+    try:
+        cnt, bf = ingest_transcripts(
+            transcript_dir=artifact_path,
+            client=client,
+            index_name=index_name,
+            hostname=host.hostname,
+            system_timezone=host.system_timezone,
+            ingest_audit_id=aid,
+            pipeline_version=_PIPELINE_VERSION,
+            vss_id=host.vss_id,
+        )
+        ar.indexed = cnt
+        ar.bulk_failed = bf
+        audit.log(
+            tool="ingest_transcripts",
+            audit_id=aid,
+            params={
+                "hostname": host.hostname,
+                "path": str(artifact_path),
+            },
+            result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
+            input_files=[str(artifact_path)],
+            source_evidence=str(artifact_path),
+        )
+        if tool_status:
+            tool_status["status"] = "complete"
+            tool_status["indexed"] = cnt
+            tool_status["bulk_failed"] = bf
+            _update_status()
+        _progress(
+            "artifact_done",
+            hostname=host.hostname,
+            artifact="transcripts",
+            indexed=cnt,
+            skipped=0,
+        )
+    except Exception as e:
+        ar.error = str(e)
+        if tool_status:
+            tool_status["status"] = "failed"
+            tool_status["error"] = str(e)
+            _update_status()
+        _progress(
+            "artifact_failed",
+            hostname=host.hostname,
+            artifact="transcripts",
+            error=str(e),
+        )
+
+    host_result.artifacts.append(ar)
+
+
 def _safe_count(client: OpenSearch, index_name: str) -> int:
     try:
         r = client.count(index=index_name)
@@ -490,10 +745,13 @@ def _build_status_hosts(
     hosts: list[DiscoveredHost],
     active_names: set[str],
     active_plaso: set[str] | None = None,
+    active_custom: set[str] | None = None,
 ) -> list[dict]:
     """Build the initial status host structure with all artifacts pending."""
     if active_plaso is None:
         active_plaso = set()
+    if active_custom is None:
+        active_custom = set()
     status_hosts = []
     for host in hosts:
         artifacts = []
@@ -506,6 +764,10 @@ def _build_status_hosts(
                 continue
             if tool in _PLASO_ARTIFACTS:
                 if tool in active_plaso:
+                    seen.add(tool)
+                    artifacts.append({"name": tool, "status": "pending"})
+            elif tool in _CUSTOM_ARTIFACTS:
+                if tool in active_custom:
                     seen.add(tool)
                     artifacts.append({"name": tool, "status": "pending"})
             elif tool in active_names:

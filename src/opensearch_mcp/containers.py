@@ -400,16 +400,30 @@ def make_ingest_tmpdir(case_id: str) -> Path:
     from opensearch_mcp.paths import vhir_dir
 
     case_dir = vhir_dir() / "cases" / case_id
-    tmp = case_dir / "tmp" / f"ingest-{ts}"
+    import os
+
+    tmp = case_dir / "tmp" / f"ingest-{ts}-{os.getpid()}"
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
 
 
 def cleanup_orphaned_mounts() -> None:
-    """Clean up orphaned nbd connections and mounts from prior failed ingests."""
+    """Clean up orphaned nbd connections from prior failed ingests.
+
+    Skips cleanup if another ingest is currently running — avoids
+    disconnecting devices held by a concurrent process (B18).
+    """
     import sys
 
-    # Disconnect any connected nbd devices
+    from opensearch_mcp.ingest_status import read_active_ingests
+
+    try:
+        active = read_active_ingests()
+        if any(ing.get("status") == "running" for ing in active):
+            return
+    except Exception:
+        pass
+
     for i in range(8):
         size_path = Path(f"/sys/block/nbd{i}/size")
         if size_path.exists():

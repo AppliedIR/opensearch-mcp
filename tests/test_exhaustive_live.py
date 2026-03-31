@@ -427,13 +427,14 @@ class TestEZToolsReal:
         from opensearch_mcp.tools import run_and_ingest
 
         client = _get_test_client()
-        index = f"case-pytest-{uuid.uuid4().hex[:8]}-amcache-testhost"
+        case_id = f"pytest-{uuid.uuid4().hex[:8]}"
+        index = f"case-{case_id}-amcache-testhost"
         try:
             cnt, sk, bf = run_and_ingest(
                 tool_name="amcache",
                 artifact_path=amcache,
                 client=client,
-                case_id=f"pytest-{uuid.uuid4().hex[:8]}",
+                case_id=case_id,
                 hostname="testhost",
                 source_file=str(amcache),
                 pipeline_version="test",
@@ -599,34 +600,28 @@ class TestRealArchiveExtraction:
     @skip_no_7z
     @pytest.mark.slow
     def test_extract_real_7z_triage(self, tmp_path):
-        """Extract real base-dc-triage.7z, discover Windows artifacts."""
+        """Extract real base-dc-triage.7z — contains a VHDX disk image.
+        Verifies extraction produces the expected disk image file.
+        Mounting the VHDX requires sudo (not available in test), so we
+        only verify the archive-containing-image detection works."""
         archive = _SRL2_DIR / "base-dc-triage.7z"
         if not archive.exists():
             pytest.skip("No base-dc-triage.7z")
 
         dest = tmp_path / "extracted"
         dest.mkdir()
-        from opensearch_mcp.containers import extract_container
+        from opensearch_mcp.containers import detect_container, extract_container
 
         extract_container(archive, dest)
 
-        # Should have Windows directory structure
-        from opensearch_mcp.discover import scan_triage_directory
+        # This 7z contains a .vhdx file (disk image), not a directory tree
+        extracted_files = list(dest.iterdir())
+        names = {f.name for f in extracted_files}
+        assert "base-dc-triage.vhdx" in names, f"Expected VHDX, got: {names}"
 
-        hosts = scan_triage_directory(dest)
-        # The triage may be flat or have subdirectories
-        if not hosts:
-            # Try scanning subdirectories
-            for sub in dest.iterdir():
-                if sub.is_dir():
-                    hosts = scan_triage_directory(sub)
-                    if hosts:
-                        break
-
-        assert len(hosts) >= 1, "No hosts found in base-dc-triage.7z"
-        host = hosts[0]
-        artifact_names = {a[0] for a in host.artifacts}
-        assert len(artifact_names) >= 1, f"No artifacts found, volume_root={host.volume_root}"
+        # The VHDX should be detected as an NBD container
+        vhdx = dest / "base-dc-triage.vhdx"
+        assert detect_container(vhdx) == "nbd"
 
     @skip_no_srl2
     @skip_no_7z
@@ -764,7 +759,7 @@ class TestServerToolsLive:
                 ):
                     resp = idx_search(query="*", index=index, limit=5)
             assert resp["total"] > 0
-            assert len(resp["hits"]) <= 5
+            assert len(resp["results"]) <= 5
         finally:
             client.indices.delete(index=index, ignore=[404])
 

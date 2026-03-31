@@ -23,6 +23,13 @@ _VHIR_CONFIG = vhir_dir() / "config.yaml"
 
 def _resolve_case_id(args_case: str | None) -> str:
     if args_case:
+        case_dir = vhir_dir() / "cases" / args_case
+        if not case_dir.is_dir():
+            print(
+                f"Warning: Case '{args_case}' not found in case system. "
+                f"Ingesting with '{args_case}' as index prefix.",
+                file=sys.stderr,
+            )
         return args_case
     if _ACTIVE_CASE_FILE.exists():
         raw = _ACTIVE_CASE_FILE.read_text().strip()
@@ -30,6 +37,75 @@ def _resolve_case_id(args_case: str | None) -> str:
             return Path(raw).name
     print("Error: No case ID. Use --case or run 'vhir case init' first.", file=sys.stderr)
     sys.exit(1)
+
+
+def _ensure_case_active(case_id: str) -> None:
+    """Ensure the case is active and SMB share is configured.
+
+    Tries gateway case_activate first (handles SMB + wintools).
+    Falls back to setting active_case file + inline SMB repoint.
+    """
+    active_case = vhir_dir() / "active_case"
+    if active_case.exists():
+        current = Path(active_case.read_text().strip()).name
+        if current == case_id:
+            return
+
+    # Try gateway (handles SMB + wintools notification)
+    try:
+        from opensearch_mcp.wintools import _call_gateway_tool, _load_gateway_config
+
+        config = _load_gateway_config()
+        if config and config.get("url"):
+            base_url = config["url"].split("/mcp/")[0]
+            _call_gateway_tool(
+                base_url,
+                config.get("token", ""),
+                "mcp__case-mcp__case_activate",
+                {"case_id": case_id},
+            )
+            return
+    except Exception:
+        pass
+
+    # Fallback: set active_case file + try inline SMB repoint
+    case_path = vhir_dir() / "cases" / case_id
+    if case_path.is_dir():
+        active_case.parent.mkdir(parents=True, exist_ok=True)
+        active_case.write_text(str(case_path))
+    _repoint_samba_if_configured(case_id)
+
+
+def _repoint_samba_if_configured(case_id: str) -> None:
+    """Repoint SMB [cases] share to the case directory. No-op if Samba not configured."""
+    import os
+    import subprocess
+
+    samba_yaml = vhir_dir() / "samba.yaml"
+    if not samba_yaml.is_file():
+        return
+    case_dir = vhir_dir() / "cases" / case_id
+    if not case_dir.is_dir():
+        return
+    target = str(case_dir)
+    doc = yaml.safe_load(samba_yaml.read_text()) or {}
+    if doc.get("active_share_target") == target:
+        return
+    conf_path = "/etc/samba/smb.conf.d/vhir-cases.conf"
+    username = doc.get("force_user", os.environ.get("USER", "sansforensics"))
+    conf = (
+        f"[cases]\n    path = {target}\n    valid users = vhir-smb\n"
+        f"    read only = no\n    force user = {username}\n"
+        f"    create mask = 0644\n    directory mask = 0755\n    browseable = yes\n"
+    )
+    try:
+        Path(conf_path).write_text(conf)
+        subprocess.run(["smbcontrol", "all", "reload-config"], capture_output=True)
+    except PermissionError:
+        subprocess.run(["sudo", "tee", conf_path], input=conf.encode(), capture_output=True)
+        subprocess.run(["smbcontrol", "all", "reload-config"], capture_output=True)
+    doc["active_share_target"] = target
+    samba_yaml.write_text(yaml.dump(doc))
 
 
 def _resolve_examiner(args_examiner: str | None) -> str:
@@ -88,8 +164,10 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
         args.time_to = str(time_range["to"])
 
     evtx_config = config.get("evtx", {})
-    if not getattr(args, "reduced", False) and evtx_config.get("reduced"):
-        args.reduced = True
+    if not getattr(args, "reduced_ids", False) and evtx_config.get("reduced_ids"):
+        args.reduced_ids = True
+    if not getattr(args, "all_logs", False) and evtx_config.get("all_logs"):
+        args.all_logs = True
 
     if not getattr(args, "password", None) and config.get("password"):
         args.password = config["password"]
@@ -118,6 +196,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
+    _ensure_case_active(case_id)
 
     # Load config file and merge
     config = _load_config(getattr(args, "config", None))
@@ -128,17 +207,24 @@ def cmd_scan(args: argparse.Namespace) -> None:
     include = _parse_set(getattr(args, "include", None))
     exclude = _parse_set(getattr(args, "exclude", None))
     hostname = getattr(args, "hostname", None)
-    reduced = getattr(args, "reduced", False)
     vss_flag = getattr(args, "vss", False)
     password = getattr(args, "password", None)
 
-    # Load reduced event IDs if requested
+    # Log file filter — ON by default, --all-logs disables
+    reduced_log_names = None
+    if not getattr(args, "all_logs", False):
+        from opensearch_mcp.reduced import load_reduced_logs
+
+        reduced_log_names = load_reduced_logs()
+        print(f"Forensic logs mode: {len(reduced_log_names)} log types (use --all-logs for all)")
+
+    # Event ID filter — OFF by default, --reduced-ids enables
     reduced_ids = None
-    if reduced:
+    if getattr(args, "reduced_ids", False):
         from opensearch_mcp.reduced import load_reduced_ids
 
         reduced_ids = load_reduced_ids()
-        print(f"Reduced mode: {len(reduced_ids)} high-value Event IDs")
+        print(f"Reduced IDs mode: {len(reduced_ids)} high-value Event IDs")
 
     # Detect container type and clean up orphaned mounts from prior failures
     container_type = detect_container(input_path)
@@ -177,6 +263,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if extracted_images:
                     img = extracted_images[0]
                     print(f"  Found disk image: {img.name}")
+                    if not hostname:
+                        hostname = input_path.stem.split(".")[0]
+                        print(f"  Hostname from archive: {hostname}")
                     volumes = mount_image(img, tmpdir, mount_ctx)
                     if not volumes:
                         print(
@@ -194,6 +283,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 scan_root = tmpdir
 
         elif container_type in ("ewf", "raw", "nbd"):
+            # Default hostname from filename for disk images (B21)
+            if not hostname:
+                hostname = input_path.stem
+                print(f"  Hostname from filename: {hostname}")
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Mounting {input_path.name}...")
             volumes = mount_image(input_path, tmpdir, mount_ctx)
@@ -230,7 +323,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         # Discover hosts
         print("Scanning...")
-        hosts = discover(scan_root, hostname=hostname)
+        force_hn = container_type in ("ewf", "raw", "nbd") or (
+            container_type == "archive" and hostname
+        )
+        hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and container_type in ("ewf", "raw", "nbd") and tmpdir and vss_volumes:
@@ -302,9 +398,16 @@ def cmd_scan(args: argparse.Namespace) -> None:
             if event == "host_start":
                 print(f"\n{kw['hostname']}:")
             elif event == "evtx_file":
+                c = kw["count"]
+                if c == 0:
+                    return  # skip empty files silently
                 fn = kw["filename"]
-                n, t, c = kw["file_num"], kw["file_total"], kw["count"]
+                n, t = kw["file_num"], kw["file_total"]
                 print(f"  evtx [{n}/{t}] {fn}... {c:,} events")
+            elif event == "sigma_paused":
+                print("  Sigma detection paused during ingest")
+            elif event == "sigma_resumed":
+                print("  Sigma detection re-enabled")
             elif event == "evtx_done":
                 idx = kw["indexed"]
                 sk = kw.get("skipped", 0)
@@ -343,6 +446,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             time_from=time_from,
             time_to=time_to,
             reduced_ids=reduced_ids,
+            reduced_log_names=reduced_log_names,
             on_progress=_cli_progress,
         )
 
@@ -511,7 +615,22 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--password", help="Archive password")
     p.add_argument("--from", dest="time_from", help="Start date (ISO)")
     p.add_argument("--to", dest="time_to", help="End date (ISO)")
-    p.add_argument("--reduced", action="store_true", help="High-value Event IDs only (evtx)")
+    p.add_argument(
+        "--all-logs",
+        action="store_true",
+        help="Parse all evtx files (default: forensic logs only)",
+    )
+    p.add_argument(
+        "--reduced-ids",
+        action="store_true",
+        help="Filter to ~78 high-value Event IDs",
+    )
+    p.add_argument(
+        "--reduced",
+        action="store_true",
+        dest="reduced_ids",
+        help=argparse.SUPPRESS,
+    )
     p.add_argument("--include", help="Artifact types (comma-sep)")
     p.add_argument("--exclude", help="Artifact types (comma-sep)")
     p.add_argument("--full", action="store_true", help="Include all tiers (MFT, USN, timeline)")

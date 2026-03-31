@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ def parse_srum(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    case_id: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
@@ -33,6 +35,7 @@ def parse_srum(
                 client,
                 index_name,
                 hostname,
+                case_id=case_id,
                 ingest_audit_id=ingest_audit_id,
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
@@ -65,19 +68,46 @@ def _parse_srum_wintools(
     client: OpenSearch,
     index_name: str,
     hostname: str,
+    case_id: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
 ) -> tuple[int, int]:
-    """Parse SRUM via SrumECmd on Windows (wintools-mcp)."""
+    """Parse SRUM via SrumECmd on Windows (wintools-mcp).
+
+    Copies SRUDB.dat to writable [cases] share — SrumECmd's ManagedEsent
+    needs write access for dirty ESE database recovery.
+    """
+    import yaml
 
     from opensearch_mcp.parse_csv import ingest_csv
+    from opensearch_mcp.paths import vhir_dir
     from opensearch_mcp.wintools import run_tool_and_get_csv
+
+    # Copy SRUM to writable [cases] share for ESE recovery
+    srum_workdir = vhir_dir() / "cases" / case_id / "extractions" / "srum" / hostname
+    srum_workdir.mkdir(parents=True, exist_ok=True)
+    work_copy = srum_workdir / "SRUDB.dat"
+    shutil.copy2(srum_path, work_copy)
+
+    # Also copy SRU log files if present (needed for full recovery)
+    sru_dir = srum_path.parent
+    for log_file in sru_dir.glob("SRU*.log"):
+        shutil.copy2(log_file, srum_workdir / log_file.name)
+
+    # Convert Linux path to Windows UNC path for SrumECmd
+    samba_yaml = vhir_dir() / "samba.yaml"
+    sift_host = "sift"
+    if samba_yaml.is_file():
+        doc = yaml.safe_load(samba_yaml.read_text()) or {}
+        sift_host = doc.get("sift_hostname", "sift")
+    rel_path = f"extractions\\srum\\{hostname}\\SRUDB.dat"
+    unc_path = f"\\\\{sift_host}\\cases\\{rel_path}"
 
     csv_files = run_tool_and_get_csv(
         tool_binary="SrumECmd.exe",
         input_flag="-f",
-        evidence_path=str(srum_path),
+        evidence_path=unc_path,
         purpose="Parse SRUM database for resource usage monitoring",
     )
 

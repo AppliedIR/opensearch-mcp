@@ -51,7 +51,7 @@ class TestRegister:
         assert args.hostname == "HOST1"
         assert args.case == "INC001"
         assert args.password == "infected"
-        assert args.reduced is True
+        assert args.reduced_ids is True
         assert args.full is True
         assert args.vss is True
         assert args.parallel == 8

@@ -27,14 +27,15 @@ class TestMergeConfig:
             exclude=None,
             time_from=None,
             time_to=None,
-            reduced=False,
+            reduced_ids=False,
+            all_logs=False,
             password=None,
         )
         config = {
             "include": ["evtx", "amcache"],
             "exclude": ["mft"],
             "time_range": {"from": "2023-01-15", "to": "2023-01-20"},
-            "evtx": {"reduced": True},
+            "evtx": {"reduced_ids": True},
             "password": "infected",
         }
         _merge_config(args, config)
@@ -42,7 +43,7 @@ class TestMergeConfig:
         assert args.exclude == "mft"
         assert args.time_from == "2023-01-15"
         assert args.time_to == "2023-01-20"
-        assert args.reduced is True
+        assert args.reduced_ids is True
         assert args.password == "infected"
 
     def test_cli_takes_precedence(self):
@@ -52,7 +53,8 @@ class TestMergeConfig:
             exclude=None,
             time_from=None,
             time_to=None,
-            reduced=True,
+            reduced_ids=True,
+            all_logs=False,
             password="secret",
         )
         config = {
@@ -70,7 +72,8 @@ class TestMergeConfig:
             exclude=None,
             time_from=None,
             time_to=None,
-            reduced=False,
+            reduced_ids=False,
+            all_logs=False,
             password=None,
         )
         _merge_config(args, {})

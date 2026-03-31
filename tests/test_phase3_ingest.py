@@ -30,7 +30,7 @@ class TestIngestWithReducedIds:
 
         evtx_dir = tmp_path / "evtx"
         evtx_dir.mkdir()
-        (evtx_dir / "Security.evtx").touch()
+        (evtx_dir / "Security.evtx").write_bytes(b"\x00" * 70000)
 
         host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)
         host.evtx_dir = evtx_dir
@@ -102,7 +102,7 @@ class TestIngestWithVssId:
 
         evtx_dir = tmp_path / "evtx"
         evtx_dir.mkdir()
-        (evtx_dir / "Security.evtx").touch()
+        (evtx_dir / "Security.evtx").write_bytes(b"\x00" * 70000)
 
         host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path, vss_id="vss1")
         host.evtx_dir = evtx_dir

@@ -235,8 +235,8 @@ class TestIngest:
 
         evtx_dir = tmp_path / "evtx"
         evtx_dir.mkdir()
-        (evtx_dir / "Security.evtx").touch()
-        (evtx_dir / "System.evtx").touch()
+        (evtx_dir / "Security.evtx").write_bytes(b"\x00" * 70000)
+        (evtx_dir / "System.evtx").write_bytes(b"\x00" * 70000)
         (evtx_dir / "readme.txt").touch()  # should be ignored
 
         host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)

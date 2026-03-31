@@ -355,6 +355,8 @@ def idx_ingest(
     hostname: str = "",
     include: list[str] | None = None,
     exclude: list[str] | None = None,
+    all_logs: bool = False,
+    reduced_ids: bool = False,
     dry_run: bool = True,
 ) -> dict:
     """Discover and ingest forensic artifacts into OpenSearch.
@@ -484,6 +486,10 @@ def idx_ingest(
         cmd.extend(["--include", ",".join(include)])
     if exclude:
         cmd.extend(["--exclude", ",".join(exclude)])
+    if all_logs:
+        cmd.append("--all-logs")
+    if reduced_ids:
+        cmd.append("--reduced-ids")
 
     proc = _sp.Popen(
         cmd,
