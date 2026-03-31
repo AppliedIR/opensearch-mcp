@@ -312,7 +312,7 @@ def ingest_memory(
 
     Returns dict with per-plugin results.
     """
-    if plugins:
+    if plugins is not None and len(plugins) > 0:
         plugin_list = plugins
     elif tier >= 3:
         plugin_list = TIER_3
@@ -324,7 +324,32 @@ def ingest_memory(
     source_file = str(image_path)
     results: dict = {}
 
-    _find_vol3()
+    vol_cmd = _find_vol3()
+
+    # Pre-flight: check symbol availability by running windows.info
+    # This catches missing symbols early with a clear error instead of
+    # failing cryptically on the first real plugin.
+    try:
+        test_cmd = vol_cmd.split() + [
+            "-f",
+            str(image_path),
+            "--renderer",
+            "json",
+            "-q",
+            "windows.info",
+        ]
+        test = subprocess.run(test_cmd, capture_output=True, text=True, timeout=60)
+        if "Unsatisfied" in test.stderr:
+            print(
+                "ERROR: Volatility 3 symbols not available for this image.\n"
+                "  Download symbols: vol -f <image> windows.info\n"
+                "  Or set symbol path: export VOLATILITY_SYMBOLS=/path/to/symbols/",
+                file=sys.stderr,
+            )
+            return {"windows.info": {"status": "failed", "error": "Symbols not available"}}
+    except subprocess.TimeoutExpired:
+        pass  # Slow but not a symbol issue — continue
+
     _register_memory_evidence(image_path, hostname)
 
     safe_host = sanitize_index_component(hostname)
