@@ -29,6 +29,7 @@ def parse_mplog(
     source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse all MPLog files in directory. Returns (indexed, skipped, bulk_failed)."""
     count = 0
@@ -62,8 +63,10 @@ def parse_mplog(
                     try:
                         ts = datetime.fromisoformat(current_ts.replace("Z", "+00:00"))
                         if time_from and ts < time_from:
+                            skipped += 1
                             continue
                         if time_to and ts > time_to:
+                            skipped += 1
                             continue
                     except ValueError:
                         pass
@@ -89,7 +92,8 @@ def parse_mplog(
                     doc["defender.event_type"] = "exclusion_removed"
                     doc["defender.exclusion_path"] = excl_del.group(1).strip()
                 else:
-                    doc["defender.event_type"] = "other"
+                    skipped += 1
+                    continue  # skip noise — only index forensic events
 
                 doc["defender.raw_line"] = line_body
                 doc["vhir.source_file"] = str(log_file)
@@ -98,6 +102,8 @@ def parse_mplog(
                 if pipeline_version:
                     doc["pipeline_version"] = pipeline_version
                 doc["vhir.parse_method"] = "defender-mplog"
+                if vss_id:
+                    doc["vhir.vss_id"] = vss_id
 
                 id_input = f"{index_name}:{log_file}:{current_ts or ''}:{line_body[:100]}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]

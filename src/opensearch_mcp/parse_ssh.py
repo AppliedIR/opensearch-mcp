@@ -26,6 +26,7 @@ def parse_ssh_log(
     source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse sshd.log files — extract auth events."""
     count = 0
@@ -48,7 +49,8 @@ def parse_ssh_log(
                 ts_match = _SSH_LINE.match(line)
                 if not ts_match:
                     continue
-                doc["@timestamp"] = ts_match.group(1).strip()
+                # Convert "2023-01-17 14:30:00.000" to ISO 8601
+                doc["@timestamp"] = ts_match.group(1).strip().replace(" ", "T") + "Z"
                 message = ts_match.group(2)
 
                 # Time range filter
@@ -86,6 +88,8 @@ def parse_ssh_log(
                 if pipeline_version:
                     doc["pipeline_version"] = pipeline_version
                 doc["vhir.parse_method"] = "ssh-parser"
+                if vss_id:
+                    doc["vhir.vss_id"] = vss_id
 
                 id_input = f"{index_name}:{log_file}:{doc['@timestamp']}:{message[:100]}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]

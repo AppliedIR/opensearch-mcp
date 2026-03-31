@@ -757,13 +757,15 @@ def _run_custom_parser(
     tool_name, artifact_path, client, index_name, host, aid, time_from, time_to
 ):
     """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed)."""
-    kw = {
+    kw: dict = {
         "client": client,
         "index_name": index_name,
         "hostname": host.hostname,
         "ingest_audit_id": aid,
         "pipeline_version": _PIPELINE_VERSION,
     }
+    if host.vss_id:
+        kw["vss_id"] = host.vss_id
 
     if tool_name == "transcripts":
         from opensearch_mcp.parse_transcripts import ingest_transcripts

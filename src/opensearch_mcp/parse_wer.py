@@ -71,6 +71,7 @@ def parse_wer_dir(
     source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse all Report.wer files in directory tree."""
     count = 0
@@ -92,6 +93,8 @@ def parse_wer_dir(
         if pipeline_version:
             doc["pipeline_version"] = pipeline_version
         doc["vhir.parse_method"] = "wer-parser"
+        if vss_id:
+            doc["vhir.vss_id"] = vss_id
 
         id_input = f"{index_name}:{wer_file}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]

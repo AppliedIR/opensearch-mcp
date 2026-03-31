@@ -92,6 +92,7 @@ def parse_tasks_dir(
     source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse all task XML files in the directory tree."""
     count = 0
@@ -101,6 +102,9 @@ def parse_tasks_dir(
 
     for task_file in sorted(tasks_dir.rglob("*")):
         if not task_file.is_file():
+            continue
+        # Task XML files have no extension or .xml extension
+        if task_file.suffix.lower() not in ("", ".xml"):
             continue
         doc = parse_task_xml(task_file)
         if doc is None:
@@ -114,6 +118,8 @@ def parse_tasks_dir(
         if pipeline_version:
             doc["pipeline_version"] = pipeline_version
         doc["vhir.parse_method"] = "task-xml"
+        if vss_id:
+            doc["vhir.vss_id"] = vss_id
 
         id_input = f"{index_name}:{task_file}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]

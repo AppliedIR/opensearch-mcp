@@ -33,6 +33,7 @@ def parse_w3c_log(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     parse_method: str = "",
+    vss_id: str = "",
 ) -> tuple[int, int, int]:
     """Parse W3C log file and bulk index.
 
@@ -114,6 +115,8 @@ def parse_w3c_log(
                 row["pipeline_version"] = pipeline_version
             if parse_method:
                 row["vhir.parse_method"] = parse_method
+            if vss_id:
+                row["vhir.vss_id"] = vss_id
 
             # Deterministic ID
             id_parts = [
@@ -125,7 +128,8 @@ def parse_w3c_log(
                 row.get("cs-uri-query", ""),
                 row.get("s-port", ""),
             ]
-            doc_hash = hashlib.sha256(":".join(str(p) for p in id_parts).encode()).hexdigest()[:20]
+            id_str = ":".join(str(p or "") for p in id_parts)
+            doc_hash = hashlib.sha256(id_str.encode()).hexdigest()[:20]
 
             actions.append({"_index": index_name, "_id": doc_hash, "_source": row})
 
