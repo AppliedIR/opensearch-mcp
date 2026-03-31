@@ -1,0 +1,32 @@
+{
+  "index_patterns": ["case-*-transcripts-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "transcript.end_time": {"type": "date"},
+        "transcript.duration_seconds": {"type": "integer"},
+        "user.name": {"type": "keyword"},
+        "user.domain": {"type": "keyword"},
+        "user.runas": {"type": "keyword"},
+        "host.name": {"type": "keyword"},
+        "host.os.version": {"type": "keyword"},
+        "transcript.machine": {"type": "keyword"},
+        "process.name": {"type": "keyword"},
+        "process.pid": {"type": "integer"},
+        "transcript.session_type": {"type": "keyword"},
+        "transcript.ps_version": {"type": "keyword"},
+        "transcript.command_count": {"type": "integer"},
+        "transcript.commands": {"type": "text"},
+        "transcript.full_text": {"type": "text"},
+        "transcript.timezone_warning": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.vss_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
+        "pipeline_version": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 20
+}

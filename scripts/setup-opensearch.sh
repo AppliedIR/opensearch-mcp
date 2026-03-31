@@ -109,6 +109,15 @@ if [ -f "$SRUM_TEMPLATE" ]; then
         -d @"$SRUM_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
 fi
 
+TRANSCRIPT_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/transcripts_template.json"
+if [ -f "$TRANSCRIPT_TEMPLATE" ]; then
+    echo "Registering Transcripts index template..."
+    curl -sk -u "admin:$OS_PASSWORD" \
+        -X PUT "$OS_URL/_index_template/vhir-transcripts" \
+        -H "Content-Type: application/json" \
+        -d @"$TRANSCRIPT_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
+fi
+
 # --- 6. Smoke test ---
 echo "Running smoke test..."
 # Index a test doc

@@ -45,6 +45,7 @@ class DiscoveredHost:
     evtx_dir: Path | None = None
     user_profiles: list[Path] = field(default_factory=list)
     vss_id: str = ""  # "live", "vss1", "vss2", etc. Empty = non-VSS
+    system_timezone: str | None = None  # Windows TZ name from SYSTEM hive
 
 
 def find_volume_root(host_dir: Path) -> Path | None:
@@ -119,6 +120,23 @@ def discover_artifacts(host: DiscoveredHost) -> None:
                         full = resolve_case_insensitive(profile, rel_paths)
                         if full is not None and (full.is_dir() or full.is_file()):
                             host.artifacts.append((artifact_name, full))
+
+    # PowerShell transcripts — read GP config from registry, then discover files
+    try:
+        from opensearch_mcp.parse_transcripts import (
+            _read_transcript_config,
+            discover_transcripts,
+        )
+
+        gp_dir, tz = _read_transcript_config(vr)
+        host.system_timezone = tz
+        transcript_files = discover_transcripts(vr, gp_transcript_dir=gp_dir)
+        if transcript_files:
+            # Store volume_root as the artifact path (prefetch pattern) —
+            # parser discovers files internally via discover_transcripts()
+            host.artifacts.append(("transcripts", vr))
+    except ImportError:
+        pass  # regipy not installed — skip transcripts
 
 
 def scan_triage_directory(root: Path) -> list[DiscoveredHost]:
