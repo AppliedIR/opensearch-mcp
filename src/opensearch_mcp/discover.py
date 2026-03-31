@@ -138,6 +138,52 @@ def discover_artifacts(host: DiscoveredHost) -> None:
     except ImportError:
         pass  # regipy not installed — skip transcripts
 
+    # Defender MPLog
+    mplog_dir = resolve_case_insensitive(vr, "ProgramData/Microsoft/Windows Defender/Support")
+    if mplog_dir and mplog_dir.is_dir():
+        mplogs = [f for f in mplog_dir.iterdir() if f.name.lower().startswith("mplog")]
+        if mplogs:
+            host.artifacts.append(("defender", mplog_dir))
+
+    # IIS logs (only if inetpub exists — server hosts)
+    iis_dir = resolve_case_insensitive(vr, "inetpub/logs/LogFiles")
+    if iis_dir and iis_dir.is_dir():
+        host.artifacts.append(("iis", iis_dir))
+
+    # HTTPERR
+    httperr_dir = resolve_case_insensitive(vr, "Windows/System32/LogFiles/HTTPERR")
+    if httperr_dir and httperr_dir.is_dir():
+        host.artifacts.append(("httperr", httperr_dir))
+
+    # Scheduled Tasks XML
+    tasks_dir = resolve_case_insensitive(vr, "Windows/System32/Tasks")
+    if tasks_dir and tasks_dir.is_dir():
+        host.artifacts.append(("tasks", tasks_dir))
+
+    # WER reports — check ALL locations
+    for wer_path in [
+        "ProgramData/Microsoft/Windows/WER/ReportArchive",
+        "ProgramData/Microsoft/Windows/WER/ReportQueue",
+    ]:
+        wer_dir = resolve_case_insensitive(vr, wer_path)
+        if wer_dir and wer_dir.is_dir():
+            host.artifacts.append(("wer", wer_dir))
+    for profile in host.user_profiles:
+        user_wer = resolve_case_insensitive(profile, "AppData/Local/Microsoft/Windows/WER")
+        if user_wer and user_wer.is_dir():
+            host.artifacts.append(("wer", user_wer))
+
+    # Firewall log
+    fw_log = resolve_case_insensitive(vr, "Windows/System32/LogFiles/Firewall/pfirewall.log")
+    if fw_log and fw_log.is_file():
+        host.artifacts.append(("firewall", fw_log))
+
+    # OpenSSH text logs
+    for ssh_path in ["ProgramData/ssh/logs", "Windows/System32/OpenSSH/logs"]:
+        ssh_dir = resolve_case_insensitive(vr, ssh_path)
+        if ssh_dir and ssh_dir.is_dir():
+            host.artifacts.append(("ssh", ssh_dir))
+
 
 def scan_triage_directory(root: Path) -> list[DiscoveredHost]:
     """Scan a triage directory for host subdirectories with Windows artifacts.

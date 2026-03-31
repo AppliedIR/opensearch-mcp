@@ -23,7 +23,16 @@ _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 _PLASO_ARTIFACTS = {"prefetch", "srum"}
 
 # Artifacts with custom parsers (not EZ tools, not Plaso)
-_CUSTOM_ARTIFACTS = {"transcripts"}
+_CUSTOM_ARTIFACTS = {
+    "transcripts",
+    "defender",
+    "iis",
+    "httperr",
+    "tasks",
+    "wer",
+    "firewall",
+    "ssh",
+}
 
 
 def _pause_sigma_detector(client: OpenSearch) -> str | None:
@@ -105,6 +114,13 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
         "prefetch": "prefetch",
         "srum": "srum",
         "transcripts": "transcripts",
+        "defender": "defender",
+        "iis": "iis",
+        "httperr": "httperr",
+        "tasks": "tasks",
+        "wer": "wer",
+        "firewall": "firewall",
+        "ssh": "ssh",
     }
     return mapping.get(artifact_name)
 
@@ -430,11 +446,12 @@ def _ingest_hosts(
                 )
                 continue
 
-            # Route transcript artifacts to custom parser
+            # Route custom artifacts (transcripts, defender, IIS, etc.)
             if tool_name in _CUSTOM_ARTIFACTS:
                 if tool_name not in active_custom:
                     continue
-                _ingest_transcript_artifact(
+                _ingest_custom_artifact(
+                    tool_name=tool_name,
                     artifact_path=artifact_path,
                     client=client,
                     audit=audit,
@@ -445,6 +462,8 @@ def _ingest_hosts(
                     status_hosts=status_hosts,
                     _progress=_progress,
                     _update_status=_update_status,
+                    time_from=time_from,
+                    time_to=time_to,
                 )
                 continue
 
@@ -649,7 +668,8 @@ def _ingest_plaso_artifact(
     host_result.artifacts.append(ar)
 
 
-def _ingest_transcript_artifact(
+def _ingest_custom_artifact(
+    tool_name: str,
     artifact_path: Path,
     client: OpenSearch,
     audit: AuditWriter,
@@ -660,48 +680,48 @@ def _ingest_transcript_artifact(
     status_hosts: list[dict],
     _progress,
     _update_status,
+    time_from=None,
+    time_to=None,
 ) -> None:
-    """Ingest PowerShell transcript files."""
-    from opensearch_mcp.parse_transcripts import ingest_transcripts
-
-    index_name = f"case-{case_id}-transcripts-{host.hostname}".lower()
+    """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
+    index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
     existing = _safe_count(client, index_name)
     aid = audit._next_audit_id()
 
     ar = ArtifactResult(
-        artifact="transcripts",
+        artifact=tool_name,
         index=index_name,
         existing_before=existing,
         source_files=[str(artifact_path)],
     )
 
-    tool_status = _find_artifact_status(status_hosts, host_idx, "transcripts")
+    tool_status = _find_artifact_status(status_hosts, host_idx, tool_name)
     if tool_status:
         tool_status["status"] = "running"
         _update_status()
-    _progress("artifact_start", hostname=host.hostname, artifact="transcripts")
+    _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
-        cnt, bf = ingest_transcripts(
-            transcript_dir=artifact_path,
-            client=client,
-            index_name=index_name,
-            hostname=host.hostname,
-            system_timezone=host.system_timezone,
-            ingest_audit_id=aid,
-            pipeline_version=_PIPELINE_VERSION,
-            vss_id=host.vss_id,
+        cnt, sk, bf = _run_custom_parser(
+            tool_name,
+            artifact_path,
+            client,
+            index_name,
+            host,
+            aid,
+            time_from,
+            time_to,
         )
         ar.indexed = cnt
+        ar.skipped = sk
         ar.bulk_failed = bf
         audit.log(
-            tool="ingest_transcripts",
+            tool=f"ingest_{tool_name}",
             audit_id=aid,
-            params={
-                "hostname": host.hostname,
-                "path": str(artifact_path),
-            },
-            result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
+            params={"hostname": host.hostname, "path": str(artifact_path)},
+            result_summary=f"{cnt} indexed"
+            + (f", {sk} skipped" if sk else "")
+            + (f", {bf} bulk failed" if bf else ""),
             input_files=[str(artifact_path)],
             source_evidence=str(artifact_path),
         )
@@ -713,9 +733,9 @@ def _ingest_transcript_artifact(
         _progress(
             "artifact_done",
             hostname=host.hostname,
-            artifact="transcripts",
+            artifact=tool_name,
             indexed=cnt,
-            skipped=0,
+            skipped=sk,
         )
     except Exception as e:
         ar.error = str(e)
@@ -726,11 +746,114 @@ def _ingest_transcript_artifact(
         _progress(
             "artifact_failed",
             hostname=host.hostname,
-            artifact="transcripts",
+            artifact=tool_name,
             error=str(e),
         )
 
     host_result.artifacts.append(ar)
+
+
+def _run_custom_parser(
+    tool_name, artifact_path, client, index_name, host, aid, time_from, time_to
+):
+    """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed)."""
+    kw = {
+        "client": client,
+        "index_name": index_name,
+        "hostname": host.hostname,
+        "ingest_audit_id": aid,
+        "pipeline_version": _PIPELINE_VERSION,
+    }
+
+    if tool_name == "transcripts":
+        from opensearch_mcp.parse_transcripts import ingest_transcripts
+
+        cnt, bf = ingest_transcripts(
+            transcript_dir=artifact_path,
+            system_timezone=host.system_timezone,
+            vss_id=host.vss_id,
+            **kw,
+        )
+        return cnt, 0, bf
+
+    if tool_name == "defender":
+        from opensearch_mcp.parse_defender import parse_mplog
+
+        return parse_mplog(mplog_dir=artifact_path, time_from=time_from, time_to=time_to, **kw)
+
+    if tool_name == "iis":
+        from opensearch_mcp.parse_w3c import parse_w3c_log
+
+        cnt = sk = bf = 0
+        for log_file in sorted(artifact_path.rglob("u_ex*.log")):
+            c, s, b = parse_w3c_log(
+                log_file,
+                timestamp_is_utc=True,
+                time_from=time_from,
+                time_to=time_to,
+                source_file=str(log_file),
+                parse_method="iis-w3c",
+                **kw,
+            )
+            cnt += c
+            sk += s
+            bf += b
+        return cnt, sk, bf
+
+    if tool_name == "httperr":
+        from opensearch_mcp.parse_w3c import parse_w3c_log
+
+        cnt = sk = bf = 0
+        for log_file in sorted(artifact_path.rglob("httperr*.log")):
+            c, s, b = parse_w3c_log(
+                log_file,
+                timestamp_is_utc=True,
+                time_from=time_from,
+                time_to=time_to,
+                source_file=str(log_file),
+                parse_method="httperr-w3c",
+                **kw,
+            )
+            cnt += c
+            sk += s
+            bf += b
+        return cnt, sk, bf
+
+    if tool_name == "tasks":
+        from opensearch_mcp.parse_tasks import parse_tasks_dir
+
+        return parse_tasks_dir(tasks_dir=artifact_path, **kw)
+
+    if tool_name == "wer":
+        from opensearch_mcp.parse_wer import parse_wer_dir
+
+        return parse_wer_dir(wer_dir=artifact_path, **kw)
+
+    if tool_name == "firewall":
+        from opensearch_mcp.parse_w3c import parse_w3c_log
+
+        return parse_w3c_log(
+            artifact_path,
+            timestamp_is_utc=False,
+            system_timezone=host.system_timezone,
+            time_from=time_from,
+            time_to=time_to,
+            source_file=str(artifact_path),
+            parse_method="firewall-w3c",
+            **kw,
+        )
+
+    if tool_name == "ssh":
+        from opensearch_mcp.parse_ssh import parse_ssh_log
+
+        return parse_ssh_log(
+            ssh_dir=artifact_path,
+            time_from=time_from,
+            time_to=time_to,
+            **kw,
+        )
+
+    raise ValueError(f"Unknown custom artifact: {tool_name}")
 
 
 def _safe_count(client: OpenSearch, index_name: str) -> int:

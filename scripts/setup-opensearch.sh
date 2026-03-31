@@ -118,6 +118,18 @@ if [ -f "$TRANSCRIPT_TEMPLATE" ]; then
         -d @"$TRANSCRIPT_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
 fi
 
+# Register text log parser templates (W3C, Defender, Tasks, WER, SSH)
+for TPL_NAME in w3c defender tasks wer ssh; do
+    TPL_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/${TPL_NAME}_template.json"
+    if [ -f "$TPL_FILE" ]; then
+        echo "Registering ${TPL_NAME} index template..."
+        curl -sk -u "admin:$OS_PASSWORD" \
+            -X PUT "$OS_URL/_index_template/vhir-${TPL_NAME}" \
+            -H "Content-Type: application/json" \
+            -d @"$TPL_FILE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
+    fi
+done
+
 # --- 6. Smoke test ---
 echo "Running smoke test..."
 # Index a test doc

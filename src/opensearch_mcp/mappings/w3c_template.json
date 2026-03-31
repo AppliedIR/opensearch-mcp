@@ -1,0 +1,32 @@
+{
+  "index_patterns": ["case-*-iis-*", "case-*-httperr-*", "case-*-firewall-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "c-ip": {"type": "ip", "ignore_malformed": true},
+        "s-ip": {"type": "ip", "ignore_malformed": true},
+        "src-ip": {"type": "ip", "ignore_malformed": true},
+        "dst-ip": {"type": "ip", "ignore_malformed": true},
+        "source.ip": {"type": "ip", "ignore_malformed": true},
+        "destination.ip": {"type": "ip", "ignore_malformed": true},
+        "s-port": {"type": "integer"},
+        "dst-port": {"type": "integer"},
+        "src-port": {"type": "integer"},
+        "sc-status": {"type": "integer"},
+        "sc-substatus": {"type": "integer"},
+        "time-taken": {"type": "integer"},
+        "size": {"type": "integer"},
+        "host.name": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
+        "pipeline_version": {"type": "keyword"}
+      }
+    },
+    "settings": {
+      "default_pipeline": "vhir-geoip"
+    }
+  },
+  "priority": 20
+}

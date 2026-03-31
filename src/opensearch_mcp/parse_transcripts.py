@@ -86,11 +86,24 @@ def discover_transcripts(volume_root: Path, gp_transcript_dir: str | None = None
 def _parse_transcript_time(time_str: str, system_tz_name: str | None) -> str:
     """Parse transcript timestamp to UTC ISO 8601.
 
-    Transcript timestamps are in local system time with no timezone indicator.
+    Handles both PS 5.x (yyyyMMddHHmmss, local time) and PS 7.x (ISO 8601 with offset).
     Uses dateutil.tz.gettz() which handles Windows timezone names natively.
     """
+    time_str = time_str.strip()
+
+    # Try ISO 8601 first (PS 7.x — includes timezone offset)
     try:
-        naive = datetime.strptime(time_str.strip(), "%Y%m%d%H%M%S")
+        from datetime import timezone as _tz
+
+        return (
+            datetime.fromisoformat(time_str).astimezone(_tz.utc).isoformat().replace("+00:00", "Z")
+        )
+    except ValueError:
+        pass
+
+    # Fall back to PS 5.x format (yyyyMMddHHmmss, local time)
+    try:
+        naive = datetime.strptime(time_str, "%Y%m%d%H%M%S")
         if system_tz_name:
             from dateutil.tz import gettz, tzutc
 

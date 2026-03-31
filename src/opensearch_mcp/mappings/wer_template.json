@@ -1,0 +1,23 @@
+{
+  "index_patterns": ["case-*-wer-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "process.name": {"type": "keyword"},
+        "wer.event_type": {"type": "keyword"},
+        "wer.app_version": {"type": "keyword"},
+        "wer.exception_code": {"type": "keyword"},
+        "wer.os_version": {"type": "keyword"},
+        "wer.report_dir": {"type": "keyword"},
+        "wer.full_text": {"type": "text"},
+        "host.name": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
+        "pipeline_version": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 20
+}
