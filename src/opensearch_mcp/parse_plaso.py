@@ -45,6 +45,7 @@ def _run_plaso(
         ],
         check=True,
         capture_output=True,
+        timeout=7200,
     )
 
     # psort: convert to JSONL with UTC timestamps
@@ -61,6 +62,7 @@ def _run_plaso(
         ],
         check=True,
         capture_output=True,
+        timeout=7200,
     )
 
     return jsonl_file

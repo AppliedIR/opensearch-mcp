@@ -55,7 +55,11 @@ def _extract_7z(path: Path, dest: Path, password: str | None = None) -> None:
     result = subprocess.run(cmd, capture_output=True)
     # 7z exit codes: 0=ok, 1=warning (timestamps), 2+=error
     if result.returncode > 1:
-        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+        # Sanitize command to strip password before including in error
+        safe_cmd = [c if not c.startswith("-p") else "-p***" for c in cmd]
+        raise subprocess.CalledProcessError(
+            result.returncode, safe_cmd, result.stdout, result.stderr
+        )
 
 
 def _extract_tar(path: Path, dest: Path) -> None:
@@ -393,6 +397,9 @@ def normalize_velociraptor(extract_dir: Path) -> Path:
     for path in sorted(auto_dir.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         decoded = urllib.parse.unquote(path.name)
         if decoded != path.name:
+            # Validate decoded name doesn't contain path separators or traversal
+            if "/" in decoded or "\\" in decoded or ".." in decoded:
+                continue
             new_path = path.parent / decoded
             path.rename(new_path)
             print(f"  Renamed {path.name} -> {decoded}")

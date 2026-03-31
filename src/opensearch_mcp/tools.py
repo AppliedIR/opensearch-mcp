@@ -132,9 +132,12 @@ TOOLS: dict[str, ToolConfig] = {
 _RECMD_BATCH = "/opt/zimmermantools/RECmd/BatchExamples/Kroll_Batch.reb"
 
 
+_TOOL_TIMEOUT = 7200  # 2 hours — generous for MFT/large artifacts
+
+
 def _run_tool(cmd: list[str], label: str) -> None:
     """Run an EZ tool subprocess, raising on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TOOL_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"{label} failed (exit {result.returncode}): {result.stderr[:500]}")
 
@@ -162,7 +165,12 @@ def run_and_ingest(
     if cfg is None:
         raise ValueError(f"Unknown tool: {tool_name}")
 
-    index_name = f"case-{case_id}-{cfg.index_suffix}-{hostname}".lower()
+    import re
+
+    def _san(v: str) -> str:
+        return re.sub(r"[^a-z0-9._-]", "-", v.lower())
+
+    index_name = f"case-{_san(case_id)}-{cfg.index_suffix}-{_san(hostname)}"
     tmpdir = tempfile.mkdtemp(prefix=f"vhir-{tool_name}-")
     natural_key = natural_key_override if natural_key_override is not None else cfg.natural_key
 
@@ -212,6 +220,7 @@ def run_and_ingest(
                 time_from=time_from,
                 time_to=time_to,
                 vss_id=vss_id,
+                parse_method=cfg.cli_name,
             )
             total_count += count
             total_skipped += sk

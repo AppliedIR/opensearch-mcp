@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,12 @@ from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
 from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
+
+
+def _sanitize_index_component(value: str) -> str:
+    """Sanitize a hostname or case_id for use in OpenSearch index names."""
+    return re.sub(r"[^a-z0-9._-]", "-", value.lower())
+
 
 # Artifacts handled by Plaso/wintools (not EZ tools on Linux)
 _PLASO_ARTIFACTS = {"prefetch", "srum"}
@@ -67,7 +74,14 @@ def _pause_sigma_detector(client: OpenSearch) -> str | None:
             params={"timeout": "30s"},
         )
         return detector_id
-    except Exception:
+    except Exception as e:
+        import sys
+
+        print(
+            f"WARNING: Could not pause Sigma detector: {e}\n"
+            "  Ingest will be slower with Sigma scanning active.",
+            file=sys.stderr,
+        )
         return None
 
 
@@ -336,7 +350,9 @@ def _ingest_hosts(
             evtx_files = [f for f in evtx_files if f.stat().st_size >= _MIN_EVTX_SIZE]
 
             if evtx_files:
-                index_name = f"case-{case_id}-evtx-{host.hostname}".lower()
+                _cid = _sanitize_index_component(case_id)
+                _hn = _sanitize_index_component(host.hostname)
+                index_name = f"case-{_cid}-evtx-{_hn}"
                 existing = _safe_count(client, index_name)
                 ar = ArtifactResult(
                     artifact="evtx",
@@ -407,6 +423,14 @@ def _ingest_hosts(
                             ar.error += f"; {evtx_file.name}: {e}"
                         else:
                             ar.error = f"{evtx_file.name}: {e}"
+                        audit.log(
+                            tool="ingest_evtx",
+                            audit_id=aid,
+                            params={"file": str(evtx_file)},
+                            result_summary=f"FAILED: {e}",
+                            input_files=[str(evtx_file)],
+                            input_sha256s=[file_hash],
+                        )
 
                 if evtx_status:
                     evtx_status["status"] = "failed" if ar.error else "complete"
@@ -485,7 +509,9 @@ def _ingest_hosts(
             seen_runs.add(run_key)
 
             cfg = TOOLS[tool_name]
-            index_name = f"case-{case_id}-{cfg.index_suffix}-{host.hostname}".lower()
+            _cid = _sanitize_index_component(case_id)
+            _hn = _sanitize_index_component(host.hostname)
+            index_name = f"case-{_cid}-{cfg.index_suffix}-{_hn}"
             existing = _safe_count(client, index_name)
             file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
             aid = audit._next_audit_id()
@@ -557,6 +583,14 @@ def _ingest_hosts(
                 )
             except Exception as e:
                 ar.error = str(e)
+                audit.log(
+                    tool=f"ingest_{tool_name}",
+                    audit_id=aid,
+                    params={"hostname": host.hostname, "tool": tool_name},
+                    result_summary=f"FAILED: {e}",
+                    input_files=[str(artifact_path)],
+                    input_sha256s=[file_hash] if file_hash else [],
+                )
                 if tool_status:
                     tool_status["status"] = "failed"
                     tool_status["error"] = str(e)
@@ -590,7 +624,9 @@ def _ingest_plaso_artifact(
     from opensearch_mcp.parse_prefetch import parse_prefetch
     from opensearch_mcp.parse_srum import parse_srum
 
-    index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
+    _cid = _sanitize_index_component(case_id)
+    _hn = _sanitize_index_component(host.hostname)
+    index_name = f"case-{_cid}-{tool_name}-{_hn}"
     existing = _safe_count(client, index_name)
     plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()
@@ -659,6 +695,14 @@ def _ingest_plaso_artifact(
         )
     except Exception as e:
         ar.error = str(e)
+        audit.log(
+            tool=f"ingest_{tool_name}",
+            audit_id=aid,
+            params={"hostname": host.hostname, "tool": tool_name},
+            result_summary=f"FAILED: {e}",
+            input_files=[str(artifact_path)],
+            input_sha256s=[plaso_hash] if plaso_hash else [],
+        )
         if tool_status:
             tool_status["status"] = "failed"
             tool_status["error"] = str(e)
@@ -689,7 +733,9 @@ def _ingest_custom_artifact(
     time_to=None,
 ) -> None:
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
-    index_name = f"case-{case_id}-{tool_name}-{host.hostname}".lower()
+    _cid = _sanitize_index_component(case_id)
+    _hn = _sanitize_index_component(host.hostname)
+    index_name = f"case-{_cid}-{tool_name}-{_hn}"
     existing = _safe_count(client, index_name)
     file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()
@@ -746,6 +792,14 @@ def _ingest_custom_artifact(
         )
     except Exception as e:
         ar.error = str(e)
+        audit.log(
+            tool=f"ingest_{tool_name}",
+            audit_id=aid,
+            params={"hostname": host.hostname, "tool": tool_name},
+            result_summary=f"FAILED: {e}",
+            input_files=[str(artifact_path)],
+            input_sha256s=[file_hash] if file_hash else [],
+        )
         if tool_status:
             tool_status["status"] = "failed"
             tool_status["error"] = str(e)

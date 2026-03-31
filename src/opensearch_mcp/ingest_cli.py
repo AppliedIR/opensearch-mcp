@@ -631,7 +631,6 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", help="Triage directory, archive, or disk image")
     p.add_argument("--case", help="Case ID")
     p.add_argument("--hostname", help="Override hostname (flat dirs)")
-    p.add_argument("--examiner", help="Examiner name")
     p.add_argument("--password", help="Archive password")
     p.add_argument("--from", dest="time_from", help="Start date (ISO)")
     p.add_argument("--to", dest="time_to", help="End date (ISO)")

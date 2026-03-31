@@ -9,6 +9,16 @@ from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
 
+
+def _validate_index(index: str) -> str | None:
+    """Validate index parameter starts with 'case-'. Returns error or None."""
+    if not index.startswith("case-"):
+        return (
+            "Index parameter must start with 'case-' (security: blocks access to system indices)"
+        )
+    return None
+
+
 server = FastMCP("opensearch-mcp")
 audit = AuditWriter(mcp_name="opensearch-mcp")
 
@@ -81,6 +91,9 @@ def idx_search(
         limit: Max results (default 50, max 200).
         sort: Sort field:order (default @timestamp:desc).
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
     limit = min(limit, 200)
 
@@ -124,6 +137,9 @@ def idx_count(
         query: OpenSearch query_string (default: all).
         index: Index pattern.
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
     result = _os_call(
         client.count,
@@ -156,6 +172,9 @@ def idx_aggregate(
         index: Index pattern.
         limit: Max buckets (default 50, max 500).
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
     limit = min(limit, 500)
 
@@ -200,6 +219,9 @@ def idx_get_event(
         doc_id: Document _id.
         index: Exact index name (not a pattern).
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
     result = _os_call(client.get, index=index, id=doc_id)
     doc = {"_id": result["_id"], "_index": result["_index"]}
@@ -229,6 +251,9 @@ def idx_timeline(
         interval: Histogram bucket size (e.g., '1m', '1h', '1d').
         time_field: Timestamp field (default @timestamp).
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
 
     result = _os_call(
@@ -284,6 +309,9 @@ def idx_field_values(
         index: Index pattern.
         limit: Max values (default 50, max 500).
     """
+    err = _validate_index(index)
+    if err:
+        return {"error": err}
     client = _get_os()
     limit = min(limit, 500)
 
@@ -358,6 +386,7 @@ def idx_ingest(
     source_timezone: str = "",
     all_logs: bool = False,
     reduced_ids: bool = False,
+    full: bool = False,
     dry_run: bool = True,
 ) -> dict:
     """Discover and ingest forensic artifacts into OpenSearch.
@@ -371,6 +400,10 @@ def idx_ingest(
             if multi-host triage package. Required for flat directories.
         include: Only these artifact types (e.g., ["mft", "usn"]).
         exclude: Skip these artifact types (e.g., ["jumplists"]).
+        source_timezone: Evidence system's local timezone (e.g., "Eastern Standard Time").
+        all_logs: Parse all evtx files (default: forensic logs only).
+        reduced_ids: Filter to ~78 high-value Event IDs.
+        full: Include all tiers including MFT, USN, timeline.
         dry_run: Preview what would be ingested without indexing (default True).
     """
     import sys
@@ -493,11 +526,13 @@ def idx_ingest(
         cmd.append("--all-logs")
     if reduced_ids:
         cmd.append("--reduced-ids")
+    if full:
+        cmd.append("--full")
 
     proc = _sp.Popen(
         cmd,
-        stdout=_sp.PIPE,
-        stderr=_sp.STDOUT,
+        stdout=_sp.DEVNULL,
+        stderr=_sp.DEVNULL,
         env=env,
         start_new_session=True,
     )

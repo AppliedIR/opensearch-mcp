@@ -6,6 +6,7 @@ import sys
 import time
 
 from opensearchpy import OpenSearch, helpers
+from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from opensearchpy.exceptions import ConnectionTimeout, TransportError
 
 _INITIAL_BACKOFF = 10
@@ -45,7 +46,7 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
             )
         return success, failed
 
-    except ConnectionTimeout:
+    except (ConnectionTimeout, OSConnectionError):
         if attempt >= _MAX_RETRIES:
             index = actions[0].get("_index", "") if actions else ""
             print(
