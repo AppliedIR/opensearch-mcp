@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 from opensearchpy.exceptions import AuthorizationException, ConnectionTimeout
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
@@ -663,6 +665,131 @@ def idx_ingest_status() -> dict:
         summaries.append(s)
 
     return {"ingests": summaries}
+
+
+@server.tool()
+def idx_ingest_json(
+    path: str,
+    hostname: str,
+    index_suffix: str = "",
+    time_field: str = "",
+    dry_run: bool = True,
+) -> dict:
+    """Ingest JSON/JSONL file into OpenSearch.
+
+    Args:
+        path: Path to JSON/JSONL file or directory.
+        hostname: Source hostname.
+        index_suffix: Index suffix (default: json-{filename}).
+        time_field: Timestamp field name (default: auto-detect).
+        dry_run: Preview what would be ingested (default True).
+    """
+    if dry_run:
+        from opensearch_mcp.parse_json import _detect_json_format
+
+        p = Path(path)
+        if p.is_file():
+            fmt = _detect_json_format(p)
+            return {"status": "preview", "file": p.name, "format": fmt}
+        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
+        return {"status": "preview", "files": files, "count": len(files)}
+
+    return _launch_background("json", path, hostname, index_suffix, time_field)
+
+
+@server.tool()
+def idx_ingest_delimited(
+    path: str,
+    hostname: str,
+    index_suffix: str = "",
+    time_field: str = "",
+    delimiter: str = "",
+    dry_run: bool = True,
+) -> dict:
+    """Ingest delimited files (CSV, TSV, Zeek, bodyfile) into OpenSearch.
+
+    Args:
+        path: Path to delimited file or directory.
+        hostname: Source hostname.
+        index_suffix: Index suffix (default: format-{filename}).
+        time_field: Timestamp field (default: auto-detect).
+        delimiter: Delimiter character (default: auto-detect).
+        dry_run: Preview (default True).
+    """
+    if dry_run:
+        from opensearch_mcp.parse_delimited import _detect_delimited_format
+
+        p = Path(path)
+        if p.is_file():
+            fmt = _detect_delimited_format(p)
+            return {"status": "preview", "file": p.name, "format": fmt.get("format")}
+        exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in exts)
+        return {"status": "preview", "files": files, "count": len(files)}
+
+    return _launch_background("delimited", path, hostname, index_suffix, time_field)
+
+
+@server.tool()
+def idx_ingest_accesslog(
+    path: str,
+    hostname: str,
+    index_suffix: str = "accesslog",
+    dry_run: bool = True,
+) -> dict:
+    """Ingest Apache/Nginx access logs into OpenSearch.
+
+    Args:
+        path: Path to access log file or directory.
+        hostname: Source hostname.
+        index_suffix: Index suffix (default: accesslog).
+        dry_run: Preview (default True).
+    """
+    if dry_run:
+        p = Path(path)
+        if p.is_file():
+            return {"status": "preview", "file": p.name}
+        files = sorted(
+            f.name
+            for f in p.iterdir()
+            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+        )
+        return {"status": "preview", "files": files, "count": len(files)}
+
+    return _launch_background("accesslog", path, hostname, index_suffix)
+
+
+def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):
+    """Launch a generic ingest as background subprocess."""
+    import subprocess as _sp
+    import sys as _sys
+
+    active_case = _get_active_case()
+    if not active_case:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+
+    cmd = [
+        _sys.executable,
+        "-m",
+        "opensearch_mcp.ingest_cli",
+        subcommand,
+        path,
+        "--hostname",
+        hostname,
+        "--case",
+        active_case,
+    ]
+    if index_suffix:
+        cmd.extend(["--index-suffix", index_suffix])
+    if time_field:
+        cmd.extend(["--time-field", time_field])
+
+    proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+    return {
+        "status": "started",
+        "pid": proc.pid,
+        "message": "Ingest running. Use idx_ingest_status() to check progress.",
+    }
 
 
 @server.tool()

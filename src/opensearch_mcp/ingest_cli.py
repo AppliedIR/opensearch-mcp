@@ -592,6 +592,238 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 
 
 # ---------------------------------------------------------------------------
+# cmd_ingest_json — generic JSON/JSONL ingest
+# ---------------------------------------------------------------------------
+
+
+def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    """Ingest JSON/JSONL files."""
+    from opensearch_mcp import __version__
+    from opensearch_mcp.parse_json import ingest_json
+    from opensearch_mcp.paths import sanitize_index_component
+
+    input_path = Path(args.path)
+    case_id = _resolve_case_id(getattr(args, "case", None))
+    _ensure_case_active(case_id)
+    hostname = args.hostname
+    time_field = getattr(args, "time_field", None)
+    time_from = _parse_date(args.time_from) if getattr(args, "time_from", None) else None
+    time_to = _parse_date(args.time_to) if getattr(args, "time_to", None) else None
+    batch_size = getattr(args, "batch_size", 1000)
+
+    if getattr(args, "dry_run", False):
+        print(f"Dry run: {input_path}")
+        return
+
+    client = get_client()
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    aid = audit._next_audit_id()
+    safe_case = sanitize_index_component(case_id)
+    safe_host = sanitize_index_component(hostname)
+
+    files = (
+        [input_path]
+        if input_path.is_file()
+        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
+    )
+
+    total = total_sk = total_bf = 0
+    for f in files:
+        suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
+        if not suffix.startswith("json-"):
+            suffix = f"json-{suffix}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        print(f"  {f.name} → {index_name}...", end=" ", flush=True)
+        cnt, sk, bf = ingest_json(
+            f,
+            client,
+            index_name,
+            hostname,
+            time_field=time_field,
+            source_file=str(f),
+            ingest_audit_id=aid,
+            pipeline_version=f"opensearch-mcp-{__version__}",
+            time_from=time_from,
+            time_to=time_to,
+            batch_size=batch_size,
+        )
+        print(f"{cnt:,} entries")
+        total += cnt
+        total_sk += sk
+        total_bf += bf
+
+    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    audit.log(
+        tool="ingest_json",
+        audit_id=aid,
+        params={"path": str(input_path), "hostname": hostname},
+        result_summary=f"{total} indexed",
+    )
+
+
+# ---------------------------------------------------------------------------
+# cmd_ingest_delimited — generic CSV/TSV/Zeek/bodyfile ingest
+# ---------------------------------------------------------------------------
+
+
+def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    """Ingest delimited files."""
+    from opensearch_mcp import __version__
+    from opensearch_mcp.parse_delimited import ingest_delimited
+    from opensearch_mcp.paths import sanitize_index_component
+
+    input_path = Path(args.path)
+    case_id = _resolve_case_id(getattr(args, "case", None))
+    _ensure_case_active(case_id)
+    hostname = args.hostname
+    time_field = getattr(args, "time_field", None)
+    delimiter = getattr(args, "delimiter", None)
+    format_override = getattr(args, "format", None)
+    time_from = _parse_date(args.time_from) if getattr(args, "time_from", None) else None
+    time_to = _parse_date(args.time_to) if getattr(args, "time_to", None) else None
+    batch_size = getattr(args, "batch_size", 1000)
+
+    if getattr(args, "dry_run", False):
+        print(f"Dry run: {input_path}")
+        return
+
+    client = get_client()
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    aid = audit._next_audit_id()
+    safe_case = sanitize_index_component(case_id)
+    safe_host = sanitize_index_component(hostname)
+
+    exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+    files = (
+        [input_path]
+        if input_path.is_file()
+        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+    )
+
+    from opensearch_mcp.parse_delimited import _detect_delimited_format
+
+    total = total_sk = total_bf = 0
+    for f in files:
+        fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
+        detected = fmt.get("format", "csv")
+        # Format-aware suffix: zeek-conn, bodyfile-body, delim-timeline
+        user_suffix = getattr(args, "index_suffix", None)
+        if user_suffix:
+            suffix = user_suffix
+            if not suffix.startswith(("delim-", "zeek-", "bodyfile-")):
+                suffix = f"delim-{suffix}"
+        elif detected == "zeek":
+            suffix = f"zeek-{f.stem}"
+        elif detected == "bodyfile":
+            suffix = f"bodyfile-{f.stem}"
+        else:
+            suffix = f"delim-{f.stem}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        print(f"  {f.name} ({detected}) → {index_name}...", end=" ", flush=True)
+        if detected == "unknown":
+            print("skipped (unrecognized format)")
+            continue
+        try:
+            cnt, sk, bf = ingest_delimited(
+                f,
+                client,
+                index_name,
+                hostname,
+                fmt=fmt,
+                delimiter=delimiter,
+                time_field=time_field,
+                source_file=str(f),
+                ingest_audit_id=aid,
+                pipeline_version=f"opensearch-mcp-{__version__}",
+                time_from=time_from,
+                time_to=time_to,
+                batch_size=batch_size,
+            )
+            print(f"{cnt:,} entries")
+            total += cnt
+            total_sk += sk
+            total_bf += bf
+        except (ValueError, OSError) as e:
+            print(f"skipped ({e})")
+
+    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    audit.log(
+        tool="ingest_delimited",
+        audit_id=aid,
+        params={"path": str(input_path), "hostname": hostname},
+        result_summary=f"{total} indexed",
+    )
+
+
+# ---------------------------------------------------------------------------
+# cmd_ingest_accesslog — Apache/Nginx access log ingest
+# ---------------------------------------------------------------------------
+
+
+def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    """Ingest Apache/Nginx access logs."""
+    from opensearch_mcp import __version__
+    from opensearch_mcp.parse_accesslog import ingest_accesslog
+    from opensearch_mcp.paths import sanitize_index_component
+
+    input_path = Path(args.path)
+    case_id = _resolve_case_id(getattr(args, "case", None))
+    _ensure_case_active(case_id)
+    hostname = args.hostname
+    time_from = _parse_date(args.time_from) if getattr(args, "time_from", None) else None
+    time_to = _parse_date(args.time_to) if getattr(args, "time_to", None) else None
+
+    if getattr(args, "dry_run", False):
+        print(f"Dry run: {input_path}")
+        return
+
+    client = get_client()
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    aid = audit._next_audit_id()
+    safe_case = sanitize_index_component(case_id)
+    safe_host = sanitize_index_component(hostname)
+    suffix = getattr(args, "index_suffix", None) or "accesslog"
+
+    files = (
+        [input_path]
+        if input_path.is_file()
+        else sorted(
+            f
+            for f in input_path.iterdir()
+            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+        )
+    )
+
+    total = total_sk = total_bf = 0
+    for f in files:
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        print(f"  {f.name} → {index_name}...", end=" ", flush=True)
+        cnt, sk, bf = ingest_accesslog(
+            f,
+            client,
+            index_name,
+            hostname,
+            time_from=time_from,
+            time_to=time_to,
+            source_file=str(f),
+            ingest_audit_id=aid,
+            pipeline_version=f"opensearch-mcp-{__version__}",
+        )
+        print(f"{cnt:,} entries ({sk} skipped)")
+        total += cnt
+        total_sk += sk
+        total_bf += bf
+
+    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    audit.log(
+        tool="ingest_accesslog",
+        audit_id=aid,
+        params={"path": str(input_path), "hostname": hostname},
+        result_summary=f"{total} indexed",
+    )
+
+
+# ---------------------------------------------------------------------------
 # cmd_ingest_memory — memory forensics entry point
 # ---------------------------------------------------------------------------
 
@@ -728,6 +960,45 @@ def main() -> None:
     p_mem.add_argument("--timeout", type=int, default=3600, help="Per-plugin timeout")
     p_mem.add_argument("--yes", action="store_true", help="Skip confirmation")
     p_mem.set_defaults(func=cmd_ingest_memory)
+
+    # json subcommand
+    p_json = sub.add_parser("json", help="Ingest JSON/JSONL files")
+    p_json.add_argument("path", help="JSON/JSONL file or directory")
+    p_json.add_argument("--hostname", required=True)
+    p_json.add_argument("--index-suffix")
+    p_json.add_argument("--time-field")
+    p_json.add_argument("--case")
+    p_json.add_argument("--from", dest="time_from")
+    p_json.add_argument("--to", dest="time_to")
+    p_json.add_argument("--batch-size", type=int, default=1000)
+    p_json.add_argument("--dry-run", action="store_true")
+    p_json.set_defaults(func=cmd_ingest_json)
+
+    # delimited subcommand
+    p_delim = sub.add_parser("delimited", help="Ingest CSV/TSV/Zeek/bodyfile")
+    p_delim.add_argument("path", help="Delimited file or directory")
+    p_delim.add_argument("--hostname", required=True)
+    p_delim.add_argument("--index-suffix")
+    p_delim.add_argument("--time-field")
+    p_delim.add_argument("--delimiter")
+    p_delim.add_argument("--format", choices=["csv", "tsv", "zeek", "bodyfile"])
+    p_delim.add_argument("--case")
+    p_delim.add_argument("--from", dest="time_from")
+    p_delim.add_argument("--to", dest="time_to")
+    p_delim.add_argument("--batch-size", type=int, default=1000)
+    p_delim.add_argument("--dry-run", action="store_true")
+    p_delim.set_defaults(func=cmd_ingest_delimited)
+
+    # accesslog subcommand
+    p_alog = sub.add_parser("accesslog", help="Ingest Apache/Nginx access logs")
+    p_alog.add_argument("path", help="Access log file or directory")
+    p_alog.add_argument("--hostname", required=True)
+    p_alog.add_argument("--index-suffix", default="accesslog")
+    p_alog.add_argument("--case")
+    p_alog.add_argument("--from", dest="time_from")
+    p_alog.add_argument("--to", dest="time_to")
+    p_alog.add_argument("--dry-run", action="store_true")
+    p_alog.set_defaults(func=cmd_ingest_accesslog)
 
     args = parser.parse_args()
 

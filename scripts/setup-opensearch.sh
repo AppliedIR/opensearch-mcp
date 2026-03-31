@@ -119,7 +119,7 @@ if [ -f "$TRANSCRIPT_TEMPLATE" ]; then
 fi
 
 # Register text log parser templates (W3C, Defender, Tasks, WER, SSH)
-for TPL_NAME in w3c defender tasks wer ssh vol3; do
+for TPL_NAME in w3c defender tasks wer ssh vol3 json delimited accesslog; do
     TPL_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/${TPL_NAME}_template.json"
     if [ -f "$TPL_FILE" ]; then
         echo "Registering ${TPL_NAME} index template..."

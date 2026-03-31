@@ -170,6 +170,27 @@ def resolve_timezone(tz_name: str | None) -> str | None:
     return None
 
 
+_TIMESTAMP_CANDIDATES = [
+    "@timestamp",
+    "timestamp",
+    "ts",
+    "datetime",
+    "event_time",
+    "time",
+    "CreatedTime",
+    "EventTime",
+    "date",
+]
+
+
+def auto_detect_time_field(sample: dict) -> str | None:
+    """Find the timestamp field from a sample record."""
+    for candidate in _TIMESTAMP_CANDIDATES:
+        if candidate in sample:
+            return candidate
+    return None
+
+
 def sanitize_index_component(value: str) -> str:
     """Sanitize a hostname or case_id for use in OpenSearch index names."""
     import re

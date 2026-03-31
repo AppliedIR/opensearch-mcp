@@ -58,6 +58,48 @@ def register(subparsers, registered: set) -> None:
         p.set_defaults(func=_cmd_ingest_memory)
         registered.add("ingest-memory")
 
+    if "ingest-json" not in registered:
+        p = subparsers.add_parser("ingest-json", help="Ingest JSON/JSONL files")
+        p.add_argument("path", help="JSON/JSONL file or directory")
+        p.add_argument("--hostname", required=True)
+        p.add_argument("--index-suffix")
+        p.add_argument("--time-field")
+        p.add_argument("--case")
+        p.add_argument("--from", dest="time_from")
+        p.add_argument("--to", dest="time_to")
+        p.add_argument("--batch-size", type=int, default=1000)
+        p.add_argument("--dry-run", action="store_true")
+        p.set_defaults(func=_cmd_ingest_json)
+        registered.add("ingest-json")
+
+    if "ingest-delimited" not in registered:
+        p = subparsers.add_parser("ingest-delimited", help="Ingest CSV/TSV/Zeek/bodyfile")
+        p.add_argument("path", help="Delimited file or directory")
+        p.add_argument("--hostname", required=True)
+        p.add_argument("--index-suffix")
+        p.add_argument("--time-field")
+        p.add_argument("--delimiter")
+        p.add_argument("--format", choices=["csv", "tsv", "zeek", "bodyfile"])
+        p.add_argument("--case")
+        p.add_argument("--from", dest="time_from")
+        p.add_argument("--to", dest="time_to")
+        p.add_argument("--batch-size", type=int, default=1000)
+        p.add_argument("--dry-run", action="store_true")
+        p.set_defaults(func=_cmd_ingest_delimited)
+        registered.add("ingest-delimited")
+
+    if "ingest-accesslog" not in registered:
+        p = subparsers.add_parser("ingest-accesslog", help="Ingest Apache/Nginx access logs")
+        p.add_argument("path", help="Access log file or directory")
+        p.add_argument("--hostname", required=True)
+        p.add_argument("--index-suffix", default="accesslog")
+        p.add_argument("--case")
+        p.add_argument("--from", dest="time_from")
+        p.add_argument("--to", dest="time_to")
+        p.add_argument("--dry-run", action="store_true")
+        p.set_defaults(func=_cmd_ingest_accesslog)
+        registered.add("ingest-accesslog")
+
 
 def _cmd_ingest(args, identity) -> None:
     """Delegate to opensearch_mcp ingest logic."""
@@ -71,3 +113,21 @@ def _cmd_ingest_memory(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_ingest_memory
 
     cmd_ingest_memory(args, examiner=identity.get("name", "unknown"))
+
+
+def _cmd_ingest_json(args, identity) -> None:
+    from opensearch_mcp.ingest_cli import cmd_ingest_json
+
+    cmd_ingest_json(args, examiner=identity.get("name", "unknown"))
+
+
+def _cmd_ingest_delimited(args, identity) -> None:
+    from opensearch_mcp.ingest_cli import cmd_ingest_delimited
+
+    cmd_ingest_delimited(args, examiner=identity.get("name", "unknown"))
+
+
+def _cmd_ingest_accesslog(args, identity) -> None:
+    from opensearch_mcp.ingest_cli import cmd_ingest_accesslog
+
+    cmd_ingest_accesslog(args, examiner=identity.get("name", "unknown"))

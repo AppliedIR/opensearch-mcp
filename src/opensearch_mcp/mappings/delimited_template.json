@@ -1,0 +1,22 @@
+{
+  "index_patterns": ["case-*-delim-*", "case-*-zeek-*", "case-*-bodyfile-*"],
+  "template": {
+    "settings": { "index.mapping.total_fields.limit": 1000 },
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date", "ignore_malformed": true},
+        "ts": {"type": "date", "format": "epoch_second||epoch_millis||strict_date_optional_time", "ignore_malformed": true},
+        "atime": {"type": "date", "ignore_malformed": true},
+        "mtime": {"type": "date", "ignore_malformed": true},
+        "ctime": {"type": "date", "ignore_malformed": true},
+        "crtime": {"type": "date", "ignore_malformed": true},
+        "host.name": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
+        "pipeline_version": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 11
+}

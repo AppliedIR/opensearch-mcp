@@ -1,0 +1,25 @@
+{
+  "index_patterns": ["case-*-accesslog-*"],
+  "template": {
+    "settings": { "default_pipeline": "vhir-geoip" },
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "source.ip": {"type": "ip", "ignore_malformed": true},
+        "http.response.status_code": {"type": "integer"},
+        "http.response.bytes": {"type": "integer"},
+        "http.request.method": {"type": "keyword"},
+        "url.path": {"type": "keyword"},
+        "http.request.referrer": {"type": "keyword"},
+        "user.name": {"type": "keyword"},
+        "user_agent.original": {"type": "text"},
+        "host.name": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"},
+        "pipeline_version": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 28
+}
