@@ -208,9 +208,9 @@ def _batch_stamp_verdicts(
 ) -> int:
     """Batch-stamp verdicts by grouping paths with identical verdicts.
 
-    Groups paths by (verdict, confidence, is_lolbin) and issues one
-    update_by_query per group using a terms query. Reduces 5000
-    individual calls to ~4-10.
+    Groups paths by (verdict, confidence, is_lolbin) and issues
+    update_by_query per group using terms queries. Chunks to 500 paths
+    per batch to avoid timeouts on large cases.
     """
     from collections import defaultdict
 
@@ -258,26 +258,37 @@ def _batch_stamp_verdicts(
                 if verdicts[p].get("reasons")
             }
 
-        try:
-            resp = client.update_by_query(
-                index=index_pattern,
-                body={
-                    "query": {"terms": {path_field: group["paths"]}},
-                    "script": {
-                        "source": "; ".join(script_lines),
-                        "lang": "painless",
-                        "params": params,
+        # Chunk paths to avoid timeouts on large cases
+        all_paths = group["paths"]
+        for i in range(0, len(all_paths), 500):
+            chunk = all_paths[i : i + 500]
+            chunk_params = dict(params)
+            if "reason_map" in chunk_params:
+                chunk_params["reason_map"] = {
+                    p: params["reason_map"][p]
+                    for p in chunk
+                    if p in params["reason_map"]
+                }
+            try:
+                resp = client.update_by_query(
+                    index=index_pattern,
+                    body={
+                        "query": {"terms": {path_field: chunk}},
+                        "script": {
+                            "source": "; ".join(script_lines),
+                            "lang": "painless",
+                            "params": chunk_params,
+                        },
                     },
-                },
-                conflicts="proceed",
-                requests_per_second=1000,
-            )
-            total_updated += resp.get("updated", 0)
-        except Exception as e:
-            print(
-                f"  WARNING: batch update_by_query failed for {verdict_str}: {e}",
-                file=sys.stderr,
-            )
+                    conflicts="proceed",
+                    requests_per_second=1000,
+                )
+                total_updated += resp.get("updated", 0)
+            except Exception as e:
+                print(
+                    f"  WARNING: batch update_by_query failed for {verdict_str}: {e}",
+                    file=sys.stderr,
+                )
 
     return total_updated
 
