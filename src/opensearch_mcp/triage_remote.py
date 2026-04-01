@@ -150,9 +150,7 @@ def _enrich_file_artifact(
     if not verdicts:
         return {"status": "complete", "checked": len(buckets), "enriched": 0}
 
-    enriched = 0
-    for path, verdict in verdicts.items():
-        enriched += _stamp_file_verdict(client, index_pattern, path_field, path, verdict)
+    enriched = _batch_stamp_verdicts(client, index_pattern, path_field, verdicts)
 
     if on_progress:
         on_progress(
@@ -165,50 +163,86 @@ def _enrich_file_artifact(
     return {"status": "complete", "checked": len(buckets), "enriched": enriched}
 
 
-def _stamp_file_verdict(
+def _batch_stamp_verdicts(
     client: OpenSearch,
     index_pattern: str,
     path_field: str,
-    path: str,
-    result: dict,
+    verdicts: dict,
 ) -> int:
-    """Stamp a check_file verdict onto matching documents."""
-    verdict_str = result.get("verdict", "UNKNOWN")
-    reasons = result.get("reasons", [])
-    reason_str = "; ".join(reasons) if reasons else ""
+    """Batch-stamp verdicts by grouping paths with identical verdicts.
 
-    script_lines = [
-        "ctx._source['triage.verdict'] = params.verdict",
-        "ctx._source['triage.checked'] = true",
-        "ctx._source['triage.confidence'] = params.confidence",
-    ]
-    params: dict = {
-        "verdict": verdict_str,
-        "confidence": result.get("confidence", "low"),
-    }
-    if reason_str:
-        script_lines.append("ctx._source['triage.reason'] = params.reason")
-        params["reason"] = reason_str
-    if result.get("is_lolbin"):
-        script_lines.append("ctx._source['triage.lolbin'] = true")
+    Groups paths by (verdict, confidence, is_lolbin) and issues one
+    update_by_query per group using a terms query. Reduces 5000
+    individual calls to ~4-10.
+    """
+    from collections import defaultdict
 
-    try:
-        resp = client.update_by_query(
-            index=index_pattern,
-            body={
-                "query": {"term": {path_field: path}},
-                "script": {
-                    "source": "; ".join(script_lines),
-                    "lang": "painless",
-                    "params": params,
+    # Group paths by stamp key: (verdict, confidence, lolbin)
+    groups: dict[tuple, dict] = defaultdict(lambda: {"paths": [], "reasons": []})
+    for path, result in verdicts.items():
+        verdict_str = result.get("verdict", "UNKNOWN")
+        confidence = result.get("confidence", "low")
+        is_lolbin = bool(result.get("is_lolbin"))
+        key = (verdict_str, confidence, is_lolbin)
+        groups[key]["paths"].append(path)
+        reasons = result.get("reasons", [])
+        if reasons:
+            groups[key]["reasons"].append("; ".join(reasons))
+
+    total_updated = 0
+    for (verdict_str, confidence, is_lolbin), group in groups.items():
+        script_lines = [
+            "ctx._source['triage.verdict'] = params.verdict",
+            "ctx._source['triage.checked'] = true",
+            "ctx._source['triage.confidence'] = params.confidence",
+        ]
+        params: dict = {"verdict": verdict_str, "confidence": confidence}
+        if is_lolbin:
+            script_lines.append("ctx._source['triage.lolbin'] = true")
+
+        # For batched paths, stamp a generic reason (individual reasons
+        # vary per path but the verdict is the same for all in this group)
+        unique_reasons = sorted(set(group["reasons"]))
+        if len(unique_reasons) == 1:
+            script_lines.append("ctx._source['triage.reason'] = params.reason")
+            params["reason"] = unique_reasons[0]
+        elif unique_reasons:
+            # Multiple distinct reasons in same verdict group — use per-doc
+            # reason from a lookup map in params
+            script_lines.append(
+                "String p = ctx._source.getOrDefault(params.path_field, ''); "
+                "if (params.reason_map.containsKey(p)) { "
+                "ctx._source['triage.reason'] = params.reason_map.get(p); }"
+            )
+            params["path_field"] = path_field.replace(".keyword", "")
+            params["reason_map"] = {
+                p: "; ".join(verdicts[p].get("reasons", []))
+                for p in group["paths"]
+                if verdicts[p].get("reasons")
+            }
+
+        try:
+            resp = client.update_by_query(
+                index=index_pattern,
+                body={
+                    "query": {"terms": {path_field: group["paths"]}},
+                    "script": {
+                        "source": "; ".join(script_lines),
+                        "lang": "painless",
+                        "params": params,
+                    },
                 },
-            },
-            conflicts="proceed",
-        )
-        return resp.get("updated", 0)
-    except Exception as e:
-        print(f"  WARNING: update_by_query failed for {path}: {e}", file=sys.stderr)
-        return 0
+                conflicts="proceed",
+                requests_per_second=1000,
+            )
+            total_updated += resp.get("updated", 0)
+        except Exception as e:
+            print(
+                f"  WARNING: batch update_by_query failed for {verdict_str}: {e}",
+                file=sys.stderr,
+            )
+
+    return total_updated
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +318,7 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
                     },
                 },
                 conflicts="proceed",
+                requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
         except Exception:
@@ -357,6 +392,7 @@ def _enrich_service_artifact(
                     },
                 },
                 conflicts="proceed",
+                requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
         except Exception:
@@ -448,6 +484,7 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
                     },
                 },
                 conflicts="proceed",
+                requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
         except Exception:
@@ -512,9 +549,41 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
             consecutive_failures = 0
             if not verdict.get("verdict"):
                 continue
-            enriched += _stamp_file_verdict(
-                client, index, "ValueData.keyword", value_data, verdict
-            )
+            reasons = verdict.get("reasons", [])
+            script_lines = [
+                "ctx._source['triage.verdict'] = params.verdict",
+                "ctx._source['triage.checked'] = true",
+                "ctx._source['triage.confidence'] = params.confidence",
+            ]
+            params: dict = {
+                "verdict": verdict["verdict"],
+                "confidence": verdict.get("confidence", "low"),
+            }
+            if reasons:
+                script_lines.append("ctx._source['triage.reason'] = params.reason")
+                params["reason"] = "; ".join(reasons)
+            if verdict.get("is_lolbin"):
+                script_lines.append("ctx._source['triage.lolbin'] = true")
+            try:
+                resp = client.update_by_query(
+                    index=index,
+                    body={
+                        "query": {"term": {"ValueData.keyword": value_data}},
+                        "script": {
+                            "source": "; ".join(script_lines),
+                            "lang": "painless",
+                            "params": params,
+                        },
+                    },
+                    conflicts="proceed",
+                    requests_per_second=1000,
+                )
+                enriched += resp.get("updated", 0)
+            except Exception as e:
+                print(
+                    f"  WARNING: update_by_query failed for Run key: {e}",
+                    file=sys.stderr,
+                )
         except Exception:
             consecutive_failures += 1
 

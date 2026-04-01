@@ -205,6 +205,7 @@ def stamp_documents(
                 },
                 timeout="120s",
                 conflicts="proceed",
+                requests_per_second=1000,
             )
             total_updated += result.get("updated", 0)
         except Exception as e:
