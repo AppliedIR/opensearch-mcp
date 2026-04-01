@@ -100,21 +100,6 @@ def _repoint_samba_if_configured(case_id: str) -> None:
     samba_yaml.write_text(yaml.dump(doc))
 
 
-def _resolve_examiner(args_examiner: str | None) -> str:
-    if args_examiner:
-        return args_examiner
-    if _VHIR_CONFIG.exists():
-        try:
-            config = yaml.safe_load(_VHIR_CONFIG.read_text()) or {}
-            if config.get("examiner"):
-                return config["examiner"]
-        except Exception:
-            pass
-    import os
-
-    return os.environ.get("USER", "unknown")
-
-
 def _parse_date(value: str) -> datetime:
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:

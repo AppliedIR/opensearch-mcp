@@ -15,6 +15,7 @@ dependencies = [
     "sift-common",
     "regipy>=4.0",
     "python-dateutil>=2.8",
+    "defusedxml>=0.7",
 ]
 
 [project.scripts]

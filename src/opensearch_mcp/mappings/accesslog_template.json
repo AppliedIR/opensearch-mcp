@@ -1,7 +1,6 @@
 {
   "index_patterns": ["case-*-accesslog-*"],
   "template": {
-    "settings": { "default_pipeline": "vhir-geoip" },
     "mappings": {
       "properties": {
         "@timestamp": {"type": "date"},

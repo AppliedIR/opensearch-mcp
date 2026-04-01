@@ -4,8 +4,7 @@
   ],
   "template": {
     "settings": {
-      "index.mapping.total_fields.limit": 5000,
-      "default_pipeline": "vhir-geoip"
+      "index.mapping.total_fields.limit": 5000
     },
     "mappings": {
       "dynamic_templates": [

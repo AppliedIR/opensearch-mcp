@@ -24,9 +24,6 @@
         "threat_intel.enriched_at": {"type": "date"},
         "threat_intel.checked": {"type": "boolean"}
       }
-    },
-    "settings": {
-      "default_pipeline": "vhir-geoip"
     }
   },
   "priority": 27

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import defusedxml.ElementTree as ET
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk

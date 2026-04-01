@@ -112,14 +112,22 @@ def batch_lookup(
     results = {}
     total = sum(len(v) for v in iocs.values())
     done = 0
+    consecutive_failures = 0
 
     for ioc_type, values in iocs.items():
         for value in values:
+            if consecutive_failures >= 3:
+                print(
+                    "WARNING: 3 consecutive OpenCTI failures — stopping lookup",
+                    file=sys.stderr,
+                )
+                return results
             done += 1
             if on_progress and done % 50 == 0:
                 on_progress("looking_up", done=done, total=total)
             try:
                 resp = call_tool("lookup_ioc", {"ioc": value}, timeout=15)
+                consecutive_failures = 0
 
                 if not resp.get("found", False):
                     # Mark as checked (no verdict) so --force skip works
@@ -144,6 +152,7 @@ def batch_lookup(
                 }
 
             except Exception as e:
+                consecutive_failures += 1
                 print(
                     f"WARNING: OpenCTI lookup failed for {value}: {e}",
                     file=sys.stderr,

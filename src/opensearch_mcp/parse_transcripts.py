@@ -259,7 +259,10 @@ def ingest_transcripts(
         from opensearch_mcp.paths import relative_evidence_path
 
         rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
-        _id = _doc_id(index_name, {"source_file": rel})
+        id_data = {"source_file": rel}
+        if vss_id:
+            id_data["vss_id"] = vss_id
+        _id = _doc_id(index_name, id_data)
         actions.append({"_index": index_name, "_id": _id, "_source": doc})
 
         if len(actions) >= 100:

@@ -35,7 +35,7 @@ def enrich_remote(
 
     results: dict = {}
 
-    # --- Gateway-independent: registry persistence (R1-R7, R11-R14, R16) ---
+    # --- Gateway-independent: registry persistence R1-R14, R16 ---
     results["registry_persistence"] = _enrich_registry_persistence(client, safe_case, on_progress)
 
     # --- Gateway-dependent: file + service enrichment ---
@@ -87,6 +87,35 @@ def enrich_remote(
     # Registry Run keys (check_file on ValueData)
     results["registry_run"] = _enrich_registry_run_keys(client, safe_case, on_progress)
 
+    # R15: Active Setup StubPath (check_file)
+    results["registry_activestub"] = _enrich_registry_check_file(
+        client,
+        safe_case,
+        query_body={"wildcard": {"KeyPath.keyword": "*Active Setup\\\\Installed Components*"}},
+        value_field="StubPath",
+        artifact_name="registry_activestub",
+        on_progress=on_progress,
+    )
+
+    # R17: NetSh Helper DLLs (check_file)
+    results["registry_netsh"] = _enrich_registry_check_file(
+        client,
+        safe_case,
+        query_body={
+            "bool": {
+                "should": [
+                    {"wildcard": {"KeyPath.keyword": "*\\\\NetSh*"}},
+                    {"wildcard": {"KeyPath.keyword": "*\\\\NetSh\\\\*"}},
+                ],
+                "minimum_should_match": 1,
+            }
+        },
+        value_field="ValueData",
+        artifact_name="registry_netsh",
+        on_progress=on_progress,
+        dll_filter=True,
+    )
+
     return results
 
 
@@ -114,8 +143,16 @@ def _enrich_file_artifact(
                 "size": 0,
             },
         )
-    except Exception:
-        return {"status": "skipped", "reason": "index not found"}
+    except Exception as e:
+        from opensearchpy.exceptions import NotFoundError
+
+        if isinstance(e, NotFoundError):
+            return {"status": "skipped", "reason": "index not found"}
+        print(
+            f"  WARNING: {artifact_name} aggregation failed: {e}",
+            file=sys.stderr,
+        )
+        return {"status": "skipped", "reason": str(e)}
 
     buckets = agg_result.get("aggregations", {}).get("paths", {}).get("buckets", [])
     if not buckets:
@@ -598,6 +635,94 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
 
 
 # ---------------------------------------------------------------------------
+def _enrich_registry_check_file(
+    client,
+    safe_case,
+    query_body,
+    value_field,
+    artifact_name,
+    on_progress=None,
+    dll_filter=False,
+):
+    """Enrich registry entries by calling check_file on a value field.
+
+    Used for R15 (Active Setup StubPath) and R17 (NetSh helper DLLs).
+    """
+    index = f"case-{safe_case}-registry-*"
+    try:
+        result = client.search(
+            index=index,
+            body={
+                "query": {
+                    "bool": {
+                        "must": [query_body, {"exists": {"field": value_field}}],
+                    }
+                },
+                "size": 0,
+                "aggs": {"values": {"terms": {"field": f"{value_field}.keyword", "size": 5000}}},
+            },
+        )
+    except Exception:
+        return {"status": "skipped"}
+
+    buckets = result.get("aggregations", {}).get("values", {}).get("buckets", [])
+    if not buckets:
+        return {"status": "empty", "checked": 0}
+
+    if on_progress:
+        on_progress("triage_start", artifact=artifact_name, unique_values=len(buckets))
+
+    enriched = 0
+    consecutive_failures = 0
+    for bucket in buckets:
+        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            break
+        value = bucket["key"]
+        if not value.strip():
+            continue
+        if dll_filter and not value.lower().endswith(".dll"):
+            continue
+        try:
+            verdict = call_tool("check_file", {"path": value}, timeout=15)
+            consecutive_failures = 0
+            if not verdict.get("verdict"):
+                continue
+            reasons = verdict.get("reasons", [])
+            script_lines = [
+                "ctx._source['triage.verdict'] = params.verdict",
+                "ctx._source['triage.checked'] = true",
+            ]
+            params: dict = {"verdict": verdict["verdict"]}
+            if reasons:
+                script_lines.append("ctx._source['triage.reason'] = params.reason")
+                params["reason"] = "; ".join(reasons)
+            resp = client.update_by_query(
+                index=index,
+                body={
+                    "query": {"term": {f"{value_field}.keyword": value}},
+                    "script": {
+                        "source": "; ".join(script_lines),
+                        "lang": "painless",
+                        "params": params,
+                    },
+                },
+                conflicts="proceed",
+                requests_per_second=1000,
+            )
+            enriched += resp.get("updated", 0)
+        except Exception:
+            consecutive_failures += 1
+
+    if on_progress:
+        on_progress(
+            "triage_done",
+            artifact=artifact_name,
+            checked=len(buckets),
+            enriched=enriched,
+        )
+    return {"status": "complete", "checked": len(buckets), "enriched": enriched}
+
+
 # Registry persistence R1-R17 (no gateway — pure update_by_query)
 # ---------------------------------------------------------------------------
 
@@ -605,8 +730,8 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
 def _enrich_registry_persistence(client, safe_case, on_progress=None):
     """Flag registry persistence mechanisms via update_by_query.
 
-    Implements R1-R7, R11-R14, R16. R8-R10 (LSA packages), R15 (Active
-    Setup), R17 (NetSh) deferred — need complex Painless or gateway calls.
+    Implements R1-R14, R16. R15 (Active Setup) and R17 (NetSh) use
+    check_file gateway calls and are handled in enrich_remote().
 
     No gateway calls — queries OpenSearch directly. Runs even when
     gateway is unavailable.
@@ -668,6 +793,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             "reason_prefix": "Winlogon mpnotify: ",
         },
         # R11: Print Monitors (T1547.010)
+        # NOTE: R8-R10 (LSA packages) handled separately below (need Painless set logic)
         {
             "query": {
                 "bool": {
@@ -745,6 +871,62 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             total_updated += resp.get("updated", 0)
         except Exception:
             continue
+
+    # R8-R10: LSA packages — flag non-default entries
+    _LSA_DEFAULTS = (
+        "msv1_0 kerberos schannel wdigest tspkg pku2u cloudap negoextender scecli rassfm"
+    ).split()
+    for lsa_value_name, lsa_label in [
+        ("Authentication Packages", "Authentication Packages"),
+        ("Security Packages", "Security Packages"),
+        ("Notification Packages", "Notification Packages"),
+    ]:
+        try:
+            resp = client.update_by_query(
+                index=index,
+                body={
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {"wildcard": {"KeyPath.keyword": "*Control\\\\Lsa*"}},
+                                {"term": {"ValueName.keyword": lsa_value_name}},
+                                {"exists": {"field": "ValueData"}},
+                            ]
+                        }
+                    },
+                    "script": {
+                        "source": """
+                            String val = ctx._source['ValueData'].toLowerCase().trim();
+                            String[] entries = /[\\n| ]+/.split(val);
+                            List unknown = new ArrayList();
+                            for (String e : entries) {
+                                String trimmed = e.trim();
+                                if (trimmed.length() > 0 && !params.known.contains(trimmed)) {
+                                    unknown.add(trimmed);
+                                }
+                            }
+                            if (unknown.size() > 0) {
+                                ctx._source['triage.verdict'] = 'SUSPICIOUS';
+                                String r = params.label + ': ' + String.join(', ', unknown);
+                                ctx._source['triage.reason'] = r;
+                                ctx._source['triage.checked'] = true;
+                            } else {
+                                ctx.op = 'noop';
+                            }
+                        """,
+                        "lang": "painless",
+                        "params": {
+                            "known": _LSA_DEFAULTS,
+                            "label": f"Non-default {lsa_label}",
+                        },
+                    },
+                },
+                conflicts="proceed",
+                requests_per_second=1000,
+            )
+            total_updated += resp.get("updated", 0)
+        except Exception:
+            pass
 
     # R4: Winlogon Shell — conditional (not explorer.exe → SUSPICIOUS)
     try:

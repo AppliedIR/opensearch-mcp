@@ -192,11 +192,14 @@ curl -sk -u "admin:$OS_PASSWORD" \
   }]
 }' | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Pipeline:', 'OK' if r.get('acknowledged') else r)" 2>/dev/null
 
-# Apply GeoIP pipeline to any existing evtx indices
-curl -sk -u "admin:$OS_PASSWORD" \
-    -X PUT "$OS_URL/case-*-evtx-*/_settings" \
-    -H "Content-Type: application/json" \
-    -d '{"index.default_pipeline":"vhir-geoip"}' >/dev/null 2>&1 || true
+# Apply GeoIP pipeline to indices with IP fields (decoupled from templates)
+for PATTERN in "case-*-evtx-*" "case-*-iis-*" "case-*-httperr-*" "case-*-firewall-*" "case-*-ssh-*" "case-*-accesslog-*"; do
+    curl -sk -u "admin:$OS_PASSWORD" \
+        -X PUT "$OS_URL/$PATTERN/_settings" \
+        -H "Content-Type: application/json" \
+        -d '{"index.default_pipeline":"vhir-geoip"}' >/dev/null 2>&1 || true
+done
+echo "  Applied GeoIP pipeline to IP-bearing indices"
 
 # --- 8. Security Analytics detector (Phase 4) ---
 echo "Configuring Security Analytics..."

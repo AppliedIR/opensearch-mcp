@@ -803,7 +803,18 @@ def idx_enrich_intel(
             "total_iocs": sum(len(v) for v in iocs.values()),
         }
 
-    return enrich_case(client, cid, force=force)
+    result = enrich_case(client, cid, force=force)
+    audit.log(
+        tool="idx_enrich_intel",
+        params={"case_id": cid, "force": force},
+        result_summary=(
+            f"{result.get('documents_updated', 0)} docs updated, "
+            f"{result.get('malicious', 0)} malicious"
+            if result.get("status") == "complete"
+            else result.get("status", "unknown")
+        ),
+    )
+    return result
 
 
 @server.tool()
@@ -837,11 +848,17 @@ def idx_enrich_triage(
         return results
 
     total_enriched = sum(r.get("enriched", 0) for r in results.values() if isinstance(r, dict))
-    return {
+    resp = {
         "status": "complete",
         "documents_enriched": total_enriched,
         "details": results,
     }
+    audit.log(
+        tool="idx_enrich_triage",
+        params={"case_id": cid},
+        result_summary=f"{total_enriched} docs enriched",
+    )
+    return resp
 
 
 def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):
