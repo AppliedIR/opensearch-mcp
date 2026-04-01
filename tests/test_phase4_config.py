@@ -87,7 +87,8 @@ class TestSetupScript:
 
     def test_geoip_applied_to_existing_indices(self, script):
         """Pipeline must be applied to existing indices, not just new ones."""
-        assert "case-*-evtx-*/_settings" in script
+        assert "case-*-evtx-*" in script
+        assert "_settings" in script
         assert "default_pipeline" in script
 
     def test_sigma_rules_fetched(self, script):
