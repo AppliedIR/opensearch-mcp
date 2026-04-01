@@ -265,9 +265,7 @@ def _batch_stamp_verdicts(
             chunk_params = dict(params)
             if "reason_map" in chunk_params:
                 chunk_params["reason_map"] = {
-                    p: params["reason_map"][p]
-                    for p in chunk
-                    if p in params["reason_map"]
+                    p: params["reason_map"][p] for p in chunk if p in params["reason_map"]
                 }
             try:
                 resp = client.update_by_query(
