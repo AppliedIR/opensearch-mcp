@@ -148,11 +148,10 @@ def _enrich_file_artifact(
         return {"status": "complete", "checked": len(buckets), "enriched": 0}
 
     # Step 3: Update documents with verdicts
+    # Stamp all verdicts including EXPECTED/UNKNOWN so triage.checked: true
+    # distinguishes "checked, nothing suspicious" from "never checked".
     enriched = 0
     for path, verdict in verdicts.items():
-        if verdict.get("verdict") in ("EXPECTED", "UNKNOWN") and not verdict.get("lolbin"):
-            continue  # Only update SUSPICIOUS, EXPECTED_LOLBIN, or UNKNOWN with extra info
-
         script_lines = [
             "ctx._source['triage.verdict'] = params.verdict",
             "ctx._source['triage.checked'] = true",

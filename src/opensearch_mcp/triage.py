@@ -36,6 +36,7 @@ def init_triage_db(kg_path: Path | None = None, ctx_path: Path | None = None) ->
 
     search_dirs = [
         vhir_dir() / "data",
+        vhir_dir() / "src" / "sift-mcp" / "packages" / "windows-triage" / "data",
         Path("/opt/vhir/data"),
     ]
     # Also check sibling of opensearch-mcp (sift-mcp/packages/windows-triage/data/)
@@ -389,6 +390,27 @@ def enrich_document(doc: dict, artifact_type: str) -> dict:
                 image_path = event_data.get("ImagePath", "")
                 if service_name:
                     triage = check_service(service_name, image_path)
+
+    elif artifact_type == "evtxecmd":
+        # EvtxECmd CSV uses EventId (not event.code) and different column names
+        try:
+            event_id = int(doc.get("EventId", 0))
+        except (ValueError, TypeError):
+            event_id = 0
+        if event_id in (4688, 1):
+            # ExecutableInfo has the new process path
+            proc = doc.get("ExecutableInfo", "") or doc.get("PayloadData1", "")
+            if proc:
+                parts = proc.strip().strip('"').replace("/", "\\").rsplit("\\", 1)
+                filename = parts[-1].split()[0] if parts else ""
+                directory = parts[0] if len(parts) > 1 else ""
+                triage = check_file(filename, directory)
+        elif event_id == 7045:
+            # PayloadData1 has ServiceName, PayloadData2 has ImagePath
+            service_name = doc.get("PayloadData1", "")
+            image_path = doc.get("PayloadData2", "")
+            if service_name:
+                triage = check_service(service_name, image_path)
 
     elif artifact_type in ("vol-pslist", "vol-pstree", "vol-psscan"):
         filename = doc.get("ImageFileName", "")
