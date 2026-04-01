@@ -135,6 +135,9 @@ def _enrich_file_artifact(
             )
             break
         path = bucket["key"]
+        # Skip non-path entries (AppX metadata, hex strings, empty)
+        if not path or not (path[0] in ("\\", "/") or (len(path) > 1 and path[1] == ":")):
+            continue
         try:
             result = call_tool("check_file", {"path": path}, timeout=15)
             consecutive_failures = 0
