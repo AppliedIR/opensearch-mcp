@@ -72,6 +72,8 @@ echo "Cluster status: $STATUS"
 TEMPLATE_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/evtx_ecs_template.json"
 if [ -f "$TEMPLATE_FILE" ]; then
     echo "Registering ECS index template..."
+    # Delete legacy template name if it exists (renamed from vhir-evtx to vhir-evtx-ecs)
+    curl -sk -u "admin:$OS_PASSWORD" -X DELETE "$OS_URL/_index_template/vhir-evtx" >/dev/null 2>&1 || true
     curl -sk -u "admin:$OS_PASSWORD" \
         -X PUT "$OS_URL/_index_template/vhir-evtx-ecs" \
         -H "Content-Type: application/json" \

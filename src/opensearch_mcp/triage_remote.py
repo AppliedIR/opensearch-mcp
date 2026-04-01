@@ -52,15 +52,15 @@ def enrich_remote(
     # File enrichment (check_file)
     # Fields with .keyword: dynamically mapped text fields (no explicit template mapping).
     # Fields without: explicitly mapped as keyword in their template.
+    # Vol3 pslist/pstree/psscan excluded: ImageFileName is a bare 14-char name
+    # (no path) — check_file gives wrong is_system_path, all system procs → SUSPICIOUS.
+    # Vol3 dlllist uses Path (full Windows path), not Name (bare DLL name).
     for name, suffix, field, query in [
         ("shimcache", "shimcache", "Path.keyword", "*"),
         ("amcache", "amcache", "FullPath.keyword", "*"),
         ("evtx_proc", "evtx", "process.name", "event.code:(4688 OR 1)"),
         ("tasks", "tasks", "task.command", "*"),
-        ("vol_pslist", "vol-pslist", "ImageFileName.keyword", "*"),
-        ("vol_pstree", "vol-pstree", "ImageFileName.keyword", "*"),
-        ("vol_psscan", "vol-psscan", "ImageFileName.keyword", "*"),
-        ("vol_dlls", "vol-dlllist", "Name.keyword", "*"),
+        ("vol_dlls", "vol-dlllist", "Path.keyword", "*"),
     ]:
         results[name] = _enrich_file_artifact(
             client,
