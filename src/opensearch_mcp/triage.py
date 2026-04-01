@@ -29,6 +29,7 @@ def init_triage_db(kg_path: Path | None = None, ctx_path: Path | None = None) ->
         _CTX_PATH = ctx_path
 
     if _KG_PATH and _CTX_PATH:
+        _MODE = "local"
         return True
 
     # Auto-discover from common locations
