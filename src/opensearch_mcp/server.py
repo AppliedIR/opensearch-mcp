@@ -89,7 +89,7 @@ def idx_search(
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
-        index: Index pattern (default: all evtx indices).
+        index: Index pattern (default: case-*, all artifact types).
         limit: Max results (default 50, max 200).
         sort: Sort field:order (default @timestamp:desc).
     """
@@ -395,6 +395,10 @@ def idx_ingest(
 
     Case ID is read from ~/.vhir/active_case. Not accepted as a
     parameter — set via 'vhir case activate'.
+
+    Triage enrichment runs automatically during ingest when the Windows
+    baseline database is available (local SQLite or remote via gateway).
+    Use idx_enrich_triage to re-run on already-indexed data.
 
     Args:
         path: Directory containing evidence (triage package, mounted image).
@@ -800,6 +804,44 @@ def idx_enrich_intel(
         }
 
     return enrich_case(client, cid, force=force)
+
+
+@server.tool()
+def idx_enrich_triage(
+    case_id: str = "",
+) -> dict:
+    """Run triage baseline enrichment on already-indexed data.
+
+    Checks indexed filenames and services against the Windows baseline
+    database (known_good.db) via the gateway. Stamps documents with
+    triage.verdict (EXPECTED, SUSPICIOUS, UNKNOWN, EXPECTED_LOLBIN).
+
+    Use this after ingesting evidence to add baseline context, or to
+    re-enrich after the triage database is updated.
+
+    Requires gateway with windows-triage-mcp backend running.
+
+    Args:
+        case_id: Case to enrich (default: active case).
+    """
+    from opensearch_mcp.triage_remote import enrich_remote
+
+    cid = case_id or _get_active_case()
+    if not cid:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+
+    client = _get_os()
+    results = enrich_remote(client, cid)
+
+    if "error" in results:
+        return results
+
+    total_enriched = sum(r.get("enriched", 0) for r in results.values() if isinstance(r, dict))
+    return {
+        "status": "complete",
+        "documents_enriched": total_enriched,
+        "details": results,
+    }
 
 
 def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):

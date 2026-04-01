@@ -13,6 +13,8 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
 
+csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
+
 
 def _detect_encoding(path: Path) -> str:
     """Detect CSV encoding from BOM.

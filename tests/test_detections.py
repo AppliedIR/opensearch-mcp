@@ -424,4 +424,4 @@ class TestDetectionsToolRegistration:
             for name, obj in inspect.getmembers(srv)
             if callable(obj) and name.startswith("idx_") and not name.startswith("_")
         ]
-        assert len(tool_names) == 15
+        assert len(tool_names) == 16

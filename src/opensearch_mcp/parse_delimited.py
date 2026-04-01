@@ -12,6 +12,8 @@ from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _detect_encoding, _doc_id
 from opensearch_mcp.paths import auto_detect_time_field
 
+csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
+
 _DELIM_VOLATILE = {
     "host.name",
     "pipeline_version",
