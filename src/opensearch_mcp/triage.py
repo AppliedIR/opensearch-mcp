@@ -71,7 +71,7 @@ def init_triage_db(kg_path: Path | None = None, ctx_path: Path | None = None) ->
             _call_gateway_tool(
                 base_url,
                 config.get("token", ""),
-                "mcp__windows-triage__get_health",
+                "windows-triage-mcp__get_health",
                 {},
             )
             _MODE = "remote"

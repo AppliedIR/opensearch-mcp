@@ -108,7 +108,7 @@ def run_windows_tool(
 
     base_url = _get_gateway_base_url(config)
     token = config.get("token", "")
-    tool_name = "mcp__wintools-mcp__run_windows_command"
+    tool_name = "run_windows_command"
 
     arguments: dict = {
         "command": command,

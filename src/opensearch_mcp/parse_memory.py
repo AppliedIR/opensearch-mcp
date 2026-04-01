@@ -293,7 +293,7 @@ def _register_memory_evidence(image_path: Path, hostname: str) -> None:
         _call_gateway_tool(
             base_url,
             config.get("token", ""),
-            "mcp__case-mcp__evidence_register",
+            "evidence_register",
             {
                 "path": str(image_path),
                 "description": f"Memory image from {hostname} (vol3 analysis)",

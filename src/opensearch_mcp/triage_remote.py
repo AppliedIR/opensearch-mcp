@@ -136,7 +136,7 @@ def _enrich_file_artifact(
             result = _call_gateway_tool(
                 base_url,
                 token,
-                "mcp__windows-triage__check_file",
+                "check_file",
                 {"path": path},
             )
             if result.get("verdict"):

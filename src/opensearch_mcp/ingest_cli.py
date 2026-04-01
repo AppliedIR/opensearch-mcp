@@ -61,7 +61,7 @@ def _ensure_case_active(case_id: str) -> None:
             _call_gateway_tool(
                 base_url,
                 config.get("token", ""),
-                "mcp__case-mcp__case_activate",
+                "case_activate",
                 {"case_id": case_id},
             )
             return
