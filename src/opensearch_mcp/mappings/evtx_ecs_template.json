@@ -1,5 +1,7 @@
 {
-  "index_patterns": ["case-*-evtx-*"],
+  "index_patterns": [
+    "case-*-evtx-*"
+  ],
   "template": {
     "settings": {
       "index.mapping.total_fields.limit": 5000,
@@ -11,42 +13,115 @@
           "winlog_event_data_strings": {
             "path_match": "winlog.event_data.*",
             "match_mapping_type": "string",
-            "mapping": {"type": "keyword", "ignore_above": 1024}
+            "mapping": {
+              "type": "keyword",
+              "ignore_above": 1024
+            }
           }
         }
       ],
       "properties": {
-        "event.code": {"type": "integer"},
-        "winlog.event_id": {"type": "integer"},
-        "@timestamp": {"type": "date"},
-        "source.ip": {"type": "ip", "ignore_malformed": true},
-        "host.name": {"type": "keyword"},
-        "user.name": {"type": "keyword"},
-        "user.effective.name": {"type": "keyword"},
-        "winlog.channel": {"type": "keyword"},
-        "winlog.provider_name": {"type": "keyword"},
-        "winlog.logon.type": {"type": "keyword"},
-        "process.name": {"type": "keyword"},
+        "event.code": {
+          "type": "integer"
+        },
+        "winlog.event_id": {
+          "type": "integer"
+        },
+        "@timestamp": {
+          "type": "date"
+        },
+        "source.ip": {
+          "type": "ip",
+          "ignore_malformed": true
+        },
+        "host.name": {
+          "type": "keyword"
+        },
+        "user.name": {
+          "type": "keyword"
+        },
+        "user.effective.name": {
+          "type": "keyword"
+        },
+        "winlog.channel": {
+          "type": "keyword"
+        },
+        "winlog.provider_name": {
+          "type": "keyword"
+        },
+        "winlog.logon.type": {
+          "type": "keyword"
+        },
+        "process.name": {
+          "type": "keyword"
+        },
         "process.command_line": {
           "type": "text",
-          "fields": {"keyword": {"type": "keyword", "ignore_above": 2048}}
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 2048
+            }
+          }
         },
-        "process.parent.name": {"type": "keyword"},
-        "file.path": {"type": "keyword"},
-        "script_block_text": {"type": "text"},
+        "process.parent.name": {
+          "type": "keyword"
+        },
+        "file.path": {
+          "type": "keyword"
+        },
+        "script_block_text": {
+          "type": "text"
+        },
         "winlog.event_data.ScriptBlockText": {
-          "type": "keyword", "ignore_above": 32766
+          "type": "keyword",
+          "ignore_above": 32766
         },
-        "pipeline_version": {"type": "keyword"},
-        "vhir.source_file": {"type": "keyword"},
-        "vhir.ingest_audit_id": {"type": "keyword"},
-        "vhir.vss_id": {"type": "keyword"},
-        "vhir.parse_method": {"type": "keyword"},
-        "source.geo.country_name": {"type": "keyword"},
-        "source.geo.city_name": {"type": "keyword"},
-        "source.geo.continent_name": {"type": "keyword"},
-        "source.geo.region_name": {"type": "keyword"},
-        "source.geo.location": {"type": "geo_point"}
+        "pipeline_version": {
+          "type": "keyword"
+        },
+        "vhir.source_file": {
+          "type": "keyword"
+        },
+        "vhir.ingest_audit_id": {
+          "type": "keyword"
+        },
+        "vhir.vss_id": {
+          "type": "keyword"
+        },
+        "vhir.parse_method": {
+          "type": "keyword"
+        },
+        "source.geo.country_name": {
+          "type": "keyword"
+        },
+        "source.geo.city_name": {
+          "type": "keyword"
+        },
+        "source.geo.continent_name": {
+          "type": "keyword"
+        },
+        "source.geo.region_name": {
+          "type": "keyword"
+        },
+        "source.geo.location": {
+          "type": "geo_point"
+        },
+        "triage.verdict": {
+          "type": "keyword"
+        },
+        "triage.reason": {
+          "type": "keyword"
+        },
+        "triage.lolbin": {
+          "type": "boolean"
+        },
+        "triage.checked": {
+          "type": "boolean"
+        },
+        "triage.expected_paths": {
+          "type": "keyword"
+        }
       }
     }
   }

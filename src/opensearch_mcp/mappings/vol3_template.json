@@ -1,30 +1,92 @@
 {
-  "index_patterns": ["case-*-vol-*"],
+  "index_patterns": [
+    "case-*-vol-*"
+  ],
   "template": {
     "settings": {
       "index.mapping.total_fields.limit": 500
     },
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date", "ignore_malformed": true},
-        "PID": {"type": "integer"},
-        "PPID": {"type": "integer"},
-        "Threads": {"type": "integer"},
-        "Handles": {"type": "integer"},
-        "SessionId": {"type": "integer"},
-        "CreateTime": {"type": "date", "ignore_malformed": true},
-        "ExitTime": {"type": "date", "ignore_malformed": true},
-        "Created": {"type": "date", "ignore_malformed": true},
-        "LoadTime": {"type": "date", "ignore_malformed": true},
-        "LastModified": {"type": "date", "ignore_malformed": true},
-        "LastWriteTime": {"type": "date", "ignore_malformed": true},
-        "LocalPort": {"type": "integer"},
-        "ForeignPort": {"type": "integer"},
-        "host.name": {"type": "keyword"},
-        "vhir.source_file": {"type": "keyword"},
-        "vhir.ingest_audit_id": {"type": "keyword"},
-        "vhir.parse_method": {"type": "keyword"},
-        "pipeline_version": {"type": "keyword"}
+        "@timestamp": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "PID": {
+          "type": "integer"
+        },
+        "PPID": {
+          "type": "integer"
+        },
+        "Threads": {
+          "type": "integer"
+        },
+        "Handles": {
+          "type": "integer"
+        },
+        "SessionId": {
+          "type": "integer"
+        },
+        "CreateTime": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "ExitTime": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "Created": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LoadTime": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastModified": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastWriteTime": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LocalPort": {
+          "type": "integer"
+        },
+        "ForeignPort": {
+          "type": "integer"
+        },
+        "host.name": {
+          "type": "keyword"
+        },
+        "vhir.source_file": {
+          "type": "keyword"
+        },
+        "vhir.ingest_audit_id": {
+          "type": "keyword"
+        },
+        "vhir.parse_method": {
+          "type": "keyword"
+        },
+        "pipeline_version": {
+          "type": "keyword"
+        },
+        "triage.verdict": {
+          "type": "keyword"
+        },
+        "triage.reason": {
+          "type": "keyword"
+        },
+        "triage.lolbin": {
+          "type": "boolean"
+        },
+        "triage.checked": {
+          "type": "boolean"
+        },
+        "triage.expected_paths": {
+          "type": "keyword"
+        }
       }
     }
   },

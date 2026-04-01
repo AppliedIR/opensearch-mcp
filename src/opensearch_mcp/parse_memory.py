@@ -257,6 +257,15 @@ def _index_vol3_records(
         if pipeline_version:
             record["pipeline_version"] = pipeline_version
 
+        try:
+            from opensearch_mcp.triage import enrich_document, get_triage_mode
+
+            suffix = _plugin_to_index_suffix(plugin)
+            if get_triage_mode() == "local":
+                enrich_document(record, suffix)
+        except ImportError:
+            pass
+
         actions.append({"_index": index_name, "_id": doc_id, "_source": record})
 
         if len(actions) >= 500:

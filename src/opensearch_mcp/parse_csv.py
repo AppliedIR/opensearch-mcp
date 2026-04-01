@@ -145,6 +145,16 @@ def ingest_csv(
             if parse_method:
                 row["vhir.parse_method"] = parse_method
 
+            # Triage enrichment (after ID + provenance)
+            if parse_method:
+                try:
+                    from opensearch_mcp.triage import enrich_document, get_triage_mode
+
+                    if get_triage_mode() == "local":
+                        enrich_document(row, parse_method)
+                except ImportError:
+                    pass
+
             actions.append({"_index": index_name, "_id": _id, "_source": row})
 
             if len(actions) >= 1000:

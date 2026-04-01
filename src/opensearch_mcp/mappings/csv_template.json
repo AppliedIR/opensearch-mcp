@@ -1,32 +1,96 @@
 {
   "index_patterns": [
-    "case-*-amcache-*", "case-*-shimcache-*",
-    "case-*-mft-*", "case-*-usn-*",
-    "case-*-registry-*", "case-*-shellbags-*",
-    "case-*-jumplists-*", "case-*-lnk-*",
-    "case-*-recyclebin-*", "case-*-timeline-*",
+    "case-*-amcache-*",
+    "case-*-shimcache-*",
+    "case-*-mft-*",
+    "case-*-usn-*",
+    "case-*-registry-*",
+    "case-*-shellbags-*",
+    "case-*-jumplists-*",
+    "case-*-lnk-*",
+    "case-*-recyclebin-*",
+    "case-*-timeline-*",
     "case-*-srum-*"
   ],
   "template": {
     "mappings": {
       "properties": {
-        "host.name": {"type": "keyword"},
-        "vhir.source_file": {"type": "keyword"},
-        "vhir.ingest_audit_id": {"type": "keyword"},
-        "vhir.table": {"type": "keyword"},
-        "vhir.vss_id": {"type": "keyword"},
-        "pipeline_version": {"type": "keyword"},
-        "vhir.parse_method": {"type": "keyword"},
-        "FileKeyLastWriteTimestamp": {"type": "date", "ignore_malformed": true},
-        "LastModifiedTimeUTC": {"type": "date", "ignore_malformed": true},
-        "LastWriteTimestamp": {"type": "date", "ignore_malformed": true},
-        "LastInteracted": {"type": "date", "ignore_malformed": true},
-        "LastModified": {"type": "date", "ignore_malformed": true},
-        "TargetModified": {"type": "date", "ignore_malformed": true},
-        "DeletedOn": {"type": "date", "ignore_malformed": true},
-        "Created0x10": {"type": "date", "ignore_malformed": true},
-        "UpdateTimestamp": {"type": "date", "ignore_malformed": true},
-        "LastModifiedTime": {"type": "date", "ignore_malformed": true}
+        "host.name": {
+          "type": "keyword"
+        },
+        "vhir.source_file": {
+          "type": "keyword"
+        },
+        "vhir.ingest_audit_id": {
+          "type": "keyword"
+        },
+        "vhir.table": {
+          "type": "keyword"
+        },
+        "vhir.vss_id": {
+          "type": "keyword"
+        },
+        "pipeline_version": {
+          "type": "keyword"
+        },
+        "vhir.parse_method": {
+          "type": "keyword"
+        },
+        "FileKeyLastWriteTimestamp": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastModifiedTimeUTC": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastWriteTimestamp": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastInteracted": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastModified": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "TargetModified": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "DeletedOn": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "Created0x10": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "UpdateTimestamp": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "LastModifiedTime": {
+          "type": "date",
+          "ignore_malformed": true
+        },
+        "triage.verdict": {
+          "type": "keyword"
+        },
+        "triage.reason": {
+          "type": "keyword"
+        },
+        "triage.lolbin": {
+          "type": "boolean"
+        },
+        "triage.checked": {
+          "type": "boolean"
+        },
+        "triage.expected_paths": {
+          "type": "keyword"
+        }
       }
     }
   },

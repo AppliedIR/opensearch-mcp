@@ -1,25 +1,76 @@
 {
-  "index_patterns": ["case-*-tasks-*"],
+  "index_patterns": [
+    "case-*-tasks-*"
+  ],
   "template": {
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date"},
-        "task.name": {"type": "keyword"},
-        "task.author": {"type": "keyword"},
-        "task.command": {"type": "keyword"},
-        "task.arguments": {"type": "text"},
-        "task.trigger_types": {"type": "keyword"},
-        "task.user_id": {"type": "keyword"},
-        "task.run_level": {"type": "keyword"},
-        "task.enabled": {"type": "boolean"},
-        "task.is_system": {"type": "boolean"},
-        "task.description": {"type": "text"},
-        "task.xml": {"type": "text"},
-        "host.name": {"type": "keyword"},
-        "vhir.source_file": {"type": "keyword"},
-        "vhir.ingest_audit_id": {"type": "keyword"},
-        "vhir.parse_method": {"type": "keyword"},
-        "pipeline_version": {"type": "keyword"}
+        "@timestamp": {
+          "type": "date"
+        },
+        "task.name": {
+          "type": "keyword"
+        },
+        "task.author": {
+          "type": "keyword"
+        },
+        "task.command": {
+          "type": "keyword"
+        },
+        "task.arguments": {
+          "type": "text"
+        },
+        "task.trigger_types": {
+          "type": "keyword"
+        },
+        "task.user_id": {
+          "type": "keyword"
+        },
+        "task.run_level": {
+          "type": "keyword"
+        },
+        "task.enabled": {
+          "type": "boolean"
+        },
+        "task.is_system": {
+          "type": "boolean"
+        },
+        "task.description": {
+          "type": "text"
+        },
+        "task.xml": {
+          "type": "text"
+        },
+        "host.name": {
+          "type": "keyword"
+        },
+        "vhir.source_file": {
+          "type": "keyword"
+        },
+        "vhir.ingest_audit_id": {
+          "type": "keyword"
+        },
+        "vhir.parse_method": {
+          "type": "keyword"
+        },
+        "pipeline_version": {
+          "type": "keyword"
+        },
+        "triage.verdict": {
+          "type": "keyword"
+        },
+        "triage.reason": {
+          "type": "keyword"
+        },
+        "triage.lolbin": {
+          "type": "boolean"
+        },
+        "triage.checked": {
+          "type": "boolean"
+        },
+        "triage.expected_paths": {
+          "type": "keyword"
+        }
       }
     }
   },

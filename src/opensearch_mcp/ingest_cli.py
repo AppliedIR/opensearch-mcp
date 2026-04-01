@@ -224,6 +224,22 @@ def cmd_scan(args: argparse.Namespace) -> None:
             )
             tz_override = None
 
+    # Triage enrichment init
+    triage_mode = "unavailable"
+    if not getattr(args, "no_triage", False):
+        from opensearch_mcp.triage import get_triage_mode, init_triage_db
+
+        triage_db = getattr(args, "triage_db", None)
+        kg_path = Path(triage_db) if triage_db else None
+        init_triage_db(kg_path=kg_path)
+        triage_mode = get_triage_mode()
+        if triage_mode == "local":
+            print("Triage enrichment: local DB (baseline checks during ingest)")
+        elif triage_mode == "remote":
+            print("Triage enrichment: remote (batch enrichment after ingest)")
+        else:
+            print("Triage DB not found — skipping baseline enrichment")
+
     # Log file filter — ON by default, --all-logs disables
     reduced_log_names = None
     if not getattr(args, "all_logs", False):
@@ -495,6 +511,29 @@ def cmd_scan(args: argparse.Namespace) -> None:
             print(f"\n{len(errors)} issue(s):")
             for msg in errors:
                 print(f"  {msg}")
+
+        # Post-ingest remote triage enrichment
+        if triage_mode == "remote":
+            print("\nRunning remote triage enrichment...")
+            from opensearch_mcp.triage_remote import enrich_remote
+
+            def _triage_progress(event, **kw):
+                if event == "triage_start":
+                    print(
+                        f"  {kw['artifact']}: checking {kw['unique_values']} unique values...",
+                        end=" ",
+                        flush=True,
+                    )
+                elif event == "triage_done":
+                    print(f"{kw['enriched']} enriched")
+
+            triage_results = enrich_remote(
+                client=client, case_id=case_id, on_progress=_triage_progress
+            )
+            total_enriched = sum(
+                r.get("enriched", 0) for r in triage_results.values() if isinstance(r, dict)
+            )
+            print(f"Triage enrichment complete: {total_enriched} documents updated")
 
     finally:
         mount_ctx.cleanup()
@@ -1050,6 +1089,8 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
         help="Reserved — parallel parsing not yet implemented",
     )
     p.add_argument("--yes", action="store_true", help="Skip confirmation")
+    p.add_argument("--no-triage", action="store_true", help="Skip triage baseline enrichment")
+    p.add_argument("--triage-db", help="Path to triage known_good.db")
 
 
 if __name__ == "__main__":
