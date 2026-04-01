@@ -740,6 +740,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                     },
                 },
                 conflicts="proceed",
+                requests_per_second=1000,
             )
             total_updated += resp.get("updated", 0)
         except Exception:
@@ -777,6 +778,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 },
             },
             conflicts="proceed",
+            requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
     except Exception:
@@ -813,6 +815,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 },
             },
             conflicts="proceed",
+            requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
     except Exception:
@@ -847,6 +850,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 },
             },
             conflicts="proceed",
+            requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
     except Exception:
@@ -892,6 +896,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 },
             },
             conflicts="proceed",
+            requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
     except Exception:
