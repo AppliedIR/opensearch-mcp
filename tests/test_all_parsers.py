@@ -19,6 +19,9 @@ import pytest
 
 _TEST_DATA = Path("/tmp/opensearch-test-data")
 
+# Skip all fixture-dependent tests when test data is not present (CI)
+pytestmark = pytest.mark.skipif(not _TEST_DATA.is_dir(), reason="test fixtures not present")
+
 
 def _collect(module_path):
     """Helper: returns (mock_bulk, collected_actions) for patching flush_bulk."""
