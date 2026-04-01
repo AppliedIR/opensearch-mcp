@@ -28,8 +28,11 @@ def register(subparsers, registered: set) -> None:
         p.add_argument("--vss", action="store_true", help="Include volume shadow copies")
         p.add_argument("--parallel", type=int, default=4, help=argparse.SUPPRESS)
         p.add_argument("--yes", action="store_true", help="Skip confirmation")
-        p.add_argument("--no-triage", action="store_true", help="Skip triage enrichment")
-        p.add_argument("--triage-db", help="Path to triage known_good.db")
+        p.add_argument(
+            "--skip-triage",
+            action="store_true",
+            help="Skip post-ingest triage baseline enrichment",
+        )
         p.set_defaults(func=_cmd_ingest)
         registered.add("ingest")
 

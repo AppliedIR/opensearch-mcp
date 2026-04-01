@@ -257,14 +257,6 @@ def _index_vol3_records(
         if pipeline_version:
             record["pipeline_version"] = pipeline_version
 
-        try:
-            from opensearch_mcp.triage import enrich_document
-
-            suffix = _plugin_to_index_suffix(plugin)
-            enrich_document(record, suffix)
-        except ImportError:
-            pass
-
         actions.append({"_index": index_name, "_id": doc_id, "_source": record})
 
         if len(actions) >= 500:
@@ -284,15 +276,9 @@ def _index_vol3_records(
 def _register_memory_evidence(image_path: Path, hostname: str) -> None:
     """Register memory image with case-mcp (best-effort)."""
     try:
-        from opensearch_mcp.wintools import _call_gateway_tool, _load_gateway_config
+        from opensearch_mcp.gateway import call_tool
 
-        config = _load_gateway_config()
-        if not config or not config.get("url"):
-            return
-        base_url = config["url"].split("/mcp/")[0]
-        _call_gateway_tool(
-            base_url,
-            config.get("token", ""),
+        call_tool(
             "evidence_register",
             {
                 "path": str(image_path),

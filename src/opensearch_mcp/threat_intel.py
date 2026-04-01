@@ -8,23 +8,26 @@ from datetime import datetime, timezone
 
 from opensearchpy import OpenSearch
 
+# Fields for aggregation and term queries.
+# Explicitly-mapped keyword/ip fields use bare names.
+# Dynamically-mapped text fields need .keyword suffix.
 _IP_FIELDS = [
-    "source.ip",
-    "ForeignAddr",
-    "LocalAddr",
+    "source.ip",  # explicit ip type in evtx/accesslog/w3c templates
+    "ForeignAddr.keyword",  # dynamic in vol3_template
+    "LocalAddr.keyword",  # dynamic in vol3_template
 ]
 
 _HASH_FIELDS = [
-    "SHA1",
-    "SHA256",
-    "MD5",
+    "SHA1.keyword",  # dynamic in csv_template
+    "SHA256.keyword",  # dynamic in csv_template
+    "MD5.keyword",  # dynamic in csv_template
 ]
 
 _DOMAIN_FIELDS = [
-    "dns.query",
-    "query",
-    "source_host",
-    "server_name",
+    "dns.query.keyword",  # dynamic in json_template
+    "query.keyword",  # dynamic in json/delimited
+    "source_host.keyword",  # dynamic (B36 renamed field)
+    "server_name.keyword",  # dynamic in delimited
 ]
 
 
@@ -97,18 +100,15 @@ def batch_lookup(
 
     Returns {ioc_value: result_dict} for found IOCs only.
     """
-    from opensearch_mcp.wintools import _call_gateway_tool, _load_gateway_config
+    from opensearch_mcp.gateway import call_tool, gateway_available
 
-    config = _load_gateway_config()
-    if not config or not config.get("url"):
+    if not gateway_available():
         print(
             "WARNING: Gateway not configured — skipping OpenCTI lookup",
             file=sys.stderr,
         )
         return {}
 
-    base_url = config["url"].split("/mcp/")[0] if "/mcp/" in config["url"] else config["url"]
-    token = config.get("token", "")
     results = {}
     total = sum(len(v) for v in iocs.values())
     done = 0
@@ -119,13 +119,7 @@ def batch_lookup(
             if on_progress and done % 50 == 0:
                 on_progress("looking_up", done=done, total=total)
             try:
-                resp = _call_gateway_tool(
-                    base_url,
-                    token,
-                    "lookup_ioc",
-                    {"ioc": value},
-                    timeout=15,
-                )
+                resp = call_tool("lookup_ioc", {"ioc": value}, timeout=15)
 
                 if not resp.get("found", False):
                     # Mark as checked (no verdict) so --force skip works

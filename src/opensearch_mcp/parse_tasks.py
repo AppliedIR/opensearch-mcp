@@ -147,13 +147,6 @@ def parse_tasks_dir(
         if vss_id:
             doc["vhir.vss_id"] = vss_id
 
-        try:
-            from opensearch_mcp.triage import enrich_document
-
-            enrich_document(doc, "tasks")
-        except ImportError:
-            pass
-
         from opensearch_mcp.paths import relative_evidence_path
 
         rel = relative_evidence_path(task_file, volume_root) if volume_root else str(task_file)

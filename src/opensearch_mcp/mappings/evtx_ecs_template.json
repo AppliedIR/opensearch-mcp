@@ -122,6 +122,9 @@
         "triage.expected_paths": {
           "type": "keyword"
         },
+        "triage.confidence": {
+          "type": "keyword"
+        },
         "threat_intel.verdict": {
           "type": "keyword"
         },

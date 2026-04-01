@@ -84,14 +84,6 @@ def parse_and_index(
             doc["vhir.vss_id"] = vss_id
         doc["vhir.parse_method"] = "pyevtx-rs"
 
-        # Triage enrichment (after ID + provenance)
-        try:
-            from opensearch_mcp.triage import enrich_document
-
-            enrich_document(doc, "evtx")
-        except ImportError:
-            pass
-
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 
         if len(actions) >= 1000:
