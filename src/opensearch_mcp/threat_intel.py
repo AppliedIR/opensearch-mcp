@@ -128,6 +128,13 @@ def batch_lookup(
                 )
 
                 if not resp.get("found", False):
+                    # Mark as checked (no verdict) so --force skip works
+                    results[value] = {
+                        "threat_intel.checked": True,
+                        "threat_intel.ioc_type": ioc_type,
+                        "threat_intel.ioc_value": value,
+                        "threat_intel.source": "opencti",
+                    }
                     continue
 
                 confidence = resp.get("confidence", 0) or 0
