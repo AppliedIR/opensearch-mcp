@@ -20,6 +20,23 @@ from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 
+
+def _register_evidence(file_path: str, hostname: str, artifact_type: str) -> None:
+    """Best-effort evidence registration via gateway."""
+    try:
+        from opensearch_mcp.gateway import call_tool
+
+        call_tool(
+            "evidence_register",
+            {
+                "path": file_path,
+                "description": f"Ingested {artifact_type} from {hostname}",
+            },
+        )
+    except Exception:
+        pass
+
+
 # Artifacts handled by Plaso/wintools (not EZ tools on Linux)
 _PLASO_ARTIFACTS = {"prefetch", "srum"}
 
@@ -383,6 +400,7 @@ def _ingest_hosts(
                         ar.skipped += sk
                         ar.bulk_failed += bf
                         ar.source_files.append(str(evtx_file))
+                        _register_evidence(str(evtx_file), host.hostname, "evtx")
                         audit.log(
                             tool="ingest_evtx",
                             audit_id=aid,
@@ -547,6 +565,7 @@ def _ingest_hosts(
                 ar.indexed = cnt
                 ar.skipped = sk
                 ar.bulk_failed = bf
+                _register_evidence(str(artifact_path), host.hostname, tool_name)
                 audit.log(
                     tool=f"ingest_{tool_name}",
                     audit_id=aid,
@@ -662,6 +681,7 @@ def _ingest_plaso_artifact(
             )
         ar.indexed = cnt
         ar.bulk_failed = bf
+        _register_evidence(str(artifact_path), host.hostname, tool_name)
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
@@ -761,6 +781,7 @@ def _ingest_custom_artifact(
         ar.indexed = cnt
         ar.skipped = sk
         ar.bulk_failed = bf
+        _register_evidence(str(artifact_path), host.hostname, tool_name)
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,

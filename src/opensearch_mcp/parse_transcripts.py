@@ -246,8 +246,11 @@ def ingest_transcripts(
                 file=sys.stderr,
             )
             continue
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
         doc["host.name"] = hostname
-        doc["vhir.source_file"] = str(f)
+        doc["vhir.source_file"] = rel
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id
         if pipeline_version:
@@ -255,10 +258,6 @@ def ingest_transcripts(
         if vss_id:
             doc["vhir.vss_id"] = vss_id
         doc["vhir.parse_method"] = "transcript-parser"
-
-        from opensearch_mcp.paths import relative_evidence_path
-
-        rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
         id_data = {"source_file": rel}
         if vss_id:
             id_data["vss_id"] = vss_id

@@ -86,8 +86,11 @@ def parse_wer_dir(
             skipped += 1
             continue
 
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(wer_file, volume_root) if volume_root else str(wer_file)
         doc["host.name"] = hostname
-        doc["vhir.source_file"] = str(wer_file)
+        doc["vhir.source_file"] = rel
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id
         if pipeline_version:
@@ -95,10 +98,6 @@ def parse_wer_dir(
         doc["vhir.parse_method"] = "wer-parser"
         if vss_id:
             doc["vhir.vss_id"] = vss_id
-
-        from opensearch_mcp.paths import relative_evidence_path
-
-        rel = relative_evidence_path(wer_file, volume_root) if volume_root else str(wer_file)
         id_input = f"{index_name}:{rel}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})

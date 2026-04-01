@@ -119,7 +119,11 @@ def parse_mplog(
                     continue  # skip noise — only index forensic events
 
                 doc["defender.raw_line"] = line_body
-                doc["vhir.source_file"] = str(log_file)
+                from opensearch_mcp.paths import relative_evidence_path
+
+                doc["vhir.source_file"] = (
+                    relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
+                )
                 if ingest_audit_id:
                     doc["vhir.ingest_audit_id"] = ingest_audit_id
                 if pipeline_version:

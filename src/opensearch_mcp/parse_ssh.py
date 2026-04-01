@@ -53,6 +53,9 @@ def parse_ssh_log(
     actions: list[dict] = []
 
     for log_file in sorted(ssh_dir.rglob("*.log")):
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
         with open(log_file, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -61,7 +64,7 @@ def parse_ssh_log(
 
                 doc: dict = {
                     "host.name": hostname,
-                    "vhir.source_file": str(log_file),
+                    "vhir.source_file": rel,
                 }
 
                 ts_match = _SSH_LINE.match(line)

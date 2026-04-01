@@ -137,8 +137,11 @@ def parse_tasks_dir(
                     # Timezone unknown — remove unreliable timestamp
                     del doc["@timestamp"]
 
+        from opensearch_mcp.paths import relative_evidence_path
+
+        rel = relative_evidence_path(task_file, volume_root) if volume_root else str(task_file)
         doc["host.name"] = hostname
-        doc["vhir.source_file"] = str(task_file)
+        doc["vhir.source_file"] = rel
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id
         if pipeline_version:
@@ -146,10 +149,6 @@ def parse_tasks_dir(
         doc["vhir.parse_method"] = "task-xml"
         if vss_id:
             doc["vhir.vss_id"] = vss_id
-
-        from opensearch_mcp.paths import relative_evidence_path
-
-        rel = relative_evidence_path(task_file, volume_root) if volume_root else str(task_file)
         id_input = f"{index_name}:{rel}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
