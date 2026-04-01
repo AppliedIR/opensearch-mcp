@@ -157,11 +157,9 @@ class TestFieldLimit:
 
 
 class TestGeoIPPipeline:
-    def test_default_pipeline_set(self, settings):
-        assert settings["default_pipeline"] == "vhir-geoip"
-
-    def test_default_pipeline_is_string(self, settings):
-        assert isinstance(settings["default_pipeline"], str)
+    def test_default_pipeline_decoupled(self, settings):
+        """GeoIP pipeline decoupled from template — applied via setup script."""
+        assert "default_pipeline" not in settings
 
 
 # ---------------------------------------------------------------------------

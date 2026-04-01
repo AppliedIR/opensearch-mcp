@@ -118,8 +118,7 @@ class TestSetupScript:
             assert "admin:admin" not in line
 
     def test_template_registration_before_geoip(self, script):
-        """Template must be registered before GeoIP pipeline,
-        because template references the pipeline as default_pipeline."""
+        """Template must be registered before GeoIP pipeline."""
         template_pos = script.find("index_template/vhir-evtx-ecs")
         geoip_pos = script.find("_ingest/pipeline/vhir-geoip")
         assert template_pos < geoip_pos, "Template must be registered before GeoIP pipeline"
@@ -137,12 +136,15 @@ class TestSetupScript:
 
 
 class TestTemplateCoherence:
-    def test_default_pipeline_matches_created_pipeline(self):
-        """Template's default_pipeline name must match the pipeline created in setup."""
+    def test_geoip_pipeline_applied_via_settings(self):
+        """GeoIP pipeline applied post-hoc via _settings API, not in template."""
         template = json.loads(_TEMPLATE_PATH.read_text())
-        pipeline_name = template["template"]["settings"]["default_pipeline"]
+        settings = template.get("template", {}).get("settings", {})
+        assert "default_pipeline" not in settings, (
+            "default_pipeline decoupled from template — applied in setup script"
+        )
         script = _SETUP_SCRIPT.read_text()
-        assert f"pipeline/{pipeline_name}" in script
+        assert "vhir-geoip" in script
 
     def test_geo_fields_in_template(self):
         """All GeoIP output fields must have explicit mappings to avoid
