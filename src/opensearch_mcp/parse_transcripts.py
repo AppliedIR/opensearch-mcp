@@ -165,7 +165,9 @@ def parse_transcript(file_path: Path, system_timezone: str | None = None) -> dic
         elif line.startswith("Host Application: "):
             app = line[18:].strip()
             app_parts = app.split(None, 1)
-            doc["process.name"] = Path(app_parts[0]).name if app_parts else app
+            # rsplit handles Windows backslash paths on Linux (Path().name doesn't)
+            exe = app_parts[0] if app_parts else app
+            doc["process.name"] = exe.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
             if len(app_parts) > 1:
                 doc["process.args"] = app_parts[1]
             doc["transcript.session_type"] = _detect_session_type(app)

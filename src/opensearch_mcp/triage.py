@@ -197,6 +197,15 @@ def check_service(service_name: str, image_path: str = "") -> dict:
     return result
 
 
+def _suspicious(reason: str) -> dict:
+    """Shorthand for a SUSPICIOUS triage result."""
+    return {
+        "triage.checked": True,
+        "triage.verdict": "SUSPICIOUS",
+        "triage.reason": reason,
+    }
+
+
 def enrich_document(doc: dict, artifact_type: str) -> dict:
     """Add triage.* fields to a document based on artifact type.
 
@@ -222,18 +231,140 @@ def enrich_document(doc: dict, artifact_type: str) -> dict:
 
     elif artifact_type == "registry":
         key_path = doc.get("KeyPath", "")
+        value_name = doc.get("ValueName", "")
+        value_data = doc.get("ValueData", "")
+
+        # --- Existing: Run keys ---
         if "\\Run\\" in key_path or key_path.endswith("\\Run"):
-            value_data = doc.get("ValueData", "")
             if value_data:
                 clean = value_data.strip().strip('"').strip("'")
                 parts = clean.replace("/", "\\").rsplit("\\", 1)
                 filename = parts[-1].split()[0] if parts else ""
                 triage = check_file(filename)
+
+        # --- Existing: Services ---
         elif "\\Services\\" in key_path:
             service = key_path.rsplit("\\", 1)[-1] if "\\" in key_path else ""
-            image_path = doc.get("ValueData", "") if doc.get("ValueName") == "ImagePath" else ""
+            image_path = value_data if value_name == "ImagePath" else ""
             if service:
                 triage = check_service(service, image_path)
+
+        # --- R1: IFEO Debugger (T1546.012) ---
+        elif "Image File Execution Options" in key_path and value_name == "Debugger":
+            if value_data:
+                triage = _suspicious(f"IFEO debugger: {value_data}")
+
+        # --- R2: Silent Process Exit Monitor (T1546.012) ---
+        elif "SilentProcessExit" in key_path and value_name == "MonitorProcess":
+            if value_data:
+                triage = _suspicious(f"SilentProcessExit monitor: {value_data}")
+
+        # --- R3: AppInit_DLLs (T1546.010) ---
+        elif "CurrentVersion\\Windows" in key_path and value_name == "AppInit_DLLs":
+            if value_data:
+                triage = _suspicious(f"AppInit_DLLs: {value_data}")
+
+        # --- R4-R6: Winlogon persistence (T1547.004) ---
+        elif "Winlogon" in key_path:
+            if value_name == "Shell":
+                vd = value_data.lower().strip().rsplit("\\", 1)[-1]
+                if vd != "explorer.exe":
+                    triage = _suspicious(f"Winlogon Shell: {value_data}")
+            elif value_name == "Userinit":
+                stripped = value_data.lower().strip().rstrip(", ")
+                if not stripped.endswith("userinit.exe"):
+                    triage = _suspicious(f"Winlogon Userinit: {value_data}")
+            elif value_name == "mpnotify":
+                if value_data:
+                    triage = _suspicious(f"Winlogon mpnotify: {value_data}")
+
+        # --- R7: BootExecute (T1547.001) ---
+        elif "Session Manager" in key_path and value_name == "BootExecute":
+            if value_data.strip() != "autocheck autochk *":
+                triage = _suspicious(f"BootExecute: {value_data}")
+
+        # --- R8-R10: LSA packages (T1547.002/T1547.005/T1556.002) ---
+        elif "Control\\Lsa" in key_path and value_name in (
+            "Authentication Packages",
+            "Security Packages",
+            "Notification Packages",
+        ):
+            import re as _re
+
+            _LSA_DEFAULTS = {
+                "msv1_0",
+                "kerberos",
+                "schannel",
+                "wdigest",
+                "tspkg",
+                "pku2u",
+                "cloudap",
+                "negoextender",
+                "scecli",
+                "rassfm",
+                "",
+            }
+            entries = [e.strip().lower() for e in _re.split(r"[\n| ]+", value_data) if e.strip()]
+            unknown = [e for e in entries if e not in _LSA_DEFAULTS]
+            if unknown:
+                triage = _suspicious(f"Non-default {value_name}: {', '.join(unknown)}")
+
+        # --- R11: Print Monitors (T1547.010) ---
+        elif "Print\\Monitors" in key_path and value_name == "Driver":
+            _DEFAULT_MONITORS = {
+                "localspl.dll",
+                "win32spl.dll",
+                "tcpmon.dll",
+                "usbmon.dll",
+                "apmon.dll",
+                "lprmon.dll",
+            }
+            if value_data.lower().strip() not in _DEFAULT_MONITORS:
+                triage = _suspicious(f"Print Monitor DLL: {value_data}")
+
+        # --- R12: Command Processor AutoRun (T1546) ---
+        elif "Command Processor" in key_path and value_name == "AutoRun":
+            if value_data:
+                triage = _suspicious(f"cmd.exe AutoRun: {value_data}")
+
+        # --- R13: Explorer Load (T1547.001) ---
+        elif "CurrentVersion\\Windows" in key_path and value_name == "Load":
+            if value_data:
+                triage = _suspicious(f"Explorer Load: {value_data}")
+
+        # --- R14: Screensaver (T1546.002) ---
+        elif "Control Panel\\Desktop" in key_path and value_name == "SCRNSAVE.EXE":
+            vd = value_data.lower().strip()
+            if vd:
+                if not vd.endswith(".scr"):
+                    triage = _suspicious(f"Screensaver non-.scr: {value_data}")
+                elif "\\" in vd and "system32" not in vd and "winsxs" not in vd:
+                    triage = _suspicious(f"Screensaver outside System32: {value_data}")
+
+        # --- R15: Active Setup StubPath (T1547.014) ---
+        elif "Active Setup\\Installed Components" in key_path and value_name == "StubPath":
+            if value_data:
+                parts = value_data.strip().strip('"').replace("/", "\\").rsplit("\\", 1)
+                filename = parts[-1].split()[0] if parts else ""
+                triage = check_file(filename)
+                if not triage.get("triage.verdict"):
+                    triage = {
+                        "triage.checked": True,
+                        "triage.verdict": "UNKNOWN",
+                        "triage.reason": f"Active Setup: {value_data}",
+                    }
+
+        # --- R16: Terminal Services InitialProgram (T1547.001) ---
+        elif "Terminal Services" in key_path and value_name == "InitialProgram":
+            if value_data:
+                triage = _suspicious(f"TS InitialProgram: {value_data}")
+
+        # --- R17: NetSh Helper DLLs (T1546.007) ---
+        elif key_path.endswith("\\NetSh") or "\\NetSh\\" in key_path:
+            if value_data and value_data.lower().endswith(".dll"):
+                triage = check_file(value_data.rsplit("\\", 1)[-1])
+                if not triage:
+                    triage = _suspicious(f"NetSh helper: {value_data}")
 
     elif artifact_type == "tasks":
         command = doc.get("task.command", "")
