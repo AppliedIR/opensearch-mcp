@@ -187,6 +187,10 @@ def ingest_delimited(
             except (ValueError, TypeError, OSError):
                 pass
 
+        # Resolve field conflicts: 'host' (string) conflicts with 'host.name' (object)
+        if "host" in record and not isinstance(record["host"], dict):
+            record["source_host"] = record.pop("host")
+
         doc_id = _doc_id(index_name, record, volatile_keys=_DELIM_VOLATILE)
 
         record["host.name"] = hostname

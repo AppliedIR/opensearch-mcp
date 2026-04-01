@@ -124,6 +124,15 @@ def ingest_json(
             except (ValueError, TypeError, OSError):
                 pass
 
+        # Resolve field conflicts: source data with 'host' (string) conflicts
+        # with 'host.name' (object.keyword). Rename source field before provenance.
+        if "host" in record and not isinstance(record["host"], dict):
+            record["source_host"] = record.pop("host")
+        # Same for _source (reserved by OpenSearch/tshark -T ek)
+        if "_source" in record and isinstance(record["_source"], dict):
+            inner = record.pop("_source")
+            record.update(inner)
+
         doc_id = _doc_id(index_name, record, volatile_keys=_JSON_VOLATILE)
 
         record["host.name"] = hostname
