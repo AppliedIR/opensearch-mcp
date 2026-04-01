@@ -68,7 +68,7 @@ class TestJsonIngest:
 
         p, collected = _collect("opensearch_mcp.parse_json.flush_bulk")
         with p:
-            cnt, sk, bf = ingest_json(
+            cnt, sk, bf, _ = ingest_json(
                 _TEST_DATA / "json" / "suricata-eve.jsonl",
                 MagicMock(),
                 "test",
@@ -82,7 +82,7 @@ class TestJsonIngest:
 
         p, collected = _collect("opensearch_mcp.parse_json.flush_bulk")
         with p:
-            cnt, sk, bf = ingest_json(
+            cnt, sk, bf, _ = ingest_json(
                 _TEST_DATA / "json" / "tshark-packets.json",
                 MagicMock(),
                 "test",
@@ -112,7 +112,7 @@ class TestJsonIngest:
         t_to = datetime(2024, 1, 15, 10, 0, 3, tzinfo=timezone.utc)
         p, collected = _collect("opensearch_mcp.parse_json.flush_bulk")
         with p:
-            cnt, sk, bf = ingest_json(
+            cnt, sk, bf, _ = ingest_json(
                 _TEST_DATA / "json" / "suricata-eve.jsonl",
                 MagicMock(),
                 "test",
@@ -208,7 +208,7 @@ class TestDelimitedIngest:
 
         p, collected = _collect("opensearch_mcp.parse_delimited.flush_bulk")
         with p:
-            cnt, sk, bf = ingest_delimited(
+            cnt, sk, bf, _ = ingest_delimited(
                 _TEST_DATA / "delimited" / "timeline.csv",
                 MagicMock(),
                 "test",
@@ -224,7 +224,7 @@ class TestDelimitedIngest:
 
         p, collected = _collect("opensearch_mcp.parse_delimited.flush_bulk")
         with p:
-            cnt, _, _ = ingest_delimited(
+            cnt, _, _, _ = ingest_delimited(
                 _TEST_DATA / "delimited" / "conn.log",
                 MagicMock(),
                 "test",
@@ -240,7 +240,7 @@ class TestDelimitedIngest:
 
         p, collected = _collect("opensearch_mcp.parse_delimited.flush_bulk")
         with p:
-            cnt, _, _ = ingest_delimited(
+            cnt, _, _, _ = ingest_delimited(
                 _TEST_DATA / "delimited" / "body.txt",
                 MagicMock(),
                 "test",

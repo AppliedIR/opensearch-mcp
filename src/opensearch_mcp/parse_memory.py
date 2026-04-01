@@ -258,11 +258,10 @@ def _index_vol3_records(
             record["pipeline_version"] = pipeline_version
 
         try:
-            from opensearch_mcp.triage import enrich_document, get_triage_mode
+            from opensearch_mcp.triage import enrich_document
 
             suffix = _plugin_to_index_suffix(plugin)
-            if get_triage_mode() == "local":
-                enrich_document(record, suffix)
+            enrich_document(record, suffix)
         except ImportError:
             pass
 

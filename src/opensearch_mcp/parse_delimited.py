@@ -142,15 +142,15 @@ def ingest_delimited(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     batch_size: int = 1000,
-) -> tuple[int, int, int]:
-    """Ingest delimited file. Returns (indexed, skipped, bulk_failed)."""
+) -> tuple[int, int, int, int]:
+    """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed)."""
     if fmt is None:
         fmt = _detect_delimited_format(path)
     if fmt.get("format") == "unknown":
         raise ValueError(f"Cannot detect delimited format of {path.name}")
 
     format_name = fmt.get("format", "csv")
-    count = skipped = bulk_failed = 0
+    count = skipped = bulk_failed = host_renamed = 0
     actions: list[dict] = []
     ts_field = time_field
     if format_name == "bodyfile" and not ts_field:
@@ -190,6 +190,7 @@ def ingest_delimited(
         # Resolve field conflicts: 'host' (string) conflicts with 'host.name' (object)
         if "host" in record and not isinstance(record["host"], dict):
             record["source_host"] = record.pop("host")
+            host_renamed += 1
 
         doc_id = _doc_id(index_name, record, volatile_keys=_DELIM_VOLATILE)
 
@@ -214,4 +215,4 @@ def ingest_delimited(
         count += flushed
         bulk_failed += failed
 
-    return count, skipped, bulk_failed
+    return count, skipped, bulk_failed, host_renamed

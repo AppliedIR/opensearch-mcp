@@ -148,10 +148,9 @@ def parse_tasks_dir(
             doc["vhir.vss_id"] = vss_id
 
         try:
-            from opensearch_mcp.triage import enrich_document, get_triage_mode
+            from opensearch_mcp.triage import enrich_document
 
-            if get_triage_mode() == "local":
-                enrich_document(doc, "tasks")
+            enrich_document(doc, "tasks")
         except ImportError:
             pass
 

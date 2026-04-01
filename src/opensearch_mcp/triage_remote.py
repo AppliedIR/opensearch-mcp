@@ -129,9 +129,6 @@ def _enrich_file_artifact(
     verdicts: dict = {}
     for bucket in buckets:
         path = bucket["key"]
-        parts = path.replace("/", "\\").rsplit("\\", 1)
-        filename = parts[-1] if parts else path
-        directory = parts[0] if len(parts) > 1 else ""
 
         try:
             from opensearch_mcp.wintools import _call_gateway_tool
@@ -140,7 +137,7 @@ def _enrich_file_artifact(
                 base_url,
                 token,
                 "mcp__windows-triage__check_file",
-                {"filename": filename, "directory": directory},
+                {"path": path},
             )
             if result.get("verdict"):
                 verdicts[path] = result
@@ -156,21 +153,27 @@ def _enrich_file_artifact(
         if verdict.get("verdict") in ("EXPECTED", "UNKNOWN") and not verdict.get("lolbin"):
             continue  # Only update SUSPICIOUS, EXPECTED_LOLBIN, or UNKNOWN with extra info
 
-        script_parts = [
-            f"ctx._source['triage.verdict'] = '{verdict['verdict']}'",
+        script_lines = [
+            "ctx._source['triage.verdict'] = params.verdict",
             "ctx._source['triage.checked'] = true",
         ]
+        params = {"verdict": verdict["verdict"]}
         if verdict.get("reason"):
-            script_parts.append(f"ctx._source['triage.reason'] = '{verdict['reason']}'")
+            script_lines.append("ctx._source['triage.reason'] = params.reason")
+            params["reason"] = verdict["reason"]
         if verdict.get("lolbin"):
-            script_parts.append("ctx._source['triage.lolbin'] = true")
+            script_lines.append("ctx._source['triage.lolbin'] = true")
 
         try:
             resp = client.update_by_query(
                 index=index_pattern,
                 body={
                     "query": {"term": {path_field: path}},
-                    "script": {"source": "; ".join(script_parts), "lang": "painless"},
+                    "script": {
+                        "source": "; ".join(script_lines),
+                        "lang": "painless",
+                        "params": params,
+                    },
                 },
             )
             enriched += resp.get("updated", 0)

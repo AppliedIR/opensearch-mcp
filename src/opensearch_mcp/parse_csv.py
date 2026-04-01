@@ -146,12 +146,13 @@ def ingest_csv(
                 row["vhir.parse_method"] = parse_method
 
             # Triage enrichment (after ID + provenance)
+            # Always run — DB-dependent checks (check_file/check_service) return {}
+            # when DB unavailable; pattern rules (registry R1-R17) are DB-independent.
             if parse_method:
                 try:
-                    from opensearch_mcp.triage import enrich_document, get_triage_mode
+                    from opensearch_mcp.triage import enrich_document
 
-                    if get_triage_mode() == "local":
-                        enrich_document(row, parse_method)
+                    enrich_document(row, parse_method)
                 except ImportError:
                     pass
 

@@ -673,7 +673,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             suffix = f"json-{suffix}"
         index_name = f"case-{safe_case}-{suffix}-{safe_host}"
         print(f"  {f.name} → {index_name}...", end=" ", flush=True)
-        cnt, sk, bf = ingest_json(
+        cnt, sk, bf, hr = ingest_json(
             f,
             client,
             index_name,
@@ -687,6 +687,8 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             batch_size=batch_size,
         )
         print(f"{cnt:,} entries")
+        if hr:
+            print("    NOTE: 'host' field renamed to 'source_host' (conflicts with host.name)")
         total += cnt
         total_sk += sk
         total_bf += bf
@@ -763,7 +765,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print("skipped (unrecognized format)")
             continue
         try:
-            cnt, sk, bf = ingest_delimited(
+            cnt, sk, bf, hr = ingest_delimited(
                 f,
                 client,
                 index_name,
@@ -779,6 +781,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 batch_size=batch_size,
             )
             print(f"{cnt:,} entries")
+            if hr:
+                print("    NOTE: 'host' renamed to 'source_host' (conflicts with host.name)")
             total += cnt
             total_sk += sk
             total_bf += bf

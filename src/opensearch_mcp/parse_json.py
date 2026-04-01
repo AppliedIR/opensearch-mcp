@@ -83,13 +83,13 @@ def ingest_json(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     batch_size: int = 1000,
-) -> tuple[int, int, int]:
-    """Ingest JSON/JSONL. Returns (indexed, skipped, bulk_failed)."""
+) -> tuple[int, int, int, int]:
+    """Ingest JSON/JSONL. Returns (indexed, skipped, bulk_failed, host_renamed)."""
     fmt = _detect_json_format(path)
     if fmt == "unknown":
         raise ValueError(f"Cannot detect JSON format in {path.name}")
 
-    count = skipped = bulk_failed = 0
+    count = skipped = bulk_failed = host_renamed = 0
     actions: list[dict] = []
     ts_field = time_field
 
@@ -128,6 +128,7 @@ def ingest_json(
         # with 'host.name' (object.keyword). Rename source field before provenance.
         if "host" in record and not isinstance(record["host"], dict):
             record["source_host"] = record.pop("host")
+            host_renamed += 1
         # Same for _source (reserved by OpenSearch/tshark -T ek)
         if "_source" in record and isinstance(record["_source"], dict):
             inner = record.pop("_source")
@@ -156,4 +157,4 @@ def ingest_json(
         count += flushed
         bulk_failed += failed
 
-    return count, skipped, bulk_failed
+    return count, skipped, bulk_failed, host_renamed

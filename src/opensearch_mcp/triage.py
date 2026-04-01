@@ -21,7 +21,7 @@ _MODE: str = "unavailable"  # "local", "remote", "unavailable"
 
 def init_triage_db(kg_path: Path | None = None, ctx_path: Path | None = None) -> bool:
     """Initialize triage DB connections. Returns True if at least known_good available."""
-    global _KG_PATH, _CTX_PATH
+    global _KG_PATH, _CTX_PATH, _MODE
 
     if kg_path and kg_path.exists():
         _KG_PATH = kg_path
