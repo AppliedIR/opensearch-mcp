@@ -759,6 +759,49 @@ def idx_ingest_accesslog(
     return _launch_background("accesslog", path, hostname, index_suffix)
 
 
+@server.tool()
+def idx_enrich_intel(
+    case_id: str = "",
+    dry_run: bool = True,
+    force: bool = False,
+) -> dict:
+    """Enrich indexed evidence with OpenCTI threat intelligence.
+
+    Extracts unique IOCs (IPs, hashes, domains) from indexed data,
+    looks them up in OpenCTI via the gateway, and stamps matching
+    documents with threat_intel.verdict and confidence.
+
+    No LLM tokens consumed — all lookups are programmatic.
+
+    Args:
+        case_id: Case to enrich (default: active case).
+        dry_run: Extract and count IOCs without lookup (default True).
+        force: Re-enrich even if already enriched (default False).
+    """
+    from opensearch_mcp.paths import sanitize_index_component
+    from opensearch_mcp.threat_intel import enrich_case, extract_unique_iocs
+
+    cid = case_id or _get_active_case()
+    if not cid:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+
+    client = _get_os()
+    safe_case = sanitize_index_component(cid)
+
+    if dry_run:
+        iocs = extract_unique_iocs(client, f"case-{safe_case}-*", force=force)
+        return {
+            "status": "preview",
+            "case_id": cid,
+            "ips": len(iocs["ip"]),
+            "hashes": len(iocs["hash"]),
+            "domains": len(iocs["domain"]),
+            "total_iocs": sum(len(v) for v in iocs.values()),
+        }
+
+    return enrich_case(client, cid, force=force)
+
+
 def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):
     """Launch a generic ingest as background subprocess."""
     import subprocess as _sp

@@ -90,6 +90,24 @@ def register(subparsers, registered: set) -> None:
         p.set_defaults(func=_cmd_ingest_delimited)
         registered.add("ingest-delimited")
 
+    if "enrich-intel" not in registered:
+        p = subparsers.add_parser(
+            "enrich-intel", help="Enrich indexed data with OpenCTI threat intel"
+        )
+        p.add_argument("--case", help="Case ID (default: active case)")
+        p.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Extract IOCs and show counts without lookup",
+        )
+        p.add_argument(
+            "--force",
+            action="store_true",
+            help="Re-enrich even if already enriched",
+        )
+        p.set_defaults(func=_cmd_enrich_intel)
+        registered.add("enrich-intel")
+
     if "ingest-accesslog" not in registered:
         p = subparsers.add_parser("ingest-accesslog", help="Ingest Apache/Nginx access logs")
         p.add_argument("path", help="Access log file or directory")
@@ -133,3 +151,9 @@ def _cmd_ingest_accesslog(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_ingest_accesslog
 
     cmd_ingest_accesslog(args, examiner=identity.get("name", "unknown"))
+
+
+def _cmd_enrich_intel(args, identity) -> None:
+    from opensearch_mcp.ingest_cli import cmd_enrich_intel
+
+    cmd_enrich_intel(args, examiner=identity.get("name", "unknown"))

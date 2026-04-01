@@ -867,6 +867,70 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
 
 # ---------------------------------------------------------------------------
+# cmd_enrich_intel — OpenCTI threat intel enrichment
+# ---------------------------------------------------------------------------
+
+
+def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    """Enrich indexed data with OpenCTI threat intel."""
+    case_id = _resolve_case_id(getattr(args, "case", None))
+    force = getattr(args, "force", False)
+
+    from opensearch_mcp.paths import sanitize_index_component
+    from opensearch_mcp.threat_intel import enrich_case, extract_unique_iocs
+
+    client = get_client()
+
+    if getattr(args, "dry_run", False):
+        safe_case = sanitize_index_component(case_id)
+        iocs = extract_unique_iocs(client, f"case-{safe_case}-*", force=force)
+        print(f"Case: {case_id}")
+        print(f"  External IPs: {len(iocs['ip'])}")
+        print(f"  Hashes: {len(iocs['hash'])}")
+        print(f"  Domains: {len(iocs['domain'])}")
+        total = sum(len(v) for v in iocs.values())
+        print(f"  Total unique IOCs: {total}")
+        if not force:
+            print("  (excluding already-enriched documents; use --force to include)")
+        return
+
+    def _progress(event, **kw):
+        if event == "extracting":
+            print("Extracting unique IOCs from indexed data...")
+        elif event == "extracted":
+            print(f"  IPs: {kw['ips']}, Hashes: {kw['hashes']}, Domains: {kw['domains']}")
+        elif event == "looking_up":
+            total = kw.get("total", 0)
+            done = kw.get("done", 0)
+            if done:
+                print(f"  Looked up {done}/{total}...", flush=True)
+            else:
+                print(f"Looking up {total} IOCs via OpenCTI...")
+        elif event == "stamping":
+            print(f"Stamping {kw['matched']} matched IOCs to documents...")
+
+    result = enrich_case(client, case_id, force=force, on_progress=_progress)
+
+    if result["status"] == "no_iocs":
+        print("No external IOCs found in indexed data.")
+        return
+
+    print(f"\nDone. {result['documents_updated']} documents updated.")
+    print(f"  MALICIOUS: {result['malicious']}")
+    print(f"  SUSPICIOUS: {result['suspicious']}")
+
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    audit.log(
+        tool="enrich_intel",
+        params={"case_id": case_id, "force": force},
+        result_summary=(
+            f"{result['documents_updated']} docs updated, "
+            f"{result['malicious']} malicious, {result['suspicious']} suspicious"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # cmd_ingest_memory — memory forensics entry point
 # ---------------------------------------------------------------------------
 

@@ -17,7 +17,15 @@
         "vhir.source_file": {"type": "keyword"},
         "vhir.ingest_audit_id": {"type": "keyword"},
         "vhir.parse_method": {"type": "keyword"},
-        "pipeline_version": {"type": "keyword"}
+        "pipeline_version": {"type": "keyword"},
+        "threat_intel.verdict": {"type": "keyword"},
+        "threat_intel.confidence": {"type": "integer"},
+        "threat_intel.labels": {"type": "keyword"},
+        "threat_intel.source": {"type": "keyword"},
+        "threat_intel.ioc_type": {"type": "keyword"},
+        "threat_intel.ioc_value": {"type": "keyword"},
+        "threat_intel.enriched_at": {"type": "date"},
+        "threat_intel.checked": {"type": "boolean"}
       }
     }
   },
