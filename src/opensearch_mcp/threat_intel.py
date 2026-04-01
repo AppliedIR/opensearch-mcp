@@ -72,7 +72,7 @@ def extract_unique_iocs(
                         "size": 0,
                         "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
                     },
-                    timeout="60s",
+                    request_timeout=60,
                 )
                 for bucket in result["aggregations"]["values"]["buckets"]:
                     val = str(bucket["key"])
@@ -212,7 +212,7 @@ def stamp_documents(
                         "params": params,
                     },
                 },
-                timeout="120s",
+                request_timeout=120,
                 conflicts="proceed",
                 requests_per_second=1000,
             )
