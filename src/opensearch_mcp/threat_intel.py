@@ -129,6 +129,16 @@ def batch_lookup(
                 resp = call_tool("lookup_ioc", {"ioc": value}, timeout=15)
                 consecutive_failures = 0
 
+                # Detect error responses from opencti-mcp (QueryError, etc.)
+                if resp.get("error"):
+                    consecutive_failures += 1
+                    msg = resp.get("message", resp["error"])
+                    print(
+                        f"WARNING: OpenCTI error for {value}: {msg}",
+                        file=sys.stderr,
+                    )
+                    continue
+
                 if not resp.get("found", False):
                     # Mark as checked (no verdict) so --force skip works
                     results[value] = {
