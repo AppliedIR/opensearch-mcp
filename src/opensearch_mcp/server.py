@@ -431,6 +431,17 @@ def idx_case_summary(case_id: str = "") -> dict:
         artifacts[artifact_type]["indices"].append(name)
 
     # Get field mappings per artifact type (sample one index per type)
+    # Flatten nested properties to dotted paths (host.name, not host)
+    def _flatten_props(props: dict, prefix: str = "") -> list[str]:
+        fields = []
+        for key, val in props.items():
+            full = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
+            if isinstance(val, dict) and "properties" in val:
+                fields.extend(_flatten_props(val["properties"], full))
+            else:
+                fields.append(full)
+        return fields
+
     fields_per_type: dict = {}
     for atype, info in artifacts.items():
         if not info["indices"]:
@@ -439,7 +450,7 @@ def idx_case_summary(case_id: str = "") -> dict:
             mapping = client.indices.get_mapping(index=info["indices"][0])
             idx_name = info["indices"][0]
             props = mapping.get(idx_name, {}).get("mappings", {}).get("properties", {})
-            fields_per_type[atype] = sorted(props.keys())[:50]
+            fields_per_type[atype] = sorted(_flatten_props(props))[:80]
         except Exception:
             pass
 
