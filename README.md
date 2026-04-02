@@ -8,7 +8,7 @@ Built by [Applied IR](https://github.com/AppliedIR) with Claude Code.
 
 A KAPE triage collection from 30 hosts produces ~50 million evidence records across hundreds of artifact types. An LLM reading these directly would consume billions of tokens and still miss patterns buried in the noise.
 
-opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM 16 purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits.
+opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM 17 purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits.
 
 **The math:**
 - Raw: 50M records x ~200 tokens/record = 10 billion tokens (impossible)
@@ -49,6 +49,7 @@ The LLM gets these tools via the MCP protocol:
 
 | Tool | Purpose |
 |------|---------|
+| `idx_case_summary` | Complete case overview: hosts, artifacts, fields, enrichment status |
 | `idx_search` | Full-text + structured queries across all artifact types |
 | `idx_count` | Fast document counts with filters |
 | `idx_aggregate` | Group-by analysis (top processes, IP distribution, etc.) |
@@ -138,8 +139,13 @@ python -m opensearch_mcp
 python -m opensearch_mcp --http --port 4625
 ```
 
-The LLM can now query:
+The LLM starts with a case overview, then queries:
 ```
+# First call — understand what's available
+idx_case_summary(case_id="incident-001")
+# Returns: hosts, artifact types, doc counts, field names per type, enrichment status
+
+# Then query with full context
 idx_search(query="event.code:4688 AND process.parent.name:cmd.exe", index="case-incident-001-evtx-*")
 idx_aggregate(field="process.name", query="triage.verdict:SUSPICIOUS")
 idx_timeline(query="threat_intel.verdict:MALICIOUS", interval="1h")
