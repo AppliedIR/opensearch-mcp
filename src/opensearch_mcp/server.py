@@ -464,7 +464,7 @@ def idx_case_summary(case_id: str = "") -> dict:
         if triage_count:
             suspicious = client.count(
                 index=pattern,
-                body={"query": {"term": {"triage.verdict.keyword": "SUSPICIOUS"}}},
+                body={"query": {"term": {"triage.verdict": "SUSPICIOUS"}}},
             )["count"]
             enrichment["triage"] = {
                 "checked": triage_count,
@@ -481,7 +481,7 @@ def idx_case_summary(case_id: str = "") -> dict:
         if intel_count:
             malicious = client.count(
                 index=pattern,
-                body={"query": {"term": {"threat_intel.verdict.keyword": "MALICIOUS"}}},
+                body={"query": {"term": {"threat_intel.verdict": "MALICIOUS"}}},
             )["count"]
             enrichment["threat_intel"] = {
                 "checked": intel_count,
