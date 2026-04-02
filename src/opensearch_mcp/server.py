@@ -380,6 +380,124 @@ def idx_status() -> dict:
 
 
 @server.tool()
+def idx_case_summary(case_id: str = "") -> dict:
+    """Get a complete overview of indexed evidence for a case.
+
+    Returns hosts, artifact types with doc counts, available fields
+    per artifact type, and enrichment status. Call this at investigation
+    start to understand what data is available before querying.
+
+    Args:
+        case_id: Case ID (default: active case).
+    """
+    from opensearch_mcp.paths import sanitize_index_component
+
+    cid = case_id or _get_active_case()
+    if not cid:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+
+    client = _get_os()
+    safe = sanitize_index_component(cid)
+    pattern = f"case-{safe}-*"
+
+    # Get all indices for this case
+    try:
+        indices = _os_call(client.cat.indices, index=pattern, format="json")
+    except Exception:
+        return {"case_id": cid, "error": "No indices found"}
+
+    if not indices:
+        return {"case_id": cid, "hosts": [], "artifacts": {}, "total_docs": 0}
+
+    # Parse index names: case-{id}-{type}-{host}
+    artifacts: dict = {}
+    hosts: set = set()
+    total_docs = 0
+    for idx in indices:
+        name = idx["index"]
+        docs = int(idx.get("docs.count", 0))
+        total_docs += docs
+        # Strip case-{safe}- prefix and -{host} suffix
+        parts = name[len(f"case-{safe}-") :].rsplit("-", 1)
+        artifact_type = parts[0] if parts else name
+        host = parts[1] if len(parts) > 1 else ""
+        if host:
+            hosts.add(host)
+        if artifact_type not in artifacts:
+            artifacts[artifact_type] = {"docs": 0, "hosts": [], "indices": []}
+        artifacts[artifact_type]["docs"] += docs
+        if host and host not in artifacts[artifact_type]["hosts"]:
+            artifacts[artifact_type]["hosts"].append(host)
+        artifacts[artifact_type]["indices"].append(name)
+
+    # Get field mappings per artifact type (sample one index per type)
+    fields_per_type: dict = {}
+    for atype, info in artifacts.items():
+        if not info["indices"]:
+            continue
+        try:
+            mapping = client.indices.get_mapping(index=info["indices"][0])
+            idx_name = info["indices"][0]
+            props = mapping.get(idx_name, {}).get("mappings", {}).get("properties", {})
+            fields_per_type[atype] = sorted(props.keys())[:50]
+        except Exception:
+            pass
+
+    # Enrichment status
+    enrichment: dict = {}
+    try:
+        triage_count = client.count(
+            index=pattern,
+            body={"query": {"exists": {"field": "triage.checked"}}},
+        )["count"]
+        if triage_count:
+            suspicious = client.count(
+                index=pattern,
+                body={"query": {"term": {"triage.verdict.keyword": "SUSPICIOUS"}}},
+            )["count"]
+            enrichment["triage"] = {
+                "checked": triage_count,
+                "suspicious": suspicious,
+            }
+    except Exception:
+        pass
+
+    try:
+        intel_count = client.count(
+            index=pattern,
+            body={"query": {"exists": {"field": "threat_intel.checked"}}},
+        )["count"]
+        if intel_count:
+            malicious = client.count(
+                index=pattern,
+                body={"query": {"term": {"threat_intel.verdict.keyword": "MALICIOUS"}}},
+            )["count"]
+            enrichment["threat_intel"] = {
+                "checked": intel_count,
+                "malicious": malicious,
+            }
+    except Exception:
+        pass
+
+    resp = {
+        "case_id": cid,
+        "hosts": sorted(hosts),
+        "artifacts": artifacts,
+        "total_docs": total_docs,
+        "fields_per_type": fields_per_type,
+        "enrichment": enrichment,
+    }
+    aid = audit.log(
+        tool="idx_case_summary",
+        params={"case_id": cid},
+        result_summary=f"{len(hosts)} hosts, {len(artifacts)} artifact types, {total_docs} docs",
+    )
+    if aid:
+        resp["audit_id"] = aid
+    return resp
+
+
+@server.tool()
 def idx_ingest(
     path: str,
     hostname: str = "",
