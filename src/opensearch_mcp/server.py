@@ -68,11 +68,18 @@ def _os_call(fn, *args, **kwargs):
 
 
 def _strip_hits(hits: list[dict]) -> list[dict]:
-    """Extract _source from hits, trim large field sets."""
+    """Extract _source from hits with artifact type for cross-index queries."""
     results = []
     for hit in hits:
         src = hit.get("_source", {})
-        doc = {"_id": hit.get("_id"), "_index": hit.get("_index")}
+        idx_name = hit.get("_index", "")
+        doc = {"_id": hit.get("_id"), "_index": idx_name}
+        # Extract artifact type from index name: case-{id}-{type}-{host}
+        parts = idx_name.split("-", 2)
+        if len(parts) >= 3:
+            remainder = parts[2]  # {type}-{host}
+            type_parts = remainder.rsplit("-", 1)
+            doc["_type"] = type_parts[0] if type_parts else remainder
         doc.update(src)
         results.append(doc)
     return results
