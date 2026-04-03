@@ -226,7 +226,7 @@ class TestIdxAggregate:
         assert resp["field"] == "host.name"
         assert resp["total_docs"] == 100
         assert len(resp["buckets"]) == 2
-        assert resp["buckets"][0] == {"key": "host-a", "count": 60}
+        assert resp["buckets"][0] == {"key": "host-a", "count": 60, "doc_count": 60}
 
     def test_caps_limit_at_500(self, mock_client):
         mock_client.search.return_value = {
@@ -302,7 +302,7 @@ class TestIdxFieldValues:
         resp = idx_field_values(field="winlog.provider_name")
         assert resp["field"] == "winlog.provider_name"
         assert len(resp["values"]) == 2
-        assert resp["values"][0] == {"value": "Sysmon", "count": 50}
+        assert resp["values"][0] == {"value": "Sysmon", "count": 50, "doc_count": 50}
 
 
 # ---------------------------------------------------------------------------
