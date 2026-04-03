@@ -109,6 +109,7 @@ def idx_search(
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
+            Quote values with special chars: source.ip:"::1" (IPv6 needs quotes).
         index: Index pattern. Overrides case_id if provided.
         case_id: Case ID — auto-constructs case-{id}-* pattern.
         limit: Max results (default 50, max 200).
