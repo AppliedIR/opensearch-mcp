@@ -43,11 +43,11 @@ def enrich_remote(
         results["_gateway"] = "not configured — file/service enrichment skipped"
         return results
 
-    try:
-        call_tool("windows-triage-mcp__get_health", {})
-    except Exception:
-        results["_gateway"] = "windows-triage-mcp not available"
-        return results
+    # No health pre-check — the first check_file call serves as the
+    # availability test. Circuit breaker (3 failures) handles backend down.
+    # Removed hardcoded windows-triage-mcp__get_health: the collision-prefixed
+    # name only exists when BOTH windows-triage-mcp AND opencti-mcp are
+    # registered. In single-backend configs, bare get_health is the name.
 
     # File enrichment (check_file)
     # Fields with .keyword: dynamically mapped text fields (no explicit template mapping).
