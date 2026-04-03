@@ -78,10 +78,23 @@ def _strip_hits(hits: list[dict]) -> list[dict]:
     return results
 
 
+def _resolve_index(index: str, case_id: str) -> str:
+    """Resolve index pattern from explicit index, case_id, or active case."""
+    if index:
+        return index
+    from opensearch_mcp.paths import sanitize_index_component
+
+    cid = case_id or _get_active_case() or ""
+    if cid:
+        return f"case-{sanitize_index_component(cid)}-*"
+    return "case-*"
+
+
 @server.tool()
 def idx_search(
     query: str,
-    index: str = "case-*",
+    index: str = "",
+    case_id: str = "",
     limit: int = 50,
     sort: str = "@timestamp:desc",
 ) -> dict:
@@ -89,10 +102,12 @@ def idx_search(
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
-        index: Index pattern (default: case-*, all artifact types).
+        index: Index pattern. Overrides case_id if provided.
+        case_id: Case ID — auto-constructs case-{id}-* pattern.
         limit: Max results (default 50, max 200).
         sort: Sort field:order (default @timestamp:desc).
     """
+    index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -102,7 +117,7 @@ def idx_search(
     sort_field, _, sort_order = sort.partition(":")
     if sort_order not in ("asc", "desc", ""):
         sort_order = "desc"
-    sort_body = [{sort_field: {"order": sort_order or "desc"}}]
+    sort_body = [{sort_field: {"order": sort_order or "desc", "unmapped_type": "date"}}]
 
     result = _os_call(
         client.search,
@@ -131,14 +146,17 @@ def idx_search(
 @server.tool()
 def idx_count(
     query: str = "*",
-    index: str = "case-*",
+    index: str = "",
+    case_id: str = "",
 ) -> dict:
     """Count matching documents.
 
     Args:
         query: OpenSearch query_string (default: all).
-        index: Index pattern.
+        index: Index pattern. Overrides case_id if provided.
+        case_id: Case ID — auto-constructs case-{id}-* pattern.
     """
+    index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -163,7 +181,8 @@ def idx_count(
 def idx_aggregate(
     field: str,
     query: str = "*",
-    index: str = "case-*",
+    index: str = "",
+    case_id: str = "",
     limit: int = 50,
 ) -> dict:
     """Aggregate (group by) a field with optional query filter.
@@ -171,9 +190,11 @@ def idx_aggregate(
     Args:
         field: Field to aggregate on (e.g., 'host.name', 'event.code').
         query: OpenSearch query_string filter (default: all).
-        index: Index pattern.
+        index: Index pattern. Overrides case_id if provided.
+        case_id: Case ID — auto-constructs case-{id}-* pattern.
         limit: Max buckets (default 50, max 500).
     """
+    index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -191,7 +212,7 @@ def idx_aggregate(
     )
 
     buckets = [
-        {"key": b["key"], "count": b["doc_count"]}
+        {"key": b["key"], "count": b["doc_count"], "doc_count": b["doc_count"]}
         for b in result["aggregations"]["agg"]["buckets"]
     ]
 
@@ -241,28 +262,46 @@ def idx_get_event(
 @server.tool()
 def idx_timeline(
     query: str = "*",
-    index: str = "case-*",
+    index: str = "",
+    case_id: str = "",
     interval: str = "1h",
     time_field: str = "@timestamp",
+    time_from: str = "",
+    time_to: str = "",
 ) -> dict:
     """Show event count over time as a date histogram.
 
     Args:
         query: OpenSearch query_string filter.
-        index: Index pattern.
+        index: Index pattern. Overrides case_id if provided.
+        case_id: Case ID — auto-constructs case-{id}-* pattern.
         interval: Histogram bucket size (e.g., '1m', '1h', '1d').
         time_field: Timestamp field (default @timestamp).
+        time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
+        time_to: End time (ISO 8601).
     """
+    index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
         return {"error": err}
     client = _get_os()
 
+    query_body: dict = {"query_string": {"query": query}}
+    if time_from or time_to:
+        range_filter: dict = {time_field: {}}
+        if time_from:
+            range_filter[time_field]["gte"] = time_from
+        if time_to:
+            range_filter[time_field]["lte"] = time_to
+        query_body = {
+            "bool": {"must": [{"query_string": {"query": query}}, {"range": range_filter}]}
+        }
+
     result = _os_call(
         client.search,
         index=index,
         body={
-            "query": {"query_string": {"query": query}},
+            "query": query_body,
             "aggs": {
                 "timeline": {
                     "date_histogram": {
@@ -300,7 +339,8 @@ def idx_timeline(
 def idx_field_values(
     field: str,
     query: str = "*",
-    index: str = "case-*",
+    index: str = "",
+    case_id: str = "",
     limit: int = 50,
 ) -> dict:
     """List unique values for a field (terms aggregation).
@@ -308,9 +348,11 @@ def idx_field_values(
     Args:
         field: Field to enumerate (e.g., 'winlog.provider_name').
         query: OpenSearch query_string filter.
-        index: Index pattern.
+        index: Index pattern. Overrides case_id if provided.
+        case_id: Case ID — auto-constructs case-{id}-* pattern.
         limit: Max values (default 50, max 500).
     """
+    index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -328,7 +370,7 @@ def idx_field_values(
     )
 
     values = [
-        {"value": b["key"], "count": b["doc_count"]}
+        {"value": b["key"], "count": b["doc_count"], "doc_count": b["doc_count"]}
         for b in result["aggregations"]["values"]["buckets"]
     ]
 
