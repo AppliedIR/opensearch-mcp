@@ -291,7 +291,13 @@ if [ -f "$GW_CONFIG" ]; then
         echo "Registering opensearch-mcp with gateway..."
         # Append opensearch-mcp backend entry
         # Insert under backends: key using Python for safe YAML manipulation
-        python3 -c "
+        # Use venv python (matches setup-sift.sh), not system python
+        VENV_PYTHON="$VHIR_DIR/venv/bin/python"
+        if [ ! -f "$VENV_PYTHON" ]; then
+            VENV_PYTHON="$(which python3)"
+            echo "  Warning: venv not found at $VHIR_DIR/venv — using system python3"
+        fi
+        "$VENV_PYTHON" -c "
 import yaml
 from pathlib import Path
 p = Path('$GW_CONFIG')
@@ -299,8 +305,9 @@ config = yaml.safe_load(p.read_text()) or {}
 backends = config.setdefault('backends', {})
 backends['opensearch-mcp'] = {
     'type': 'stdio',
-    'command': '$(which python3)',
+    'command': '$VENV_PYTHON',
     'args': ['-m', 'opensearch_mcp'],
+    'env': {'OPENSEARCH_CONFIG': '$VHIR_DIR/opensearch.yaml'},
 }
 p.write_text(yaml.dump(config, default_flow_style=False))
 "
@@ -312,8 +319,9 @@ else
     echo "  Add to gateway.yaml under 'backends:':"
     echo "    opensearch-mcp:"
     echo "      type: stdio"
-    echo "      command: $(which python3)"
+    echo "      command: $HOME/.vhir/venv/bin/python"
     echo '      args: ["-m", "opensearch_mcp"]'
+    echo '      env: {OPENSEARCH_CONFIG: ~/.vhir/opensearch.yaml}'
 fi
 
 # --- 10. Restart gateway if running ---
