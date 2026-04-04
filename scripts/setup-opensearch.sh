@@ -20,10 +20,24 @@ if ! docker compose version &>/dev/null; then
 fi
 
 if ! docker ps &>/dev/null; then
-    echo "Error: Cannot connect to Docker daemon (permission denied)."
-    echo "  Fix: sudo usermod -aG docker $USER && newgrp docker"
-    echo "  Then re-run this script."
-    exit 1
+    if ! groups | grep -qw docker; then
+        echo "Adding $USER to docker group (requires sudo)..."
+        if sudo usermod -aG docker "$USER"; then
+            echo "Re-running with docker group access..."
+            exec sg docker -c 'bash "'"$0"'"'
+        else
+            echo "Error: Could not add $USER to docker group."
+            echo "  Run manually: sudo usermod -aG docker $USER && newgrp docker"
+            exit 1
+        fi
+    else
+        echo "Docker daemon not running. Starting..."
+        sudo systemctl start docker
+        if ! docker ps &>/dev/null; then
+            echo "Error: Could not start Docker daemon."
+            exit 1
+        fi
+    fi
 fi
 
 echo "Docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
