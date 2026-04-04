@@ -19,10 +19,10 @@ if ! docker compose version &>/dev/null; then
     exit 1
 fi
 
-if ! docker info &>/dev/null; then
-    echo "Error: Cannot connect to Docker daemon."
+if ! docker ps &>/dev/null; then
+    echo "Error: Cannot connect to Docker daemon (permission denied)."
     echo "  Fix: sudo usermod -aG docker $USER && newgrp docker"
-    echo "  Or run this script with sudo."
+    echo "  Then re-run this script."
     exit 1
 fi
 
