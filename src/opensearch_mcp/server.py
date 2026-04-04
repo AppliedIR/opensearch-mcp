@@ -179,6 +179,23 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
     return " ".join(parts) if parts else None
 
 
+def _detect_hostnames_from_filenames(path: Path) -> set[str]:
+    """Best-effort hostname detection from ZimmermanTools CSV naming."""
+    from collections import Counter
+
+    exts = {".csv", ".tsv"}
+    files = [f for f in path.iterdir() if f.suffix.lower() in exts][:50]
+    if not files:
+        return set()
+    counts: Counter = Counter()
+    for f in files:
+        parts = f.stem.rsplit("-", 1)
+        if len(parts) == 2 and len(parts[1]) >= 2:
+            counts[parts[1].lower()] += 1
+    threshold = len(files) * 0.3
+    return {h for h, c in counts.items() if c >= threshold}
+
+
 def _validate_path(path: str) -> str | None:
     """Validate path is in allowed locations. Returns error string or None."""
     from opensearch_mcp.paths import vhir_home
@@ -1129,25 +1146,85 @@ def idx_ingest_json(
 @server.tool()
 def idx_ingest_delimited(
     path: str,
-    hostname: str,
+    hostname: str = "",
     index_suffix: str = "",
     time_field: str = "",
     delimiter: str = "",
+    recursive: bool = False,
     dry_run: bool = True,
 ) -> dict:
     """Ingest delimited files (CSV, TSV, Zeek, bodyfile) into OpenSearch.
 
     Args:
         path: Path to delimited file or directory.
-        hostname: Source hostname.
+        hostname: Source hostname. Required unless recursive=True.
         index_suffix: Index suffix (default: format-{filename}).
         time_field: Timestamp field (default: auto-detect).
         delimiter: Delimiter character (default: auto-detect).
+        recursive: Treat subdirectories as hosts (dirname = hostname).
+            Eliminates need for per-host calls on multi-host directories.
         dry_run: Preview (default True). Set False to execute immediately.
     """
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
+
+    # Recursive mode: subdirs are hosts
+    if recursive:
+        p = Path(path)
+        if not p.is_dir():
+            return {"error": "recursive requires a directory path"}
+        subdirs = sorted(d for d in p.iterdir() if d.is_dir() and not d.name.startswith("."))
+        if not subdirs:
+            return {"error": f"No subdirectories found in {path}"}
+        exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+        if dry_run:
+            hosts_preview = []
+            for d in subdirs:
+                files = [f.name for f in d.iterdir() if f.suffix.lower() in exts]
+                if files:
+                    hosts_preview.append(
+                        {
+                            "hostname": d.name,
+                            "files": len(files),
+                        }
+                    )
+            return {
+                "status": "preview",
+                "recursive": True,
+                "hosts": hosts_preview,
+                "total_hosts": len(hosts_preview),
+            }
+        # Single background process iterates all hosts sequentially
+        return _launch_background(
+            "delimited",
+            path,
+            "__recursive__",
+            index_suffix,
+            time_field,
+        )
+
+    # Non-recursive: hostname required
+    if not hostname:
+        suggestion = _detect_hostnames_from_filenames(Path(path))
+        if suggestion:
+            return {
+                "error": "hostname is required for non-recursive ingest.",
+                "detected_hostnames": sorted(suggestion),
+                "suggestion": (
+                    "Detected possible hostnames from filenames: "
+                    + ", ".join(sorted(suggestion))
+                    + ". Pass hostname=... to confirm, or use "
+                    "recursive=true for per-host subdirectories."
+                ),
+            }
+        return {
+            "error": (
+                "hostname is required. Pass hostname='...' or use "
+                "recursive=true for per-host subdirectories."
+            )
+        }
+
     if dry_run:
         from opensearch_mcp.parse_delimited import _detect_delimited_format
 

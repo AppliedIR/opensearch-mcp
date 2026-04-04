@@ -762,6 +762,23 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
     hostname = args.hostname
+
+    # Recursive mode: iterate subdirs as hosts in a single process
+    if hostname == "__recursive__" and input_path.is_dir():
+        exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+        subdirs = sorted(
+            d
+            for d in input_path.iterdir()
+            if d.is_dir()
+            and not d.name.startswith(".")
+            and any(f.suffix.lower() in exts for f in d.iterdir() if f.is_file())
+        )
+        for d in subdirs:
+            args.path = str(d)
+            args.hostname = d.name
+            print(f"\n--- Host: {d.name} ---")
+            cmd_ingest_delimited(args, examiner=examiner)
+        return
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)
