@@ -27,7 +27,8 @@
           "type": "integer"
         },
         "@timestamp": {
-          "type": "date"
+          "type": "date",
+          "ignore_malformed": true
         },
         "source.ip": {
           "type": "ip",

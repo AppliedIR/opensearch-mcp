@@ -139,6 +139,7 @@ def parse_prefetch(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse .pf files with Plaso, index into OpenSearch.
 
@@ -152,7 +153,7 @@ def parse_prefetch(
             client,
             index_name,
             hostname,
-            source_dir=str(prefetch_dir),
+            source_dir=source_file or str(prefetch_dir),
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
@@ -169,6 +170,7 @@ def parse_srum(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse SRUM database with Plaso, index into OpenSearch.
 
@@ -185,7 +187,7 @@ def parse_srum(
             client,
             index_name,
             hostname,
-            source_dir=str(srum_path),
+            source_dir=source_file or str(srum_path),
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,

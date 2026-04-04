@@ -3,7 +3,7 @@
   "template": {
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date"},
+        "@timestamp": {"type": "date", "ignore_malformed": true},
         "source.ip": {"type": "ip", "ignore_malformed": true},
         "source.port": {"type": "integer"},
         "user.name": {"type": "keyword"},
@@ -22,7 +22,12 @@
         "threat_intel.ioc_type": {"type": "keyword"},
         "threat_intel.ioc_value": {"type": "keyword"},
         "threat_intel.enriched_at": {"type": "date"},
-        "threat_intel.checked": {"type": "boolean"}
+        "threat_intel.checked": {"type": "boolean"},
+        "source.geo.country_name": {"type": "keyword"},
+        "source.geo.city_name": {"type": "keyword"},
+        "source.geo.region_name": {"type": "keyword"},
+        "source.geo.continent_name": {"type": "keyword"},
+        "source.geo.location": {"type": "geo_point"}
       }
     }
   },

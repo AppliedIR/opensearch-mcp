@@ -3,7 +3,7 @@
   "template": {
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date"},
+        "@timestamp": {"type": "date", "ignore_malformed": true},
         "process.name": {"type": "keyword"},
         "wer.event_type": {"type": "keyword"},
         "wer.app_version": {"type": "keyword"},

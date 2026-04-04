@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,7 @@ def parse_w3c_log(
         tz_info = dateutil_tz.gettz(system_timezone)
 
     line_number = 0
+    data_seq = 0  # Sequential counter for data lines (stable across header changes)
     with open(file_path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line_number += 1
@@ -61,6 +63,7 @@ def parse_w3c_log(
             if not fields:
                 continue
 
+            data_seq += 1
             values = line.strip().split()
             if len(values) != len(fields):
                 skipped += 1
@@ -83,6 +86,11 @@ def parse_w3c_log(
                 else:
                     # Timezone unknown — skip entry (unreliable timestamp)
                     skipped += 1
+                    if skipped == 1:
+                        print(
+                            "  w3c: skipping entries — timezone unknown, timestamps unreliable",
+                            file=sys.stderr,
+                        )
                     continue
 
             # Time range filter
@@ -113,12 +121,14 @@ def parse_w3c_log(
                     row[ecs_name] = row[w3c_name]
 
             # Deterministic ID — computed BEFORE provenance injection
-            # Line number ensures uniqueness for high-volume IIS logs
+            # Sequential counter ensures uniqueness for high-volume IIS logs
             # (multiple requests in same second from same IP to same URI)
+            # Uses data_seq (resets after headers) instead of line_number
+            # for stability across re-ingest with different header lines
             id_parts = [
                 index_name,
                 source_file,
-                str(line_number),
+                str(data_seq),
                 row.get("@timestamp", ""),
                 row.get("source.ip", row.get("c-ip", "")),
                 row.get("cs-uri-stem", row.get("dst-port", "")),

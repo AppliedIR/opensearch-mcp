@@ -3,7 +3,7 @@
   "template": {
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date"},
+        "@timestamp": {"type": "date", "ignore_malformed": true},
         "defender.event_type": {"type": "keyword"},
         "defender.threat_name": {"type": "keyword"},
         "defender.threat_type": {"type": "keyword"},

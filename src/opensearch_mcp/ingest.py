@@ -21,20 +21,63 @@ from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 
 
-def _register_evidence(file_path: str, hostname: str, artifact_type: str) -> None:
-    """Best-effort evidence registration via gateway."""
-    try:
-        from opensearch_mcp.gateway import call_tool
+def _register_evidence(
+    file_path: str, hostname: str, artifact_type: str, sha256: str = "", doc_count: int = 0
+) -> None:
+    """Best-effort evidence registration via gateway.
 
+    Writes a manifest to the case directory, then registers it via
+    evidence_register. The manifest path is inside the case dir, so
+    path validation in evidence_register succeeds.
+    """
+    try:
+        import json as _json
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        from opensearch_mcp.gateway import call_tool
+        from opensearch_mcp.paths import vhir_dir
+
+        # Resolve case directory — active_case contains full path
+        active_case_file = vhir_dir() / "active_case"
+        if not active_case_file.exists():
+            return
+        case_dir = Path(active_case_file.read_text().strip())
+        if not case_dir.is_dir():
+            return
+
+        # Write manifest to case evidence directory
+        evidence_dir = case_dir / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        safe_host = hostname.replace("/", "_").replace("\\", "_")
+        safe_type = artifact_type.replace("/", "_").replace("\\", "_")
+        # Include file stem to prevent overwrite when multiple files per artifact type
+        safe_file = Path(file_path).stem.replace("/", "_").replace("\\", "_")[:50]
+        manifest_name = f"{safe_host}-{safe_type}-{safe_file}.manifest.json"
+        manifest_path = evidence_dir / manifest_name
+        manifest = {
+            "source_path": file_path,
+            "hostname": hostname,
+            "artifact_type": artifact_type,
+            "registered_at": _dt.now(_tz.utc).isoformat(),
+        }
+        if sha256:
+            manifest["sha256"] = sha256
+        manifest["doc_count"] = doc_count
+        manifest_path.write_text(_json.dumps(manifest, indent=2))
+
+        # Register the in-case manifest path
         call_tool(
             "evidence_register",
             {
-                "path": file_path,
-                "description": f"Ingested {artifact_type} from {hostname}",
+                "path": str(manifest_path),
+                "description": f"Ingest manifest: {artifact_type} from {hostname}",
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+
+        logging.getLogger(__name__).debug("Evidence registration skipped: %s", e)
 
 
 # Artifacts handled by Plaso/wintools (not EZ tools on Linux)
@@ -400,7 +443,13 @@ def _ingest_hosts(
                         ar.skipped += sk
                         ar.bulk_failed += bf
                         ar.source_files.append(str(evtx_file))
-                        _register_evidence(str(evtx_file), host.hostname, "evtx")
+                        _register_evidence(
+                            str(evtx_file),
+                            host.hostname,
+                            "evtx",
+                            sha256=file_hash,
+                            doc_count=cnt,
+                        )
                         audit.log(
                             tool="ingest_evtx",
                             audit_id=aid,
@@ -548,13 +597,16 @@ def _ingest_hosts(
             _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
             try:
+                from opensearch_mcp.paths import relative_evidence_path
+
+                _rel_src = relative_evidence_path(artifact_path, host.volume_root)
                 cnt, sk, bf = run_and_ingest(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
                     client=client,
                     case_id=case_id,
                     hostname=host.hostname,
-                    source_file=str(artifact_path),
+                    source_file=_rel_src,
                     ingest_audit_id=aid,
                     pipeline_version=_PIPELINE_VERSION,
                     time_from=time_from,
@@ -565,7 +617,13 @@ def _ingest_hosts(
                 ar.indexed = cnt
                 ar.skipped = sk
                 ar.bulk_failed = bf
-                _register_evidence(str(artifact_path), host.hostname, tool_name)
+                _register_evidence(
+                    str(artifact_path),
+                    host.hostname,
+                    tool_name,
+                    sha256=file_hash,
+                    doc_count=cnt,
+                )
                 audit.log(
                     tool=f"ingest_{tool_name}",
                     audit_id=aid,
@@ -658,6 +716,9 @@ def _ingest_plaso_artifact(
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
+        from opensearch_mcp.paths import relative_evidence_path as _rel
+
+        _plaso_src = _rel(artifact_path, host.volume_root)
         if tool_name == "prefetch":
             cnt, bf = parse_prefetch(
                 prefetch_dir=artifact_path,
@@ -667,6 +728,7 @@ def _ingest_plaso_artifact(
                 ingest_audit_id=aid,
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
+                source_file=_plaso_src,
             )
         else:
             cnt, bf = parse_srum(
@@ -678,10 +740,11 @@ def _ingest_plaso_artifact(
                 ingest_audit_id=aid,
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
+                source_file=_plaso_src,
             )
         ar.indexed = cnt
         ar.bulk_failed = bf
-        _register_evidence(str(artifact_path), host.hostname, tool_name)
+        _register_evidence(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
@@ -781,7 +844,7 @@ def _ingest_custom_artifact(
         ar.indexed = cnt
         ar.skipped = sk
         ar.bulk_failed = bf
-        _register_evidence(str(artifact_path), host.hostname, tool_name)
+        _register_evidence(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,

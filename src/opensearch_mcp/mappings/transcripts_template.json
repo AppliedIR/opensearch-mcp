@@ -3,7 +3,7 @@
   "template": {
     "mappings": {
       "properties": {
-        "@timestamp": {"type": "date"},
+        "@timestamp": {"type": "date", "ignore_malformed": true},
         "transcript.end_time": {"type": "date"},
         "transcript.duration_seconds": {"type": "integer"},
         "user.name": {"type": "keyword"},

@@ -17,6 +17,7 @@ def parse_prefetch(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse prefetch files. Returns (count_indexed, count_bulk_failed).
 
@@ -35,6 +36,7 @@ def parse_prefetch(
                 ingest_audit_id=ingest_audit_id,
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
+                source_file=source_file,
             )
         except Exception as e:
             print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
@@ -50,6 +52,7 @@ def parse_prefetch(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            source_file=source_file,
         )
     except subprocess.CalledProcessError as e:
         print(f"  prefetch: Plaso failed ({e})", file=sys.stderr)
@@ -64,6 +67,7 @@ def _parse_prefetch_wintools(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse prefetch via PECmd on Windows (wintools-mcp)."""
     from opensearch_mcp.parse_csv import ingest_csv
@@ -87,7 +91,7 @@ def _parse_prefetch_wintools(
             client=client,
             index_name=index_name,
             hostname=hostname,
-            source_file=str(prefetch_dir),
+            source_file=source_file or str(prefetch_dir),
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
@@ -107,6 +111,7 @@ def _parse_prefetch_plaso(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse prefetch via Plaso prefetch parser."""
     from opensearch_mcp.parse_plaso import parse_prefetch as _plaso_prefetch
@@ -119,4 +124,5 @@ def _parse_prefetch_plaso(
         ingest_audit_id=ingest_audit_id,
         pipeline_version=pipeline_version,
         vss_id=vss_id,
+        source_file=source_file,
     )

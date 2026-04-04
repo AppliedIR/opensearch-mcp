@@ -6,12 +6,15 @@ Gateway-independent: registry persistence R1-R17 via update_by_query.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.gateway import call_tool, gateway_available
 from opensearch_mcp.paths import sanitize_index_component
+
+logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_FAILURES = 3
 
@@ -934,8 +937,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 requests_per_second=1000,
             )
             total_updated += resp.get("updated", 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Registry rule failed: %s", exc)
 
     # R4: Winlogon Shell — conditional (not explorer.exe → SUSPICIOUS)
     try:
@@ -947,12 +950,14 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                         "must": [
                             {"wildcard": {"KeyPath.keyword": "*Winlogon*"}},
                             {"term": {"ValueName.keyword": "Shell"}},
+                            {"exists": {"field": "ValueData"}},
                         ]
                     }
                 },
                 "script": {
                     "source": """
                         String val = ctx._source['ValueData'].toLowerCase().trim();
+                        if (val.length() == 0) { ctx.op = 'noop'; return; }
                         int idx = val.lastIndexOf('\\\\');
                         String filename = idx >= 0 ? val.substring(idx + 1) : val;
                         if (!filename.equals('explorer.exe')) {
@@ -972,8 +977,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Registry rule failed: %s", exc)
 
     # R5: Winlogon Userinit — conditional (not userinit.exe → SUSPICIOUS)
     try:
@@ -985,12 +990,14 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                         "must": [
                             {"wildcard": {"KeyPath.keyword": "*Winlogon*"}},
                             {"term": {"ValueName.keyword": "Userinit"}},
+                            {"exists": {"field": "ValueData"}},
                         ]
                     }
                 },
                 "script": {
                     "source": """
                         String val = ctx._source['ValueData'].toLowerCase().trim();
+                        if (val.length() == 0) { ctx.op = 'noop'; return; }
                         if (val.endsWith(',')) { val = val.substring(0, val.length() - 1).trim(); }
                         if (!val.endsWith('userinit.exe')) {
                             ctx._source['triage.verdict'] = 'SUSPICIOUS';
@@ -1009,8 +1016,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Registry rule failed: %s", exc)
 
     # R7: BootExecute — conditional (not "autocheck autochk *" → SUSPICIOUS)
     try:
@@ -1022,12 +1029,14 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                         "must": [
                             {"wildcard": {"KeyPath.keyword": "*Session Manager*"}},
                             {"term": {"ValueName.keyword": "BootExecute"}},
+                            {"exists": {"field": "ValueData"}},
                         ]
                     }
                 },
                 "script": {
                     "source": """
                         String val = ctx._source['ValueData'].trim();
+                        if (val.length() == 0) { ctx.op = 'noop'; return; }
                         if (!val.equals('autocheck autochk *')) {
                             ctx._source['triage.verdict'] = 'SUSPICIOUS';
                             ctx._source['triage.reason'] = params.prefix + val;
@@ -1044,8 +1053,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Registry rule failed: %s", exc)
 
     # R14: Screensaver — conditional (non-.scr or outside System32 → SUSPICIOUS)
     try:
@@ -1090,8 +1099,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Registry rule failed: %s", exc)
 
     if on_progress:
         on_progress(

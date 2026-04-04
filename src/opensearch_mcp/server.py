@@ -1,11 +1,15 @@
-"""OpenSearch MCP server — 10 tools for forensic evidence querying and ingest."""
+"""OpenSearch MCP server — 17 tools for forensic evidence querying, ingest, and enrichment."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
-from opensearchpy.exceptions import AuthorizationException, ConnectionTimeout
+from opensearchpy.exceptions import (
+    AuthorizationException,
+    ConnectionTimeout,
+    RequestError,
+)
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
 
@@ -58,13 +62,19 @@ def _os_call(fn, *args, **kwargs):
     global _client, _client_verified
     try:
         return fn(*args, **kwargs)
-    except (OSConnectionError, ConnectionTimeout, AuthorizationException):
+    except (OSConnectionError, ConnectionTimeout, AuthorizationException) as e:
         _client = None
         _client_verified = False
         raise RuntimeError(
             "Lost connection to OpenSearch. Is the container running?\n"
             "Check: docker ps | grep vhir-opensearch"
-        )
+        ) from e
+    except RequestError as e:
+        # 400 Bad Request — malformed query, missing field, etc.
+        info = getattr(e, "info", None) or {}
+        err = info.get("error", {})
+        reason = err.get("reason", str(e)) if isinstance(err, dict) else str(e)
+        raise ValueError(f"Query error: {reason}") from e
 
 
 def _strip_hits(hits: list[dict]) -> list[dict]:
@@ -97,13 +107,28 @@ def _resolve_index(index: str, case_id: str) -> str:
     return "case-*"
 
 
+def _validate_path(path: str) -> str | None:
+    """Validate path is in allowed locations. Returns error string or None."""
+    from opensearch_mcp.paths import vhir_home
+
+    p = Path(path).resolve()
+    home = vhir_home().resolve()
+    allowed = [home, Path("/mnt").resolve(), Path("/evidence").resolve(), Path("/tmp").resolve()]
+    if not any(p.is_relative_to(a) for a in allowed):
+        return f"Path not in allowed locations (~/, /mnt/, /evidence/, /tmp/): {path}"
+    return None
+
+
 @server.tool()
 def idx_search(
     query: str,
     index: str = "",
     case_id: str = "",
     limit: int = 50,
+    offset: int = 0,
     sort: str = "@timestamp:desc",
+    time_from: str = "",
+    time_to: str = "",
 ) -> dict:
     """Search indexed evidence using OpenSearch query_string syntax.
 
@@ -113,7 +138,10 @@ def idx_search(
         index: Index pattern. Overrides case_id if provided.
         case_id: Case ID — auto-constructs case-{id}-* pattern.
         limit: Max results (default 50, max 200).
+        offset: Skip first N results for pagination (default 0).
         sort: Sort field:order (default @timestamp:desc).
+        time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
+        time_to: End time (ISO 8601).
     """
     index = _resolve_index(index, case_id)
     err = _validate_index(index)
@@ -127,14 +155,29 @@ def idx_search(
         sort_order = "desc"
     sort_body = [{sort_field: {"order": sort_order or "desc", "unmapped_type": "date"}}]
 
+    query_body: dict = {"query_string": {"query": query}}
+    if time_from or time_to:
+        range_filter: dict = {"@timestamp": {}}
+        if time_from:
+            range_filter["@timestamp"]["gte"] = time_from
+        if time_to:
+            range_filter["@timestamp"]["lte"] = time_to
+        query_body = {
+            "bool": {"must": [{"query_string": {"query": query}}, {"range": range_filter}]}
+        }
+
+    search_body: dict = {
+        "query": query_body,
+        "sort": sort_body,
+        "size": limit,
+    }
+    if offset > 0:
+        search_body["from"] = min(offset, 10000)  # OpenSearch max_result_window
+
     result = _os_call(
         client.search,
         index=index,
-        body={
-            "query": {"query_string": {"query": query}},
-            "sort": sort_body,
-            "size": limit,
-        },
+        body=search_body,
     )
 
     total = result["hits"]["total"]["value"]
@@ -228,6 +271,7 @@ def idx_aggregate(
         "field": field,
         "total_docs": result["hits"]["total"]["value"],
         "buckets": buckets,
+        "truncated": len(buckets) >= limit,
     }
     aid = audit.log(
         tool="idx_aggregate",
@@ -382,7 +426,7 @@ def idx_field_values(
         for b in result["aggregations"]["values"]["buckets"]
     ]
 
-    resp = {"field": field, "values": values}
+    resp = {"field": field, "values": values, "truncated": len(values) >= limit}
     aid = audit.log(
         tool="idx_field_values",
         params={"field": field, "query": query, "index": index},
@@ -402,7 +446,7 @@ def idx_status() -> dict:
     case_indices = [
         {
             "index": idx["index"],
-            "docs": idx.get("docs.count", "0"),
+            "docs": int(idx.get("docs.count", 0)),
             "size": idx.get("store.size", "0"),
             "status": idx.get("status", "unknown"),
         }
@@ -453,43 +497,72 @@ def idx_case_summary(case_id: str = "") -> dict:
     # Get all indices for this case
     try:
         indices = _os_call(client.cat.indices, index=pattern, format="json")
-    except Exception:
-        return {"case_id": cid, "error": "No indices found"}
+    except ValueError:
+        # RequestError — likely no matching indices
+        return {"case_id": cid, "error": "No indices found for this case"}
+    except RuntimeError as e:
+        return {"case_id": cid, "error": str(e)}
+    except Exception as e:
+        return {"case_id": cid, "error": f"OpenSearch error: {type(e).__name__}"}
 
     if not indices:
         return {"case_id": cid, "hosts": [], "artifacts": {}, "total_docs": 0}
 
-    # Parse index names: case-{id}-{type}-{host}
-    artifacts: dict = {}
+    # Get hosts from document field (reliable — index name parsing
+    # breaks on hostnames with dashes)
     hosts: set = set()
+    try:
+        host_agg = client.search(
+            index=pattern,
+            body={
+                "size": 0,
+                "aggs": {"hosts": {"terms": {"field": "host.name", "size": 500}}},
+            },
+        )
+        for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
+            hosts.add(bucket["key"])
+    except Exception:
+        pass
+
+    # Build artifact map — strip known hostnames from index suffixes
+    # to extract the artifact type. Index format: case-{id}-{type}-{host}
+    # where both type and host may contain dashes.
+    artifacts: dict = {}
     total_docs = 0
+    prefix = f"case-{safe}-"
+    host_suffixes = sorted(hosts, key=len, reverse=True)  # longest first
     for idx in indices:
         name = idx["index"]
         docs = int(idx.get("docs.count", 0))
         total_docs += docs
-        # Strip case-{safe}- prefix and -{host} suffix
-        parts = name[len(f"case-{safe}-") :].rsplit("-", 1)
-        artifact_type = parts[0] if parts else name
-        host = parts[1] if len(parts) > 1 else ""
-        if host:
-            hosts.add(host)
+        remainder = name[len(prefix) :] if name.startswith(prefix) else name
+        # Try stripping each known host suffix
+        artifact_type = remainder
+        matched_host = ""
+        for h in host_suffixes:
+            suffix = f"-{h}"
+            if remainder.endswith(suffix):
+                artifact_type = remainder[: -len(suffix)]
+                matched_host = h
+                break
         if artifact_type not in artifacts:
             artifacts[artifact_type] = {"docs": 0, "hosts": [], "indices": []}
         artifacts[artifact_type]["docs"] += docs
-        if host and host not in artifacts[artifact_type]["hosts"]:
-            artifacts[artifact_type]["hosts"].append(host)
+        if matched_host and matched_host not in artifacts[artifact_type]["hosts"]:
+            artifacts[artifact_type]["hosts"].append(matched_host)
         artifacts[artifact_type]["indices"].append(name)
 
-    # Get field mappings per artifact type (sample one index per type)
-    # Flatten nested properties to dotted paths (host.name, not host)
-    def _flatten_props(props: dict, prefix: str = "") -> list[str]:
+    # Get field mappings per artifact type with types (sample one index per type)
+    def _flatten_props(props: dict, prefix: str = "") -> list[dict]:
         fields = []
         for key, val in props.items():
             full = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
             if isinstance(val, dict) and "properties" in val:
                 fields.extend(_flatten_props(val["properties"], full))
+            elif isinstance(val, dict):
+                fields.append({"field": full, "type": val.get("type", "object")})
             else:
-                fields.append(full)
+                fields.append({"field": full, "type": "unknown"})
         return fields
 
     fields_per_type: dict = {}
@@ -500,7 +573,7 @@ def idx_case_summary(case_id: str = "") -> dict:
             mapping = client.indices.get_mapping(index=info["indices"][0])
             idx_name = info["indices"][0]
             props = mapping.get(idx_name, {}).get("mappings", {}).get("properties", {})
-            fields_per_type[atype] = sorted(_flatten_props(props))[:80]
+            fields_per_type[atype] = sorted(_flatten_props(props), key=lambda f: f["field"])[:150]
         except Exception:
             pass
 
@@ -540,11 +613,32 @@ def idx_case_summary(case_id: str = "") -> dict:
     except Exception:
         pass
 
+    # Time range
+    time_range: dict = {}
+    try:
+        min_ts = client.search(
+            index=pattern,
+            body={"size": 0, "aggs": {"min_ts": {"min": {"field": "@timestamp"}}}},
+        )
+        max_ts = client.search(
+            index=pattern,
+            body={"size": 0, "aggs": {"max_ts": {"max": {"field": "@timestamp"}}}},
+        )
+        min_val = min_ts["aggregations"]["min_ts"].get("value_as_string")
+        max_val = max_ts["aggregations"]["max_ts"].get("value_as_string")
+        if min_val:
+            time_range["earliest"] = min_val
+        if max_val:
+            time_range["latest"] = max_val
+    except Exception:
+        pass
+
     resp = {
         "case_id": cid,
         "hosts": sorted(hosts),
         "artifacts": artifacts,
         "total_docs": total_docs,
+        "time_range": time_range,
         "fields_per_type": fields_per_type,
         "enrichment": enrichment,
     }
@@ -599,13 +693,9 @@ def idx_ingest(
     evidence_path = Path(path).resolve()
     if not evidence_path.is_dir():
         return {"error": f"Not a directory: {path}"}
-    # Restrict to reasonable evidence locations
-    from opensearch_mcp.paths import vhir_home
-
-    home = vhir_home().resolve()
-    allowed = [home, Path("/mnt").resolve(), Path("/evidence").resolve(), Path("/tmp").resolve()]
-    if not any(evidence_path.is_relative_to(a) for a in allowed):
-        return {"error": f"Path not in allowed locations (~/, /mnt/, /evidence/, /tmp/): {path}"}
+    path_err = _validate_path(path)
+    if path_err:
+        return {"error": path_err}
 
     # Read case from active_case
     from opensearch_mcp.paths import vhir_dir
@@ -646,7 +736,9 @@ def idx_ingest(
                 if suffix in checked_suffixes:
                     continue
                 checked_suffixes.add(suffix)
-                idx = f"case-{case_id}-{suffix}-{host.hostname}".lower()
+                from opensearch_mcp.paths import sanitize_index_component as _sic
+
+                idx = f"case-{_sic(case_id)}-{suffix}-{_sic(host.hostname)}"
                 try:
                     r = client.count(index=idx)
                     existing[idx] = r["count"]
@@ -867,6 +959,9 @@ def idx_ingest_json(
         time_field: Timestamp field name (default: auto-detect).
         dry_run: Preview what would be ingested (default True).
     """
+    path_err = _validate_path(path)
+    if path_err:
+        return {"error": path_err}
     if dry_run:
         from opensearch_mcp.parse_json import _detect_json_format
 
@@ -899,6 +994,9 @@ def idx_ingest_delimited(
         delimiter: Delimiter character (default: auto-detect).
         dry_run: Preview (default True).
     """
+    path_err = _validate_path(path)
+    if path_err:
+        return {"error": path_err}
     if dry_run:
         from opensearch_mcp.parse_delimited import _detect_delimited_format
 
@@ -928,6 +1026,9 @@ def idx_ingest_accesslog(
         index_suffix: Index suffix (default: accesslog).
         dry_run: Preview (default True).
     """
+    path_err = _validate_path(path)
+    if path_err:
+        return {"error": path_err}
     if dry_run:
         p = Path(path)
         if p.is_file():
@@ -1090,6 +1191,9 @@ def idx_ingest_memory(
         plugins: Override tier — run only these specific plugins.
         dry_run: Preview which plugins would run (default True).
     """
+    path_err = _validate_path(path)
+    if path_err:
+        return {"error": path_err}
     from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3
 
     if plugins:
@@ -1203,12 +1307,17 @@ def idx_list_detections(
         "sortOrder": "desc",
     }
 
-    response = _os_call(
-        client.transport.perform_request,
-        "GET",
-        "/_plugins/_security_analytics/findings/_search",
-        params=params,
-    )
+    try:
+        response = _os_call(
+            client.transport.perform_request,
+            "GET",
+            "/_plugins/_security_analytics/findings/_search",
+            params=params,
+        )
+    except (RuntimeError, ValueError, Exception) as e:
+        if "security_analytics" in str(e).lower() or "400" in str(e) or "404" in str(e):
+            return {"error": "Security Analytics plugin not available", "findings": []}
+        raise
 
     sev_filter = severity.lower() if severity else ""
     findings = []

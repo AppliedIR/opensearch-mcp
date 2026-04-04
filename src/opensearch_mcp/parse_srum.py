@@ -19,6 +19,7 @@ def parse_srum(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse SRUM database. Returns (count_indexed, count_bulk_failed).
 
@@ -39,6 +40,7 @@ def parse_srum(
                 ingest_audit_id=ingest_audit_id,
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
+                source_file=source_file,
             )
         except Exception as e:
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
@@ -54,6 +56,7 @@ def parse_srum(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            source_file=source_file,
         )
     except subprocess.CalledProcessError:
         print(
@@ -72,6 +75,7 @@ def _parse_srum_wintools(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse SRUM via SrumECmd on Windows (wintools-mcp).
 
@@ -122,7 +126,7 @@ def _parse_srum_wintools(
             client=client,
             index_name=index_name,
             hostname=hostname,
-            source_file=str(srum_path),
+            source_file=source_file or str(srum_path),
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
@@ -142,6 +146,7 @@ def _parse_srum_plaso(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    source_file: str = "",
 ) -> tuple[int, int]:
     """Parse SRUM via Plaso esedb/srum parser."""
     from opensearch_mcp.parse_plaso import parse_srum as _plaso_srum
@@ -154,4 +159,5 @@ def _parse_srum_plaso(
         ingest_audit_id=ingest_audit_id,
         pipeline_version=pipeline_version,
         vss_id=vss_id,
+        source_file=source_file,
     )

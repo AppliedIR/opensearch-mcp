@@ -49,6 +49,7 @@ def extract_unique_iocs(
     If force=False, skip docs already enriched (threat_intel.checked: true).
     """
     iocs: dict[str, set[str]] = {"ip": set(), "hash": set(), "domain": set()}
+    any_succeeded = False
 
     query: dict = {"match_all": {}}
     if not force:
@@ -74,6 +75,7 @@ def extract_unique_iocs(
                     },
                     request_timeout=60,
                 )
+                any_succeeded = True
                 for bucket in result["aggregations"]["values"]["buckets"]:
                     val = str(bucket["key"])
                     if ioc_type == "ip":
@@ -88,6 +90,10 @@ def extract_unique_iocs(
                         file=sys.stderr,
                     )
                 continue
+
+    if not any_succeeded:
+        # All aggregations failed — OpenSearch likely unreachable
+        raise RuntimeError("IOC extraction failed — all OpenSearch queries failed")
 
     return iocs
 
@@ -127,7 +133,6 @@ def batch_lookup(
                 on_progress("looking_up", done=done, total=total)
             try:
                 resp = call_tool("lookup_ioc", {"ioc": value}, timeout=15)
-                consecutive_failures = 0
 
                 # Detect error responses from opencti-mcp (QueryError, etc.)
                 if resp.get("error"):
@@ -138,6 +143,9 @@ def batch_lookup(
                         file=sys.stderr,
                     )
                     continue
+
+                # Genuine success — reset failure counter
+                consecutive_failures = 0
 
                 if not resp.get("found", False):
                     # Mark as checked (no verdict) so --force skip works

@@ -188,14 +188,14 @@ def run_vol3_plugin(
     return []
 
 
-def _flatten_records(records: list[dict]) -> list[dict]:
+def _flatten_records(records: list[dict], _depth: int = 0) -> list[dict]:
     """Recursively flatten __children into a flat list."""
     flat = []
     for record in records:
         children = record.pop("__children", [])
         flat.append(record)
-        if children:
-            flat.extend(_flatten_records(children))
+        if children and _depth < 50:
+            flat.extend(_flatten_records(children, _depth + 1))
     return flat
 
 
