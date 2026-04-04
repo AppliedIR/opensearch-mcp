@@ -83,9 +83,9 @@ def gen_defender_mplog():
     """Windows Defender MPLog — detection events and exclusions."""
     lines = [
         f"2023-01-17T14:30:00.000Z DETECTION_ADD Name: Trojan:Win32/{MALWARE_SIG}#ThreatType: Trojan#file: C:\\Windows\\System32\\{MALWARE_BIN}",
-        f"2023-01-17T14:30:02.000Z process: C:\\Windows\\System32\\svchost.exe severity: Severe",
+        "2023-01-17T14:30:02.000Z process: C:\\Windows\\System32\\svchost.exe severity: Severe",
         f"2023-01-17T14:30:05.000Z Adding exclusion: C:\\Users\\{ATTACKER_USER}\\AppData\\Local\\Temp",
-        f"2023-01-17T14:30:08.000Z Removing exclusion: C:\\Users\\Public\\Downloads",
+        "2023-01-17T14:30:08.000Z Removing exclusion: C:\\Users\\Public\\Downloads",
         f"2023-01-17T14:30:10.000Z DETECTION_CLEAN Name: Trojan:Win32/{MALWARE_SIG}#file: C:\\Windows\\System32\\{MALWARE_BIN}",
     ]
     _write_raw("defender/MPLog-20230117-143000.log", "\n".join(lines) + "\n")
