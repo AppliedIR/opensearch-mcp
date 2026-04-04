@@ -19,6 +19,13 @@ if ! docker compose version &>/dev/null; then
     exit 1
 fi
 
+if ! docker info &>/dev/null; then
+    echo "Error: Cannot connect to Docker daemon."
+    echo "  Fix: sudo usermod -aG docker $USER && newgrp docker"
+    echo "  Or run this script with sudo."
+    exit 1
+fi
+
 echo "Docker $(docker --version | grep -oP '\d+\.\d+\.\d+')"
 
 # --- 2. Generate password ---
