@@ -98,7 +98,7 @@ class TestOsCall:
         def failing_fn():
             raise OSConnectionError("connection lost")
 
-        with pytest.raises(RuntimeError, match="Lost connection"):
+        with pytest.raises(RuntimeError, match="temporarily lost"):
             _os_call(failing_fn)
         assert srv._client is None
         assert srv._client_verified is False
@@ -336,9 +336,22 @@ class TestIdxStatus:
 
     def test_includes_cluster_status(self, mock_client):
         mock_client.cat.indices.return_value = []
-        mock_client.cluster.health.return_value = {"status": "yellow"}
+        mock_client.cluster.health.return_value = {
+            "status": "yellow",
+            "number_of_nodes": 1,
+        }
         resp = idx_status()
-        assert resp["cluster_status"] == "yellow"
+        assert "yellow" in resp["cluster_status"]
+        assert "single-node" in resp["cluster_status"]
+
+    def test_cluster_status_green_not_annotated(self, mock_client):
+        mock_client.cat.indices.return_value = []
+        mock_client.cluster.health.return_value = {
+            "status": "green",
+            "number_of_nodes": 3,
+        }
+        resp = idx_status()
+        assert resp["cluster_status"] == "green"
 
 
 # ---------------------------------------------------------------------------

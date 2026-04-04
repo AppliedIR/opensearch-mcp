@@ -62,12 +62,19 @@ def _os_call(fn, *args, **kwargs):
     global _client, _client_verified
     try:
         return fn(*args, **kwargs)
-    except (OSConnectionError, ConnectionTimeout, AuthorizationException) as e:
+    except (OSConnectionError, ConnectionTimeout) as e:
         _client = None
         _client_verified = False
         raise RuntimeError(
-            "Lost connection to OpenSearch. Is the container running?\n"
-            "Check: docker ps | grep vhir-opensearch"
+            "OpenSearch connection temporarily lost — client reset. "
+            "Retry your query. If it persists: "
+            "docker ps | grep vhir-opensearch"
+        ) from e
+    except AuthorizationException as e:
+        _client = None
+        _client_verified = False
+        raise RuntimeError(
+            "OpenSearch authentication failed. Check opensearch.yaml credentials."
         ) from e
     except RequestError as e:
         # 400 Bad Request — malformed query, missing field, etc.
@@ -107,15 +114,87 @@ def _resolve_index(index: str, case_id: str) -> str:
     return "case-*"
 
 
+def _detect_preparsed_csvs(path: Path) -> str | None:
+    """Check for pre-parsed CSV output and suggest the right ingest tool."""
+    # Scan flat + one level of subdirs (avoid full tree walk on USB)
+    csv_files = [f for f in path.iterdir() if f.suffix.lower() == ".csv"]
+    for d in path.iterdir():
+        if d.is_dir() and not d.name.startswith("."):
+            csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
+        if len(csv_files) >= 100:
+            break
+    csv_files = csv_files[:100]
+    if not csv_files:
+        return None
+
+    # ZimmermanTools patterns
+    zt_patterns = {
+        "amcache": "Amcache",
+        "shimcache": "AppCompatCache",
+        "evtxecmd": "EvtxECmd",
+        "mft": "MFTECmd",
+        "prefetch": "PECmd",
+        "registry": "RECmd",
+        "shellbags": "SBECmd",
+        "usn": "UsnJrnl",
+    }
+    found_zt: set[str] = set()
+    for f in csv_files:
+        name_lower = f.name.lower()
+        for key, pattern in zt_patterns.items():
+            if pattern.lower() in name_lower:
+                found_zt.add(key)
+
+    # Hayabusa detection (check header of first few CSVs)
+    hayabusa = False
+    for f in csv_files[:5]:
+        try:
+            header = f.read_text(errors="replace")[:200].lower()
+            if "ruletitle" in header and "eventid" in header:
+                hayabusa = True
+                break
+        except OSError:
+            pass
+
+    parts = []
+    if found_zt:
+        parts.append(
+            f"Detected ZimmermanTools CSV output "
+            f"({', '.join(sorted(found_zt))}). "
+            "Use idx_ingest_delimited(path=..., hostname=...) "
+            "to ingest."
+        )
+    if hayabusa:
+        parts.append(
+            "Detected Hayabusa CSV output. "
+            "Use idx_ingest_delimited(path=..., hostname=...) "
+            "to ingest."
+        )
+    if not parts and csv_files:
+        parts.append(
+            f"Found {len(csv_files)} CSV files but no raw Windows "
+            "artifacts. If these are pre-parsed tool output, use "
+            "idx_ingest_delimited(path=..., hostname=...)."
+        )
+    return " ".join(parts) if parts else None
+
+
 def _validate_path(path: str) -> str | None:
     """Validate path is in allowed locations. Returns error string or None."""
     from opensearch_mcp.paths import vhir_home
 
     p = Path(path).resolve()
     home = vhir_home().resolve()
-    allowed = [home, Path("/mnt").resolve(), Path("/evidence").resolve(), Path("/tmp").resolve()]
+    allowed = [
+        home,
+        Path("/mnt").resolve(),
+        Path("/media").resolve(),
+        Path("/run/media").resolve(),
+        Path("/evidence").resolve(),
+        Path("/tmp").resolve(),
+    ]
     if not any(p.is_relative_to(a) for a in allowed):
-        return f"Path not in allowed locations (~/, /mnt/, /evidence/, /tmp/): {path}"
+        return f"Path not in allowed locations (~/, /mnt/, /media/, /evidence/, /tmp/): {path}"
     return None
 
 
@@ -457,9 +536,13 @@ def idx_status() -> dict:
     case_indices.sort(key=lambda x: x["index"])
 
     health = _os_call(client.cluster.health)
+    cluster_status = health.get("status")
+    nodes = health.get("number_of_nodes", 0)
+    if cluster_status == "yellow" and nodes <= 1:
+        cluster_status = "yellow (normal for single-node deployment)"
 
     resp = {
-        "cluster_status": health.get("status"),
+        "cluster_status": cluster_status,
         "indices": case_indices,
         "total_indices": len(case_indices),
     }
@@ -663,18 +746,24 @@ def idx_ingest(
     reduced_ids: bool = False,
     full: bool = False,
     dry_run: bool = True,
+    vss: bool = False,
+    password: str = "",
 ) -> dict:
     """Discover and ingest forensic artifacts into OpenSearch.
 
     Case ID is read from ~/.vhir/active_case. Not accepted as a
     parameter — set via 'vhir case activate'.
 
+    Supports directories (triage packages, mounted images) AND container
+    files (VHDX, E01, VMDK, 7z, raw). Containers are auto-detected and
+    mounted by the CLI backend.
+
     Triage enrichment runs automatically during ingest when the Windows
     baseline database is available (local SQLite or remote via gateway).
     Use idx_enrich_triage to re-run on already-indexed data.
 
     Args:
-        path: Directory containing evidence (triage package, mounted image).
+        path: Evidence path — directory or container file (VHDX, E01, 7z, raw).
         hostname: Source hostname. Auto-detected from directory structure
             if multi-host triage package. Required for flat directories.
         include: Only these artifact types (e.g., ["mft", "usn"]).
@@ -683,16 +772,19 @@ def idx_ingest(
         all_logs: Parse all evtx files (default: forensic logs only).
         reduced_ids: Filter to ~78 high-value Event IDs.
         full: Include all tiers including MFT, USN, timeline.
-        dry_run: Preview what would be ingested without indexing (default True).
+        dry_run: Preview without indexing (default True). Set False to execute
+            immediately if path and parameters are confirmed.
     """
+    import subprocess as _check_sp
     import sys
     from pathlib import Path
 
+    from opensearch_mcp.containers import detect_container
     from opensearch_mcp.ingest import discover
 
     evidence_path = Path(path).resolve()
-    if not evidence_path.is_dir():
-        return {"error": f"Not a directory: {path}"}
+    if not evidence_path.exists():
+        return {"error": f"Path not found: {path}"}
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
@@ -708,9 +800,63 @@ def idx_ingest(
         return {"error": "No active case. Run 'vhir case activate' first."}
     case_id = Path(raw).name
 
-    # Discover
-    hosts = discover(evidence_path, hostname=hostname or None)
-    if not hosts:
+    # Container files (VHDX, E01, 7z, raw) — preview without mounting
+    container_type = detect_container(evidence_path)
+    if container_type in ("ewf", "raw", "nbd", "archive"):
+        if dry_run:
+            sudo_ok = _check_sp.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+            resp = {
+                "status": "preview",
+                "container": {
+                    "type": container_type,
+                    "file": evidence_path.name,
+                    "size_mb": round(evidence_path.stat().st_size / 1048576),
+                },
+                "case_id": case_id,
+                "message": (
+                    f"Container image detected ({container_type}). "
+                    "Set dry_run=false to mount and ingest."
+                ),
+            }
+            if not sudo_ok:
+                resp["warning"] = (
+                    "Container mounting requires sudo. If ingest fails, "
+                    "mount manually and point idx_ingest at the mount."
+                )
+            if hostname:
+                resp["hostname"] = hostname
+            else:
+                resp["suggested_hostname"] = evidence_path.stem.split("-")[0]
+            aid = audit.log(
+                tool="idx_ingest",
+                params={
+                    "path": path,
+                    "dry_run": True,
+                    "container": container_type,
+                },
+                result_summary=f"container preview: {container_type}",
+            )
+            if aid:
+                resp["audit_id"] = aid
+            return resp
+        # dry_run=False falls through to subprocess launch below
+
+    elif not evidence_path.is_dir():
+        return {"error": f"Not a directory or supported container: {path}"}
+
+    # Discover (directories only — containers handled by CLI subprocess)
+    if evidence_path.is_dir():
+        hosts = discover(evidence_path, hostname=hostname or None)
+    else:
+        hosts = []  # container file — skip discover, go to subprocess
+
+    if not hosts and evidence_path.is_dir():
+        csv_hint = _detect_preparsed_csvs(evidence_path)
+        if csv_hint:
+            return {
+                "error": ("No raw Windows artifacts found (no registry hives, evtx files, etc.)."),
+                "suggestion": csv_hint,
+            }
         return {"error": f"No Windows artifacts found in {path}"}
 
     # dry_run: return discovery summary
@@ -805,6 +951,10 @@ def idx_ingest(
         cmd.append("--reduced-ids")
     if full:
         cmd.append("--full")
+    if vss:
+        cmd.append("--vss")
+    if password:
+        cmd.extend(["--password", password])
 
     proc = _sp.Popen(
         cmd,
@@ -958,7 +1108,7 @@ def idx_ingest_json(
         hostname: Source hostname.
         index_suffix: Index suffix (default: json-{filename}).
         time_field: Timestamp field name (default: auto-detect).
-        dry_run: Preview what would be ingested (default True).
+        dry_run: Preview (default True). Set False to execute immediately.
     """
     path_err = _validate_path(path)
     if path_err:
@@ -993,7 +1143,7 @@ def idx_ingest_delimited(
         index_suffix: Index suffix (default: format-{filename}).
         time_field: Timestamp field (default: auto-detect).
         delimiter: Delimiter character (default: auto-detect).
-        dry_run: Preview (default True).
+        dry_run: Preview (default True). Set False to execute immediately.
     """
     path_err = _validate_path(path)
     if path_err:
@@ -1025,7 +1175,7 @@ def idx_ingest_accesslog(
         path: Path to access log file or directory.
         hostname: Source hostname.
         index_suffix: Index suffix (default: accesslog).
-        dry_run: Preview (default True).
+        dry_run: Preview (default True). Set False to execute immediately.
     """
     path_err = _validate_path(path)
     if path_err:
@@ -1248,7 +1398,7 @@ def idx_ingest_memory(
         hostname: Source hostname for the memory image.
         tier: Analysis depth (1=fast/essential, 2=moderate, 3=deep).
         plugins: Override tier — run only these specific plugins.
-        dry_run: Preview which plugins would run (default True).
+        dry_run: Preview plugins (default True). Set False to execute.
     """
     path_err = _validate_path(path)
     if path_err:
