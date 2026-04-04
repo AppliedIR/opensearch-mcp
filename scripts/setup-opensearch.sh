@@ -226,12 +226,11 @@ echo "Configuring Security Analytics..."
 
 # Fetch all Windows pre-packaged Sigma rule IDs, create detector
 python3 -c "
-import json, sys, urllib.request, ssl
+import json, sys, time, urllib.request, ssl
 
 url = '$OS_URL'
 auth = 'admin:$OS_PASSWORD'
 
-# Build auth header
 import base64
 creds = base64.b64encode(auth.encode()).decode()
 headers = {
@@ -248,18 +247,32 @@ def api(method, path, body=None):
     with urllib.request.urlopen(req, context=ctx) as resp:
         return json.loads(resp.read())
 
-# Step 1: Fetch all Windows Sigma rule IDs
-try:
-    resp = api('POST', '/_plugins/_security_analytics/rules/_search?pre_packaged=true', {
-        'query': {'match_all': {}},
-        'size': 5000,
-    })
-    hits = resp.get('hits', {}).get('hits', [])
-    rule_ids = [{'id': h['_id']} for h in hits if h.get('_source', {}).get('category') == 'windows']
-    print(f'  Found {len(rule_ids)} Windows Sigma rules (from {len(hits)} total)')
-except Exception as e:
-    print(f'  Warning: Could not fetch Sigma rules: {e}')
-    sys.exit(0)
+# Step 1: Wait for pre-packaged rules to load (async after cluster start)
+rule_ids = []
+for attempt in range(6):
+    try:
+        resp = api('POST', '/_plugins/_security_analytics/rules/_search?pre_packaged=true', {
+            'query': {'match_all': {}},
+            'size': 5000,
+        })
+        hits = resp.get('hits', {}).get('hits', [])
+        rule_ids = [{'id': h['_id']} for h in hits if h.get('_source', {}).get('category') == 'windows']
+        if rule_ids:
+            print(f'  Found {len(rule_ids)} Windows Sigma rules (from {len(hits)} total)')
+            break
+        if hits:
+            print(f'  Found {len(hits)} rules but 0 Windows category')
+            break
+        if attempt < 5:
+            print(f'  Waiting for Sigma rules to load ({attempt + 1}/6)...')
+            time.sleep(10)
+    except Exception as e:
+        if attempt < 5:
+            print(f'  Rules API not ready ({e}), retrying...')
+            time.sleep(10)
+        else:
+            print(f'  Warning: Could not fetch Sigma rules after 6 attempts: {e}')
+            sys.exit(0)
 
 if not rule_ids:
     print('  No Windows Sigma rules found — skipping detector creation')
@@ -268,16 +281,17 @@ if not rule_ids:
 # Step 2: Check if detector already exists
 try:
     existing = api('POST', '/_plugins/_security_analytics/detectors/_search', {
-        'query': {'match': {'name': 'vhir-windows'}},
-        'size': 1,
+        'query': {'match_all': {}},
+        'size': 10,
     })
-    if existing.get('hits', {}).get('total', {}).get('value', 0) > 0:
-        print('  Detector vhir-windows already exists')
-        sys.exit(0)
+    for hit in existing.get('hits', {}).get('hits', []):
+        if hit.get('_source', {}).get('name') == 'vhir-windows':
+            print('  Detector vhir-windows already exists')
+            sys.exit(0)
 except Exception:
     pass
 
-# Step 3: Create detector
+# Step 3: Create detector with evtx + EvtxECmd CSV index patterns
 detector = {
     'name': 'vhir-windows',
     'detector_type': 'windows',
@@ -285,7 +299,7 @@ detector = {
     'inputs': [{
         'detector_input': {
             'description': 'Windows Event Logs (all channels)',
-            'indices': ['case-*-evtx-*'],
+            'indices': ['case-*-evtx-*', 'case-*-delim-evtxecmd-*'],
             'pre_packaged_rules': rule_ids,
             'custom_rules': [],
         }
@@ -300,7 +314,19 @@ try:
     print(f'  Detector created: {det_id} ({len(rule_ids)} rules)')
 except Exception as e:
     print(f'  Warning: Could not create detector: {e}')
-" 2>/dev/null || echo "  Security Analytics setup: skipped (may require manual configuration)"
+    # Clean up orphaned monitors from partial creation
+    try:
+        monitors = api('GET', '/_plugins/_alerting/monitors/_search', {
+            'query': {'match_all': {}}, 'size': 20
+        })
+        for m in monitors.get('hits', {}).get('hits', []):
+            if 'vhir-windows' in m.get('_source', {}).get('name', ''):
+                mid = m['_id']
+                api('DELETE', f'/_plugins/_alerting/monitors/{mid}')
+                print(f'  Cleaned up orphaned monitor: {mid}')
+    except Exception:
+        pass
+" || echo "  Security Analytics setup: skipped (may require manual configuration)"
 
 # --- 9. Register opensearch-mcp with gateway ---
 GW_CONFIG="$VHIR_DIR/gateway.yaml"
