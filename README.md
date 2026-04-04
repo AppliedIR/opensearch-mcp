@@ -43,7 +43,7 @@ Every parser produces:
 - Full provenance: `host.name`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.parse_method`, `pipeline_version`
 - Proper `@timestamp` with timezone handling (local-time artifacts require `--source-timezone`)
 
-### Query (16 MCP Tools)
+### Query (17 MCP Tools)
 
 The LLM gets these tools via the MCP protocol:
 
@@ -89,7 +89,7 @@ opensearch-mcp parsers (15 types, programmatic, deterministic)
 OpenSearch (Docker, single-node, 4-12GB heap)
     |
     v
-16 MCP tools <-- LLM queries here (structured, ~500 tokens each)
+17 MCP tools <-- LLM queries here (structured, ~500 tokens each)
     |
     v
 Enrichment (triage baseline + threat intel, programmatic)
@@ -116,7 +116,7 @@ This starts a Docker container with OpenSearch 2.12, registers all 14 index temp
 
 ```bash
 # Full triage package (auto-discovers hosts and artifacts)
-opensearch-ingest scan /path/to/kape/output --hostname WKSTN05 --case incident-001
+opensearch-ingest scan /path/to/kape/output --hostname SERVER01 --case incident-001
 
 # Memory image
 opensearch-ingest memory /path/to/memory.raw --hostname DC01 --case incident-001
@@ -168,7 +168,7 @@ opensearch-ingest enrich-intel --case incident-001
 All indices follow: `case-{case_id}-{artifact_type}-{hostname}`
 
 Examples:
-- `case-incident-001-evtx-wkstn05`
+- `case-incident-001-evtx-server01`
 - `case-incident-001-shimcache-dc01`
 - `case-incident-001-zeek-conn-fw01`
 - `case-incident-001-vol-pslist-dc01`
@@ -243,4 +243,4 @@ pytest tests/
 
 ## License
 
-Proprietary. Copyright Applied IR.
+MIT License - see [LICENSE](LICENSE)

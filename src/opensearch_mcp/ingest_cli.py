@@ -1073,6 +1073,15 @@ def main() -> None:
     p_alog.add_argument("--dry-run", action="store_true")
     p_alog.set_defaults(func=cmd_ingest_accesslog)
 
+    # enrich-intel subcommand
+    p_enrich = sub.add_parser("enrich-intel", help="Enrich indexed data with OpenCTI threat intel")
+    p_enrich.add_argument("--case", help="Case ID")
+    p_enrich.add_argument("--force", action="store_true", help="Re-enrich already-enriched docs")
+    p_enrich.add_argument(
+        "--dry-run", action="store_true", help="Show IOC counts without enriching"
+    )
+    p_enrich.set_defaults(func=cmd_enrich_intel)
+
     args = parser.parse_args()
 
     if hasattr(args, "func"):

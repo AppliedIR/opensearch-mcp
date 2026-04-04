@@ -128,35 +128,35 @@ def _cmd_ingest(args, identity) -> None:
     """Delegate to opensearch_mcp ingest logic."""
     from opensearch_mcp.ingest_cli import cmd_ingest
 
-    cmd_ingest(args, examiner=identity.get("name", "unknown"))
+    cmd_ingest(args, examiner=identity.get("examiner", "unknown"))
 
 
 def _cmd_ingest_memory(args, identity) -> None:
     """Delegate to opensearch_mcp memory ingest logic."""
     from opensearch_mcp.ingest_cli import cmd_ingest_memory
 
-    cmd_ingest_memory(args, examiner=identity.get("name", "unknown"))
+    cmd_ingest_memory(args, examiner=identity.get("examiner", "unknown"))
 
 
 def _cmd_ingest_json(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_ingest_json
 
-    cmd_ingest_json(args, examiner=identity.get("name", "unknown"))
+    cmd_ingest_json(args, examiner=identity.get("examiner", "unknown"))
 
 
 def _cmd_ingest_delimited(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_ingest_delimited
 
-    cmd_ingest_delimited(args, examiner=identity.get("name", "unknown"))
+    cmd_ingest_delimited(args, examiner=identity.get("examiner", "unknown"))
 
 
 def _cmd_ingest_accesslog(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_ingest_accesslog
 
-    cmd_ingest_accesslog(args, examiner=identity.get("name", "unknown"))
+    cmd_ingest_accesslog(args, examiner=identity.get("examiner", "unknown"))
 
 
 def _cmd_enrich_intel(args, identity) -> None:
     from opensearch_mcp.ingest_cli import cmd_enrich_intel
 
-    cmd_enrich_intel(args, examiner=identity.get("name", "unknown"))
+    cmd_enrich_intel(args, examiner=identity.get("examiner", "unknown"))
