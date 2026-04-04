@@ -15,3 +15,15 @@ tests/fixtures/*.hve
 tests/fixtures/*.dat
 *.E01
 *.e01
+
+# Environment and credentials
+.env
+.env.*
+*.pem
+*.key
+*.crt
+opensearch.yaml
+
+# Live tests — require real evidence, moved to aiir-tests (private)
+tests/test_exhaustive_live.py
+tests/test_live_containers.py

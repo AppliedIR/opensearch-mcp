@@ -19,7 +19,7 @@ class TestIndexNameSecurity:
         from opensearch_mcp.tools import TOOLS
 
         case_id = "INC-2024-001"
-        hostname = "WKSTN05"
+        hostname = "WS05"
         for name, cfg in TOOLS.items():
             index_name = f"case-{case_id}-{cfg.index_suffix}-{hostname}".lower()
             assert index_name == index_name.lower(), f"Index for {name} not lowercase"
@@ -216,7 +216,7 @@ class TestValidateIndex:
     def test_case_prefix_passes(self):
         from opensearch_mcp.server import _validate_index
 
-        assert _validate_index("case-inc001-evtx-wkstn05") is None
+        assert _validate_index("case-inc001-evtx-ws05") is None
 
     def test_case_wildcard_passes(self):
         from opensearch_mcp.server import _validate_index
@@ -263,12 +263,12 @@ class TestSanitizeIndexComponent:
     def test_lowercase(self):
         from opensearch_mcp.ingest import _sanitize_index_component
 
-        assert _sanitize_index_component("WKSTN05") == "wkstn05"
+        assert _sanitize_index_component("WS05") == "ws05"
 
     def test_spaces_replaced(self):
         from opensearch_mcp.ingest import _sanitize_index_component
 
-        assert _sanitize_index_component("WKSTN 05") == "wkstn-05"
+        assert _sanitize_index_component("WS 05") == "ws-05"
 
     def test_slashes_replaced(self):
         from opensearch_mcp.ingest import _sanitize_index_component

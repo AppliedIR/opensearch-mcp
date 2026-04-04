@@ -308,9 +308,9 @@ class TestAccessLog:
             )
         assert cnt == 6
         doc = collected[0]["_source"]
-        assert doc["source.ip"] == "172.16.6.18"
+        assert doc["source.ip"] == "198.51.100.23"
         assert doc["http.request.method"] == "POST"
-        assert doc["url.path"] == "/aspnet_client/aspnet_www.aspx"
+        assert doc["url.path"] == "/aspnet_client/system_web.aspx"
         assert doc["http.response.status_code"] == 200
         assert doc.get("user_agent.original") == "python-requests/2.28.1"
 
@@ -465,7 +465,7 @@ class TestIISW3C:
             )
         assert cnt == 4
         doc = collected[0]["_source"]
-        assert doc["@timestamp"] == "2023-01-25T15:10:30Z"
+        assert doc["@timestamp"] == "2023-01-25T14:30:00Z"
         assert "source.ip" in doc  # ECS remapped from c-ip
 
     def test_ecs_ip_remap(self):
@@ -481,7 +481,7 @@ class TestIISW3C:
                 timestamp_is_utc=True,
             )
         doc = collected[0]["_source"]
-        assert doc["source.ip"] == "172.16.6.18"
+        assert doc["source.ip"] == "198.51.100.23"
 
     def test_httperr(self):
         from opensearch_mcp.parse_w3c import parse_w3c_log
@@ -517,7 +517,7 @@ class TestTasksXML:
             )
         assert cnt == 2
         commands = {d["_source"]["task.command"] for d in collected}
-        assert r"c:\windows\system32\stun.exe" in commands
+        assert r"C:\Windows\System32\updater.exe" in commands
 
     def test_system_task_detection(self):
         from opensearch_mcp.parse_tasks import parse_tasks_dir
@@ -527,14 +527,14 @@ class TestTasksXML:
             parse_tasks_dir(_TEST_DATA / "tasks", MagicMock(), "test", "host1")
         docs = {d["_source"]["task.name"]: d["_source"] for d in collected}
         assert docs["WindowsUpdate"]["task.is_system"] is True
-        assert docs["SRL_Update_Service"]["task.is_system"] is False
+        assert docs["Backup_Sync_Service"]["task.is_system"] is False
 
     def test_xml_namespace(self):
         from opensearch_mcp.parse_tasks import parse_task_xml
 
-        doc = parse_task_xml(_TEST_DATA / "tasks" / "SRL_Update_Service")
+        doc = parse_task_xml(_TEST_DATA / "tasks" / "Backup_Sync_Service")
         assert doc is not None
-        assert doc["task.author"] == r"shieldbase\wacsvc"
+        assert doc["task.author"] == r"contoso\svc-backup"
         assert "CalendarTrigger" in doc["task.trigger_types"]
         assert doc["task.run_level"] == "HighestAvailable"
 
@@ -558,7 +558,7 @@ class TestWER:
             )
         assert cnt == 1
         doc = collected[0]["_source"]
-        assert doc["process.name"] == "stun.exe"
+        assert doc["process.name"] == "updater.exe"
         assert doc["wer.event_type"] == "APPCRASH"
         assert doc["wer.exception_code"] == "c0000005"
 
@@ -569,7 +569,7 @@ class TestWER:
         with p:
             parse_wer_dir(_TEST_DATA / "wer", MagicMock(), "test", "host1")
         doc = collected[0]["_source"]
-        assert "stun" in doc["wer.report_dir"]
+        assert "updater" in doc["wer.report_dir"]
 
 
 # ===================================================================
@@ -609,8 +609,8 @@ class TestSSH:
             )
         accepted = [d for d in collected if d["_source"]["ssh.event_type"] == "auth_accepted"]
         doc = accepted[0]["_source"]
-        assert doc["user.name"] == "rsydow-a"
-        assert doc["source.ip"] == "172.16.6.18"
+        assert doc["user.name"] == "jdoe-admin"
+        assert doc["source.ip"] == "198.51.100.23"
         assert doc["source.port"] == 49832
         assert doc["ssh.auth_method"] == "publickey"
 
@@ -693,8 +693,8 @@ class TestTranscripts:
         assert doc["transcript.session_type"] == "remoting"
         assert doc["transcript.command_count"] == 2
         assert any("whoami" in cmd for cmd in doc["transcript.commands"])
-        assert doc["user.name"] == "rsydow-a"
-        assert doc["user.domain"] == "shieldbase"
+        assert doc["user.name"] == "jdoe-admin"
+        assert doc["user.domain"] == "contoso"
         # BUG: Path().name on Linux doesn't parse Windows backslash paths.
         # Should be "wsmprovhost.exe" but returns full path.
         # Fix: use PureWindowsPath or rsplit("\\", 1)[-1]

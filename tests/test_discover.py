@@ -255,11 +255,11 @@ class TestScanTriageDirectory:
 
     def test_multi_host_with_drive_letter(self, tmp_path):
         """Multi-host where each host has a drive letter subdir."""
-        make_windows_tree(tmp_path / "WKSTN05" / "C")
+        make_windows_tree(tmp_path / "WS05" / "C")
         hosts = scan_triage_directory(tmp_path)
         assert len(hosts) == 1
-        assert hosts[0].hostname == "WKSTN05"
-        assert hosts[0].volume_root == tmp_path / "WKSTN05" / "C"
+        assert hosts[0].hostname == "WS05"
+        assert hosts[0].volume_root == tmp_path / "WS05" / "C"
 
     def test_empty_dir_returns_no_hosts(self, tmp_path):
         """Empty directory returns no hosts."""

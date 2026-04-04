@@ -252,10 +252,10 @@ class TestDetectionsResponseSchema:
     def test_finding_has_index(self, mock_client):
         mock_client.transport.perform_request.return_value = {
             "total_findings": 1,
-            "findings": [_make_finding(index="case-inc001-evtx-wkstn05")],
+            "findings": [_make_finding(index="case-inc001-evtx-ws05")],
         }
         resp = idx_list_detections()
-        assert resp["findings"][0]["index"] == "case-inc001-evtx-wkstn05"
+        assert resp["findings"][0]["index"] == "case-inc001-evtx-ws05"
 
     def test_finding_has_matched_docs_count(self, mock_client):
         mock_client.transport.perform_request.return_value = {

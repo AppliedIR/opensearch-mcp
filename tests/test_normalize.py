@@ -36,7 +36,7 @@ class TestNormalizeEvent:
                 "System": {
                     "EventID": 4624,
                     "Channel": "Security",
-                    "Computer": "WKSTN05",
+                    "Computer": "WS05",
                     "TimeCreated": {"#attributes": {"SystemTime": "2024-01-15T10:30:00Z"}},
                     "Provider": {"#attributes": {"Name": "Microsoft-Windows-Security-Auditing"}},
                 },
@@ -52,7 +52,7 @@ class TestNormalizeEvent:
         assert doc["event.code"] == 4624
         assert doc["winlog.event_id"] == 4624
         assert doc["winlog.channel"] == "Security"
-        assert doc["host.name"] == "WKSTN05"
+        assert doc["host.name"] == "WS05"
         assert doc["@timestamp"] == "2024-01-15T10:30:00Z"
         assert doc["winlog.provider_name"] == "Microsoft-Windows-Security-Auditing"
         assert doc["user.name"] == "jsmith"
@@ -279,9 +279,9 @@ class TestNormalizeEvent:
                 "UserData": {
                     "EventXML": {
                         "#attributes": {"xmlns": "Event_NS"},
-                        "User": "SHIELDBASE\\tdungan",
+                        "User": "CONTOSO\\jsmith",
                         "SessionID": "3",
-                        "Address": "172.16.4.4",
+                        "Address": "203.0.113.4",
                     }
                 },
             }
