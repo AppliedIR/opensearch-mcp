@@ -68,8 +68,11 @@ docker compose -f "$DOCKER_DIR/docker-compose.yml" up -d
 
 # --- 4. Wait for OpenSearch to be ready ---
 echo -n "Waiting for OpenSearch"
-for i in $(seq 1 60); do
-    if curl -sk -u "admin:$OS_PASSWORD" "$OS_URL/_cluster/health" &>/dev/null; then
+STATUS="unknown"
+for i in $(seq 1 90); do
+    HEALTH=$(curl -sk -u "admin:$OS_PASSWORD" "$OS_URL/_cluster/health" 2>/dev/null || true)
+    STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
+    if [ "$STATUS" = "green" ] || [ "$STATUS" = "yellow" ]; then
         echo " ready!"
         break
     fi
@@ -77,16 +80,12 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
-# Verify it's actually up
-HEALTH=$(curl -sk -u "admin:$OS_PASSWORD" "$OS_URL/_cluster/health" 2>/dev/null || true)
-if [ -z "$HEALTH" ]; then
+if [ "$STATUS" != "green" ] && [ "$STATUS" != "yellow" ]; then
     echo ""
-    echo "Error: OpenSearch did not start within 120 seconds."
+    echo "Error: OpenSearch not ready after 180 seconds (status: $STATUS)."
     echo "Check: docker logs vhir-opensearch"
     exit 1
 fi
-
-STATUS=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])" 2>/dev/null || echo "unknown")
 echo "Cluster status: $STATUS"
 
 # --- 5. Register index template ---
