@@ -877,6 +877,7 @@ def idx_ingest_status() -> dict:
             "hosts_total": totals.get("hosts_total", 0),
             "artifacts_complete": totals.get("artifacts_complete", 0),
             "artifacts_total": totals.get("artifacts_total", 0),
+            "log_file": ing.get("log_file", ""),
         }
 
         # Build per-host checklist for the LLM to present
@@ -1141,14 +1142,39 @@ def idx_enrich_triage(
     return resp
 
 
+_MAX_CONCURRENT_INGESTS = 3
+
+
 def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):
-    """Launch a generic ingest as background subprocess."""
+    """Launch a generic ingest as background subprocess with concurrency control."""
+    import os as _os
     import subprocess as _sp
     import sys as _sys
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from opensearch_mcp.ingest_status import read_active_ingests, write_status
 
     active_case = _get_active_case()
     if not active_case:
         return {"error": "No active case. Run 'vhir case activate' first."}
+
+    # Concurrency gate — prevent OpenSearch OOM from unbounded parallelism
+    active = read_active_ingests()
+    running = [i for i in active if i.get("status") == "running"]
+    if len(running) >= _MAX_CONCURRENT_INGESTS:
+        return {
+            "error": (
+                f"Too many concurrent ingests ({len(running)} running, "
+                f"max {_MAX_CONCURRENT_INGESTS}). Wait for current ingests "
+                "to complete. Use idx_ingest_status() to check progress."
+            ),
+            "running": [{"case_id": r.get("case_id"), "pid": r.get("pid")} for r in running],
+        }
+
+    run_id = str(_uuid.uuid4())
+    env = _os.environ.copy()
+    env["VHIR_INGEST_RUN_ID"] = run_id
 
     cmd = [
         _sys.executable,
@@ -1166,11 +1192,44 @@ def _launch_background(subcommand, path, hostname, index_suffix="", time_field="
     if time_field:
         cmd.extend(["--time-field", time_field])
 
-    proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+    # Log to file instead of DEVNULL so errors are visible
+    from opensearch_mcp.paths import vhir_dir
+
+    log_dir = vhir_dir() / "ingest-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{run_id}.log"
+    log_fh = open(log_file, "w")
+
+    proc = _sp.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=_sp.STDOUT,
+        env=env,
+        start_new_session=True,
+    )
+    log_fh.close()
+
+    # Write initial status so concurrency gate sees this process immediately
+    started_ts = datetime.now(timezone.utc).isoformat()
+    write_status(
+        case_id=active_case,
+        pid=proc.pid,
+        run_id=run_id,
+        status="running",
+        hosts=[{"hostname": hostname, "artifacts": [{"name": subcommand, "status": "running"}]}],
+        totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+        started=started_ts,
+        log_file=str(log_file),
+    )
+
     return {
         "status": "started",
         "pid": proc.pid,
-        "message": "Ingest running. Use idx_ingest_status() to check progress.",
+        "run_id": run_id,
+        "log_file": str(log_file),
+        "message": (
+            f"Ingest started. Call idx_ingest_status() to monitor progress. Log file: {log_file}"
+        ),
     }
 
 

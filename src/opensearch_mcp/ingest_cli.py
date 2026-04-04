@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,12 +14,50 @@ from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
+from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.tools import TOOLS
 
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
+
+
+def _write_bg_status(
+    case_id,
+    run_id,
+    status,
+    hostname,
+    artifact_name,
+    started,
+    elapsed=0.0,
+    indexed=0,
+    files_done=0,
+    files_total=0,
+):
+    """Write status for background ingest (delimited/json/accesslog)."""
+    art = {"name": artifact_name, "status": status, "indexed": indexed}
+    if files_total:
+        art["files_total"] = files_total
+    if files_done:
+        art["files_done"] = files_done
+    done = 1 if status == "complete" else 0
+    write_status(
+        case_id=case_id,
+        pid=os.getpid(),
+        run_id=run_id,
+        status="complete" if status == "complete" else "running",
+        hosts=[{"hostname": hostname, "artifacts": [art]}],
+        totals={
+            "indexed": indexed,
+            "artifacts_complete": done,
+            "artifacts_total": 1,
+        },
+        started=started,
+        elapsed_seconds=elapsed,
+    )
+
+
 _VHIR_CONFIG = vhir_dir() / "config.yaml"
 
 
@@ -389,7 +429,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         client = get_client()
         audit = AuditWriter(mcp_name="opensearch-mcp")
-        run_id = str(uuid.uuid4())
+        run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
 
         def _cli_progress(event: str, **kw) -> None:
             if event == "host_start":
@@ -620,6 +660,10 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         print(f"Dry run: {input_path}")
         return
 
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    start_mono = time.monotonic()
+    started_ts = datetime.now(timezone.utc).isoformat()
+
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
@@ -632,8 +676,19 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         else sorted(f for f in input_path.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
     )
 
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "running",
+            hostname,
+            "json",
+            started_ts,
+            files_total=len(files),
+        )
+
     total = total_sk = total_bf = 0
-    for f in files:
+    for idx, f in enumerate(files):
         suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
         if not suffix.startswith("json-"):
             suffix = f"json-{suffix}"
@@ -658,6 +713,19 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         total += cnt
         total_sk += sk
         total_bf += bf
+        if run_id:
+            _write_bg_status(
+                case_id,
+                run_id,
+                "running",
+                hostname,
+                "json",
+                started_ts,
+                time.monotonic() - start_mono,
+                indexed=total,
+                files_done=idx + 1,
+                files_total=len(files),
+            )
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
     audit.log(
@@ -666,6 +734,17 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         params={"path": str(input_path), "hostname": hostname},
         result_summary=f"{total} indexed",
     )
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "complete",
+            hostname,
+            "json",
+            started_ts,
+            time.monotonic() - start_mono,
+            indexed=total,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +773,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"Dry run: {input_path}")
         return
 
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    start_mono = time.monotonic()
+    started_ts = datetime.now(timezone.utc).isoformat()
+
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
@@ -709,11 +792,35 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     from opensearch_mcp.parse_delimited import _detect_delimited_format
 
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "running",
+            hostname,
+            "delimited",
+            started_ts,
+            files_total=len(files),
+        )
+
+    # Progress callback for intra-file updates on large single files
+    def _on_progress(indexed_so_far):
+        if run_id:
+            _write_bg_status(
+                case_id,
+                run_id,
+                "running",
+                hostname,
+                "delimited",
+                started_ts,
+                time.monotonic() - start_mono,
+                indexed=indexed_so_far,
+            )
+
     total = total_sk = total_bf = 0
-    for f in files:
+    for idx, f in enumerate(files):
         fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
         detected = fmt.get("format", "csv")
-        # Format-aware suffix: zeek-conn, bodyfile-body, delim-timeline
         user_suffix = getattr(args, "index_suffix", None)
         if user_suffix:
             suffix = user_suffix
@@ -745,6 +852,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 time_from=time_from,
                 time_to=time_to,
                 batch_size=batch_size,
+                on_progress=_on_progress if run_id else None,
             )
             print(f"{cnt:,} entries")
             if hr:
@@ -752,6 +860,19 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             total += cnt
             total_sk += sk
             total_bf += bf
+            if run_id:
+                _write_bg_status(
+                    case_id,
+                    run_id,
+                    "running",
+                    hostname,
+                    "delimited",
+                    started_ts,
+                    time.monotonic() - start_mono,
+                    indexed=total,
+                    files_done=idx + 1,
+                    files_total=len(files),
+                )
         except (ValueError, OSError) as e:
             print(f"skipped ({e})")
 
@@ -762,6 +883,17 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         params={"path": str(input_path), "hostname": hostname},
         result_summary=f"{total} indexed",
     )
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "complete",
+            hostname,
+            "delimited",
+            started_ts,
+            time.monotonic() - start_mono,
+            indexed=total,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +918,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"Dry run: {input_path}")
         return
 
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    start_mono = time.monotonic()
+    started_ts = datetime.now(timezone.utc).isoformat()
+
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
@@ -803,8 +939,19 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         )
     )
 
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "running",
+            hostname,
+            "accesslog",
+            started_ts,
+            files_total=len(files),
+        )
+
     total = total_sk = total_bf = 0
-    for f in files:
+    for idx, f in enumerate(files):
         index_name = f"case-{safe_case}-{suffix}-{safe_host}"
         print(f"  {f.name} → {index_name}...", end=" ", flush=True)
         cnt, sk, bf = ingest_accesslog(
@@ -822,6 +969,19 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         total += cnt
         total_sk += sk
         total_bf += bf
+        if run_id:
+            _write_bg_status(
+                case_id,
+                run_id,
+                "running",
+                hostname,
+                "accesslog",
+                started_ts,
+                time.monotonic() - start_mono,
+                indexed=total,
+                files_done=idx + 1,
+                files_total=len(files),
+            )
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
     audit.log(
@@ -830,6 +990,17 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         params={"path": str(input_path), "hostname": hostname},
         result_summary=f"{total} indexed",
     )
+    if run_id:
+        _write_bg_status(
+            case_id,
+            run_id,
+            "complete",
+            hostname,
+            "accesslog",
+            started_ts,
+            time.monotonic() - start_mono,
+            indexed=total,
+        )
 
 
 # ---------------------------------------------------------------------------

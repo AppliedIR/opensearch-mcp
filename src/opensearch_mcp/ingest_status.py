@@ -23,6 +23,7 @@ def write_status(
     started: str,
     error: str = "",
     elapsed_seconds: float = 0.0,
+    log_file: str = "",
 ) -> None:
     """Write ingest progress atomically."""
     _STATUS_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,8 @@ def write_status(
         "error": error,
         "elapsed_seconds": round(elapsed_seconds, 1),
     }
+    if log_file:
+        data["log_file"] = log_file
     path = _status_path_safe(case_id, pid)
     fd, tmp = tempfile.mkstemp(dir=str(_STATUS_DIR), suffix=".tmp")
     try:
@@ -103,7 +106,7 @@ def _is_process_alive(pid: int, run_id: str) -> bool:
 
 
 def cleanup_old(max_age_hours: int = 24) -> None:
-    """Remove status files older than max_age_hours."""
+    """Remove status files older than max_age_hours, logs older than 7 days."""
     if not _STATUS_DIR.exists():
         return
     cutoff = datetime.now(timezone.utc).timestamp() - (max_age_hours * 3600)
@@ -113,3 +116,13 @@ def cleanup_old(max_age_hours: int = 24) -> None:
                 f.unlink(missing_ok=True)
         except OSError:
             pass
+    # Log file cleanup (7 days — longer retention for post-mortem)
+    log_dir = _STATUS_DIR.parent / "ingest-logs"
+    if log_dir.exists():
+        log_cutoff = datetime.now(timezone.utc).timestamp() - (7 * 24 * 3600)
+        for f in log_dir.glob("*.log"):
+            try:
+                if f.stat().st_mtime < log_cutoff:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass

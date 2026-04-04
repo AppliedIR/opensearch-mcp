@@ -144,8 +144,12 @@ def ingest_delimited(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     batch_size: int = 1000,
+    on_progress: object = None,
 ) -> tuple[int, int, int, int]:
-    """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed)."""
+    """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed).
+
+    on_progress: optional callable(indexed_so_far) for status updates on large files.
+    """
     if fmt is None:
         fmt = _detect_delimited_format(path)
     if fmt.get("format") == "unknown":
@@ -211,6 +215,9 @@ def ingest_delimited(
             count += flushed
             bulk_failed += failed
             actions = []
+            # Periodic progress callback for large single-file ingests
+            if callable(on_progress) and count % 10000 < batch_size:
+                on_progress(count)
 
     if actions:
         flushed, failed = flush_bulk(client, actions)
