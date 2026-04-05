@@ -585,15 +585,15 @@ def idx_status() -> dict:
 
 
 @server.tool()
-def idx_case_summary(case_id: str = "") -> dict:
+def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """Get a complete overview of indexed evidence for a case.
 
-    Returns hosts, artifact types with doc counts, available fields
-    per artifact type, and enrichment status. Call this at investigation
-    start to understand what data is available before querying.
+    Returns hosts, artifact types with doc counts, and enrichment status.
 
     Args:
         case_id: Case ID (default: active case).
+        include_fields: Include field mappings per artifact type (large output).
+            Default False to keep response compact.
     """
     from opensearch_mcp.paths import sanitize_index_component
 
@@ -677,16 +677,19 @@ def idx_case_summary(case_id: str = "") -> dict:
         return fields
 
     fields_per_type: dict = {}
-    for atype, info in artifacts.items():
-        if not info["indices"]:
-            continue
-        try:
-            mapping = client.indices.get_mapping(index=info["indices"][0])
-            idx_name = info["indices"][0]
-            props = mapping.get(idx_name, {}).get("mappings", {}).get("properties", {})
-            fields_per_type[atype] = sorted(_flatten_props(props), key=lambda f: f["field"])[:150]
-        except Exception:
-            pass
+    if include_fields:
+        for atype, info in artifacts.items():
+            if not info["indices"]:
+                continue
+            try:
+                mapping = client.indices.get_mapping(index=info["indices"][0])
+                idx_name = info["indices"][0]
+                props = mapping.get(idx_name, {}).get("mappings", {}).get("properties", {})
+                fields_per_type[atype] = sorted(_flatten_props(props), key=lambda f: f["field"])[
+                    :150
+                ]
+            except Exception:
+                pass
 
     # Enrichment status
     enrichment: dict = {}
@@ -750,9 +753,10 @@ def idx_case_summary(case_id: str = "") -> dict:
         "artifacts": artifacts,
         "total_docs": total_docs,
         "time_range": time_range,
-        "fields_per_type": fields_per_type,
         "enrichment": enrichment,
     }
+    if fields_per_type:
+        resp["fields_per_type"] = fields_per_type
     aid = audit.log(
         tool="idx_case_summary",
         params={"case_id": cid},
