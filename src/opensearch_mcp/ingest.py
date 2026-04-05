@@ -423,17 +423,25 @@ def run_hayabusa_batch(
             continue
 
         index_name = f"case-{_cid}-hayabusa-{_hn}"
-        cnt, sk, bf, hr = ingest_delimited(
-            csv_output,
-            client,
-            index_name,
-            host.hostname,
-            source_file=str(csv_output),
-            pipeline_version=_PIPELINE_VERSION,
-        )
-        results[host.hostname] = cnt
-        if callable(on_progress):
-            on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
+        try:
+            cnt, sk, bf, hr = ingest_delimited(
+                csv_output,
+                client,
+                index_name,
+                host.hostname,
+                source_file=str(csv_output),
+                pipeline_version=_PIPELINE_VERSION,
+            )
+            results[host.hostname] = cnt
+            if callable(on_progress):
+                on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
+        except Exception as e:
+            if callable(on_progress):
+                on_progress(
+                    "hayabusa_failed",
+                    hostname=host.hostname,
+                    error=f"ingest failed: {e}",
+                )
         if audit:
             audit.log(
                 tool="ingest_hayabusa",

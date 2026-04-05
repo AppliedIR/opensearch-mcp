@@ -533,7 +533,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
                 print("\nRunning Hayabusa detection...")
                 hb_results = run_hayabusa_batch(
-                    hosts, client, case_id, audit=audit,
+                    hosts,
+                    client,
+                    case_id,
+                    audit=audit,
                     on_progress=_hayabusa_progress,
                 )
                 total_alerts = 0
