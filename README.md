@@ -8,13 +8,7 @@ Built by [Applied IR](https://github.com/AppliedIR) with Claude Code.
 
 A KAPE triage collection from 30 hosts produces ~50 million evidence records across hundreds of artifact types. An LLM reading these directly would consume billions of tokens and still miss patterns buried in the noise.
 
-opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM 17 purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits.
-
-**The math:**
-- Raw: 50M records x ~200 tokens/record = 10 billion tokens (impossible)
-- Indexed: LLM issues `idx_search(query="event.code:4688 AND process.parent.name:cmd.exe")` = ~500 tokens (instant)
-
-The LLM focuses on investigation logic. The parsers handle the data.
+opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM 17 purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits. The LLM focuses on investigation logic. The parsers handle the data.
 
 ## What It Does
 
