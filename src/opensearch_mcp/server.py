@@ -117,9 +117,17 @@ def _resolve_index(index: str, case_id: str) -> str:
 def _detect_preparsed_csvs(path: Path) -> str | None:
     """Check for pre-parsed CSV output and suggest the right ingest tool."""
     # Scan flat + one level of subdirs (avoid full tree walk on USB)
-    csv_files = [f for f in path.iterdir() if f.suffix.lower() == ".csv"]
-    for d in path.iterdir():
-        if d.is_dir() and not d.name.startswith("."):
+    # Single-pass scan: collect CSVs and subdirs together
+    csv_files = []
+    subdirs = []
+    for entry in path.iterdir():
+        if entry.is_file() and entry.suffix.lower() == ".csv":
+            csv_files.append(entry)
+        elif entry.is_dir() and not entry.name.startswith("."):
+            subdirs.append(entry)
+    for d in subdirs:
+        if len(csv_files) >= 100:
+            break
             csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
         if len(csv_files) >= 100:
             break
@@ -1417,7 +1425,7 @@ def _spawn_ingest(cmd, env, stdout, run_id):
         "--scope",
         "--property=MemoryMax=8G",
         "--property=MemoryHigh=6G",
-        f"--unit=vhir-ingest-{run_id[:8]}",
+        f"--unit=vhir-ingest-{run_id[:12]}",
     ] + cmd
 
     try:
@@ -1431,6 +1439,11 @@ def _spawn_ingest(cmd, env, stdout, run_id):
         # systemd-run may fail after Popen succeeds (no D-Bus, etc.)
         _time.sleep(0.3)
         if proc.poll() is not None and proc.returncode != 0:
+            # Clean up failed scope unit
+            _sp.run(
+                ["systemctl", "--user", "reset-failed", f"vhir-ingest-{run_id[:12]}"],
+                capture_output=True,
+            )
             proc = _sp.Popen(
                 cmd,
                 stdout=stdout,

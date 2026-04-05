@@ -762,9 +762,14 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
     hostname = getattr(args, "hostname", "") or ""
+    is_recursive = getattr(args, "recursive", False)
+
+    if not hostname and not is_recursive:
+        print("Error: --hostname is required (or use --recursive).", file=sys.stderr)
+        sys.exit(1)
 
     # Recursive mode: iterate subdirs as hosts in a single process
-    if getattr(args, "recursive", False) and input_path.is_dir():
+    if is_recursive and input_path.is_dir():
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         subdirs = sorted(
             d
