@@ -198,6 +198,19 @@ def sanitize_index_component(value: str) -> str:
     return re.sub(r"[^a-z0-9._-]", "-", value.lower())
 
 
+def validate_index_name(index_name: str) -> str | None:
+    """Return error message if index name is invalid, None if OK."""
+    if index_name != index_name.lower():
+        return (
+            f"Index name '{index_name}' contains uppercase characters. "
+            "OpenSearch requires lowercase index names. "
+            "This is likely a filename with mixed case in the path."
+        )
+    if any(c in index_name for c in ' ,"*\\<|>?/'):
+        return f"Index name '{index_name}' contains invalid characters."
+    return None
+
+
 def relative_evidence_path(file_path: Path, volume_root: Path) -> str:
     """Compute a volume-root-relative path for dedup IDs.
 

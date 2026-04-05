@@ -150,6 +150,12 @@ def ingest_delimited(
 
     on_progress: optional callable(indexed_so_far) for status updates on large files.
     """
+    from opensearch_mcp.paths import validate_index_name
+
+    idx_err = validate_index_name(index_name)
+    if idx_err:
+        raise ValueError(idx_err)
+
     if fmt is None:
         fmt = _detect_delimited_format(path)
     if fmt.get("format") == "unknown":

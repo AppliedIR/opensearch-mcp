@@ -692,7 +692,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
         if not suffix.startswith("json-"):
             suffix = f"json-{suffix}"
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
         print(f"  {f.name} → {index_name}...", end=" ", flush=True)
         cnt, sk, bf, hr = ingest_json(
             f,
@@ -853,7 +853,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             suffix = f"bodyfile-{f.stem}"
         else:
             suffix = f"delim-{f.stem}"
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
         print(f"  {f.name} ({detected}) → {index_name}...", end=" ", flush=True)
         if detected == "unknown":
             print("skipped (unrecognized format)")
@@ -973,7 +973,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
     total = total_sk = total_bf = 0
     for idx, f in enumerate(files):
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
         print(f"  {f.name} → {index_name}...", end=" ", flush=True)
         cnt, sk, bf = ingest_accesslog(
             f,

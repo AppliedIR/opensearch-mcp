@@ -351,7 +351,7 @@ def ingest_memory(
 
     for plugin in plugin_list:
         suffix = _plugin_to_index_suffix(plugin)
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}"
+        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
 
         if on_progress:
             on_progress("plugin_start", plugin=plugin, hostname=hostname)
