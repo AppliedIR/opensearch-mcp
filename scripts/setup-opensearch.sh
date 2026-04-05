@@ -312,7 +312,8 @@ for seed_idx, alias in _SEEDS.items():
 from collections import Counter
 cat_counts = Counter(h.get('_source', {}).get('category', '') for h in hits)
 print(f'  Sigma detectors: disabled (OpenSearch 3.5 field alias regression)')
-print(f'  Available rules: {len(hits)} ({cat_counts.get("windows", 0)} Windows)')
+win_count = cat_counts.get('windows', 0)
+print(f'  Available rules: {len(hits)} ({win_count} Windows)')
 print(f'  Detection via Hayabusa during evtx ingest (if installed)')
 
 # Delete any existing detectors (produce 0 findings, waste CPU)
