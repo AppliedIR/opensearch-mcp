@@ -388,13 +388,17 @@ class TestIdxIngest:
         assert resp.get("status") == "preview"
         assert len(resp.get("hosts", [])) >= 1
 
-    def test_not_a_directory_returns_error(self, mock_client, tmp_path):
-        """Non-directory path returns error."""
+    def test_not_a_directory_returns_error(self, mock_client, tmp_path, monkeypatch):
+        """Non-directory, non-container path returns error."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        vhir_dir = tmp_path / ".vhir"
+        vhir_dir.mkdir()
+        (vhir_dir / "active_case").write_text("TEST-CASE\n")
         f = tmp_path / "not_a_dir.txt"
         f.write_text("test")
         resp = idx_ingest(path=str(f))
         assert "error" in resp
-        assert "Not a directory" in resp["error"]
+        assert "Not a directory or supported container" in resp["error"]
 
     def test_ingest_status_returns_empty_when_no_status(self, mock_client):
         """idx_ingest_status returns empty when no status files exist."""
