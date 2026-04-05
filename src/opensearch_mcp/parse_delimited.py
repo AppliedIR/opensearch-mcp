@@ -206,7 +206,8 @@ def ingest_delimited(
 
         doc_id = _doc_id(index_name, record, volatile_keys=_DELIM_VOLATILE)
 
-        record["host.name"] = hostname
+        # Use per-row Computer field if present (Hayabusa, EvtxECmd), else CLI hostname
+        record["host.name"] = record.pop("Computer", None) or hostname
         record["vhir.parse_method"] = f"delimited-{format_name}"
         if source_file:
             record["vhir.source_file"] = source_file

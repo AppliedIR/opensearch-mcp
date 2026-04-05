@@ -52,6 +52,8 @@ def _write_bg_status(
             "indexed": indexed,
             "artifacts_complete": done,
             "artifacts_total": 1,
+            "hosts_total": 1,
+            "hosts_complete": done,
         },
         started=started,
         elapsed_seconds=elapsed,

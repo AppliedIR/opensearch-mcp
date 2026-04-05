@@ -1035,19 +1035,23 @@ def idx_ingest(
 
 
 @server.tool()
-def idx_ingest_status() -> dict:
+def idx_ingest_status(case_id: str = "") -> dict:
     """Check status of running or recent ingest operations.
 
-    IMPORTANT: Present the checklist to the examiner showing each host
-    and artifact with its status icon. If status is 'running', call
-    this tool again in 30 seconds to get updated progress. Continue
-    polling until all ingests show 'complete' or 'failed'.
+    Defaults to active case. Pass case_id="*" to see all cases.
 
-    Cleans up status files older than 24 hours.
+    Args:
+        case_id: Filter to this case (default: active case). "*" for all.
     """
     from opensearch_mcp.ingest_status import read_active_ingests
 
     ingests = read_active_ingests()
+
+    # Filter by case (default: active case)
+    filter_case = case_id or _get_active_case() or ""
+    if filter_case and filter_case != "*":
+        ingests = [i for i in ingests if i.get("case_id") == filter_case]
+
     if not ingests:
         return {"ingests": [], "message": "No active or recent ingests."}
 

@@ -125,7 +125,7 @@ def _pause_sigma_detector(client: OpenSearch) -> str | None:
             "PUT",
             f"/_plugins/_security_analytics/detectors/{detector_id}",
             body=detector,
-            params={"timeout": "30s"},
+            timeout=30,
         )
         return detector_id
     except Exception as e:
