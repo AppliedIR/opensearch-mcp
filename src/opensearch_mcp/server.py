@@ -182,6 +182,8 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
 
 def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     """Best-effort hostname detection from ZimmermanTools CSV naming."""
+    if not path.is_dir():
+        return set()
     from collections import Counter
 
     exts = {".csv", ".tsv"}
@@ -939,6 +941,17 @@ def idx_ingest(
     # dry_run=False: launch ingest as a subprocess that survives gateway restart.
     import os as _os
     import uuid as _uuid
+
+    from opensearch_mcp.ingest_status import read_active_ingests as _read_active
+
+    _running = [i for i in _read_active() if i.get("status") == "running"]
+    if len(_running) >= _MAX_CONCURRENT_INGESTS:
+        return {
+            "error": (
+                f"Too many concurrent ingests ({len(_running)} running, "
+                f"max {_MAX_CONCURRENT_INGESTS}). Use idx_ingest_status()."
+            ),
+        }
 
     run_id = str(_uuid.uuid4())
     env = _os.environ.copy()
