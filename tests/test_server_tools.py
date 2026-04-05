@@ -250,7 +250,7 @@ class TestIdxGetEvent:
             "_index": "case-test-evtx-host1",
             "_source": {"event.code": 4624, "user.name": "admin"},
         }
-        resp = idx_get_event(doc_id="doc123", index="case-test-evtx-host1")
+        resp = idx_get_event(event_id="doc123", index="case-test-evtx-host1")
         assert resp["_id"] == "doc123"
         assert resp["_index"] == "case-test-evtx-host1"
         assert resp["event.code"] == 4624

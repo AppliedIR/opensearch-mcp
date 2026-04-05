@@ -384,26 +384,26 @@ def idx_aggregate(
 
 @server.tool()
 def idx_get_event(
-    doc_id: str,
+    event_id: str,
     index: str,
 ) -> dict:
-    """Retrieve a single document by ID.
+    """Retrieve a single document by its _id.
 
     Args:
-        doc_id: Document _id.
+        event_id: Document _id from search results.
         index: Exact index name (not a pattern).
     """
     err = _validate_index(index)
     if err:
         return {"error": err}
     client = _get_os()
-    result = _os_call(client.get, index=index, id=doc_id)
+    result = _os_call(client.get, index=index, id=event_id)
     doc = {"_id": result["_id"], "_index": result["_index"]}
     doc.update(result.get("_source", {}))
     aid = audit.log(
         tool="idx_get_event",
-        params={"doc_id": doc_id, "index": index},
-        result_summary=f"doc {doc_id}",
+        params={"event_id": event_id, "index": index},
+        result_summary=f"doc {event_id}",
     )
     if aid:
         doc["audit_id"] = aid
