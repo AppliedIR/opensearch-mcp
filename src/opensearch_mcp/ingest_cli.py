@@ -64,7 +64,8 @@ _VHIR_CONFIG = vhir_dir() / "config.yaml"
 def _resolve_case_id(args_case: str | None) -> str:
     if args_case:
         case_dir = vhir_dir() / "cases" / args_case
-        if not case_dir.is_dir():
+        # Suppress warning in background mode (parent already validated)
+        if not case_dir.is_dir() and not os.environ.get("VHIR_INGEST_RUN_ID"):
             print(
                 f"Warning: Case '{args_case}' not found in case system. "
                 f"Ingesting with '{args_case}' as index prefix.",

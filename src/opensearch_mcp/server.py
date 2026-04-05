@@ -1080,7 +1080,7 @@ def idx_ingest_status() -> dict:
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":
                     icon = "done"
-                    detail = f"{indexed:,} entries"
+                    detail = f"{indexed:,} docs submitted"
                 elif a_status == "running":
                     files_done = a.get("files_done", 0)
                     files_total = a.get("files_total", 0)
@@ -1125,7 +1125,7 @@ def idx_ingest_status() -> dict:
                 s["errors"] = errors
             else:
                 s["message"] = (
-                    f"Ingest complete. {totals.get('indexed', 0):,} entries indexed "
+                    f"Ingest complete. {totals.get('indexed', 0):,} docs submitted "
                     f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
                 )
 
@@ -1226,6 +1226,7 @@ def idx_ingest_delimited(
             "",
             index_suffix,
             time_field,
+            delimiter=delimiter,
             recursive=True,
         )
 
@@ -1261,7 +1262,14 @@ def idx_ingest_delimited(
         files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in exts)
         return {"status": "preview", "files": files, "count": len(files)}
 
-    return _launch_background("delimited", path, hostname, index_suffix, time_field)
+    return _launch_background(
+        "delimited",
+        path,
+        hostname,
+        index_suffix,
+        time_field,
+        delimiter=delimiter,
+    )
 
 
 @server.tool()
@@ -1463,7 +1471,13 @@ def _spawn_ingest(cmd, env, stdout, run_id):
 
 
 def _launch_background(
-    subcommand, path, hostname, index_suffix="", time_field="", recursive=False
+    subcommand,
+    path,
+    hostname,
+    index_suffix="",
+    time_field="",
+    delimiter="",
+    recursive=False,
 ):
     """Launch a generic ingest as background subprocess with concurrency control."""
     import os as _os
@@ -1509,6 +1523,8 @@ def _launch_background(
         cmd.extend(["--index-suffix", index_suffix])
     if time_field:
         cmd.extend(["--time-field", time_field])
+    if delimiter:
+        cmd.extend(["--delimiter", delimiter])
     if recursive:
         cmd.append("--recursive")
 
