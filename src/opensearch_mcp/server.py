@@ -149,7 +149,8 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
     hayabusa = False
     for f in csv_files[:5]:
         try:
-            header = f.read_text(errors="replace")[:200].lower()
+            with open(f, "r", errors="replace") as fh:
+                header = fh.read(200).lower()
             if "ruletitle" in header and "eventid" in header:
                 hayabusa = True
                 break
