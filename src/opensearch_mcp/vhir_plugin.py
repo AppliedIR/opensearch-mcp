@@ -33,6 +33,11 @@ def register(subparsers, registered: set) -> None:
             action="store_true",
             help="Skip post-ingest triage baseline enrichment",
         )
+        p.add_argument(
+            "--no-hayabusa",
+            action="store_true",
+            help="Skip Hayabusa detection after evtx ingest",
+        )
         p.set_defaults(func=_cmd_ingest)
         registered.add("ingest")
 

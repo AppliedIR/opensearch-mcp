@@ -15,6 +15,7 @@ from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_evtx import parse_and_index
 from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
+from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
 from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
@@ -355,6 +356,92 @@ def ingest(
         )
 
     return result
+
+
+def run_hayabusa_batch(
+    hosts,
+    client,
+    case_id: str,
+    audit=None,
+    on_progress=None,
+) -> dict:
+    """Run Hayabusa on all hosts' evtx dirs, ingest CSV results.
+
+    Called as a post-ingest phase — evtx data is already indexed.
+    """
+    import shutil
+    import subprocess
+
+    from opensearch_mcp.parse_delimited import ingest_delimited
+
+    hayabusa = shutil.which("hayabusa")
+    if not hayabusa:
+        return {"skipped": "hayabusa not installed"}
+
+    output_dir = vhir_dir() / "hayabusa-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+
+    for host in hosts:
+        if not host.evtx_dir:
+            continue
+        _cid = _sanitize_index_component(case_id)
+        _hn = _sanitize_index_component(host.hostname)
+        csv_output = output_dir / f"hayabusa-{_cid}-{_hn}.csv"
+        cmd = [
+            hayabusa,
+            "csv-timeline",
+            "-d",
+            str(host.evtx_dir),
+            "-o",
+            str(csv_output),
+            "-p",
+            "verbose",
+            "--no-wizard",
+        ]
+        if callable(on_progress):
+            on_progress("hayabusa_start", hostname=host.hostname)
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=3600)
+            if result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace")[:200]
+                if callable(on_progress):
+                    on_progress(
+                        "hayabusa_failed",
+                        hostname=host.hostname,
+                        error=f"exit {result.returncode}: {stderr}",
+                    )
+                continue
+        except Exception as e:
+            if callable(on_progress):
+                on_progress("hayabusa_failed", hostname=host.hostname, error=str(e))
+            continue
+
+        if not csv_output.exists() or csv_output.stat().st_size == 0:
+            if callable(on_progress):
+                on_progress("hayabusa_failed", hostname=host.hostname, error="no output")
+            continue
+
+        index_name = f"case-{_cid}-hayabusa-{_hn}"
+        cnt, sk, bf, hr = ingest_delimited(
+            csv_output,
+            client,
+            index_name,
+            host.hostname,
+            source_file=str(csv_output),
+            pipeline_version=_PIPELINE_VERSION,
+        )
+        results[host.hostname] = cnt
+        if callable(on_progress):
+            on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
+        if audit:
+            audit.log(
+                tool="ingest_hayabusa",
+                params={"hostname": host.hostname, "evtx_dir": str(host.evtx_dir)},
+                result_summary=f"{cnt} alerts indexed",
+            )
+
+    return results
 
 
 _MIN_EVTX_SIZE = 69632  # One 64KB chunk + header — files under this are empty

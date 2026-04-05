@@ -141,7 +141,7 @@ if [ -f "$TRANSCRIPT_TEMPLATE" ]; then
 fi
 
 # Register text log parser templates (W3C, Defender, Tasks, WER, SSH)
-for TPL_NAME in w3c defender tasks wer ssh vol3 json delimited accesslog; do
+for TPL_NAME in w3c defender tasks wer ssh vol3 json delimited accesslog hayabusa; do
     TPL_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/${TPL_NAME}_template.json"
     if [ -f "$TPL_FILE" ]; then
         echo "Registering ${TPL_NAME} index template..."
@@ -305,83 +305,28 @@ for seed_idx, alias in _SEEDS.items():
     except Exception:
         pass  # Already exists or template not registered yet
 
-# Step 3: Create detectors targeting index aliases (not wildcards).
-# Index templates auto-attach aliases when indices are created.
-# Detectors use concrete alias names — compatible with all OS versions.
-_DETECTOR_ALIASES = {
-    'windows': ['vhir-sigma-windows'],
-    'ad_ldap': ['vhir-sigma-windows'],
-    'linux': ['vhir-sigma-linux'],
-    'network': ['vhir-sigma-network'],
-    'dns': ['vhir-sigma-network'],
-    'others_web': ['vhir-sigma-web'],
-    'apache_access': ['vhir-sigma-web'],
-}
+# Step 3: Sigma detectors disabled on OpenSearch 3.5
+# The Security Analytics percolator has a field alias regression
+# (opensearch-project/security-analytics#755) that produces 0 findings.
+# Detection is handled by Hayabusa instead (runs during evtx ingest).
+from collections import Counter
+cat_counts = Counter(h.get('_source', {}).get('category', '') for h in hits)
+print(f'  Sigma detectors: disabled (OpenSearch 3.5 field alias regression)')
+print(f'  Available rules: {len(hits)} ({cat_counts.get("windows", 0)} Windows)')
+print(f'  Detection via Hayabusa during evtx ingest (if installed)')
 
-# Delete old wildcard-based detectors that don't work on 3.x
+# Delete any existing detectors (produce 0 findings, waste CPU)
 for det_name in list(existing_detectors):
     if det_name.startswith('vhir-'):
         try:
-            # Find detector ID
             for hit in existing.get('hits', {}).get('hits', []):
                 if hit.get('_source', {}).get('name') == det_name:
                     det_id = hit['_id']
-                    indices = hit.get('_source', {}).get('inputs', [{}])[0].get('detector_input', {}).get('indices', [])
-                    # Delete if using wildcard patterns (pre-3.x)
-                    if any('*' in idx for idx in indices):
-                        api('DELETE', f'/_plugins/_security_analytics/detectors/{det_id}')
-                        existing_detectors.discard(det_name)
-                        print(f'  Removed old wildcard detector: {det_name}')
+                    api('DELETE', f'/_plugins/_security_analytics/detectors/{det_id}')
+                    print(f'  Removed non-functional detector: {det_name}')
                     break
         except Exception:
             pass
-
-# Group rules by category
-from collections import Counter
-cat_counts = Counter(h.get('_source', {}).get('category', '') for h in hits)
-created = 0
-
-for cat, count in sorted(cat_counts.items(), key=lambda x: -x[1]):
-    if not cat:
-        continue
-    det_name = f'vhir-{cat}'
-    if det_name in existing_detectors:
-        print(f'  {det_name}: already exists')
-        continue
-    aliases = _DETECTOR_ALIASES.get(cat)
-    if not aliases:
-        continue
-    cat_rules = [{'id': h['_id']} for h in hits
-                 if h.get('_source', {}).get('category') == cat]
-    if not cat_rules:
-        continue
-    # Windows at 1 min, everything else at 5 min
-    interval = 1 if cat == 'windows' else 5
-    detector = {
-        'name': det_name,
-        'detector_type': cat,
-        'enabled': True,
-        'inputs': [{'detector_input': {
-            'description': f'{cat} detection rules',
-            'indices': aliases,
-            'pre_packaged_rules': cat_rules,
-            'custom_rules': [],
-        }}],
-        'schedule': {'period': {'interval': interval, 'unit': 'MINUTES'}},
-    }
-    try:
-        result = api('POST', '/_plugins/_security_analytics/detectors', detector)
-        det_id = result.get('_id', 'unknown')
-        note = '' if cat == 'windows' else ' (activates when data ingested)'
-        print(f'  {det_name}: {det_id} ({len(cat_rules)} rules, {interval}m){note}')
-        created += 1
-    except Exception as e:
-        print(f'  {det_name}: skipped ({e})')
-
-if created == 0 and not existing_detectors:
-    print('  No detectors created')
-elif created > 0:
-    print(f'  {created} detector(s) created')
 
 # Add aliases to existing indices (upgrade from pre-alias versions)
 _ALIAS_PATTERNS = {

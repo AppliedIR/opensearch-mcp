@@ -59,7 +59,7 @@ The LLM gets these tools via the MCP protocol:
 | `idx_ingest_status` | Monitor running ingest operations |
 | `idx_enrich_triage` | Baseline enrichment via windows-triage-mcp |
 | `idx_enrich_intel` | Threat intel enrichment via OpenCTI |
-| `idx_list_detections` | Sigma detection findings |
+| `idx_list_detections` | Detection alerts (Hayabusa/Sigma) |
 
 ### Enrich
 
@@ -104,7 +104,7 @@ cd opensearch-mcp
 ./scripts/setup-opensearch.sh
 ```
 
-This starts a Docker container with OpenSearch 2.12, registers all 14 index templates, creates the GeoIP enrichment pipeline, and configures a Sigma detection rule with ~1,580 Windows signatures.
+This starts a Docker container with OpenSearch 3.5, registers all 15 index templates (including Hayabusa), and creates the GeoIP enrichment pipeline. Detection is handled by Hayabusa (3,700+ Sigma-based rules) which runs automatically after evtx ingest if installed.
 
 ### 2. Ingest evidence
 
@@ -197,7 +197,7 @@ api_keys:
 
 ## Template Priorities
 
-14 index templates with non-overlapping priorities:
+15 index templates with non-overlapping priorities:
 
 | Priority | Template | Pattern |
 |----------|----------|---------|
@@ -205,6 +205,7 @@ api_keys:
 | 11 | Delimited | `case-*-delim-*`, `case-*-zeek-*`, `case-*-bodyfile-*` |
 | 12 | JSON | `case-*-json-*` |
 | 15 | Vol3 memory | `case-*-vol-*` |
+| 18 | Hayabusa alerts | `case-*-hayabusa-*` |
 | 19 | EVTX | `case-*-evtx-*` |
 | 20 | Prefetch | `case-*-prefetch-*` |
 | 21 | SRUM | `case-*-srum-*` |

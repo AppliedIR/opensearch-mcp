@@ -776,6 +776,7 @@ def idx_ingest(
     dry_run: bool = True,
     vss: bool = False,
     password: str = "",
+    no_hayabusa: bool = False,
 ) -> dict:
     """Discover and ingest forensic artifacts into OpenSearch.
 
@@ -993,6 +994,8 @@ def idx_ingest(
         cmd.append("--vss")
     if password:
         cmd.extend(["--password", password])
+    if no_hayabusa:
+        cmd.append("--no-hayabusa")
 
     # Log to file so errors are visible (same as _launch_background)
     from opensearch_mcp.paths import vhir_dir as _vhir_dir
@@ -1758,12 +1761,33 @@ def idx_list_detections(
         if len(findings) >= limit:
             break
 
+    # Suggest Hayabusa when Sigma returns empty
+    hayabusa_hint = ""
+    if not findings:
+        try:
+            hb_count = client.count(index="case-*-hayabusa-*")["count"]
+            if hb_count:
+                hayabusa_hint = (
+                    f"No Sigma detections. {hb_count:,} Hayabusa alerts available. "
+                    "Query: idx_search(query='Level:critical OR Level:high', "
+                    "index='case-*-hayabusa-*')"
+                )
+            else:
+                hayabusa_hint = (
+                    "No Sigma detections (disabled on OpenSearch 3.5). "
+                    "Hayabusa runs during evtx ingest if installed."
+                )
+        except Exception:
+            hayabusa_hint = "No Sigma detections."
+
     resp = {
         "findings": findings,
         "total": response.get("total_findings", 0),
         "returned": len(findings),
         "offset": offset,
     }
+    if hayabusa_hint:
+        resp["suggestion"] = hayabusa_hint
     aid = audit.log(
         tool="idx_list_detections",
         params={

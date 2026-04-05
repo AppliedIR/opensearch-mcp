@@ -1,0 +1,34 @@
+{
+  "index_patterns": ["case-*-hayabusa-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": {"type": "date", "ignore_malformed": true},
+        "Timestamp": {"type": "date", "format": "yyyy-MM-dd HH:mm:ss.SSSXXX||strict_date_optional_time||epoch_millis", "ignore_malformed": true},
+        "host.name": {"type": "keyword"},
+        "Channel": {"type": "keyword"},
+        "EventID": {"type": "integer"},
+        "Level": {"type": "keyword"},
+        "MitreTactics": {"type": "keyword"},
+        "MitreTags": {"type": "keyword"},
+        "OtherTags": {"type": "keyword"},
+        "RuleTitle": {"type": "keyword"},
+        "Details": {
+          "type": "text",
+          "fields": {
+            "keyword": {"type": "keyword", "ignore_above": 2048}
+          }
+        },
+        "ExtraFieldInfo": {"type": "text"},
+        "RuleFile": {"type": "keyword"},
+        "EvtxFile": {"type": "keyword"},
+        "RecordID": {"type": "integer"},
+        "pipeline_version": {"type": "keyword"},
+        "vhir.source_file": {"type": "keyword"},
+        "vhir.ingest_audit_id": {"type": "keyword"},
+        "vhir.parse_method": {"type": "keyword"}
+      }
+    }
+  },
+  "priority": 18
+}

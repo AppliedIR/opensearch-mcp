@@ -516,6 +516,32 @@ def cmd_scan(args: argparse.Namespace) -> None:
             for msg in errors:
                 print(f"  {msg}")
 
+        # Post-ingest Hayabusa detection
+        if not getattr(args, "no_hayabusa", False):
+            import shutil
+
+            if shutil.which("hayabusa") and any(h.evtx_dir for h in hosts):
+                from opensearch_mcp.ingest import run_hayabusa_batch
+
+                def _hayabusa_progress(event, **kw):
+                    if event == "hayabusa_start":
+                        print(f"  hayabusa: {kw['hostname']}...", end=" ", flush=True)
+                    elif event == "hayabusa_done":
+                        print(f"{kw['count']:,} alerts")
+                    elif event == "hayabusa_failed":
+                        print(f"failed ({kw.get('error', 'unknown')})")
+
+                print("\nRunning Hayabusa detection...")
+                hb_results = run_hayabusa_batch(
+                    hosts, client, case_id, audit=audit,
+                    on_progress=_hayabusa_progress,
+                )
+                total_alerts = 0
+                if isinstance(hb_results, dict) and "skipped" not in hb_results:
+                    total_alerts = sum(hb_results.values())
+                if total_alerts:
+                    print(f"Hayabusa: {total_alerts:,} alerts indexed")
+
         # Post-ingest triage enrichment
         if not getattr(args, "skip_triage", False):
             try:
@@ -1337,6 +1363,11 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
         "--skip-triage",
         action="store_true",
         help="Skip post-ingest triage baseline enrichment",
+    )
+    p.add_argument(
+        "--no-hayabusa",
+        action="store_true",
+        help="Skip Hayabusa detection after evtx ingest",
     )
 
 

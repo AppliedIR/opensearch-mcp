@@ -96,18 +96,14 @@ class TestSetupScript:
         assert "pre_packaged=true" in script
         assert "category" in script and "windows" in script
 
-    def test_detector_created(self, script):
-        assert "vhir-" in script  # data-driven detector naming
+    def test_sigma_detectors_disabled(self, script):
+        """Sigma detectors disabled on 3.5 due to field alias regression."""
+        assert "disabled" in script.lower()
         assert "_security_analytics/detectors" in script
 
-    def test_detector_idempotent(self, script):
-        """Script checks if detector already exists before creating."""
-        assert "already exists" in script
-
-    def test_detector_pre_packaged_rules_not_empty(self, script):
-        """Detector must include fetched rule IDs, not empty array."""
-        assert "pre_packaged_rules" in script
-        assert "rule_ids" in script
+    def test_hayabusa_template_registered(self, script):
+        """Hayabusa template included in registration loop."""
+        assert "hayabusa" in script
 
     def test_no_hardcoded_password(self, script):
         """Password comes from $OS_PASSWORD variable, never hardcoded."""
