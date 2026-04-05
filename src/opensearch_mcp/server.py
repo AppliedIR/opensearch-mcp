@@ -973,13 +973,40 @@ def idx_ingest(
     if password:
         cmd.extend(["--password", password])
 
-    proc = _sp.Popen(
-        cmd,
-        stdout=_sp.DEVNULL,
-        stderr=_sp.DEVNULL,
-        env=env,
-        start_new_session=True,
-    )
+    # Log to file so errors are visible (same as _launch_background)
+    from opensearch_mcp.paths import vhir_dir as _vhir_dir
+
+    _log_dir = _vhir_dir() / "ingest-logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_file = _log_dir / f"{run_id}.log"
+    _log_fh = open(_log_file, "w")
+
+    # Isolate ingest from gateway cgroup to prevent OOM kill cascade
+    scope_cmd = [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--property=MemoryMax=8G",
+        "--property=MemoryHigh=6G",
+        f"--unit=vhir-ingest-{run_id[:8]}",
+    ] + cmd
+    try:
+        proc = _sp.Popen(
+            scope_cmd,
+            stdout=_log_fh,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError):
+        proc = _sp.Popen(
+            cmd,
+            stdout=_log_fh,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    _log_fh.close()
 
     host_names = [h.hostname for h in hosts]
     aid = audit.log(
@@ -1427,13 +1454,33 @@ def _launch_background(subcommand, path, hostname, index_suffix="", time_field="
     log_file = log_dir / f"{run_id}.log"
     log_fh = open(log_file, "w")
 
-    proc = _sp.Popen(
-        cmd,
-        stdout=log_fh,
-        stderr=_sp.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
+    # Wrap in systemd-run to isolate from gateway cgroup.
+    # Without this, OOM killer targets gateway when ingest uses too much memory.
+    scope_cmd = [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--property=MemoryMax=8G",
+        "--property=MemoryHigh=6G",
+        f"--unit=vhir-ingest-{run_id[:8]}",
+    ] + cmd
+    try:
+        proc = _sp.Popen(
+            scope_cmd,
+            stdout=log_fh,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError):
+        # systemd-run not available — fall back to bare Popen
+        proc = _sp.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
     log_fh.close()
 
     # Write initial status so concurrency gate sees this process immediately
