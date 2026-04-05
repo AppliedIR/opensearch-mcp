@@ -1766,7 +1766,12 @@ def idx_list_detections(
     }
     aid = audit.log(
         tool="idx_list_detections",
-        params={"severity": severity, "limit": limit, "offset": offset},
+        params={
+            "severity": severity,
+            "detector_type": detector_type,
+            "limit": limit,
+            "offset": offset,
+        },
         result_summary=f"{len(findings)} findings",
     )
     if aid:
