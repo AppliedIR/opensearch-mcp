@@ -40,10 +40,23 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
         )
         failed = len(actions) - success
         if failed:
-            print(
-                f"WARNING: {failed}/{len(actions)} docs failed in bulk batch",
-                file=sys.stderr,
-            )
+            # Log first error reason to help diagnose mapping conflicts
+            reason = ""
+            if isinstance(errors, list) and errors:
+                first = errors[0]
+                if isinstance(first, dict):
+                    for action_type in ("index", "create", "update"):
+                        info = first.get(action_type, {})
+                        if info.get("error"):
+                            err = info["error"]
+                            reason = (
+                                err.get("reason", str(err)) if isinstance(err, dict) else str(err)
+                            )
+                            break
+            msg = f"WARNING: {failed}/{len(actions)} docs failed in bulk batch"
+            if reason:
+                msg += f" — {reason[:200]}"
+            print(msg, file=sys.stderr)
         return success, failed
 
     except (ConnectionTimeout, OSConnectionError):
