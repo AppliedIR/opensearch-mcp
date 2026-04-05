@@ -80,7 +80,8 @@ def register(subparsers, registered: set) -> None:
     if "ingest-delimited" not in registered:
         p = subparsers.add_parser("ingest-delimited", help="Ingest CSV/TSV/Zeek/bodyfile")
         p.add_argument("path", help="Delimited file or directory")
-        p.add_argument("--hostname", required=True)
+        p.add_argument("--hostname")
+        p.add_argument("--recursive", action="store_true", help="Treat subdirectories as hosts")
         p.add_argument("--index-suffix")
         p.add_argument("--time-field")
         p.add_argument("--delimiter")

@@ -282,7 +282,7 @@ if not rule_ids:
 try:
     existing = api('POST', '/_plugins/_security_analytics/detectors/_search', {
         'query': {'match_all': {}},
-        'size': 10,
+        'size': 100,
     })
     for hit in existing.get('hits', {}).get('hits', []):
         if hit.get('_source', {}).get('name') == 'vhir-windows':

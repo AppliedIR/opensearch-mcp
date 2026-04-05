@@ -938,7 +938,6 @@ def idx_ingest(
 
     # dry_run=False: launch ingest as a subprocess that survives gateway restart.
     import os as _os
-    import subprocess as _sp
     import uuid as _uuid
 
     run_id = str(_uuid.uuid4())
@@ -982,31 +981,7 @@ def idx_ingest(
     _log_file = _log_dir / f"{run_id}.log"
     _log_fh = open(_log_file, "w")
 
-    # Isolate ingest from gateway cgroup to prevent OOM kill cascade
-    scope_cmd = [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "--property=MemoryMax=8G",
-        "--property=MemoryHigh=6G",
-        f"--unit=vhir-ingest-{run_id[:8]}",
-    ] + cmd
-    try:
-        proc = _sp.Popen(
-            scope_cmd,
-            stdout=_log_fh,
-            stderr=_sp.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
-    except (FileNotFoundError, OSError):
-        proc = _sp.Popen(
-            cmd,
-            stdout=_log_fh,
-            stderr=_sp.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
+    proc = _spawn_ingest(cmd, env, _log_fh, run_id)
     _log_fh.close()
 
     host_names = [h.hostname for h in hosts]
@@ -1227,9 +1202,10 @@ def idx_ingest_delimited(
         return _launch_background(
             "delimited",
             path,
-            "__recursive__",
+            "",
             index_suffix,
             time_field,
+            recursive=True,
         )
 
     # Non-recursive: hostname required
@@ -1400,10 +1376,71 @@ def idx_enrich_triage(
 _MAX_CONCURRENT_INGESTS = 3
 
 
-def _launch_background(subcommand, path, hostname, index_suffix="", time_field=""):
+def _spawn_ingest(cmd, env, stdout, run_id):
+    """Spawn ingest subprocess, isolated in its own cgroup when possible.
+
+    Uses systemd-run --user --scope for cgroup isolation so OOM kills
+    the ingest, not the gateway. Falls back to bare Popen if systemd-run
+    is unavailable or fails (missing D-Bus, non-systemd host, etc.).
+    """
+    import subprocess as _sp
+    import time as _time
+
+    # Ensure D-Bus address is available for systemd-run --user
+    if "DBUS_SESSION_BUS_ADDRESS" not in env:
+        import os
+
+        uid = os.getuid()
+        bus = f"unix:path=/run/user/{uid}/bus"
+        env["DBUS_SESSION_BUS_ADDRESS"] = bus
+    if "XDG_RUNTIME_DIR" not in env:
+        import os
+
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+
+    scope_cmd = [
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--property=MemoryMax=8G",
+        "--property=MemoryHigh=6G",
+        f"--unit=vhir-ingest-{run_id[:8]}",
+    ] + cmd
+
+    try:
+        proc = _sp.Popen(
+            scope_cmd,
+            stdout=stdout,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+        # systemd-run may fail after Popen succeeds (no D-Bus, etc.)
+        _time.sleep(0.3)
+        if proc.poll() is not None and proc.returncode != 0:
+            proc = _sp.Popen(
+                cmd,
+                stdout=stdout,
+                stderr=_sp.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+    except (FileNotFoundError, OSError):
+        proc = _sp.Popen(
+            cmd,
+            stdout=stdout,
+            stderr=_sp.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    return proc
+
+
+def _launch_background(
+    subcommand, path, hostname, index_suffix="", time_field="", recursive=False
+):
     """Launch a generic ingest as background subprocess with concurrency control."""
     import os as _os
-    import subprocess as _sp
     import sys as _sys
     import uuid as _uuid
     from datetime import datetime, timezone
@@ -1437,15 +1474,17 @@ def _launch_background(subcommand, path, hostname, index_suffix="", time_field="
         "opensearch_mcp.ingest_cli",
         subcommand,
         path,
-        "--hostname",
-        hostname,
         "--case",
         active_case,
     ]
+    if hostname:
+        cmd.extend(["--hostname", hostname])
     if index_suffix:
         cmd.extend(["--index-suffix", index_suffix])
     if time_field:
         cmd.extend(["--time-field", time_field])
+    if recursive:
+        cmd.append("--recursive")
 
     # Log to file instead of DEVNULL so errors are visible
     from opensearch_mcp.paths import vhir_dir
@@ -1455,33 +1494,7 @@ def _launch_background(subcommand, path, hostname, index_suffix="", time_field="
     log_file = log_dir / f"{run_id}.log"
     log_fh = open(log_file, "w")
 
-    # Wrap in systemd-run to isolate from gateway cgroup.
-    # Without this, OOM killer targets gateway when ingest uses too much memory.
-    scope_cmd = [
-        "systemd-run",
-        "--user",
-        "--scope",
-        "--property=MemoryMax=8G",
-        "--property=MemoryHigh=6G",
-        f"--unit=vhir-ingest-{run_id[:8]}",
-    ] + cmd
-    try:
-        proc = _sp.Popen(
-            scope_cmd,
-            stdout=log_fh,
-            stderr=_sp.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
-    except (FileNotFoundError, OSError):
-        # systemd-run not available — fall back to bare Popen
-        proc = _sp.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=_sp.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
+    proc = _spawn_ingest(cmd, env, log_fh, run_id)
     log_fh.close()
 
     # Write initial status so concurrency gate sees this process immediately
@@ -1556,12 +1569,17 @@ def idx_ingest_memory(
         return resp
 
     # dry_run=False: launch as subprocess
-    import subprocess as _sp
+    import os as _os
     import sys as _sys
+    import uuid as _uuid
 
     active_case = _get_active_case()
     if not active_case:
         return {"error": "No active case. Run 'vhir case activate' first."}
+
+    run_id = str(_uuid.uuid4())
+    env = _os.environ.copy()
+    env["VHIR_INGEST_RUN_ID"] = run_id
 
     cmd = [
         _sys.executable,
@@ -1580,7 +1598,14 @@ def idx_ingest_memory(
     if plugins:
         cmd.extend(["--plugins", ",".join(plugins)])
 
-    proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+    from opensearch_mcp.paths import vhir_dir as _vd
+
+    _ld = _vd() / "ingest-logs"
+    _ld.mkdir(parents=True, exist_ok=True)
+    _lf = _ld / f"{run_id}.log"
+    _lfh = open(_lf, "w")
+    proc = _spawn_ingest(cmd, env, _lfh, run_id)
+    _lfh.close()
 
     resp = {
         "status": "started",

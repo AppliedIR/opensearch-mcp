@@ -761,10 +761,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
-    hostname = args.hostname
+    hostname = getattr(args, "hostname", "") or ""
 
     # Recursive mode: iterate subdirs as hosts in a single process
-    if hostname == "__recursive__" and input_path.is_dir():
+    if getattr(args, "recursive", False) and input_path.is_dir():
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         subdirs = sorted(
             d
@@ -773,11 +773,15 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             and not d.name.startswith(".")
             and any(f.suffix.lower() in exts for f in d.iterdir() if f.is_file())
         )
+        import copy
+
         for d in subdirs:
-            args.path = str(d)
-            args.hostname = d.name
+            sub_args = copy.copy(args)
+            sub_args.path = str(d)
+            sub_args.hostname = d.name
+            sub_args.recursive = False
             print(f"\n--- Host: {d.name} ---")
-            cmd_ingest_delimited(args, examiner=examiner)
+            cmd_ingest_delimited(sub_args, examiner=examiner)
         return
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
@@ -1238,7 +1242,8 @@ def main() -> None:
     # delimited subcommand
     p_delim = sub.add_parser("delimited", help="Ingest CSV/TSV/Zeek/bodyfile")
     p_delim.add_argument("path", help="Delimited file or directory")
-    p_delim.add_argument("--hostname", required=True)
+    p_delim.add_argument("--hostname")
+    p_delim.add_argument("--recursive", action="store_true", help="Treat subdirectories as hosts")
     p_delim.add_argument("--index-suffix")
     p_delim.add_argument("--time-field")
     p_delim.add_argument("--delimiter")
