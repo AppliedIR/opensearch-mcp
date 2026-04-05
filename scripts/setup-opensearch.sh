@@ -278,54 +278,125 @@ if not rule_ids:
     print('  No Windows Sigma rules found — skipping detector creation')
     sys.exit(0)
 
-# Step 2: Check if detector already exists
+# Step 2: Fetch existing detectors (one API call for all categories)
+existing_detectors = set()
 try:
     existing = api('POST', '/_plugins/_security_analytics/detectors/_search', {
         'query': {'match_all': {}},
         'size': 100,
     })
     for hit in existing.get('hits', {}).get('hits', []):
-        if hit.get('_source', {}).get('name') == 'vhir-windows':
-            print('  Detector vhir-windows already exists')
-            sys.exit(0)
+        existing_detectors.add(hit.get('_source', {}).get('name', ''))
 except Exception:
     pass
 
-# Step 3: Create detector with evtx + EvtxECmd CSV index patterns
-detector = {
-    'name': 'vhir-windows',
-    'detector_type': 'windows',
-    'enabled': True,
-    'inputs': [{
-        'detector_input': {
-            'description': 'Windows Event Logs (all channels)',
-            'indices': ['case-*-evtx-*', 'case-*-delim-evtxecmd-*'],
-            'pre_packaged_rules': rule_ids,
-            'custom_rules': [],
-        }
-    }],
-    'schedule': {
-        'period': {'interval': 1, 'unit': 'MINUTES'}
-    },
+# Step 2b: Create seed indices to instantiate aliases from templates.
+# Detectors on 3.x require aliases to exist (backed by at least one index).
+# Templates auto-attach aliases when matching indices are created.
+_SEEDS = {
+    'case-seed-evtx-init': 'vhir-sigma-windows',
+    'case-seed-ssh-init': 'vhir-sigma-linux',
+    'case-seed-accesslog-init': 'vhir-sigma-web',
+    'case-seed-json-init': 'vhir-sigma-network',
 }
-try:
-    result = api('POST', '/_plugins/_security_analytics/detectors', detector)
-    det_id = result.get('_id', 'unknown')
-    print(f'  Detector created: {det_id} ({len(rule_ids)} rules)')
-except Exception as e:
-    print(f'  Warning: Could not create detector: {e}')
-    # Clean up orphaned monitors from partial creation
+for seed_idx, alias in _SEEDS.items():
     try:
-        monitors = api('GET', '/_plugins/_alerting/monitors/_search', {
-            'query': {'match_all': {}}, 'size': 20
-        })
-        for m in monitors.get('hits', {}).get('hits', []):
-            if 'vhir-windows' in m.get('_source', {}).get('name', ''):
-                mid = m['_id']
-                api('DELETE', f'/_plugins/_alerting/monitors/{mid}')
-                print(f'  Cleaned up orphaned monitor: {mid}')
+        api('PUT', f'/{seed_idx}', {'settings': {'number_of_replicas': 0}})
     except Exception:
-        pass
+        pass  # Already exists or template not registered yet
+
+# Step 3: Create detectors targeting index aliases (not wildcards).
+# Index templates auto-attach aliases when indices are created.
+# Detectors use concrete alias names — compatible with all OS versions.
+_DETECTOR_ALIASES = {
+    'windows': ['vhir-sigma-windows'],
+    'ad_ldap': ['vhir-sigma-windows'],
+    'linux': ['vhir-sigma-linux'],
+    'network': ['vhir-sigma-network'],
+    'dns': ['vhir-sigma-network'],
+    'others_web': ['vhir-sigma-web'],
+    'apache_access': ['vhir-sigma-web'],
+}
+
+# Delete old wildcard-based detectors that don't work on 3.x
+for det_name in list(existing_detectors):
+    if det_name.startswith('vhir-'):
+        try:
+            # Find detector ID
+            for hit in existing.get('hits', {}).get('hits', []):
+                if hit.get('_source', {}).get('name') == det_name:
+                    det_id = hit['_id']
+                    indices = hit.get('_source', {}).get('inputs', [{}])[0].get('detector_input', {}).get('indices', [])
+                    # Delete if using wildcard patterns (pre-3.x)
+                    if any('*' in idx for idx in indices):
+                        api('DELETE', f'/_plugins/_security_analytics/detectors/{det_id}')
+                        existing_detectors.discard(det_name)
+                        print(f'  Removed old wildcard detector: {det_name}')
+                    break
+        except Exception:
+            pass
+
+# Group rules by category
+from collections import Counter
+cat_counts = Counter(h.get('_source', {}).get('category', '') for h in hits)
+created = 0
+
+for cat, count in sorted(cat_counts.items(), key=lambda x: -x[1]):
+    if not cat:
+        continue
+    det_name = f'vhir-{cat}'
+    if det_name in existing_detectors:
+        print(f'  {det_name}: already exists')
+        continue
+    aliases = _DETECTOR_ALIASES.get(cat)
+    if not aliases:
+        continue
+    cat_rules = [{'id': h['_id']} for h in hits
+                 if h.get('_source', {}).get('category') == cat]
+    if not cat_rules:
+        continue
+    # Windows at 1 min, everything else at 5 min
+    interval = 1 if cat == 'windows' else 5
+    detector = {
+        'name': det_name,
+        'detector_type': cat,
+        'enabled': True,
+        'inputs': [{'detector_input': {
+            'description': f'{cat} detection rules',
+            'indices': aliases,
+            'pre_packaged_rules': cat_rules,
+            'custom_rules': [],
+        }}],
+        'schedule': {'period': {'interval': interval, 'unit': 'MINUTES'}},
+    }
+    try:
+        result = api('POST', '/_plugins/_security_analytics/detectors', detector)
+        det_id = result.get('_id', 'unknown')
+        note = '' if cat == 'windows' else ' (activates when data ingested)'
+        print(f'  {det_name}: {det_id} ({len(cat_rules)} rules, {interval}m){note}')
+        created += 1
+    except Exception as e:
+        print(f'  {det_name}: skipped ({e})')
+
+if created == 0 and not existing_detectors:
+    print('  No detectors created')
+elif created > 0:
+    print(f'  {created} detector(s) created')
+
+# Add aliases to existing indices (upgrade from pre-alias versions)
+_ALIAS_PATTERNS = {
+    'vhir-sigma-windows': 'case-*-evtx-*',
+    'vhir-sigma-linux': 'case-*-ssh-*',
+    'vhir-sigma-web': 'case-*-accesslog-*',
+    'vhir-sigma-network': 'case-*-json-*',
+}
+for alias, pattern in _ALIAS_PATTERNS.items():
+    try:
+        api('POST', '/_aliases', {
+            'actions': [{'add': {'index': pattern, 'alias': alias}}]
+        })
+    except Exception:
+        pass  # No matching indices yet — aliases auto-attach via templates
 " || echo "  Security Analytics setup: skipped (may require manual configuration)"
 
 # --- 9. Register opensearch-mcp with gateway ---

@@ -3,6 +3,9 @@
     "case-*-evtx-*"
   ],
   "template": {
+    "aliases": {
+      "vhir-sigma-windows": {}
+    },
     "settings": {
       "index.mapping.total_fields.limit": 5000
     },

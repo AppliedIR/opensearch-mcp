@@ -1690,6 +1690,7 @@ def _get_active_case() -> str | None:
 @server.tool()
 def idx_list_detections(
     severity: str = "",
+    detector_type: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
@@ -1698,6 +1699,8 @@ def idx_list_detections(
     Args:
         severity: Filter by severity (critical, high, medium, low).
                   Empty = all severities.
+        detector_type: Filter by detector type (windows, linux, dns, etc.).
+                  Empty = all detectors.
         limit: Max results (default 50).
         offset: Starting position for pagination (default 0).
     """
@@ -1706,11 +1709,12 @@ def idx_list_detections(
     # Fetch more than requested when filtering by severity (API doesn't support it)
     fetch_size = limit * 3 if severity else limit
     params: dict = {
-        "detectorType": "windows",
         "size": fetch_size,
         "startIndex": offset,
         "sortOrder": "desc",
     }
+    if detector_type:
+        params["detectorType"] = detector_type
 
     try:
         response = _os_call(

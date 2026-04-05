@@ -133,12 +133,21 @@ class TestDetectionsAPIParams:
         assert call_kwargs[0][0] == "GET"
         assert "/_plugins/_security_analytics/findings/_search" in call_kwargs[0][1]
 
-    def test_detector_type_always_windows(self, mock_client):
+    def test_default_shows_all_detector_types(self, mock_client):
+        """Default (no detector_type) queries all detectors."""
         mock_client.transport.perform_request.return_value = _empty_response()
         idx_list_detections()
         call_args = mock_client.transport.perform_request.call_args
         params = call_args[1].get("params", {})
-        assert params["detectorType"] == "windows"
+        assert "detectorType" not in params
+
+    def test_explicit_detector_type_filters(self, mock_client):
+        """Explicit detector_type filters to that type."""
+        mock_client.transport.perform_request.return_value = _empty_response()
+        idx_list_detections(detector_type="linux")
+        call_args = mock_client.transport.perform_request.call_args
+        params = call_args[1].get("params", {})
+        assert params["detectorType"] == "linux"
 
     def test_severity_filter_python_side(self, mock_client):
         """Severity filtering is done in Python (API doesn't support it)."""

@@ -1,6 +1,9 @@
 {
   "index_patterns": ["case-*-ssh-*"],
   "template": {
+    "aliases": {
+      "vhir-sigma-linux": {}
+    },
     "mappings": {
       "properties": {
         "@timestamp": {"type": "date", "ignore_malformed": true},

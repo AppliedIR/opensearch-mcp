@@ -1,6 +1,9 @@
 {
   "index_patterns": ["case-*-accesslog-*"],
   "template": {
+    "aliases": {
+      "vhir-sigma-web": {}
+    },
     "mappings": {
       "properties": {
         "@timestamp": {"type": "date", "ignore_malformed": true},

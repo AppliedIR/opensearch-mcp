@@ -1,6 +1,6 @@
 services:
   opensearch:
-    image: opensearchproject/opensearch:2.12.0
+    image: opensearchproject/opensearch:3.5.0
     container_name: vhir-opensearch
     environment:
       - discovery.type=single-node

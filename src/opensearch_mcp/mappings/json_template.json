@@ -1,6 +1,9 @@
 {
   "index_patterns": ["case-*-json-*"],
   "template": {
+    "aliases": {
+      "vhir-sigma-network": {}
+    },
     "settings": { "index.mapping.total_fields.limit": 1000 },
     "mappings": {
       "properties": {

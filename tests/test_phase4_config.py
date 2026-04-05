@@ -97,7 +97,7 @@ class TestSetupScript:
         assert "category" in script and "windows" in script
 
     def test_detector_created(self, script):
-        assert "vhir-windows" in script
+        assert "vhir-" in script  # data-driven detector naming
         assert "_security_analytics/detectors" in script
 
     def test_detector_idempotent(self, script):
