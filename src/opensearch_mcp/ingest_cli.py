@@ -864,10 +864,27 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     _ensure_case_active(case_id)
     hostname = getattr(args, "hostname", "") or ""
     is_recursive = getattr(args, "recursive", False)
+    auto_hosts_str = getattr(args, "auto_hosts", "") or ""
 
-    if not hostname and not is_recursive:
-        print("Error: --hostname is required (or use --recursive).", file=sys.stderr)
+    if not hostname and not is_recursive and not auto_hosts_str:
+        print(
+            "Error: --hostname is required (or use --recursive / --auto-hosts).",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+    # Auto-hosts mode: flat directory, iterate detected hostnames sequentially
+    if auto_hosts_str and input_path.is_dir():
+        import copy
+
+        auto_hosts = [h.strip() for h in auto_hosts_str.split(",") if h.strip()]
+        for h in auto_hosts:
+            sub_args = copy.copy(args)
+            sub_args.hostname = h
+            sub_args.auto_hosts = ""
+            print(f"\n--- Host: {h} ---")
+            cmd_ingest_delimited(sub_args, examiner=examiner)
+        return
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -1414,6 +1431,7 @@ def main() -> None:
     p_delim.add_argument("path", help="Delimited file or directory")
     p_delim.add_argument("--hostname")
     p_delim.add_argument("--recursive", action="store_true", help="Treat subdirectories as hosts")
+    p_delim.add_argument("--auto-hosts", help="Comma-separated hostnames to ingest sequentially")
     p_delim.add_argument("--index-suffix")
     p_delim.add_argument("--time-field")
     p_delim.add_argument("--delimiter")

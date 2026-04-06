@@ -457,7 +457,12 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
 
 
 def _detect_hostnames_from_filenames(path: Path) -> set[str]:
-    """Best-effort hostname detection from ZimmermanTools CSV naming."""
+    """Best-effort hostname detection from forensic CSV naming.
+
+    Supports two patterns:
+    - Suffix: EvtxECmd-hostname.csv (ZimmermanTools)
+    - Prefix: hayabusa-caseid-hostname.csv (Hayabusa pipeline output)
+    """
     if not path.is_dir():
         return set()
     from collections import Counter
@@ -466,13 +471,15 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     files = [f for f in path.iterdir() if f.suffix.lower() in exts][:50]
     if not files:
         return set()
-    counts: Counter = Counter()
+    # Suffix pattern: tool-hostname.csv
+    suffix_counts: Counter = Counter()
+    # Prefix pattern: tool-caseid-hostname.csv (last segment after last -)
     for f in files:
         parts = f.stem.rsplit("-", 1)
         if len(parts) == 2 and len(parts[1]) >= 2:
-            counts[parts[1].lower()] += 1
+            suffix_counts[parts[1].lower()] += 1
     threshold = len(files) * 0.3
-    return {h for h, c in counts.items() if c >= threshold}
+    return {h for h, c in suffix_counts.items() if c >= threshold}
 
 
 def _validate_path(path: str) -> str | None:
@@ -487,10 +494,14 @@ def _validate_path(path: str) -> str | None:
         Path("/media").resolve(),
         Path("/run/media").resolve(),
         Path("/evidence").resolve(),
+        Path("/cases").resolve(),
         Path("/tmp").resolve(),
     ]
     if not any(p.is_relative_to(a) for a in allowed):
-        return f"Path not in allowed locations (~/, /mnt/, /media/, /evidence/, /tmp/): {path}"
+        return (
+            f"Path not in allowed locations "
+            f"(~/, /mnt/, /media/, /evidence/, /cases/, /tmp/): {path}"
+        )
     return None
 
 
@@ -508,9 +519,13 @@ def idx_search(
 ) -> dict:
     """Search indexed evidence using OpenSearch query_string syntax.
 
-    Results are compact by default — bloat fields excluded, long values
+    Results are compact by default -- bloat fields excluded, long values
     truncated to 500 chars. Use compact=False for full documents, or
     idx_get_event(id, index) to fetch individual full documents.
+
+    IMPORTANT: OpenSearch tokenizes on dots/hyphens. For filename searches,
+    include the extension: 'ServiceUpdater.exe' not 'ServiceUpdater'.
+    Use wildcards for partial matches: '*ServiceUpdater*'.
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
@@ -561,12 +576,22 @@ def idx_search(
     )
 
     total = result["hits"]["total"]["value"]
+    total_capped = result["hits"]["total"].get("relation") == "gte"
     if compact:
         docs = _strip_hits(result["hits"]["hits"])
     else:
         docs = _strip_hits(result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999)
 
     resp: dict = {"total": total, "returned": len(docs), "results": docs, "compact": compact}
+    if total_capped:
+        resp["total_capped"] = True
+        resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
+    if not docs:
+        resp["hint"] = (
+            "No results. If searching for filenames, include the extension "
+            "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
+            "'*svchost*'. OpenSearch tokenizes on dots/hyphens."
+        )
     if compact:
         resp["note"] = (
             "Results are compact — bloat fields excluded, long values truncated. "
@@ -1538,6 +1563,8 @@ def idx_ingest_delimited(
     Args:
         path: Path to delimited file or directory.
         hostname: Source hostname. Required unless recursive=True.
+            Use hostname="auto" to auto-detect hostnames from filenames
+            in a flat directory (e.g., Hayabusa per-host CSVs).
         index_suffix: Index suffix (default: format-{filename}).
         time_field: Timestamp field (default: auto-detect).
         delimiter: Delimiter character (default: auto-detect).
@@ -1548,6 +1575,32 @@ def idx_ingest_delimited(
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
+
+    # Auto-detect mode: flat directory with multi-host files
+    if hostname == "auto":
+        p = Path(path)
+        if not p.is_dir():
+            return {"error": "hostname='auto' requires a directory path"}
+        detected = _detect_hostnames_from_filenames(p)
+        if not detected:
+            return {"error": "Could not auto-detect hostnames from filenames."}
+        if dry_run:
+            return {
+                "status": "preview",
+                "auto_detect": True,
+                "detected_hostnames": sorted(detected),
+                "total_hosts": len(detected),
+            }
+        # Single background process iterates all detected hosts sequentially
+        return _launch_background(
+            "delimited",
+            path,
+            "",
+            index_suffix,
+            time_field,
+            delimiter=delimiter,
+            auto_hosts=",".join(sorted(detected)),
+        )
 
     # Recursive mode: subdirs are hosts
     if recursive:
@@ -1834,6 +1887,7 @@ def _launch_background(
     time_field="",
     delimiter="",
     recursive=False,
+    auto_hosts="",
 ):
     """Launch a generic ingest as background subprocess with concurrency control."""
     import os as _os
@@ -1883,6 +1937,8 @@ def _launch_background(
         cmd.extend(["--delimiter", delimiter])
     if recursive:
         cmd.append("--recursive")
+    if auto_hosts:
+        cmd.extend(["--auto-hosts", auto_hosts])
 
     # Log to file instead of DEVNULL so errors are visible
     from opensearch_mcp.paths import vhir_dir
@@ -1971,9 +2027,22 @@ def idx_ingest_memory(
     import sys as _sys
     import uuid as _uuid
 
+    from opensearch_mcp.ingest_status import read_active_ingests as _read_mem
+
     active_case = _get_active_case()
     if not active_case:
         return {"error": "No active case. Run 'vhir case activate' first."}
+
+    # Concurrency gate (same as _launch_background)
+    _running_mem = [i for i in _read_mem() if i.get("status") == "running"]
+    if len(_running_mem) >= _MAX_CONCURRENT_INGESTS:
+        return {
+            "error": (
+                f"Too many concurrent ingests ({len(_running_mem)} running, "
+                f"max {_MAX_CONCURRENT_INGESTS}). Wait for current ingests "
+                "to complete. Use idx_ingest_status() to check progress."
+            ),
+        }
 
     run_id = str(_uuid.uuid4())
     env = _os.environ.copy()
