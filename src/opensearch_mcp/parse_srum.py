@@ -60,7 +60,9 @@ def parse_srum(
         )
     except subprocess.CalledProcessError:
         print(
-            "  srum: skipped — dirty database, needs Windows workstation",
+            "  srum: skipped — dirty database, needs Windows workstation\n"
+            "  NOTE: SRUM parsing on SIFT uses Plaso (limited dirty-database handling). "
+            "Provision wintools-mcp with SrumECmd for reliable SRUM analysis.",
             file=sys.stderr,
         )
         return 0, 0

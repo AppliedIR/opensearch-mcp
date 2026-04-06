@@ -55,7 +55,12 @@ def parse_prefetch(
             source_file=source_file,
         )
     except subprocess.CalledProcessError as e:
-        print(f"  prefetch: Plaso failed ({e})", file=sys.stderr)
+        print(
+            f"  prefetch: Plaso failed ({e})\n"
+            "  NOTE: Prefetch parsing on SIFT uses Plaso (misses execution counts, loaded DLLs). "
+            "Provision wintools-mcp with PECmd for complete prefetch analysis.",
+            file=sys.stderr,
+        )
         return 0, 0
 
 
