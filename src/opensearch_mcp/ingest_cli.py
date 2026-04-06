@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1243,35 +1244,96 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
 
+    # Status tracking (BUG-8: was completely missing for memory ingest)
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
+    started_ts = datetime.now(timezone.utc).isoformat()
+    start_mono = time.monotonic()
+
+    # Build plugin checklist for status
+    status_plugins = [{"name": p, "status": "pending"} for p in plugin_list]
+    status_host = {
+        "hostname": hostname,
+        "artifacts": status_plugins,
+    }
+
+    def _write_mem_status(status: str, error: str = "") -> None:
+        total_indexed = sum(r.get("indexed", 0) for r in _plugin_results.values())
+        n_done = sum(1 for a in status_plugins if a["status"] == "complete")
+        write_status(
+            case_id,
+            os.getpid(),
+            run_id,
+            status,
+            [status_host],
+            {
+                "indexed": total_indexed,
+                "artifacts_total": len(status_plugins),
+                "artifacts_complete": n_done,
+                "hosts_total": 1,
+                "hosts_complete": 1 if n_done == len(status_plugins) else 0,
+            },
+            started_ts,
+            error=error,
+            elapsed_seconds=time.monotonic() - start_mono,
+        )
+
+    _plugin_results: dict = {}
+
     def _progress(event: str, **kw) -> None:
         if event == "plugin_start":
             print(f"  {kw['plugin']}...", end=" ", flush=True)
+            for a in status_plugins:
+                if a["name"] == kw["plugin"]:
+                    a["status"] = "running"
+                    break
+            _write_mem_status("running")
         elif event == "plugin_done":
             cnt = kw.get("indexed", 0)
+            plugin = kw.get("plugin", "")
+            _plugin_results[plugin] = {"indexed": cnt, "status": "done"}
+            for a in status_plugins:
+                if a["name"] == plugin:
+                    a["status"] = "complete"
+                    a["indexed"] = cnt
+                    break
             if cnt:
                 print(f"{cnt:,} entries")
             else:
                 print("empty")
         elif event == "plugin_failed":
+            plugin = kw.get("plugin", "")
+            _plugin_results[plugin] = {"status": "failed", "error": kw.get("error", "")}
+            for a in status_plugins:
+                if a["name"] == plugin:
+                    a["status"] = "failed"
+                    a["error"] = kw.get("error", "")
+                    break
             print(f"FAILED: {kw['error']}")
 
     def _audit_log(tool, params, result_summary):
         audit.log(tool=tool, audit_id=aid, params=params, result_summary=result_summary)
 
+    # Initial status
+    _write_mem_status("running")
+
     timeout = getattr(args, "timeout", 3600)
-    results = ingest_memory(
-        image_path=image_path,
-        client=client,
-        case_id=case_id,
-        hostname=hostname,
-        tier=tier,
-        plugins=plugins,
-        timeout=timeout,
-        ingest_audit_id=aid,
-        pipeline_version=f"opensearch-mcp-{__version__}",
-        on_progress=_progress,
-        audit_log=_audit_log,
-    )
+    try:
+        results = ingest_memory(
+            image_path=image_path,
+            client=client,
+            case_id=case_id,
+            hostname=hostname,
+            tier=tier,
+            plugins=plugins,
+            timeout=timeout,
+            ingest_audit_id=aid,
+            pipeline_version=f"opensearch-mcp-{__version__}",
+            on_progress=_progress,
+            audit_log=_audit_log,
+        )
+    except Exception as e:
+        _write_mem_status("failed", error=str(e))
+        raise
 
     # Summary
     total = sum(r.get("indexed", 0) for r in results.values())
@@ -1279,6 +1341,9 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     print(f"\nDone. {total:,} entries indexed from {len(results)} plugins.")
     if failed:
         print(f"{len(failed)} plugin(s) failed: {', '.join(failed)}")
+
+    # Final status
+    _write_mem_status("complete")
 
     # Audit the overall operation
     audit.log(
