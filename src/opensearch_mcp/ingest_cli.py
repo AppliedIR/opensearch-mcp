@@ -524,23 +524,47 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 from opensearch_mcp.ingest import run_hayabusa_batch
 
                 hayabusa_started = datetime.now(tz.utc).isoformat()
+                # BUG-4 fix: preserve full host/artifact checklist, append hayabusa
+                existing_hosts = [
+                    {
+                        "hostname": h.hostname,
+                        "artifacts": [
+                            {
+                                "name": a.artifact,
+                                "status": "failed" if a.error else "complete",
+                                "indexed": a.indexed,
+                            }
+                            for a in h.artifacts
+                        ],
+                    }
+                    for h in result.hosts
+                ]
+                existing_hosts.append(
+                    {
+                        "hostname": "hayabusa",
+                        "artifacts": [{"name": "hayabusa-detection", "status": "running"}],
+                    }
+                )
+                n_arts = sum(len(h["artifacts"]) for h in existing_hosts)
+                n_done = sum(
+                    1 for h in existing_hosts for a in h["artifacts"] if a["status"] == "complete"
+                )
                 write_status(
                     case_id,
                     os.getpid(),
                     run_id,
                     "running",
-                    [
-                        {
-                            "hostname": "hayabusa",
-                            "artifacts": [{"name": "hayabusa-detection", "status": "running"}],
-                        }
-                    ],
+                    existing_hosts,
                     {
                         "indexed": result.total_indexed,
-                        "artifacts_total": 1,
-                        "artifacts_complete": 0,
-                        "hosts_total": 1,
-                        "hosts_complete": 0,
+                        "artifacts_total": n_arts,
+                        "artifacts_complete": n_done,
+                        "hosts_total": len(existing_hosts),
+                        "hosts_complete": sum(
+                            1
+                            for h in existing_hosts
+                            if all(a["status"] == "complete" for a in h["artifacts"])
+                        ),
                     },
                     hayabusa_started,
                     elapsed_seconds=result.elapsed_seconds,
@@ -568,30 +592,22 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if total_alerts:
                     print(f"Hayabusa: {total_alerts:,} alerts indexed")
 
-                # Layer 6: update status after Hayabusa
+                # Layer 6: update status after Hayabusa (preserve full checklist)
+                existing_hosts[-1]["artifacts"][0].update(
+                    {"status": "complete", "indexed": total_alerts}
+                )
                 write_status(
                     case_id,
                     os.getpid(),
                     run_id,
                     "complete",
-                    [
-                        {
-                            "hostname": "hayabusa",
-                            "artifacts": [
-                                {
-                                    "name": "hayabusa-detection",
-                                    "status": "complete",
-                                    "indexed": total_alerts,
-                                }
-                            ],
-                        }
-                    ],
+                    existing_hosts,
                     {
                         "indexed": result.total_indexed + total_alerts,
-                        "artifacts_total": 1,
-                        "artifacts_complete": 1,
-                        "hosts_total": 1,
-                        "hosts_complete": 1,
+                        "artifacts_total": n_arts,
+                        "artifacts_complete": n_arts,
+                        "hosts_total": len(existing_hosts),
+                        "hosts_complete": len(existing_hosts),
                     },
                     hayabusa_started,
                     elapsed_seconds=result.elapsed_seconds,

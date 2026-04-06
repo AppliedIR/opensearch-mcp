@@ -169,17 +169,25 @@ _field_hint_delivered = False
 
 
 def _get_case_indices(index_pattern: str, client) -> set[str]:
-    """Get index names for a pattern, cached per case prefix."""
-    # Extract case prefix for cache key (e.g., "case-inc001-")
-    parts = index_pattern.split("*", 1)
-    cache_key = parts[0] if parts else index_pattern
+    """Get index names for a pattern, cached per case prefix.
+
+    Handles comma-separated patterns (e.g., 'case-x-evtx-*,case-x-delim-*').
+    """
+    cache_key = index_pattern
     if cache_key in _case_index_cache:
         return _case_index_cache[cache_key]
-    try:
-        cat_result = client.cat.indices(index=index_pattern, format="json", h="index")
-        names = {i["index"] for i in cat_result} if cat_result else set()
-    except Exception:
-        names = set()
+    names: set[str] = set()
+    # Handle comma-separated patterns
+    for segment in index_pattern.split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            cat_result = client.cat.indices(index=segment, format="json", h="index")
+            if cat_result:
+                names.update(i["index"] for i in cat_result)
+        except Exception:
+            pass
     _case_index_cache[cache_key] = names
     return names
 
@@ -309,6 +317,12 @@ _SEARCH_EXCLUDE_FIELDS = frozenset(
         "NameType",
         "IsAds",
         "Is256",
+        # --- EvtxECmd low-value fields ---
+        "RecordNumber",
+        "EventRecordId",
+        "ProcessId",
+        "ThreadId",
+        "UserId",
     }
 )
 
@@ -937,6 +951,30 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         if matched_host and matched_host not in artifacts[artifact_type]["hosts"]:
             artifacts[artifact_type]["hosts"].append(matched_host)
         artifacts[artifact_type]["indices"].append(name)
+
+    # Aggregate sub-indices (e.g., delim-amcache-devicecontainers → delim-amcache)
+    # to prevent 30 hosts × 6 sub-tables = 180 entries bloating the response.
+    _AGGREGATE_PREFIXES = (
+        "delim-amcache-",
+        "delim-mftecmd-",
+        "delim-srumecmd-",
+        "delim-sqlecmd-",
+    )
+    merged: dict = {}
+    for atype, info in artifacts.items():
+        parent = atype
+        for pfx in _AGGREGATE_PREFIXES:
+            if atype.startswith(pfx):
+                parent = pfx.rstrip("-")
+                break
+        if parent not in merged:
+            merged[parent] = {"docs": 0, "hosts": [], "indices": []}
+        merged[parent]["docs"] += info["docs"]
+        for h in info.get("hosts", []):
+            if h not in merged[parent]["hosts"]:
+                merged[parent]["hosts"].append(h)
+        merged[parent]["indices"].extend(info["indices"])
+    artifacts = merged
 
     # Get field mappings per artifact type with types (sample one index per type)
     def _flatten_props(props: dict, prefix: str = "") -> list[dict]:
