@@ -329,19 +329,6 @@ for det_name in list(existing_detectors):
         except Exception:
             pass
 
-# Clean up orphaned monitors from pre-3.5 detector attempts (BUG-R4)
-try:
-    monitors = api('GET', '/_plugins/_alerting/monitors/_search',
-                    body=json.dumps({"query": {"match_all": {}}, "size": 50}))
-    for hit in monitors.get('hits', {}).get('hits', []):
-        name = hit.get('_source', {}).get('name', '')
-        if name.startswith('vhir-') or name.startswith('sigma_'):
-            mon_id = hit['_id']
-            api('DELETE', f'/_plugins/_alerting/monitors/{mon_id}')
-            print(f'  Removed orphaned monitor: {name}')
-except Exception:
-    pass  # Alerting plugin may not be installed
-
 # Add aliases to existing indices (upgrade from pre-alias versions)
 _ALIAS_PATTERNS = {
     'vhir-sigma-windows': 'case-*-evtx-*',
