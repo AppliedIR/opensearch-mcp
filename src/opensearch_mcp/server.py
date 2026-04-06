@@ -141,21 +141,31 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
 _case_index_cache: dict[str, set[str]] = {}
 
 _FIELD_HINT_EVTX_EVTXECMD = (
-    "WARNING: This case has BOTH native evtx AND EvtxECmd CSV indices. "
-    "These use DIFFERENT field names for the same event data.\n"
-    "Native evtx (case-*-evtx-*): event.code, @timestamp, user.name, "
-    "source.ip, winlog.channel, winlog.logon.type, process.name\n"
-    "EvtxECmd CSV (case-*-delim-evtxecmd-*): EventId, TimeCreated, "
-    "UserName, RemoteHost, Channel, PayloadData1-6, ExecutableInfo\n"
-    "CRITICAL: EvtxECmd PayloadData1-6 columns have DIFFERENT meanings "
-    "per EventId. Example for EID 4624: PayloadData1=TargetUserName, "
-    "PayloadData2=LogonType. For EID 4688: PayloadData1=SubjectUserSid, "
-    "PayloadData2=NewProcessName. UserName is the SUBJECT account, NOT "
-    "the target — do not confuse with user.name from native evtx.\n"
-    "Query specific index patterns for consistent results: "
-    "case-*-evtx-* (ECS fields) or case-*-delim-evtxecmd-* (CSV fields). "
-    "Use idx_get_event to inspect full documents when field mapping is unclear."
+    "This case has EvtxECmd CSV indices alongside native evtx indices. "
+    "EvtxECmd uses different field names — key mappings:\n"
+    "SAFE ALIASES: event.code (evtx) = EventId (EvtxECmd). "
+    "@timestamp (evtx) = TimeCreated (EvtxECmd). host.name = same.\n"
+    "FIELDS THAT DON'T MAP 1:1 — EvtxECmd PayloadData is POSITIONAL:\n"
+    "  UserName = Subject account (NOT the target user)\n"
+    "  RemoteHost = Source IP (when present)\n"
+    "  ExecutableInfo = Process path (when present)\n"
+    "  EID 4624 (Logon): PayloadData1='Target: DOMAIN\\User', "
+    "PayloadData2='LogonType N' (3=network, 10=RDP)\n"
+    "  EID 4688 (Process): PayloadData1='Parent process: path', "
+    "ExecutableInfo=new process\n"
+    "  EID 7045 (Service): PayloadData1='Name: ServiceName', "
+    "PayloadData2='StartType: ...'\n"
+    "  EID 4648 (Explicit Creds): PayloadData1='Target: DOMAIN\\User', "
+    "PayloadData2='TargetServerName: host'\n"
+    "  EID 4672 (Special Privs): PayloadData1='PrivilegeList: ...'\n"
+    "EvtxECmd queries: EventId:4624 AND PayloadData1:*username*, "
+    "EventId:4688 AND ExecutableInfo:*process*, "
+    "EventId:7045 AND PayloadData1:*servicename*, "
+    "EventId:4624 AND PayloadData2:*LogonType 3* (lateral movement).\n"
+    "Prefer native evtx (case-*-evtx-*) when available — proper ECS fields."
 )
+
+_field_hint_delivered = False
 
 
 def _get_case_indices(index_pattern: str, client) -> set[str]:
@@ -180,21 +190,34 @@ def invalidate_index_cache() -> None:
 
 
 def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
-    """Add field_hint when query targets indices with different field names."""
+    """Add field_hint when query targets indices with different field names.
+
+    Full hint on first delivery, one-line pointer after (token budget).
+    """
+    global _field_hint_delivered
     if "*" not in index_pattern:
         return
     idx_names = _get_case_indices(index_pattern, client)
     has_evtx = any("-evtx-" in n and "-evtxecmd-" not in n for n in idx_names)
     has_evtxecmd = any("-evtxecmd-" in n for n in idx_names)
-    if has_evtx and has_evtxecmd:
+    if not (has_evtx and has_evtxecmd):
+        return
+    if _field_hint_delivered:
+        resp["field_hint"] = (
+            "Mixed evtx/EvtxECmd indices — use case-*-evtx-* for ECS fields "
+            "or case-*-delim-evtxecmd-* for CSV fields."
+        )
+    else:
         resp["field_hint"] = _FIELD_HINT_EVTX_EVTXECMD
+        _field_hint_delivered = True
 
 
 def reset_enrichment_state() -> None:
     """Reset enrichment counters for test isolation."""
-    global _shimcache_reminder_count, _hints_delivered
+    global _shimcache_reminder_count, _hints_delivered, _field_hint_delivered
     _shimcache_reminder_count = 0
     _hints_delivered = False
+    _field_hint_delivered = False
     _case_index_cache.clear()
 
 
