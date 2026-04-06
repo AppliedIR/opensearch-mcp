@@ -244,9 +244,7 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
     for d in subdirs:
         if len(csv_files) >= 100:
             break
-            csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
-        if len(csv_files) >= 100:
-            break
+        csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
     csv_files = csv_files[:100]
     if not csv_files:
         return None
