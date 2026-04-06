@@ -97,73 +97,6 @@ _CUSTOM_ARTIFACTS = {
 }
 
 
-def _pause_sigma_detector(client: OpenSearch) -> str | None:
-    """Disable vhir-windows detector during ingest. Returns detector_id or None.
-
-    Silently returns None if Security Analytics is not configured.
-    Uses match_all + Python filter (not match query — same B1 lesson).
-    """
-    try:
-        resp = client.transport.perform_request(
-            "POST",
-            "/_plugins/_security_analytics/detectors/_search",
-            body={"query": {"match_all": {}}, "size": 10},
-        )
-        hits = resp.get("hits", {}).get("hits", [])
-        target = None
-        for hit in hits:
-            if hit.get("_source", {}).get("name") == "vhir-windows":
-                target = hit
-                break
-        if not target:
-            return None
-        detector_id = target["_id"]
-        detector = target["_source"]
-        if not detector.get("enabled", False):
-            return None
-        detector["enabled"] = False
-        client.transport.perform_request(
-            "PUT",
-            f"/_plugins/_security_analytics/detectors/{detector_id}",
-            body=detector,
-            timeout=30,
-        )
-        return detector_id
-    except Exception as e:
-        import sys
-
-        print(
-            f"WARNING: Could not pause Sigma detector: {e}\n"
-            "  Ingest will be slower with Sigma scanning active.",
-            file=sys.stderr,
-        )
-        return None
-
-
-def _resume_sigma_detector(client: OpenSearch, detector_id: str) -> None:
-    """Re-enable detector after ingest."""
-    try:
-        resp = client.transport.perform_request(
-            "GET",
-            f"/_plugins/_security_analytics/detectors/{detector_id}",
-        )
-        detector = resp.get("_source", resp.get("detector", {}))
-        detector["enabled"] = True
-        client.transport.perform_request(
-            "PUT",
-            f"/_plugins/_security_analytics/detectors/{detector_id}",
-            body=detector,
-        )
-    except Exception as e:
-        import sys
-
-        print(
-            f"WARNING: Could not re-enable Sigma detector: {e}\n"
-            "  Re-enable manually via OpenSearch Dashboards.",
-            file=sys.stderr,
-        )
-
-
 def _artifact_to_tool(artifact_name: str) -> str | None:
     """Map discovery artifact name to tool name."""
     mapping = {
@@ -249,7 +182,7 @@ def ingest(
 
     on_progress: optional callable(event, **kwargs) for CLI output.
       Events: "host_start", "evtx_file", "evtx_done", "artifact_start",
-              "artifact_done", "artifact_failed", "sigma_paused", "sigma_resumed"
+              "artifact_done", "artifact_failed"
     status_pid/status_run_id: if nonzero, write progress to status file.
     reduced_ids: if set, only ingest evtx events with these Event IDs.
     reduced_log_names: if set, only parse evtx files matching these names.
@@ -304,36 +237,25 @@ def ingest(
 
     _update_status()
 
-    # Pause Sigma detector during ingest — percolate queries at scale
-    # consume 80% CPU and make ingest 6x slower (B20).
-    detector_id = _pause_sigma_detector(client)
-    if detector_id:
-        _progress("sigma_paused")
-
-    try:
-        _ingest_hosts(
-            hosts=hosts,
-            client=client,
-            audit=audit,
-            case_id=case_id,
-            active_names=active_names,
-            active_plaso=active_plaso,
-            active_custom=active_custom,
-            full=full,
-            time_from=time_from,
-            time_to=time_to,
-            reduced_ids=reduced_ids,
-            reduced_log_names=reduced_log_names,
-            status_hosts=status_hosts,
-            _progress=_progress,
-            _update_status=_update_status,
-            result=result,
-            start=start,
-        )
-    finally:
-        if detector_id:
-            _resume_sigma_detector(client, detector_id)
-            _progress("sigma_resumed")
+    _ingest_hosts(
+        hosts=hosts,
+        client=client,
+        audit=audit,
+        case_id=case_id,
+        active_names=active_names,
+        active_plaso=active_plaso,
+        active_custom=active_custom,
+        full=full,
+        time_from=time_from,
+        time_to=time_to,
+        reduced_ids=reduced_ids,
+        reduced_log_names=reduced_log_names,
+        status_hosts=status_hosts,
+        _progress=_progress,
+        _update_status=_update_status,
+        result=result,
+        start=start,
+    )
 
     result.elapsed_seconds = time.monotonic() - start
 
@@ -474,7 +396,7 @@ def _ingest_hosts(
     result,
     start,
 ):
-    """Inner ingest loop — extracted so ingest() can wrap with Sigma pause/resume."""
+    """Inner ingest loop — processes all hosts and artifacts."""
     for host_idx, host in enumerate(hosts):
         host_result = HostResult(hostname=host.hostname, volume_root=str(host.volume_root))
         _progress("host_start", hostname=host.hostname)

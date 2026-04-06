@@ -35,10 +35,17 @@ _shimcache_reminder_count = 0
 def _add_shimcache_reminder(resp: dict, index_pattern: str, docs: list) -> None:
     """Add discipline reminder when query hits shimcache/amcache indices."""
     global _shimcache_reminder_count
-    hits = "shimcache" in index_pattern or "amcache" in index_pattern
+    hits = (
+        "shimcache" in index_pattern
+        or "appcompatcache" in index_pattern
+        or "amcache" in index_pattern
+    )
     if not hits and docs:
         hits = any(
-            "shimcache" in d.get("_index", "") or "amcache" in d.get("_index", "") for d in docs
+            "shimcache" in d.get("_index", "")
+            or "appcompatcache" in d.get("_index", "")
+            or "amcache" in d.get("_index", "")
+            for d in docs
         )
     if not hits:
         return
@@ -72,14 +79,19 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
         return
 
     hints = []
-    if "mft" in artifacts:
+    art_keys = set(artifacts.keys())
+    has_mft = any("mft" in k for k in art_keys)
+    has_usn = any("usn" in k or "usnjournal" in k for k in art_keys)
+    has_evtx = any("evtx" in k for k in art_keys)
+    has_prefetch = any("prefetch" in k or "pecmd" in k for k in art_keys)
+    if has_mft:
         hints.append(
             'MFT indexed. Timestomping: "SI<FN".keyword:True OR '
             "uSecZeros.keyword:True (exclude WinSxS). "
             "Deleted: InUse.keyword:False. ADS: HasAds.keyword:True. "
             "Zone.Identifier: ZoneIdContents:* AND FileName:(*.exe OR *.dll OR *.ps1)"
         )
-    if any(k.startswith("usn") or "usnjournal" in k for k in artifacts):
+    if has_usn:
         hints.append(
             "USN Journal indexed. Use time_from/time_to. "
             "Deleted Prefetch: UpdateReasons:*Delete* AND ParentPath:*Prefetch*. "
@@ -88,13 +100,13 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
             "(verify with surrounding entries). "
             "Cross-host: same filename across case-*-usn-*"
         )
-    if any("evtx" in k for k in artifacts):
+    if has_evtx:
         hints.append(
             "EVTX indexed. Key queries: event.code:4624 (logons), "
             "event.code:4688 (process creation), event.code:7045 (service install). "
             "Use idx_aggregate on event.code for frequency overview."
         )
-    if "prefetch" in artifacts and "mft" in artifacts:
+    if has_prefetch and has_mft:
         hints.append(
             "Cross-ref Prefetch+MFT: prefetched exe with InUse=False in MFT = "
             "executed then deleted (anti-forensics)."
@@ -123,6 +135,13 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
 
     resp["investigation_hints"] = kept
     _hints_delivered = True
+
+
+def reset_enrichment_state() -> None:
+    """Reset enrichment counters for test isolation."""
+    global _shimcache_reminder_count, _hints_delivered
+    _shimcache_reminder_count = 0
+    _hints_delivered = False
 
 
 _client = None
@@ -1251,9 +1270,21 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     "Query Hayabusa alerts: idx_search(query='Level:critical OR "
                     "Level:high', index='case-*-hayabusa-*')"
                 )
+            # Pick a concrete artifact_type example from what was ingested
+            example_type = "event_logs_security"
+            for art in artifacts_done:
+                if "evtx" in art:
+                    example_type = "event_logs_security"
+                    break
+                if "prefetch" in art or "pecmd" in art:
+                    example_type = "prefetch"
+                    break
+                if "amcache" in art:
+                    example_type = "amcache"
+                    break
             next_steps.append(
-                "Call suggest_tools(artifact_type='...') on sift-mcp for "
-                "deep analysis tools beyond OpenSearch queries"
+                f"Call suggest_tools(artifact_type='{example_type}') on sift-mcp "
+                "for deep analysis tools beyond OpenSearch queries"
             )
             s["next_steps"] = next_steps
 
@@ -1818,7 +1849,7 @@ def idx_list_detections(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """List Sigma detection findings from Security Analytics.
+    """List detection findings from Security Analytics (Sigma) or suggest Hayabusa alternatives.
 
     Args:
         severity: Filter by severity (critical, high, medium, low).
@@ -1849,7 +1880,27 @@ def idx_list_detections(
         )
     except (RuntimeError, ValueError, Exception) as e:
         if "security_analytics" in str(e).lower() or "400" in str(e) or "404" in str(e):
-            return {"error": "Security Analytics plugin not available", "findings": []}
+            resp = {"error": "Security Analytics plugin not available", "findings": []}
+            # Still suggest Hayabusa when SA is unavailable
+            try:
+                hb_count = client.count(index="case-*-hayabusa-*")["count"]
+                if hb_count:
+                    resp["suggestion"] = (
+                        f"Sigma detectors unavailable. {hb_count:,} Hayabusa alerts available. "
+                        "Query: idx_search(query='Level:critical OR Level:high', "
+                        "index='case-*-hayabusa-*')"
+                    )
+                else:
+                    resp["suggestion"] = (
+                        "Sigma detectors unavailable on OpenSearch 3.5. "
+                        "Hayabusa runs during evtx ingest if installed."
+                    )
+            except Exception:
+                resp["suggestion"] = (
+                    "Sigma detectors unavailable. Check Hayabusa: "
+                    "idx_search(query='Level:*', index='case-*-hayabusa-*')"
+                )
+            return resp
         raise
 
     sev_filter = severity.lower() if severity else ""

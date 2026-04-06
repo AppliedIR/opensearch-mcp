@@ -8,6 +8,16 @@ import pytest
 from _helpers import make_windows_tree
 
 
+@pytest.fixture(autouse=True)
+def _reset_enrichment():
+    """Reset server.py enrichment globals before each test."""
+    from opensearch_mcp.server import reset_enrichment_state
+
+    reset_enrichment_state()
+    yield
+    reset_enrichment_state()
+
+
 @pytest.fixture
 def windows_tree(tmp_path):
     """Create a full Windows directory structure under tmp_path and return it."""

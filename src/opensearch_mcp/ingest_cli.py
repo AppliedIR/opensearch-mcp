@@ -444,10 +444,6 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 fn = kw["filename"]
                 n, t = kw["file_num"], kw["file_total"]
                 print(f"  evtx [{n}/{t}] {fn}... {c:,} events")
-            elif event == "sigma_paused":
-                print("  Sigma detection paused during ingest")
-            elif event == "sigma_resumed":
-                print("  Sigma detection re-enabled")
             elif event == "evtx_done":
                 idx = kw["indexed"]
                 sk = kw.get("skipped", 0)
