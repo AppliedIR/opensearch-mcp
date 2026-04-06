@@ -262,10 +262,8 @@ def _strip_hits(
             doc["_type"] = type_parts[0] if type_parts else remainder
 
         truncated_fields = []
-        excluded_here = []
         for key, val in src.items():
             if key in exclude_fields:
-                excluded_here.append(key)
                 continue
             sval = str(val) if not isinstance(val, str) else val
             if len(sval) > max_chars:
@@ -276,8 +274,6 @@ def _strip_hits(
 
         if truncated_fields:
             doc["_truncated"] = truncated_fields
-        if excluded_here:
-            doc["_excluded"] = excluded_here
 
         results.append(doc)
     return results
@@ -479,9 +475,8 @@ def idx_search(
     else:
         docs = _strip_hits(result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999)
 
-    resp: dict = {"total": total, "returned": len(docs), "results": docs}
+    resp: dict = {"total": total, "returned": len(docs), "results": docs, "compact": compact}
     if compact:
-        resp["compact"] = True
         resp["note"] = (
             "Results are compact — bloat fields excluded, long values truncated. "
             "Use idx_get_event(id, index) for full documents."
