@@ -137,11 +137,65 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
     _hints_delivered = True
 
 
+# --- Field name mismatch detection (cached per case) ---
+_case_index_cache: dict[str, set[str]] = {}
+
+_FIELD_HINT_EVTX_EVTXECMD = (
+    "WARNING: This case has BOTH native evtx AND EvtxECmd CSV indices. "
+    "These use DIFFERENT field names for the same event data.\n"
+    "Native evtx (case-*-evtx-*): event.code, @timestamp, user.name, "
+    "source.ip, winlog.channel, winlog.logon.type, process.name\n"
+    "EvtxECmd CSV (case-*-delim-evtxecmd-*): EventId, TimeCreated, "
+    "UserName, RemoteHost, Channel, PayloadData1-6, ExecutableInfo\n"
+    "CRITICAL: EvtxECmd PayloadData1-6 columns have DIFFERENT meanings "
+    "per EventId. Example for EID 4624: PayloadData1=TargetUserName, "
+    "PayloadData2=LogonType. For EID 4688: PayloadData1=SubjectUserSid, "
+    "PayloadData2=NewProcessName. UserName is the SUBJECT account, NOT "
+    "the target — do not confuse with user.name from native evtx.\n"
+    "Query specific index patterns for consistent results: "
+    "case-*-evtx-* (ECS fields) or case-*-delim-evtxecmd-* (CSV fields). "
+    "Use idx_get_event to inspect full documents when field mapping is unclear."
+)
+
+
+def _get_case_indices(index_pattern: str, client) -> set[str]:
+    """Get index names for a pattern, cached per case prefix."""
+    # Extract case prefix for cache key (e.g., "case-inc001-")
+    parts = index_pattern.split("*", 1)
+    cache_key = parts[0] if parts else index_pattern
+    if cache_key in _case_index_cache:
+        return _case_index_cache[cache_key]
+    try:
+        cat_result = client.cat.indices(index=index_pattern, format="json", h="index")
+        names = {i["index"] for i in cat_result} if cat_result else set()
+    except Exception:
+        names = set()
+    _case_index_cache[cache_key] = names
+    return names
+
+
+def invalidate_index_cache() -> None:
+    """Clear the index cache after ingest operations."""
+    _case_index_cache.clear()
+
+
+def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
+    """Add field_hint when query targets indices with different field names."""
+    if "*" not in index_pattern:
+        return
+    idx_names = _get_case_indices(index_pattern, client)
+    has_evtx = any("-evtx-" in n and "-evtxecmd-" not in n for n in idx_names)
+    has_evtxecmd = any("-evtxecmd-" in n for n in idx_names)
+    if has_evtx and has_evtxecmd:
+        resp["field_hint"] = _FIELD_HINT_EVTX_EVTXECMD
+
+
 def reset_enrichment_state() -> None:
     """Reset enrichment counters for test isolation."""
     global _shimcache_reminder_count, _hints_delivered
     _shimcache_reminder_count = 0
     _hints_delivered = False
+    _case_index_cache.clear()
 
 
 _client = None
@@ -482,18 +536,10 @@ def idx_search(
             "Use idx_get_event(id, index) for full documents."
         )
 
-    # Detect mixed index types and add field hint
-    index_types = {d.get("_type", "") for d in docs if d.get("_type")}
-    evtx_types = {"evtx", "delim-evtxecmd"}
-    if len(index_types & evtx_types) > 1 or (
-        index_types & evtx_types and index_types - evtx_types
-    ):
-        resp["field_hint"] = (
-            "Results span multiple index types with different field names. "
-            "Native evtx uses ECS fields (event.code, user.name, source.ip). "
-            "Delimited EvtxECmd uses CSV columns (EventId, UserName, RemoteHost). "
-            "Query specific index patterns for consistent field names."
-        )
+    # Detect when query targets indices with different field naming.
+    # Check existing index names (cached per case), not results, because
+    # field-specific queries silently miss index types using different names.
+    _add_field_hint(resp, index, client)
 
     _add_shimcache_reminder(resp, index, docs)
     aid = audit.log(
@@ -1333,6 +1379,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 "Ingest process died unexpectedly. Re-run to continue — dedup prevents duplicates."
             )
         elif status == "complete":
+            invalidate_index_cache()  # new indices may exist
             errors = [
                 f"{item['host']}/{item['artifact']}: {item['detail']}"
                 for item in checklist
