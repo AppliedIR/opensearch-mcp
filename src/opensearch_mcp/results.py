@@ -17,6 +17,7 @@ class ArtifactResult:
     existing_before: int = 0  # client.count() before ingest
     source_files: list[str] = field(default_factory=list)
     error: str = ""  # non-empty if the tool failed
+    note: str = ""  # informational (e.g., "parsed with Plaso fallback")
 
 
 @dataclass
@@ -60,6 +61,7 @@ class IngestResult:
                             "bulk_failed": a.bulk_failed,
                             "existing_before": a.existing_before,
                             "error": a.error,
+                            "note": a.note,
                         }
                         for a in h.artifacts
                     ],

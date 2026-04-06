@@ -737,7 +737,7 @@ def _ingest_plaso_artifact(
 
         _plaso_src = _rel(artifact_path, host.volume_root)
         if tool_name == "prefetch":
-            cnt, bf = parse_prefetch(
+            cnt, bf, _note = parse_prefetch(
                 prefetch_dir=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -748,7 +748,7 @@ def _ingest_plaso_artifact(
                 source_file=_plaso_src,
             )
         else:
-            cnt, bf = parse_srum(
+            cnt, bf, _note = parse_srum(
                 srum_path=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -761,6 +761,8 @@ def _ingest_plaso_artifact(
             )
         ar.indexed = cnt
         ar.bulk_failed = bf
+        if _note:
+            ar.note = _note
         _register_evidence(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
         audit.log(
             tool=f"ingest_{tool_name}",

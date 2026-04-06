@@ -18,17 +18,23 @@ def parse_prefetch(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
-) -> tuple[int, int]:
-    """Parse prefetch files. Returns (count_indexed, count_bulk_failed).
+) -> tuple[int, int, str]:
+    """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note).
 
     Strategy: wintools-first (PECmd on Windows), Plaso fallback.
     PECmd produces richer output than Plaso's prefetch parser.
     """
     from opensearch_mcp.wintools import mark_wintools_down, wintools_available
 
+    _fallback_note = (
+        "prefetch: parsed with Plaso fallback (reduced fidelity — "
+        "misses execution counts, loaded DLLs). "
+        "Provision wintools-mcp with PECmd for complete analysis."
+    )
+
     if wintools_available():
         try:
-            return _parse_prefetch_wintools(
+            cnt, bf = _parse_prefetch_wintools(
                 prefetch_dir,
                 client,
                 index_name,
@@ -38,13 +44,14 @@ def parse_prefetch(
                 vss_id=vss_id,
                 source_file=source_file,
             )
+            return cnt, bf, ""
         except Exception as e:
             print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
             if "connection" in str(e).lower() or "timeout" in str(e).lower():
                 mark_wintools_down()
 
     try:
-        return _parse_prefetch_plaso(
+        cnt, bf = _parse_prefetch_plaso(
             prefetch_dir,
             client,
             index_name,
@@ -54,14 +61,13 @@ def parse_prefetch(
             vss_id=vss_id,
             source_file=source_file,
         )
+        return cnt, bf, _fallback_note
     except subprocess.CalledProcessError as e:
         print(
-            f"  prefetch: Plaso failed ({e})\n"
-            "  NOTE: Prefetch parsing on SIFT uses Plaso (misses execution counts, loaded DLLs). "
-            "Provision wintools-mcp with PECmd for complete prefetch analysis.",
+            f"  prefetch: Plaso failed ({e})\n  NOTE: {_fallback_note}",
             file=sys.stderr,
         )
-        return 0, 0
+        return 0, 0, _fallback_note
 
 
 def _parse_prefetch_wintools(

@@ -20,8 +20,8 @@ def parse_srum(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
-) -> tuple[int, int]:
-    """Parse SRUM database. Returns (count_indexed, count_bulk_failed).
+) -> tuple[int, int, str]:
+    """Parse SRUM database. Returns (count_indexed, count_bulk_failed, note).
 
     Strategy: wintools-first (SrumECmd on Windows), Plaso fallback.
     SRUDB.dat from KAPE triage is frequently dirty/locked — SrumECmd
@@ -29,9 +29,14 @@ def parse_srum(
     """
     from opensearch_mcp.wintools import mark_wintools_down, wintools_available
 
+    _fallback_note = (
+        "srum: parsed with Plaso fallback (reduced fidelity). "
+        "Provision wintools-mcp with SrumECmd for reliable SRUM analysis."
+    )
+
     if wintools_available():
         try:
-            return _parse_srum_wintools(
+            cnt, bf = _parse_srum_wintools(
                 srum_path,
                 client,
                 index_name,
@@ -42,13 +47,14 @@ def parse_srum(
                 vss_id=vss_id,
                 source_file=source_file,
             )
+            return cnt, bf, ""  # wintools succeeded — no note
         except Exception as e:
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
             if "connection" in str(e).lower() or "timeout" in str(e).lower():
                 mark_wintools_down()
 
     try:
-        return _parse_srum_plaso(
+        cnt, bf = _parse_srum_plaso(
             srum_path,
             client,
             index_name,
@@ -58,14 +64,14 @@ def parse_srum(
             vss_id=vss_id,
             source_file=source_file,
         )
+        return cnt, bf, _fallback_note  # Plaso succeeded with reduced fidelity
     except subprocess.CalledProcessError:
         print(
             "  srum: skipped — dirty database, needs Windows workstation\n"
-            "  NOTE: SRUM parsing on SIFT uses Plaso (limited dirty-database handling). "
-            "Provision wintools-mcp with SrumECmd for reliable SRUM analysis.",
+            f"  NOTE: {_fallback_note}",
             file=sys.stderr,
         )
-        return 0, 0
+        return 0, 0, _fallback_note
 
 
 def _parse_srum_wintools(
