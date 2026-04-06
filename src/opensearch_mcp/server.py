@@ -200,20 +200,85 @@ def _os_call(fn, *args, **kwargs):
         raise ValueError(f"Query error: {reason}") from e
 
 
-def _strip_hits(hits: list[dict]) -> list[dict]:
-    """Extract _source from hits with artifact type for cross-index queries."""
+# Fields excluded from idx_search results by default (token optimization).
+# These are duplicated content, raw unparsed data where parsed equivalents
+# exist, or metadata with zero triage value. Full docs via idx_get_event.
+_SEARCH_EXCLUDE_FIELDS = frozenset(
+    {
+        # Duplicated content (parsed equivalents exist)
+        "ExtraFieldInfo",  # Hayabusa: duplicates Details
+        "Payload",  # EvtxECmd: raw XML, PayloadData1-6 already extracted
+        "FilesLoaded",  # PECmd: bulk DLL list
+        "Directories",  # PECmd: bulk directory list
+        "task.xml",  # Scheduled tasks: full XML
+        "wer.full_text",  # WER: full crash report text
+        # EvtxECmd duplicate/metadata
+        "SourceFile",  # duplicates vhir.source_file
+        "Computer",  # duplicated to host.name by parse_delimited
+        # Metadata (available via idx_get_event, zero triage value)
+        "ExtraDataOffset",
+        "HiddenRecord",
+        "Keywords",
+        "ChunkNumber",
+        "pipeline_version",
+        "vhir.source_file",
+        "vhir.ingest_audit_id",
+        "vhir.parse_method",
+        # MFT structural fields (low triage value, high field count)
+        "UpdateSequenceNumber",
+        "LogfileSequenceNumber",
+        "SecurityId",
+        "ReferenceCount",
+        "NameType",
+        "IsAds",
+        "Is256",
+    }
+)
+
+_MAX_FIELD_CHARS = 500
+
+
+def _strip_hits(
+    hits: list[dict],
+    exclude_fields: frozenset[str] = _SEARCH_EXCLUDE_FIELDS,
+    max_chars: int = _MAX_FIELD_CHARS,
+) -> list[dict]:
+    """Extract _source from hits with field exclusion and truncation.
+
+    Default behavior (compact): excludes bloat fields and truncates
+    values > 500 chars. Pass empty exclude_fields and large max_chars
+    for full documents.
+    """
     results = []
     for hit in hits:
         src = hit.get("_source", {})
         idx_name = hit.get("_index", "")
-        doc = {"_id": hit.get("_id"), "_index": idx_name}
+        doc: dict = {"_id": hit.get("_id"), "_index": idx_name}
         # Extract artifact type from index name: case-{id}-{type}-{host}
         parts = idx_name.split("-", 2)
         if len(parts) >= 3:
             remainder = parts[2]  # {type}-{host}
             type_parts = remainder.rsplit("-", 1)
             doc["_type"] = type_parts[0] if type_parts else remainder
-        doc.update(src)
+
+        truncated_fields = []
+        excluded_here = []
+        for key, val in src.items():
+            if key in exclude_fields:
+                excluded_here.append(key)
+                continue
+            sval = str(val) if not isinstance(val, str) else val
+            if len(sval) > max_chars:
+                doc[key] = sval[:max_chars] + "..."
+                truncated_fields.append(key)
+            else:
+                doc[key] = val
+
+        if truncated_fields:
+            doc["_truncated"] = truncated_fields
+        if excluded_here:
+            doc["_excluded"] = excluded_here
+
         results.append(doc)
     return results
 
@@ -352,8 +417,13 @@ def idx_search(
     sort: str = "@timestamp:desc",
     time_from: str = "",
     time_to: str = "",
+    compact: bool = True,
 ) -> dict:
     """Search indexed evidence using OpenSearch query_string syntax.
+
+    Results are compact by default — bloat fields excluded, long values
+    truncated to 500 chars. Use compact=False for full documents, or
+    idx_get_event(id, index) to fetch individual full documents.
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
@@ -404,9 +474,32 @@ def idx_search(
     )
 
     total = result["hits"]["total"]["value"]
-    docs = _strip_hits(result["hits"]["hits"])
+    if compact:
+        docs = _strip_hits(result["hits"]["hits"])
+    else:
+        docs = _strip_hits(result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999)
 
-    resp = {"total": total, "returned": len(docs), "results": docs}
+    resp: dict = {"total": total, "returned": len(docs), "results": docs}
+    if compact:
+        resp["compact"] = True
+        resp["note"] = (
+            "Results are compact — bloat fields excluded, long values truncated. "
+            "Use idx_get_event(id, index) for full documents."
+        )
+
+    # Detect mixed index types and add field hint
+    index_types = {d.get("_type", "") for d in docs if d.get("_type")}
+    evtx_types = {"evtx", "delim-evtxecmd"}
+    if len(index_types & evtx_types) > 1 or (
+        index_types & evtx_types and index_types - evtx_types
+    ):
+        resp["field_hint"] = (
+            "Results span multiple index types with different field names. "
+            "Native evtx uses ECS fields (event.code, user.name, source.ip). "
+            "Delimited EvtxECmd uses CSV columns (EventId, UserName, RemoteHost). "
+            "Query specific index patterns for consistent field names."
+        )
+
     _add_shimcache_reminder(resp, index, docs)
     aid = audit.log(
         tool="idx_search",
@@ -525,6 +618,7 @@ def idx_get_event(
     result = _os_call(client.get, index=index, id=event_id)
     doc = {"_id": result["_id"], "_index": result["_index"]}
     doc.update(result.get("_source", {}))
+    doc["_note"] = "Full document — all fields included, no truncation"
     aid = audit.log(
         tool="idx_get_event",
         params={"event_id": event_id, "index": index},
