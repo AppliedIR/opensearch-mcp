@@ -28,6 +28,103 @@ def _validate_index(index: str) -> str | None:
 server = FastMCP("opensearch-mcp")
 audit = AuditWriter(mcp_name="opensearch-mcp")
 
+# --- Enrichment Token Budget: Layer 11 shimcache/amcache decay ---
+_shimcache_reminder_count = 0
+
+
+def _add_shimcache_reminder(resp: dict, index_pattern: str, docs: list) -> None:
+    """Add discipline reminder when query hits shimcache/amcache indices."""
+    global _shimcache_reminder_count
+    hits = "shimcache" in index_pattern or "amcache" in index_pattern
+    if not hits and docs:
+        hits = any(
+            "shimcache" in d.get("_index", "") or "amcache" in d.get("_index", "") for d in docs
+        )
+    if not hits:
+        return
+    _shimcache_reminder_count += 1
+    if _shimcache_reminder_count <= 2:
+        resp["discipline_reminder"] = (
+            "IMPORTANT: Shimcache and Amcache prove FILE PRESENCE only, "
+            "never execution. The 'Executed' column in AppCompatCacheParser "
+            "is unreliable on all Windows versions — do not use it to prove "
+            "or disprove execution. To prove execution: check Prefetch, "
+            "RegRipper BAM plugin (rip.pl -r SYSTEM -p bam — Windows 10 1709+ only, "
+            "entries expire after 7 days, local executables only), UserAssist "
+            "(rip.pl -r NTUSER.DAT -p userassist), or process creation "
+            "events (EID 4688, Sysmon EID 1)."
+        )
+    else:
+        resp["discipline_reminder"] = "Shimcache/Amcache = PRESENCE only, not execution."
+
+
+# --- Enrichment Token Budget: Layer 9 investigation hints decay ---
+_hints_delivered = False
+
+
+def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
+    """Add investigation hints to idx_case_summary. Full on first call, pointer after."""
+    global _hints_delivered
+    if _hints_delivered:
+        resp["investigation_hints"] = [
+            "MFT/USN/evtx indexed — call suggest_tools for investigation patterns"
+        ]
+        return
+
+    hints = []
+    if "mft" in artifacts:
+        hints.append(
+            'MFT indexed. Timestomping: "SI<FN".keyword:True OR '
+            "uSecZeros.keyword:True (exclude WinSxS). "
+            "Deleted: InUse.keyword:False. ADS: HasAds.keyword:True. "
+            "Zone.Identifier: ZoneIdContents:* AND FileName:(*.exe OR *.dll OR *.ps1)"
+        )
+    if any(k.startswith("usn") or "usnjournal" in k for k in artifacts):
+        hints.append(
+            "USN Journal indexed. Use time_from/time_to. "
+            "Deleted Prefetch: UpdateReasons:*Delete* AND ParentPath:*Prefetch*. "
+            "Code deployment: Name:(*.exe OR *.dll OR *.ps1) AND UpdateReasons:*FileCreate*. "
+            "SDelete: Name:AAAAAAA* AND UpdateReasons:*Rename* "
+            "(verify with surrounding entries). "
+            "Cross-host: same filename across case-*-usn-*"
+        )
+    if any("evtx" in k for k in artifacts):
+        hints.append(
+            "EVTX indexed. Key queries: event.code:4624 (logons), "
+            "event.code:4688 (process creation), event.code:7045 (service install). "
+            "Use idx_aggregate on event.code for frequency overview."
+        )
+    if "prefetch" in artifacts and "mft" in artifacts:
+        hints.append(
+            "Cross-ref Prefetch+MFT: prefetched exe with InUse=False in MFT = "
+            "executed then deleted (anti-forensics)."
+        )
+
+    if not hints:
+        return
+
+    # Budget: sort by doc count, keep top 3, cap at 500 chars
+    def _doc_count(hint: str) -> int:
+        for art_name, art_info in artifacts.items():
+            if isinstance(art_info, dict) and art_name in hint.lower():
+                return art_info.get("docs", 0)
+        return 0
+
+    hints.sort(key=_doc_count, reverse=True)
+    kept: list[str] = []
+    total = 0
+    for hint in hints:
+        if total + len(hint) > 500 and kept:
+            break
+        kept.append(hint)
+        total += len(hint)
+        if len(kept) >= 3:
+            break
+
+    resp["investigation_hints"] = kept
+    _hints_delivered = True
+
+
 _client = None
 _client_verified = False
 
@@ -291,6 +388,7 @@ def idx_search(
     docs = _strip_hits(result["hits"]["hits"])
 
     resp = {"total": total, "returned": len(docs), "results": docs}
+    _add_shimcache_reminder(resp, index, docs)
     aid = audit.log(
         tool="idx_search",
         params={"query": query, "index": index, "limit": limit},
@@ -757,6 +855,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     }
     if fields_per_type:
         resp["fields_per_type"] = fields_per_type
+    _add_investigation_hints(resp, artifacts)
     aid = audit.log(
         tool="idx_case_summary",
         params={"case_id": cid},
@@ -1139,6 +1238,24 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     f"Ingest complete. {totals.get('indexed', 0):,} docs submitted "
                     f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
                 )
+            # Layer 1: post-ingest next_steps
+            artifacts_done = {item["artifact"] for item in checklist if item["status"] == "done"}
+            next_steps = []
+            if "evtx" in artifacts_done or any("evtx" in a for a in artifacts_done):
+                next_steps.append(
+                    "Run idx_case_summary for investigation overview, "
+                    "then idx_aggregate on host.name and event.code"
+                )
+            if "hayabusa" in artifacts_done or any("hayabusa" in a for a in artifacts_done):
+                next_steps.append(
+                    "Query Hayabusa alerts: idx_search(query='Level:critical OR "
+                    "Level:high', index='case-*-hayabusa-*')"
+                )
+            next_steps.append(
+                "Call suggest_tools(artifact_type='...') on sift-mcp for "
+                "deep analysis tools beyond OpenSearch queries"
+            )
+            s["next_steps"] = next_steps
 
         summaries.append(s)
 

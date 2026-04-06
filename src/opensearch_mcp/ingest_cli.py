@@ -521,7 +521,34 @@ def cmd_scan(args: argparse.Namespace) -> None:
             import shutil
 
             if shutil.which("hayabusa") and any(h.evtx_dir for h in hosts):
+                # Layer 6: update status to show Hayabusa phase
+                from datetime import datetime
+                from datetime import timezone as tz
+
                 from opensearch_mcp.ingest import run_hayabusa_batch
+
+                hayabusa_started = datetime.now(tz.utc).isoformat()
+                write_status(
+                    case_id,
+                    os.getpid(),
+                    run_id,
+                    "running",
+                    [
+                        {
+                            "hostname": "hayabusa",
+                            "artifacts": [{"name": "hayabusa-detection", "status": "running"}],
+                        }
+                    ],
+                    {
+                        "indexed": result.total_indexed,
+                        "artifacts_total": 1,
+                        "artifacts_complete": 0,
+                        "hosts_total": 1,
+                        "hosts_complete": 0,
+                    },
+                    hayabusa_started,
+                    elapsed_seconds=result.elapsed_seconds,
+                )
 
                 def _hayabusa_progress(event, **kw):
                     if event == "hayabusa_start":
@@ -544,6 +571,35 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     total_alerts = sum(hb_results.values())
                 if total_alerts:
                     print(f"Hayabusa: {total_alerts:,} alerts indexed")
+
+                # Layer 6: update status after Hayabusa
+                write_status(
+                    case_id,
+                    os.getpid(),
+                    run_id,
+                    "complete",
+                    [
+                        {
+                            "hostname": "hayabusa",
+                            "artifacts": [
+                                {
+                                    "name": "hayabusa-detection",
+                                    "status": "complete",
+                                    "indexed": total_alerts,
+                                }
+                            ],
+                        }
+                    ],
+                    {
+                        "indexed": result.total_indexed + total_alerts,
+                        "artifacts_total": 1,
+                        "artifacts_complete": 1,
+                        "hosts_total": 1,
+                        "hosts_complete": 1,
+                    },
+                    hayabusa_started,
+                    elapsed_seconds=result.elapsed_seconds,
+                )
 
         # Post-ingest triage enrichment
         if not getattr(args, "skip_triage", False):
