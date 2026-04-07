@@ -1,4 +1,6 @@
 # opensearch-mcp
+[![CI](https://github.com/AppliedIR/opensearch-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/AppliedIR/opensearch-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AppliedIR/opensearch-mcp/blob/main/LICENSE)
 
 Forensic evidence indexing for [Valhuntir](https://github.com/AppliedIR/Valhuntir) — parse, index, and query digital forensic artifacts at scale using OpenSearch.
 
