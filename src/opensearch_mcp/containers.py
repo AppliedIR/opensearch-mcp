@@ -287,11 +287,21 @@ def _mount_nbd(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     )
     ctx.add_nbd(nbd_dev)
 
-    # Wait for kernel to detect partitions
-    time.sleep(1)
+    # Wait for kernel to detect partitions (retry under concurrent I/O load)
+    partitions: list[str] = []
+    for _attempt in range(10):
+        time.sleep(1)
+        partitions = sorted(glob.glob(f"{nbd_dev}p*"))
+        if partitions:
+            break
+    else:
+        # Last resort: force kernel to re-read partition table
+        subprocess.run(["sudo", "partprobe", nbd_dev], capture_output=True)
+        time.sleep(1)
+        partitions = sorted(glob.glob(f"{nbd_dev}p*"))
 
     mounted = []
-    for part_dev in sorted(glob.glob(f"{nbd_dev}p*")):
+    for part_dev in partitions:
         mount_point = dest / Path(part_dev).name
         mount_point.mkdir()
         try:
