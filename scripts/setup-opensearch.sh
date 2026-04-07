@@ -88,6 +88,19 @@ if [ "$STATUS" != "green" ] && [ "$STATUS" != "yellow" ]; then
 fi
 echo "Cluster status: $STATUS"
 
+# --- Raise shard limit for multi-case deployments ---
+echo "Configuring cluster settings..."
+curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_cluster/settings" \
+    -H "Content-Type: application/json" \
+    -d '{"persistent":{"cluster.max_shards_per_node":3000}}' >/dev/null 2>&1
+echo "  max_shards_per_node: 3000"
+
+# --- 0-replica template for single-node (halves shard count) ---
+curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_index_template/vhir-single-node" \
+    -H "Content-Type: application/json" \
+    -d '{"index_patterns":["case-*"],"priority":1,"template":{"settings":{"number_of_replicas":0}}}' >/dev/null 2>&1
+echo "  case-* replicas: 0 (single-node)"
+
 # --- 5. Register index template ---
 TEMPLATE_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/evtx_ecs_template.json"
 if [ -f "$TEMPLATE_FILE" ]; then

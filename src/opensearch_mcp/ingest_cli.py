@@ -842,10 +842,13 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         result_summary=f"{total} indexed",
     )
     if run_id:
+        final_status = "complete"
+        if total_bf > 0 and total == 0:
+            final_status = "failed"
         _write_bg_status(
             case_id,
             run_id,
-            "complete",
+            final_status,
             hostname,
             "json",
             started_ts,
@@ -1033,10 +1036,13 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         result_summary=f"{total} indexed",
     )
     if run_id:
+        final_status = "complete"
+        if total_bf > 0 and total == 0:
+            final_status = "failed"
         _write_bg_status(
             case_id,
             run_id,
-            "complete",
+            final_status,
             hostname,
             "delimited",
             started_ts,
@@ -1139,10 +1145,13 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         result_summary=f"{total} indexed",
     )
     if run_id:
+        final_status = "complete"
+        if total_bf > 0 and total == 0:
+            final_status = "failed"
         _write_bg_status(
             case_id,
             run_id,
-            "complete",
+            final_status,
             hostname,
             "accesslog",
             started_ts,
@@ -1226,6 +1235,34 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3, ingest_memory
 
     image_path = Path(args.path)
+    _mem_extract_dir = None  # Track for cleanup
+
+    # Extract from archive if needed
+    if image_path.suffix.lower() in (".7z", ".zip"):
+        import shutil
+        import subprocess
+        import tempfile
+
+        _mem_extract_dir = Path(tempfile.mkdtemp(prefix="vhir-mem-"))
+        try:
+            password = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
+            cmd = ["7z", "x", f"-o{_mem_extract_dir}", str(image_path)]
+            if password:
+                cmd.insert(2, f"-p{password}")
+            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+            memory_exts = {".img", ".raw", ".vmem", ".dmp", ".mem", ".bin", ".lime"}
+            extracted = [f for f in _mem_extract_dir.iterdir() if f.suffix.lower() in memory_exts]
+            if not extracted:
+                shutil.rmtree(_mem_extract_dir, ignore_errors=True)
+                print(f"Error: No memory image found in {image_path}", file=sys.stderr)
+                sys.exit(1)
+            image_path = extracted[0]
+            print(f"Extracted: {image_path} ({image_path.stat().st_size / (1024**3):.1f} GB)")
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(_mem_extract_dir, ignore_errors=True)
+            print(f"Error: Failed to extract {image_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+
     if not image_path.is_file():
         print(f"Error: {image_path} is not a file.", file=sys.stderr)
         sys.exit(1)
@@ -1378,6 +1415,12 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         result_summary=f"{total} indexed, {len(failed)} failed",
         input_files=[str(image_path)],
     )
+
+    # Clean up extracted temp dir (multi-GB memory image)
+    if _mem_extract_dir and _mem_extract_dir.exists():
+        import shutil
+
+        shutil.rmtree(_mem_extract_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

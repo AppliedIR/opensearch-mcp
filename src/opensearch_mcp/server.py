@@ -1981,6 +1981,10 @@ def _launch_background(
 
     proc = _spawn_ingest(cmd, env, log_fh, run_id)
     log_fh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
+    # Remove orphaned PID-0 placeholder
+    _safe_case = active_case.replace("/", "_").replace("\\", "_").replace("..", "_")
+    _pid0 = vhir_dir() / "ingest-status" / f"{_safe_case}-0.json"
+    _pid0.unlink(missing_ok=True)
     write_status(
         case_id=active_case,
         pid=proc.pid,
@@ -2128,6 +2132,10 @@ def idx_ingest_memory(
 
     proc = _spawn_ingest(cmd, env, _lfh, run_id)
     _lfh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
+    # Remove orphaned PID-0 placeholder
+    _safe_case_m = active_case.replace("/", "_").replace("\\", "_").replace("..", "_")
+    _pid0_m = _vd() / "ingest-status" / f"{_safe_case_m}-0.json"
+    _pid0_m.unlink(missing_ok=True)
 
     resp = {
         "status": "started",

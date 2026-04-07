@@ -68,6 +68,9 @@ def read_active_ingests() -> list[dict]:
             data = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        # Skip orphaned PID-0 placeholders
+        if data.get("pid") == 0:
+            continue
         if data.get("status") == "running":
             pid = data.get("pid", 0)
             run_id = data.get("run_id", "")
