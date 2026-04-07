@@ -14,6 +14,7 @@ from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_evtx import parse_and_index
+from opensearch_mcp.paths import build_index_name as _build_idx
 from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
@@ -344,7 +345,8 @@ def run_hayabusa_batch(
                 on_progress("hayabusa_failed", hostname=host.hostname, error="no output")
             continue
 
-        index_name = f"case-{_cid}-hayabusa-{_hn}"
+        index_name = _build_idx(case_id, "hayabusa", host.hostname)
+        cnt = 0
         try:
             cnt, sk, bf, hr = ingest_delimited(
                 csv_output,
@@ -364,7 +366,7 @@ def run_hayabusa_batch(
                     hostname=host.hostname,
                     error=f"ingest failed: {e}",
                 )
-        if audit:
+        if audit and host.hostname in results:
             audit.log(
                 tool="ingest_hayabusa",
                 params={"hostname": host.hostname, "evtx_dir": str(host.evtx_dir)},
@@ -423,7 +425,7 @@ def _ingest_hosts(
             if evtx_files:
                 _cid = _sanitize_index_component(case_id)
                 _hn = _sanitize_index_component(host.hostname)
-                index_name = f"case-{_cid}-evtx-{_hn}"
+                index_name = _build_idx(case_id, "evtx", host.hostname)
                 existing = _safe_count(client, index_name)
                 ar = ArtifactResult(
                     artifact="evtx",
@@ -589,7 +591,7 @@ def _ingest_hosts(
             cfg = TOOLS[tool_name]
             _cid = _sanitize_index_component(case_id)
             _hn = _sanitize_index_component(host.hostname)
-            index_name = f"case-{_cid}-{cfg.index_suffix}-{_hn}"
+            index_name = _build_idx(case_id, cfg.index_suffix, host.hostname)
             existing = _safe_count(client, index_name)
             file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
             aid = audit._next_audit_id()
@@ -714,7 +716,7 @@ def _ingest_plaso_artifact(
 
     _cid = _sanitize_index_component(case_id)
     _hn = _sanitize_index_component(host.hostname)
-    index_name = f"case-{_cid}-{tool_name}-{_hn}"
+    index_name = _build_idx(case_id, tool_name, host.hostname)
     existing = _safe_count(client, index_name)
     plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()
@@ -831,7 +833,7 @@ def _ingest_custom_artifact(
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
     _cid = _sanitize_index_component(case_id)
     _hn = _sanitize_index_component(host.hostname)
-    index_name = f"case-{_cid}-{tool_name}-{_hn}"
+    index_name = _build_idx(case_id, tool_name, host.hostname)
     existing = _safe_count(client, index_name)
     file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
     aid = audit._next_audit_id()

@@ -172,6 +172,7 @@ class TestExtractContainer:
 class TestMountContext:
     @patch("opensearch_mcp.containers.subprocess")
     def test_cleanup_calls_umount(self, mock_subprocess):
+        mock_subprocess.run.return_value.returncode = 0
         ctx = MountContext()
         ctx.add_mount(Path("/mnt/vol0"))
         ctx.add_mount(Path("/mnt/vol1"))
@@ -184,6 +185,7 @@ class TestMountContext:
 
     @patch("opensearch_mcp.containers.subprocess")
     def test_cleanup_fuse_and_nbd(self, mock_subprocess):
+        mock_subprocess.run.return_value.returncode = 0
         ctx = MountContext()
         ctx.add_fuse(Path("/mnt/ewf"))
         ctx.add_nbd("/dev/nbd0")

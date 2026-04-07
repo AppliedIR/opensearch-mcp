@@ -60,6 +60,12 @@ def _iter_json_records(path: Path, fmt: str):
                         file=sys.stderr,
                     )
     elif fmt == "json_array":
+        file_size = path.stat().st_size
+        if file_size > 200_000_000:
+            raise ValueError(
+                f"JSON array file too large ({file_size // 1_000_000}MB). "
+                "Convert to JSONL format for streaming ingest."
+            )
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
             data = json.load(f)
         if isinstance(data, list):

@@ -49,6 +49,7 @@ def extract_unique_iocs(
     If force=False, skip docs already enriched (threat_intel.checked: true).
     """
     iocs: dict[str, set[str]] = {"ip": set(), "hash": set(), "domain": set()}
+    warnings: list[str] = []
     any_succeeded = False
 
     query: dict = {"match_all": {}}
@@ -76,7 +77,14 @@ def extract_unique_iocs(
                     request_timeout=60,
                 )
                 any_succeeded = True
-                for bucket in result["aggregations"]["values"]["buckets"]:
+                agg_vals = result["aggregations"]["values"]
+                other_count = agg_vals.get("sum_other_doc_count", 0)
+                if other_count > 0:
+                    warnings.append(
+                        f"{field}: {other_count} additional unique values "
+                        "not included (limit 10000)"
+                    )
+                for bucket in agg_vals["buckets"]:
                     val = str(bucket["key"])
                     if ioc_type == "ip":
                         if _is_external(val):
@@ -92,8 +100,10 @@ def extract_unique_iocs(
                 continue
 
     if not any_succeeded:
-        # All aggregations failed — OpenSearch likely unreachable
-        raise RuntimeError("IOC extraction failed — all OpenSearch queries failed")
+        raise RuntimeError("IOC extraction failed -- all OpenSearch queries failed")
+
+    for w in warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
 
     return iocs
 

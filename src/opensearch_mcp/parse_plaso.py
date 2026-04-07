@@ -86,7 +86,7 @@ def _ingest_jsonl(
     bulk_failed = 0
     actions: list[dict] = []
 
-    with open(jsonl_file) as f:
+    with open(jsonl_file, encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:

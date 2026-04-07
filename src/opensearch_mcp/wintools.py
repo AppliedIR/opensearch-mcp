@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import time as _time
 from pathlib import Path
 
 from opensearch_mcp.gateway import call_tool, gateway_available
 
 _wintools_down = False
+_wintools_down_since: float = 0
+_WINTOOLS_RETRY_INTERVAL = 300  # 5 minutes
 
 
 def wintools_available() -> bool:
-    """Check if wintools-mcp is configured. Caches failure to avoid repeated timeouts."""
+    """Check if wintools-mcp is configured. Retries after 5 minutes."""
+    global _wintools_down
     if _wintools_down:
-        return False
+        if _time.monotonic() - _wintools_down_since > _WINTOOLS_RETRY_INTERVAL:
+            _wintools_down = False  # retry
+        else:
+            return False
     return gateway_available()
 
 
 def mark_wintools_down() -> None:
-    """Mark wintools as unreachable for the rest of this process."""
-    global _wintools_down
+    """Mark wintools as temporarily unreachable (retries after 5 min)."""
+    global _wintools_down, _wintools_down_since
     _wintools_down = True
+    _wintools_down_since = _time.monotonic()
 
 
 def run_windows_tool(

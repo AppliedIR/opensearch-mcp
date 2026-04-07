@@ -16,7 +16,6 @@ from pathlib import Path
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
-from opensearch_mcp.paths import sanitize_index_component
 
 # Plugin tiers — ordered within each tier for dependency resolution
 TIER_1 = [
@@ -346,12 +345,11 @@ def ingest_memory(
 
     _register_memory_evidence(image_path, hostname)
 
-    safe_host = sanitize_index_component(hostname)
-    safe_case = sanitize_index_component(case_id)
-
     for plugin in plugin_list:
         suffix = _plugin_to_index_suffix(plugin)
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
+        from opensearch_mcp.paths import build_index_name as _build_idx
+
+        index_name = _build_idx(case_id, suffix, hostname)
 
         if on_progress:
             on_progress("plugin_start", plugin=plugin, hostname=hostname)

@@ -175,8 +175,10 @@ def ingest_delimited(
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
             if isinstance(val, (int, float)):
-                if val > 1e12:
-                    val = val / 1000.0
+                if val > 1e15:
+                    val = val / 1e6  # microseconds
+                elif val > 1e12:
+                    val = val / 1e3  # milliseconds
                 record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
             else:
                 record["@timestamp"] = val

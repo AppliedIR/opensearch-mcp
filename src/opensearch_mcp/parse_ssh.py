@@ -128,7 +128,7 @@ def parse_ssh_log(
                 rel = (
                     relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
                 )
-                msg_hash = hashlib.md5(message.encode()).hexdigest()
+                msg_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
                 id_input = f"{index_name}:{rel}:{doc['@timestamp']}:{msg_hash}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
                 actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})

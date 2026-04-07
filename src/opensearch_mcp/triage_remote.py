@@ -16,6 +16,12 @@ from opensearch_mcp.paths import sanitize_index_component
 
 logger = logging.getLogger(__name__)
 
+
+def _escape_wildcard(value: str) -> str:
+    """Escape wildcard characters in OpenSearch query values."""
+    return value.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
+
+
 _MAX_CONSECUTIVE_FAILURES = 3
 
 
@@ -525,7 +531,11 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
             resp = client.update_by_query(
                 index=index,
                 body={
-                    "query": {"wildcard": {"KeyPath.keyword": f"*\\\\Services\\\\{svc_name}*"}},
+                    "query": {
+                        "wildcard": {
+                            "KeyPath.keyword": f"*\\\\Services\\\\{_escape_wildcard(svc_name)}*"
+                        }
+                    },
                     "script": {
                         "source": "; ".join(script_lines),
                         "lang": "painless",

@@ -198,6 +198,15 @@ def sanitize_index_component(value: str) -> str:
     return re.sub(r"[^a-z0-9._-]", "-", value.lower())
 
 
+def build_index_name(case_id: str, artifact_type: str, hostname: str) -> str:
+    """Canonical index name: case-{case}-{type}-{host}. Always sanitized."""
+    return (
+        f"case-{sanitize_index_component(case_id)}"
+        f"-{sanitize_index_component(artifact_type)}"
+        f"-{sanitize_index_component(hostname)}"
+    )
+
+
 def validate_index_name(index_name: str) -> str | None:
     """Return error message if index name is invalid, None if OK."""
     if index_name != index_name.lower():

@@ -190,8 +190,13 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
     if not getattr(args, "all_logs", False) and evtx_config.get("all_logs"):
         args.all_logs = True
 
-    if not getattr(args, "password", None) and config.get("password"):
-        args.password = config["password"]
+    if not getattr(args, "password", None):
+        # Prefer env var (set by server.py to avoid process list exposure)
+        env_pw = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
+        if env_pw:
+            args.password = env_pw
+        elif config.get("password"):
+            args.password = config["password"]
 
 
 # ---------------------------------------------------------------------------
@@ -675,7 +680,9 @@ def cmd_csv(args: argparse.Namespace) -> None:
     from opensearch_mcp import __version__
 
     cfg = TOOLS[tool_name]
-    index_name = f"case-{case_id}-{cfg.index_suffix}-{hostname}".lower()
+    from opensearch_mcp.paths import build_index_name as _build_idx
+
+    index_name = _build_idx(case_id, cfg.index_suffix, hostname)
 
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
@@ -746,7 +753,6 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     """Ingest JSON/JSONL files."""
     from opensearch_mcp import __version__
     from opensearch_mcp.parse_json import ingest_json
-    from opensearch_mcp.paths import sanitize_index_component
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
@@ -768,8 +774,6 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
-    safe_case = sanitize_index_component(case_id)
-    safe_host = sanitize_index_component(hostname)
 
     files = (
         [input_path]
@@ -793,8 +797,10 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
         if not suffix.startswith("json-"):
             suffix = f"json-{suffix}"
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
-        print(f"  {f.name} → {index_name}...", end=" ", flush=True)
+        from opensearch_mcp.paths import build_index_name as _build_idx_j
+
+        index_name = _build_idx_j(case_id, suffix, hostname)
+        print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
         cnt, sk, bf, hr = ingest_json(
             f,
             client,
@@ -857,7 +863,6 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     """Ingest delimited files."""
     from opensearch_mcp import __version__
     from opensearch_mcp.parse_delimited import ingest_delimited
-    from opensearch_mcp.paths import sanitize_index_component
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
@@ -924,8 +929,6 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
-    safe_case = sanitize_index_component(case_id)
-    safe_host = sanitize_index_component(hostname)
 
     exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
     files = (
@@ -976,8 +979,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             suffix = f"bodyfile-{f.stem}"
         else:
             suffix = f"delim-{f.stem}"
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
-        print(f"  {f.name} ({detected}) → {index_name}...", end=" ", flush=True)
+        from opensearch_mcp.paths import build_index_name as _build_idx_d
+
+        index_name = _build_idx_d(case_id, suffix, hostname)
+        print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
         if detected == "unknown":
             print("skipped (unrecognized format)")
             continue
@@ -1049,7 +1054,6 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__
     from opensearch_mcp.parse_accesslog import ingest_accesslog
-    from opensearch_mcp.paths import sanitize_index_component
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
@@ -1069,8 +1073,6 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     client = get_client()
     audit = AuditWriter(mcp_name="opensearch-mcp")
     aid = audit._next_audit_id()
-    safe_case = sanitize_index_component(case_id)
-    safe_host = sanitize_index_component(hostname)
     suffix = getattr(args, "index_suffix", None) or "accesslog"
 
     files = (
@@ -1096,8 +1098,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
     total = total_sk = total_bf = 0
     for idx, f in enumerate(files):
-        index_name = f"case-{safe_case}-{suffix}-{safe_host}".lower()
-        print(f"  {f.name} → {index_name}...", end=" ", flush=True)
+        from opensearch_mcp.paths import build_index_name as _build_idx_a
+
+        index_name = _build_idx_a(case_id, suffix, hostname)
+        print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
         cnt, sk, bf = ingest_accesslog(
             f,
             client,

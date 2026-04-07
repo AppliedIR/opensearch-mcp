@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dateutil.parser import parse as dateutil_parse
@@ -77,6 +77,8 @@ def ingest_accesslog(
             if (time_from or time_to) and "@timestamp" in doc:
                 try:
                     ts = datetime.fromisoformat(doc["@timestamp"])
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
                     if time_from and ts < time_from:
                         skipped += 1
                         continue

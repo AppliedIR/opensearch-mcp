@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
+import os
 import re
 import shutil
 import subprocess
 import time
 import urllib.parse
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def detect_container(path: Path) -> str:
@@ -63,8 +67,15 @@ def _extract_7z(path: Path, dest: Path, password: str | None = None) -> None:
 
 
 def _extract_tar(path: Path, dest: Path) -> None:
-    """Extract tar/tar.gz archive."""
+    """Extract tar/tar.gz archive with path traversal validation."""
     subprocess.run(["tar", "xf", str(path), "-C", str(dest)], check=True)
+    # Validate no files escaped destination
+    dest_resolved = dest.resolve()
+    for root, _dirs, files in os.walk(dest):
+        for f in files:
+            full = Path(root, f).resolve()
+            if not full.is_relative_to(dest_resolved):
+                raise ValueError(f"Path traversal detected in archive: {full}")
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +107,22 @@ class MountContext:
     def cleanup(self) -> None:
         """Unmount everything in reverse order."""
         for mp in reversed(self._mounts):
-            subprocess.run(["sudo", "umount", str(mp)], capture_output=True)
+            result = subprocess.run(["sudo", "umount", str(mp)], capture_output=True)
+            if result.returncode != 0:
+                logger.warning(
+                    "umount %s failed: %s, trying lazy",
+                    mp,
+                    result.stderr.decode(errors="replace").strip(),
+                )
+                subprocess.run(["sudo", "umount", "-l", str(mp)], capture_output=True)
         for mp in reversed(self._fuse_mounts):
-            subprocess.run(["fusermount", "-u", str(mp)], capture_output=True)
+            result = subprocess.run(["fusermount", "-u", str(mp)], capture_output=True)
+            if result.returncode != 0:
+                logger.warning(
+                    "fusermount -u %s failed: %s",
+                    mp,
+                    result.stderr.decode(errors="replace").strip(),
+                )
         for dev in self._nbd_devices:
             subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
         for dev in self._loop_devices:
@@ -443,8 +467,14 @@ def make_ingest_tmpdir(case_id: str) -> Path:
 def cleanup_orphaned_mounts() -> None:
     """Clean up orphaned nbd connections from prior failed ingests.
 
-    Skips cleanup if another ingest is currently running — avoids
+    Skips cleanup if another ingest is currently running -- avoids
     disconnecting devices held by a concurrent process (B18).
+
+    NOTE: TOCTOU race exists between reading active ingests and
+    disconnecting nbd devices. A new ingest could start between the
+    check and the disconnect. Full fix requires file-level locking
+    around nbd operations. Current risk is low (cleanup only runs
+    at ingest start, not continuously).
     """
     import sys
 

@@ -66,9 +66,9 @@ def normalize_event(data: dict) -> dict:
     # Extract timestamp
     tc = system.get("TimeCreated", {})
     if isinstance(tc, dict):
-        tc = tc.get("#attributes", {}).get("SystemTime", "")
+        tc = tc.get("#attributes", {}).get("SystemTime") or None
     else:
-        tc = str(tc) if tc else ""
+        tc = str(tc) if tc else None
 
     # Extract provider name (always a dict from pyevtx-rs)
     provider = system.get("Provider", {})
@@ -99,7 +99,7 @@ def normalize_event(data: dict) -> dict:
     # Use EventData if available, otherwise flattened UserData
     payload = event_data if event_data else flat_user_data
     # Store both for searchability
-    stored_data = event_data if event_data else user_data
+    stored_data = event_data if event_data else (flat_user_data if flat_user_data else {})
 
     # Extract top-level ECS fields from ORIGINAL uncoerced payload first
     doc = {

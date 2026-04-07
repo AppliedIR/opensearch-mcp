@@ -24,6 +24,5 @@ tests/fixtures/*.dat
 *.crt
 opensearch.yaml
 
-# Live tests — require real evidence, moved to aiir-tests (private)
-tests/test_exhaustive_live.py
-tests/test_live_containers.py
+# Live tests — require real evidence, not discovered by default pytest
+tests-live/

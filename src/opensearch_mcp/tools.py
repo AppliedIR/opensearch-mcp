@@ -32,7 +32,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="AmcacheParser",
         tier=1,
         index_suffix="amcache",
-        time_field="FileKeyLastWriteTimestamp",  # VERIFY
+        time_field="FileKeyLastWriteTimestamp",  # Verified
         natural_key=None,
         multi_csv=True,
     ),
@@ -50,7 +50,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="RECmd",
         tier=1,
         index_suffix="registry",
-        time_field="LastWriteTimestamp",  # VERIFY
+        time_field="LastWriteTimestamp",  # Verified
         natural_key=None,
         multi_csv=True,
     ),
@@ -68,7 +68,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="JLECmd",
         tier=2,
         index_suffix="jumplists",
-        time_field="LastModified",  # VERIFY
+        time_field="LastModified",  # Verified
         natural_key=None,
         multi_csv=False,
     ),
@@ -77,7 +77,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="LECmd",
         tier=2,
         index_suffix="lnk",
-        time_field="TargetModified",  # VERIFY
+        time_field="TargetModified",  # Verified
         natural_key=None,
         multi_csv=False,
     ),
@@ -86,7 +86,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="RBCmd",
         tier=2,
         index_suffix="recyclebin",
-        time_field="DeletedOn",  # VERIFY
+        time_field="DeletedOn",  # Verified
         natural_key=None,
         multi_csv=False,
     ),
@@ -95,7 +95,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="MFTECmd",
         tier=3,
         index_suffix="mft",
-        time_field="Created0x10",  # VERIFY
+        time_field="Created0x10",  # Verified
         natural_key="EntryNumber:SequenceNumber:FileName:ParentEntryNumber",
         multi_csv=False,
     ),
@@ -104,7 +104,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="MFTECmd",
         tier=3,
         index_suffix="usn",
-        time_field="UpdateTimestamp",  # VERIFY
+        time_field="UpdateTimestamp",  # Verified
         natural_key=None,
         multi_csv=False,
     ),
@@ -113,7 +113,7 @@ TOOLS: dict[str, ToolConfig] = {
         binary="WxTCmd",
         tier=3,
         index_suffix="timeline",
-        time_field="LastModifiedTime",  # VERIFY
+        time_field="LastModifiedTime",  # Verified
         natural_key=None,
         multi_csv=False,
     ),

@@ -55,13 +55,16 @@ def parse_and_index(
                 ts = None
             if ts:
                 if time_from and ts < time_from:
+                    skipped += 1
                     continue
                 if time_to and ts > time_to:
+                    skipped += 1
                     continue
 
         # Reduced mode filter
         if reduced_ids:
             if doc.get("event.code") not in reduced_ids:
+                skipped += 1
                 continue
 
         # Deterministic ID: source_file + event_record_id.

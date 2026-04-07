@@ -17,11 +17,18 @@ from opensearch_mcp.client import get_client
 
 
 def _validate_index(index: str) -> str | None:
-    """Validate index parameter starts with 'case-'. Returns error or None."""
-    if not index.startswith("case-"):
-        return (
-            "Index parameter must start with 'case-' (security: blocks access to system indices)"
-        )
+    """Validate all index segments start with 'case-'. Returns error or None."""
+    if not index or not index.strip():
+        return "Index parameter must not be empty"
+    for segment in index.split(","):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if not segment.startswith("case-"):
+            return (
+                f"Index segment '{segment}' must start with 'case-' "
+                "(security: blocks access to system indices)"
+            )
     return None
 
 
@@ -188,7 +195,8 @@ def _get_case_indices(index_pattern: str, client) -> set[str]:
                 names.update(i["index"] for i in cat_result)
         except Exception:
             pass
-    _case_index_cache[cache_key] = names
+    if names:
+        _case_index_cache[cache_key] = names
     return names
 
 
@@ -345,12 +353,9 @@ def _strip_hits(
         src = hit.get("_source", {})
         idx_name = hit.get("_index", "")
         doc: dict = {"_id": hit.get("_id"), "_index": idx_name}
-        # Extract artifact type from index name: case-{id}-{type}-{host}
-        parts = idx_name.split("-", 2)
-        if len(parts) >= 3:
-            remainder = parts[2]  # {type}-{host}
-            type_parts = remainder.rsplit("-", 1)
-            doc["_type"] = type_parts[0] if type_parts else remainder
+        # Note: _type extraction via rsplit is unreliable for dashed hostnames
+        # (e.g., evtx-web-server-01 → type=evtx-web-server). Use _index for
+        # authoritative artifact type. Removed _type field from results.
 
         truncated_fields = []
         for key, val in src.items():
@@ -394,9 +399,7 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
         elif entry.is_dir() and not entry.name.startswith("."):
             subdirs.append(entry)
     for d in subdirs:
-        if len(csv_files) >= 100:
-            break
-            csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
+        csv_files.extend(f for f in d.iterdir() if f.suffix.lower() == ".csv")
         if len(csv_files) >= 100:
             break
     csv_files = csv_files[:100]
@@ -683,7 +686,7 @@ def idx_aggregate(
     )
 
     buckets = [
-        {"key": b["key"], "count": b["doc_count"], "doc_count": b["doc_count"]}
+        {"key": b["key"], "count": b["doc_count"]}
         for b in result["aggregations"]["agg"]["buckets"]
     ]
 
@@ -753,6 +756,10 @@ def idx_timeline(
         time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
         time_to: End time (ISO 8601).
     """
+    import re as _re_mod
+
+    if not _re_mod.match(r"^\d+[smhd]$", interval):
+        return {"error": f"Invalid interval '{interval}'. Use Ns/Nm/Nh/Nd (e.g., 1h, 30m)."}
     index = _resolve_index(index, case_id)
     err = _validate_index(index)
     if err:
@@ -918,6 +925,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     client = _get_os()
     safe = sanitize_index_component(cid)
     pattern = f"case-{safe}-*"
+    resp: dict = {}
 
     # Get all indices for this case
     try:
@@ -946,8 +954,8 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         )
         for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
             hosts.add(bucket["key"])
-    except Exception:
-        pass
+    except Exception as e:
+        resp.setdefault("warnings", []).append(f"Host detection query failed: {e}")
 
     # Build artifact map — strip known hostnames from index suffixes
     # to extract the artifact type. Index format: case-{id}-{type}-{host}
@@ -1026,8 +1034,10 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 fields_per_type[atype] = sorted(_flatten_props(props), key=lambda f: f["field"])[
                     :150
                 ]
-            except Exception:
-                pass
+            except Exception as e:
+                resp.setdefault("warnings", []).append(
+                    f"Field mapping query failed for {atype}: {e}"
+                )
 
     # Enrichment status
     enrichment: dict = {}
@@ -1045,8 +1055,8 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 "checked": triage_count,
                 "suspicious": suspicious,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        resp.setdefault("warnings", []).append(f"Triage stats query failed: {e}")
 
     try:
         intel_count = client.count(
@@ -1062,37 +1072,41 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 "checked": intel_count,
                 "malicious": malicious,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        resp.setdefault("warnings", []).append(f"Intel stats query failed: {e}")
 
-    # Time range
+    # Time range (single query for both min and max)
     time_range: dict = {}
     try:
-        min_ts = client.search(
+        ts_result = client.search(
             index=pattern,
-            body={"size": 0, "aggs": {"min_ts": {"min": {"field": "@timestamp"}}}},
+            body={
+                "size": 0,
+                "aggs": {
+                    "min_ts": {"min": {"field": "@timestamp"}},
+                    "max_ts": {"max": {"field": "@timestamp"}},
+                },
+            },
         )
-        max_ts = client.search(
-            index=pattern,
-            body={"size": 0, "aggs": {"max_ts": {"max": {"field": "@timestamp"}}}},
-        )
-        min_val = min_ts["aggregations"]["min_ts"].get("value_as_string")
-        max_val = max_ts["aggregations"]["max_ts"].get("value_as_string")
+        min_val = ts_result["aggregations"]["min_ts"].get("value_as_string")
+        max_val = ts_result["aggregations"]["max_ts"].get("value_as_string")
         if min_val:
             time_range["earliest"] = min_val
         if max_val:
             time_range["latest"] = max_val
-    except Exception:
-        pass
+    except Exception as e:
+        resp.setdefault("warnings", []).append(f"Time range query failed: {e}")
 
-    resp = {
-        "case_id": cid,
-        "hosts": sorted(hosts),
-        "artifacts": artifacts,
-        "total_docs": total_docs,
-        "time_range": time_range,
-        "enrichment": enrichment,
-    }
+    resp.update(
+        {
+            "case_id": cid,
+            "hosts": sorted(hosts),
+            "artifacts": artifacts,
+            "total_docs": total_docs,
+            "time_range": time_range,
+            "enrichment": enrichment,
+        }
+    )
     if fields_per_type:
         resp["fields_per_type"] = fields_per_type
     _add_investigation_hints(resp, artifacts)
@@ -1154,12 +1168,12 @@ def idx_ingest(
     from opensearch_mcp.containers import detect_container
     from opensearch_mcp.ingest import discover
 
-    evidence_path = Path(path).resolve()
-    if not evidence_path.exists():
-        return {"error": f"Path not found: {path}"}
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
+    evidence_path = Path(path).resolve()
+    if not evidence_path.exists():
+        return {"error": f"Path not found: {path}"}
 
     # Read case from active_case
     from opensearch_mcp.paths import vhir_dir
@@ -1254,16 +1268,16 @@ def idx_ingest(
                 if suffix in checked_suffixes:
                     continue
                 checked_suffixes.add(suffix)
-                from opensearch_mcp.paths import sanitize_index_component as _sic
+                from opensearch_mcp.paths import build_index_name as _build_idx
 
-                idx = f"case-{_sic(case_id)}-{suffix}-{_sic(host.hostname)}"
+                idx = _build_idx(case_id, suffix, host.hostname)
                 try:
                     r = client.count(index=idx)
                     existing[idx] = r["count"]
                 except Exception:
                     pass
             if evtx_count:
-                idx = f"case-{case_id}-evtx-{host.hostname}".lower()
+                idx = _build_idx(case_id, "evtx", host.hostname)
                 try:
                     r = client.count(index=idx)
                     existing[idx] = r["count"]
@@ -1336,7 +1350,7 @@ def idx_ingest(
     if vss:
         cmd.append("--vss")
     if password:
-        cmd.extend(["--password", password])
+        env["VHIR_ARCHIVE_PASSWORD"] = password
     if no_hayabusa:
         cmd.append("--no-hayabusa")
 
@@ -1349,7 +1363,7 @@ def idx_ingest(
     _log_fh = open(_log_file, "w")
 
     proc = _spawn_ingest(cmd, env, _log_fh, run_id)
-    _log_fh.close()
+    _log_fh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
 
     host_names = [h.hostname for h in hosts]
     aid = audit.log(
@@ -1754,7 +1768,7 @@ def idx_enrich_intel(
         }
 
     result = enrich_case(client, cid, force=force)
-    audit.log(
+    aid = audit.log(
         tool="idx_enrich_intel",
         params={"case_id": cid, "force": force},
         result_summary=(
@@ -1764,6 +1778,8 @@ def idx_enrich_intel(
             else result.get("status", "unknown")
         ),
     )
+    if aid:
+        result["audit_id"] = aid
     return result
 
 
@@ -1803,11 +1819,13 @@ def idx_enrich_triage(
         "documents_enriched": total_enriched,
         "details": results,
     }
-    audit.log(
+    aid = audit.log(
         tool="idx_enrich_triage",
         params={"case_id": cid},
         result_summary=f"{total_enriched} docs enriched",
     )
+    if aid:
+        resp["audit_id"] = aid
     return resp
 
 
@@ -1903,7 +1921,7 @@ def _launch_background(
 
     # Concurrency gate — prevent OpenSearch OOM from unbounded parallelism
     active = read_active_ingests()
-    running = [i for i in active if i.get("status") == "running"]
+    running = [i for i in active if i.get("status") in ("running", "starting")]
     if len(running) >= _MAX_CONCURRENT_INGESTS:
         return {
             "error": (
@@ -1948,11 +1966,21 @@ def _launch_background(
     log_file = log_dir / f"{run_id}.log"
     log_fh = open(log_file, "w")
 
-    proc = _spawn_ingest(cmd, env, log_fh, run_id)
-    log_fh.close()
-
-    # Write initial status so concurrency gate sees this process immediately
+    # Write placeholder status BEFORE spawn to close TOCTOU window
     started_ts = datetime.now(timezone.utc).isoformat()
+    write_status(
+        case_id=active_case,
+        pid=0,
+        run_id=run_id,
+        status="starting",
+        hosts=[{"hostname": hostname, "artifacts": [{"name": subcommand, "status": "starting"}]}],
+        totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+        started=started_ts,
+        log_file=str(log_file),
+    )
+
+    proc = _spawn_ingest(cmd, env, log_fh, run_id)
+    log_fh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
     write_status(
         case_id=active_case,
         pid=proc.pid,
@@ -1964,7 +1992,7 @@ def _launch_background(
         log_file=str(log_file),
     )
 
-    return {
+    resp = {
         "status": "started",
         "pid": proc.pid,
         "run_id": run_id,
@@ -1973,6 +2001,14 @@ def _launch_background(
             f"Ingest started. Call idx_ingest_status() to monitor progress. Log file: {log_file}"
         ),
     }
+    aid = audit.log(
+        tool=f"idx_ingest_{subcommand}",
+        params={"path": path, "hostname": hostname},
+        result_summary=f"Background ingest started (pid={proc.pid})",
+    )
+    if aid:
+        resp["audit_id"] = aid
+    return resp
 
 
 @server.tool()
@@ -2034,7 +2070,7 @@ def idx_ingest_memory(
         return {"error": "No active case. Run 'vhir case activate' first."}
 
     # Concurrency gate (same as _launch_background)
-    _running_mem = [i for i in _read_mem() if i.get("status") == "running"]
+    _running_mem = [i for i in _read_mem() if i.get("status") in ("running", "starting")]
     if len(_running_mem) >= _MAX_CONCURRENT_INGESTS:
         return {
             "error": (
@@ -2071,8 +2107,27 @@ def idx_ingest_memory(
     _ld.mkdir(parents=True, exist_ok=True)
     _lf = _ld / f"{run_id}.log"
     _lfh = open(_lf, "w")
+
+    # Write placeholder status BEFORE spawn (same TOCTOU fix as _launch_background)
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    from opensearch_mcp.ingest_status import write_status as _ws_mem
+
+    _started_ts = _dt.now(_tz.utc).isoformat()
+    _ws_mem(
+        case_id=active_case,
+        pid=0,
+        run_id=run_id,
+        status="starting",
+        hosts=[{"hostname": hostname, "artifacts": [{"name": "memory", "status": "starting"}]}],
+        totals={"indexed": 0, "artifacts_total": len(plugin_list), "artifacts_complete": 0},
+        started=_started_ts,
+        log_file=str(_lf),
+    )
+
     proc = _spawn_ingest(cmd, env, _lfh, run_id)
-    _lfh.close()
+    _lfh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
 
     resp = {
         "status": "started",
@@ -2125,6 +2180,7 @@ def idx_list_detections(
         limit: Max results (default 50).
         offset: Starting position for pagination (default 0).
     """
+    limit = min(limit, 500)
     client = _get_os()
 
     # Fetch more than requested when filtering by severity (API doesn't support it)

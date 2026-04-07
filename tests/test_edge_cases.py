@@ -308,8 +308,11 @@ class TestNormalizeEdgeCases:
         }
         doc = normalize_event(data)
         assert doc["event.code"] == 999
-        # UserData stored as-is for searchability
-        assert "OuterWrapper" in doc["winlog.event_data"]
+        # UserData flattened: wrapper stripped, #attributes removed
+        assert "Level1" in doc["winlog.event_data"]
+        assert "SimpleField" in doc["winlog.event_data"]
+        assert "OuterWrapper" not in doc["winlog.event_data"]
+        assert "#attributes" not in doc["winlog.event_data"]
 
 
 # ---------------------------------------------------------------------------

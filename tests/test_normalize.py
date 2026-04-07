@@ -236,11 +236,11 @@ class TestNormalizeEvent:
         }
         doc = normalize_event(data)
         assert doc["event.code"] == 5858
-        # winlog.event_data should contain the UserData (raw, including wrapper)
-        assert "Operation_ClientFailure" in doc["winlog.event_data"]
-        # The raw UserData is stored for searchability
-        inner = doc["winlog.event_data"]["Operation_ClientFailure"]
-        assert inner["ClientMachine"] == "RD01"
+        # winlog.event_data contains flattened UserData (wrapper stripped, #attributes removed)
+        assert "ClientMachine" in doc["winlog.event_data"]
+        assert doc["winlog.event_data"]["ClientMachine"] == "RD01"
+        assert "#attributes" not in doc["winlog.event_data"]
+        assert "Operation_ClientFailure" not in doc["winlog.event_data"]
 
     def test_user_data_not_used_when_event_data_exists(self):
         """EventData takes priority over UserData when both exist."""
@@ -288,5 +288,6 @@ class TestNormalizeEvent:
         }
         doc = normalize_event(data)
         assert doc["event.code"] == 21
-        # UserData stored as-is for search
-        assert "EventXML" in doc["winlog.event_data"]
+        # UserData flattened: wrapper stripped, #attributes removed
+        assert "User" in doc["winlog.event_data"]
+        assert "EventXML" not in doc["winlog.event_data"]

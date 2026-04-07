@@ -71,7 +71,7 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
             return 0, len(actions)
 
         # If batch is large enough, split and retry smaller chunks
-        if len(actions) > 200 and attempt >= 3:
+        if len(actions) > 200 and 3 <= attempt <= 5:  # cap split depth
             mid = len(actions) // 2
             print(
                 f"WARNING: Bulk timeout (attempt {attempt + 1}), "

@@ -183,9 +183,9 @@ class TestCoercionInNormalize:
             }
         }
         doc = normalize_event(data)
-        inner = doc["winlog.event_data"]["EventXML"]
-        assert inner["SessionID"] == "3"
-        assert inner["User"] == "admin"  # string stays string
+        # UserData is flattened: EventXML wrapper stripped, #attributes removed
+        assert doc["winlog.event_data"]["SessionID"] == "3"
+        assert doc["winlog.event_data"]["User"] == "admin"
 
     def test_attributes_dict_preserved_in_user_data(self):
         """#attributes dict inside UserData is recursed, scalars coerced."""
@@ -206,6 +206,6 @@ class TestCoercionInNormalize:
             }
         }
         doc = normalize_event(data)
-        inner = doc["winlog.event_data"]["Wrapper"]
-        assert inner["ClientProcessId"] == "3952"
-        assert inner["#attributes"]["version"] == "1"
+        # Wrapper key stripped, #attributes removed by flat_user_data
+        assert doc["winlog.event_data"]["ClientProcessId"] == "3952"
+        assert "#attributes" not in doc["winlog.event_data"]
