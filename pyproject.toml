@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opensearch-mcp"
-version = "0.1.0"
+version = "0.6.0"
 description = "OpenSearch MCP server for forensic evidence indexing and querying"
 requires-python = ">=3.10"
 license = {text = "MIT"}
