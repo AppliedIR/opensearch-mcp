@@ -73,7 +73,7 @@ The LLM gets these tools via the MCP protocol:
 
 Two post-ingest enrichment pipelines add context without LLM token cost:
 
-**Triage baseline** — Checks indexed filenames and services against the Windows baseline database (via [windows-triage-mcp](https://github.com/AppliedIR/sift-mcp)). Stamps documents with `triage.verdict` (EXPECTED, SUSPICIOUS, UNKNOWN, EXPECTED_LOLBIN). Includes 14 registry persistence detection rules (IFEO, Winlogon, LSA, Print Monitors, etc.) that run as direct OpenSearch queries — no external calls needed.
+**Triage baseline** — Checks indexed filenames and services against the Windows baseline database (via windows-triage-mcp, part of the [sift-mcp](https://github.com/AppliedIR/sift-mcp) monorepo). Stamps documents with `triage.verdict` (EXPECTED, SUSPICIOUS, UNKNOWN, EXPECTED_LOLBIN). Includes 14 registry persistence detection rules (IFEO, Winlogon, LSA, Print Monitors, etc.) that run as direct OpenSearch queries — no external calls needed.
 
 **OpenCTI threat intel** — Extracts unique external IPs, hashes, and domains from indexed data, looks them up in OpenCTI via the gateway, and stamps matching documents with `threat_intel.verdict` and confidence. 200 unique IOCs checked in ~10 seconds vs. 100K inline lookups that would take 83 minutes.
 
