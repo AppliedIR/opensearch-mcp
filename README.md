@@ -6,6 +6,12 @@ Forensic evidence indexing for [Valhuntir](https://github.com/AppliedIR/Valhunti
 
 Built by [Applied IR](https://github.com/AppliedIR) with Claude Code.
 
+> **Important Note** — While extensively tested, this is a new platform.
+> ALWAYS verify results and guide the investigative process. If you just
+> tell Valhuntir to "Find Evil" it will more than likely hallucinate
+> rather than provide meaningful results. The AI can accelerate, but the
+> human must guide it and review all decisions.
+
 ## Why This Exists
 
 A KAPE triage collection from 30 hosts produces ~50 million evidence records across hundreds of artifact types. An LLM reading these directly would consume billions of tokens and still miss patterns buried in the noise.
