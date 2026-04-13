@@ -1,6 +1,6 @@
+# Snapshot volume mount for vhir backup/restore
+# Added by setup-opensearch.sh — do not modify the main docker-compose.yml
 services:
   opensearch:
     volumes:
-      - /home/user/air-test/uat-verify/opensearch-snapshots:/usr/share/opensearch/snapshots
-    environment:
-      - path.repo=["/usr/share/opensearch/snapshots"]
+      - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots
