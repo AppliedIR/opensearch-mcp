@@ -1,0 +1,6 @@
+services:
+  opensearch:
+    volumes:
+      - /home/user/air-test/uat-verify/opensearch-snapshots:/usr/share/opensearch/snapshots
+    environment:
+      - path.repo=["/usr/share/opensearch/snapshots"]

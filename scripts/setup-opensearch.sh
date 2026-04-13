@@ -61,6 +61,43 @@ EOF
     echo "Generated OpenSearch config: $CONFIG_FILE"
 fi
 
+# --- 2b. Configure snapshot support for backup/restore ---
+SNAPSHOTS_DIR="/var/lib/vhir/snapshots"
+OVERRIDE_FILE="$DOCKER_DIR/docker-compose.override.yml"
+
+if [ ! -d "$SNAPSHOTS_DIR" ]; then
+    echo "Creating snapshot directory ($SNAPSHOTS_DIR)..."
+    sudo mkdir -p "$SNAPSHOTS_DIR"
+    # UID 1000 = opensearch user inside the Docker container
+    sudo chown 1000:1000 "$SNAPSHOTS_DIR"
+    echo "  Snapshot directory: OK"
+fi
+
+if [ ! -f "$OVERRIDE_FILE" ]; then
+    echo "Creating docker-compose.override.yml for snapshot volume..."
+    cat > "$OVERRIDE_FILE" <<OVERRIDE
+# Snapshot volume mount for vhir backup/restore
+# Added by setup-opensearch.sh — do not modify the main docker-compose.yml
+services:
+  opensearch:
+    volumes:
+      - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots
+OVERRIDE
+    echo "  Override file: OK"
+else
+    echo "docker-compose.override.yml exists — checking snapshot volume..."
+    if grep -q "/var/lib/vhir/snapshots" "$OVERRIDE_FILE"; then
+        echo "  Snapshot volume: already configured"
+    else
+        echo "  WARNING: Override file exists but snapshot volume not configured."
+        echo "  Add manually to $OVERRIDE_FILE:"
+        echo "    services:"
+        echo "      opensearch:"
+        echo "        volumes:"
+        echo "          - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots"
+    fi
+fi
+
 # --- 3. Start OpenSearch ---
 export VHIR_OS_PASSWORD="$OS_PASSWORD"
 echo "Starting OpenSearch..."
@@ -87,6 +124,13 @@ if [ "$STATUS" != "green" ] && [ "$STATUS" != "yellow" ]; then
     exit 1
 fi
 echo "Cluster status: $STATUS"
+
+# --- Configure snapshot repository path ---
+echo "Configuring snapshot repository path..."
+curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_cluster/settings" \
+    -H "Content-Type: application/json" \
+    -d '{"persistent":{"path.repo":["/usr/share/opensearch/snapshots"]}}' >/dev/null 2>&1
+echo "  path.repo: /usr/share/opensearch/snapshots"
 
 # --- Raise shard limit for multi-case deployments ---
 echo "Configuring cluster settings..."
