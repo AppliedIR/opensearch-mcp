@@ -80,15 +80,26 @@ def run_tool_and_get_csv(
         error = result.get("error", result.get("stderr", "unknown error"))
         raise RuntimeError(f"{tool_binary} failed: {error}")
 
-    # Collect CSV output files from the output path
+    # Collect CSV output files from the share-relative output dir
+    csv_rel = result.get("csv_output_dir", "")
+    if csv_rel:
+        from sift_common import resolve_case_dir
+
+        case_dir = resolve_case_dir()
+        if case_dir:
+            out = Path(case_dir) / csv_rel
+            if out.is_dir():
+                return sorted(out.glob("*.csv"))
+            elif out.exists() and out.suffix.lower() == ".csv":
+                return [out]
+
+    # Fallback: try full_output_path (works if SMB share is mounted at exact path)
     output_path = result.get("full_output_path", "")
     if output_path:
-        csv_files = []
         out = Path(output_path)
         if out.exists() and out.suffix.lower() == ".csv":
-            csv_files.append(out)
+            return [out]
         elif out.is_dir():
-            csv_files = sorted(out.glob("*.csv"))
-        return csv_files
+            return sorted(out.glob("*.csv"))
 
     return []
