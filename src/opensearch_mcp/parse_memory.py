@@ -23,7 +23,6 @@ TIER_1 = [
     "windows.pslist",
     "windows.pstree",
     "windows.cmdline",
-    "windows.netscan",
     "windows.netstat",
     "windows.svcscan",
     "windows.modules",
@@ -31,6 +30,7 @@ TIER_1 = [
 ]
 
 TIER_2 = TIER_1 + [
+    "windows.netscan",
     "windows.dlllist",
     "windows.envars",
     "windows.getsids",

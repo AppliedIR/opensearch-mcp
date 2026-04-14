@@ -737,7 +737,7 @@ class TestVol3:
     def test_tier_lists(self):
         from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3
 
-        assert len(TIER_1) == 9
+        assert len(TIER_1) == 8  # netscan moved to tier 2
         assert len(TIER_2) == 17
         assert len(TIER_3) == 26
         assert "windows.pslist" in TIER_1
