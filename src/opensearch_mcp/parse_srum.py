@@ -87,40 +87,37 @@ def _parse_srum_wintools(
 ) -> tuple[int, int]:
     """Parse SRUM via SrumECmd on Windows (wintools-mcp).
 
-    Copies SRUDB.dat to writable [cases] share — SrumECmd's ManagedEsent
-    needs write access for dirty ESE database recovery.
+    Stages SRUDB.dat + SRU log files to the case extractions directory
+    (on the SMB share). SrumECmd's ManagedEsent needs write access for
+    dirty ESE database recovery.
     """
-    import yaml
+    from sift_common import resolve_case_dir
 
     from opensearch_mcp.parse_csv import ingest_csv
-    from opensearch_mcp.paths import vhir_dir
     from opensearch_mcp.wintools import run_tool_and_get_csv
 
-    # Copy SRUM to writable [cases] share for ESE recovery
-    srum_workdir = vhir_dir() / "cases" / case_id / "extractions" / "srum" / hostname
+    case_dir_str = resolve_case_dir()
+    if not case_dir_str:
+        raise RuntimeError("No active case directory")
+    case_dir = Path(case_dir_str)
+
+    # Stage SRUM to case extractions (on the SMB share) for ESE recovery
+    srum_workdir = case_dir / "extractions" / "srum" / hostname
     srum_workdir.mkdir(parents=True, exist_ok=True)
-    work_copy = srum_workdir / "SRUDB.dat"
-    shutil.copy2(srum_path, work_copy)
+    shutil.copy2(srum_path, srum_workdir / "SRUDB.dat")
 
     # Also copy SRU log files if present (needed for full recovery)
     sru_dir = srum_path.parent
     for log_file in sru_dir.glob("SRU*.log"):
         shutil.copy2(log_file, srum_workdir / log_file.name)
 
-    # Convert Linux path to Windows UNC path for SrumECmd
-    samba_yaml = vhir_dir() / "samba.yaml"
-    sift_host = "sift"
-    if samba_yaml.is_file():
-        doc = yaml.safe_load(samba_yaml.read_text()) or {}
-        sift_host = doc.get("sift_hostname", "sift")
-    rel_path = f"extractions\\srum\\{hostname}\\SRUDB.dat"
-    unc_path = f"\\\\{sift_host}\\cases\\{rel_path}"
-
+    # Pass the staged path — run_tool_and_get_csv handles UNC conversion
     csv_files = run_tool_and_get_csv(
         tool_binary="SrumECmd.exe",
         input_flag="-f",
-        evidence_path=unc_path,
+        evidence_path=str(srum_workdir / "SRUDB.dat"),
         purpose="Parse SRUM database for resource usage monitoring",
+        hostname=hostname,
     )
 
     if not csv_files:

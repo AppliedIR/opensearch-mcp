@@ -40,6 +40,7 @@ def _run_plaso(
             "--unattended",
             "--parsers",
             parser,
+            "--storage_file",
             str(plaso_file),
             str(input_path),
         ],

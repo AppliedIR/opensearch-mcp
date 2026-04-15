@@ -89,6 +89,7 @@ def _parse_prefetch_wintools(
         input_flag="-d",
         evidence_path=str(prefetch_dir),
         purpose="Parse prefetch files for execution history",
+        hostname=hostname,
     )
 
     if not csv_files:
