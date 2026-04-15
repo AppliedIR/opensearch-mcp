@@ -1376,6 +1376,7 @@ def idx_ingest(
             "run_id": run_id,
         },
         result_summary=f"started ingest (pid {proc.pid}) for {len(hosts)} hosts",
+        input_files=[path],
     )
     resp = {
         "status": "started",
@@ -2009,6 +2010,7 @@ def _launch_background(
         tool=f"idx_ingest_{subcommand}",
         params={"path": path, "hostname": hostname},
         result_summary=f"Background ingest started (pid={proc.pid})",
+        input_files=[path],
     )
     if aid:
         resp["audit_id"] = aid
@@ -2151,6 +2153,7 @@ def idx_ingest_memory(
         tool="idx_ingest_memory",
         params={"path": path, "tier": tier, "pid": proc.pid},
         result_summary=f"started tier {tier} ({len(plugin_list)} plugins)",
+        input_files=[path],
     )
     if aid:
         resp["audit_id"] = aid

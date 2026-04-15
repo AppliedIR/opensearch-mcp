@@ -142,20 +142,52 @@ def run_tool_and_get_csv(
 
 
 def _to_unc_path(case_relative_path: str) -> str:
-    """Convert a case-relative path to a UNC path via the SMB share."""
+    """Convert a case-relative path to a UNC path via the SMB share.
+
+    Resolves the SIFT hostname/IP from samba.yaml, network.yaml,
+    or local IP detection (in that order).
+    """
+    import socket
+
     from opensearch_mcp.paths import vhir_dir
 
-    samba_yaml = vhir_dir() / "samba.yaml"
-    sift_host = "sift"
+    vdir = vhir_dir()
+    sift_host = ""
     share_name = "cases"
+
+    # Try samba.yaml first (has sift_hostname if configured)
+    samba_yaml = vdir / "samba.yaml"
     if samba_yaml.is_file():
         try:
             import yaml
 
             doc = yaml.safe_load(samba_yaml.read_text()) or {}
-            sift_host = doc.get("sift_hostname", "sift")
+            sift_host = doc.get("sift_hostname", "")
             share_name = doc.get("share_name", "cases")
         except Exception:
             pass
+
+    # Try network.yaml for static IP (set by vhir join)
+    if not sift_host:
+        network_yaml = vdir / "network.yaml"
+        if network_yaml.is_file():
+            try:
+                import yaml
+
+                doc = yaml.safe_load(network_yaml.read_text()) or {}
+                sift_host = doc.get("static_ip", "")
+            except Exception:
+                pass
+
+    # Fall back to local IP detection
+    if not sift_host:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            sift_host = s.getsockname()[0]
+            s.close()
+        except Exception:
+            sift_host = "sift"  # last resort
+
     win_rel = case_relative_path.replace("/", "\\")
     return f"\\\\{sift_host}\\{share_name}\\{win_rel}"
