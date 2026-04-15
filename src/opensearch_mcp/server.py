@@ -1365,7 +1365,7 @@ def idx_ingest(
     proc = _spawn_ingest(cmd, env, _log_fh, run_id)
     _log_fh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
 
-    host_names = [h.hostname for h in hosts]
+    host_names = [h.hostname for h in hosts] if hosts else ([hostname] if hostname else [])
     aid = audit.log(
         tool="idx_ingest",
         params={
