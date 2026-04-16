@@ -1268,7 +1268,7 @@ def idx_ingest(
                 if suffix in checked_suffixes:
                     continue
                 checked_suffixes.add(suffix)
-                from opensearch_mcp.paths import build_index_name as _build_idx
+                from opensearch_mcp.paths import build_index_name as _build_idx  # noqa: E402
 
                 idx = _build_idx(case_id, suffix, host.hostname)
                 try:
@@ -1277,6 +1277,8 @@ def idx_ingest(
                 except Exception:
                     pass
             if evtx_count:
+                from opensearch_mcp.paths import build_index_name as _build_idx  # noqa: E402
+
                 idx = _build_idx(case_id, "evtx", host.hostname)
                 try:
                     r = client.count(index=idx)
