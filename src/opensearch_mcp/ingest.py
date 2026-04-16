@@ -256,6 +256,7 @@ def ingest(
         _update_status=_update_status,
         result=result,
         start=start,
+        run_id=status_run_id,
     )
 
     result.elapsed_seconds = time.monotonic() - start
@@ -397,6 +398,7 @@ def _ingest_hosts(
     _update_status,
     result,
     start,
+    run_id="",
 ):
     """Inner ingest loop — processes all hosts and artifacts."""
     for host_idx, host in enumerate(hosts):
@@ -476,6 +478,7 @@ def _ingest_hosts(
                                 "hostname": host.hostname,
                                 "index_name": index_name,
                                 "file": str(evtx_file),
+                                "run_id": run_id,
                             },
                             result_summary=f"{cnt} indexed, {sk} skipped"
                             + (f", {bf} bulk failed" if bf else ""),
@@ -506,7 +509,7 @@ def _ingest_hosts(
                         audit.log(
                             tool="ingest_evtx",
                             audit_id=aid,
-                            params={"file": str(evtx_file)},
+                            params={"file": str(evtx_file), "run_id": run_id},
                             result_summary=f"FAILED: {e}",
                             input_files=[str(evtx_file)],
                             input_sha256s=[file_hash],
@@ -550,6 +553,7 @@ def _ingest_hosts(
                     status_hosts=status_hosts,
                     _progress=_progress,
                     _update_status=_update_status,
+                    run_id=run_id,
                 )
                 continue
 
@@ -571,6 +575,7 @@ def _ingest_hosts(
                     _update_status=_update_status,
                     time_from=time_from,
                     time_to=time_to,
+                    run_id=run_id,
                 )
                 continue
 
@@ -650,6 +655,7 @@ def _ingest_hosts(
                         "hostname": host.hostname,
                         "tool": tool_name,
                         "file": str(artifact_path),
+                        "run_id": run_id,
                     },
                     result_summary=f"{cnt} indexed"
                     + (f", {sk} skipped" if sk else "")
@@ -676,7 +682,7 @@ def _ingest_hosts(
                 audit.log(
                     tool=f"ingest_{tool_name}",
                     audit_id=aid,
-                    params={"hostname": host.hostname, "tool": tool_name},
+                    params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
                     result_summary=f"FAILED: {e}",
                     input_files=[str(artifact_path)],
                     input_sha256s=[file_hash] if file_hash else [],
@@ -709,6 +715,7 @@ def _ingest_plaso_artifact(
     status_hosts: list[dict],
     _progress,
     _update_status,
+    run_id: str = "",
 ) -> None:
     """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback)."""
     from opensearch_mcp.parse_prefetch import parse_prefetch
@@ -773,6 +780,7 @@ def _ingest_plaso_artifact(
                 "hostname": host.hostname,
                 "tool": tool_name,
                 "path": str(artifact_path),
+                "run_id": run_id,
             },
             result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
             input_files=[str(artifact_path)],
@@ -796,7 +804,7 @@ def _ingest_plaso_artifact(
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
-            params={"hostname": host.hostname, "tool": tool_name},
+            params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
             result_summary=f"FAILED: {e}",
             input_files=[str(artifact_path)],
             input_sha256s=[plaso_hash] if plaso_hash else [],
@@ -829,6 +837,7 @@ def _ingest_custom_artifact(
     _update_status,
     time_from=None,
     time_to=None,
+    run_id: str = "",
 ) -> None:
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
     _cid = _sanitize_index_component(case_id)
@@ -869,7 +878,7 @@ def _ingest_custom_artifact(
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
-            params={"hostname": host.hostname, "path": str(artifact_path)},
+            params={"hostname": host.hostname, "path": str(artifact_path), "run_id": run_id},
             result_summary=f"{cnt} indexed"
             + (f", {sk} skipped" if sk else "")
             + (f", {bf} bulk failed" if bf else ""),
@@ -894,7 +903,7 @@ def _ingest_custom_artifact(
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
-            params={"hostname": host.hostname, "tool": tool_name},
+            params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
             result_summary=f"FAILED: {e}",
             input_files=[str(artifact_path)],
             input_sha256s=[file_hash] if file_hash else [],

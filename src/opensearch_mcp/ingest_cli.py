@@ -437,7 +437,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         import uuid
 
         client = get_client()
-        audit = AuditWriter(mcp_name="opensearch-ingest")
+        audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
         run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
 
         def _cli_progress(event: str, **kw) -> None:
@@ -685,7 +685,7 @@ def cmd_csv(args: argparse.Namespace) -> None:
     index_name = _build_idx(case_id, cfg.index_suffix, hostname)
 
     client = get_client()
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     pipeline_version = f"opensearch-mcp-{__version__}"
 
     file_hash = sha256_file(csv_path)
@@ -772,7 +772,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
 
     files = (
@@ -931,7 +931,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
 
     exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
@@ -1079,7 +1079,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
     suffix = getattr(args, "index_suffix", None) or "accesslog"
 
@@ -1216,7 +1216,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     print(f"  MALICIOUS: {result['malicious']}")
     print(f"  SUSPICIOUS: {result['suspicious']}")
 
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     audit.log(
         tool="enrich_intel",
         params={"case_id": case_id, "force": force},
@@ -1302,7 +1302,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             sys.exit(1)
 
     client = get_client()
-    audit = AuditWriter(mcp_name="opensearch-ingest")
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
 
     # Status tracking (BUG-8: was completely missing for memory ingest)
