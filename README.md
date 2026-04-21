@@ -1,3 +1,5 @@
+![Valhuntir](docs/images/vhir-logo.png)
+
 # opensearch-mcp
 [![CI](https://github.com/AppliedIR/opensearch-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/AppliedIR/opensearch-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/AppliedIR/opensearch-mcp/blob/main/LICENSE)
@@ -202,6 +204,34 @@ api_keys:
     examiner: steve
     role: examiner
 ```
+
+### Operator environment variables (ingest resilience)
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `HAYABUSA_RULES_DIR` | *(autodetect)* | Path to hayabusa-rules directory (must contain a `config/` subdirectory). Set when hayabusa rules are installed outside the default locations (`/usr/local/share/hayabusa-rules`, `/usr/share/hayabusa-rules`, `/opt/hayabusa*/rules`). Example: `Environment=HAYABUSA_RULES_DIR=/srv/forensics/hayabusa-rules` in the gateway systemd unit file. |
+| `VHIR_SHARD_BREAKER_THRESHOLD` | `3` | Consecutive shard-limit batch failures before the bulk-write circuit breaker halts ingest. |
+| `VHIR_INTEL_BREAKER_THRESHOLD` | `10` | Consecutive non-rate-limit OpenCTI errors before enrichment halts. |
+| `VHIR_INTEL_RATE_LIMIT_RETRIES` | `5` | Per-IOC retry cap when OpenCTI rate-limits. |
+| `VHIR_INTEL_MIN_INTERVAL_MS` | `100` | Minimum milliseconds between OpenCTI requests (default ~10 QPS). Prevents self-inflicted rate limits. Clamped to a 10ms floor. |
+
+All thresholds clamp to a sane lower bound (operator typo of `0` won't disable safety).
+
+### First-run ordering note (cold clusters)
+
+Index templates are installed by the MCP server at its first verified
+OpenSearch connection (inside `ensure_winlog_pipeline` /
+`install_all_templates`). On a freshly set-up cluster, start the
+Valhuntir gateway (or the opensearch-mcp server) at least once before
+running `vhir idx ingest …` directly from the CLI.
+
+Direct CLI ingest on a cluster where templates have never been
+installed will create indices with OpenSearch's default dynamic
+mappings (including `number_of_replicas: 1`) — no data loss, but the
+replicas-0 and per-artifact-type mappings won't apply until the
+templates land. MCP-driven ingest (via `idx_ingest`, etc.) is
+unaffected; the server boot path installs templates before spawning
+any ingest subprocess.
 
 ## Template Priorities
 

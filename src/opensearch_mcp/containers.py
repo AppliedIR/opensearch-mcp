@@ -31,7 +31,7 @@ def detect_container(path: Path) -> str:
         return "ewf"
     if suffix in (".vhdx", ".vhd", ".vmdk"):
         return "nbd"
-    if suffix in (".dd", ".raw", ".img"):
+    if suffix in (".dd", ".raw", ".img", ".iso"):
         return "raw"
     if path.is_dir():
         return "directory"
@@ -145,7 +145,7 @@ def mount_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     suffix = path.suffix.lower()
     if suffix in (".e01", ".ex01"):
         return _mount_ewf(path, dest, ctx)
-    elif suffix in (".dd", ".raw", ".img"):
+    elif suffix in (".dd", ".raw", ".img", ".iso"):
         return _mount_raw(path, dest, ctx)
     elif suffix in (".vmdk", ".vhd", ".vhdx"):
         return _mount_nbd(path, dest, ctx)

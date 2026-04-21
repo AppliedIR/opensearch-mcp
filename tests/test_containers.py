@@ -84,6 +84,16 @@ class TestDetectContainer:
         f.touch()
         assert detect_container(f) == "raw"
 
+    def test_iso(self, tmp_path):
+        f = tmp_path / "evidence.iso"
+        f.touch()
+        assert detect_container(f) == "raw"
+
+    def test_iso_uppercase(self, tmp_path):
+        f = tmp_path / "evidence.ISO"
+        f.touch()
+        assert detect_container(f) == "raw"
+
     def test_directory(self, tmp_path):
         assert detect_container(tmp_path) == "directory"
 
