@@ -102,8 +102,13 @@ class TestSetupScript:
         assert "_security_analytics/detectors" in script
 
     def test_hayabusa_template_registered(self, script):
-        """Hayabusa template included in registration loop."""
-        assert "hayabusa" in script
+        """Hayabusa template install moved from setup-opensearch.sh to
+        ensure_winlog_pipeline (2026-04-22). Setup script no longer
+        installs templates; guard that the runtime installer does."""
+        from opensearch_mcp.mappings import _TEMPLATES_REGISTRY
+
+        names = {n for n, _ in _TEMPLATES_REGISTRY}
+        assert "vhir-hayabusa" in names
 
     def test_no_hardcoded_password(self, script):
         """Password comes from $OS_PASSWORD variable, never hardcoded."""

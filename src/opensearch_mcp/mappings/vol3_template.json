@@ -4,7 +4,8 @@
   ],
   "template": {
     "settings": {
-      "index.mapping.total_fields.limit": 500
+      "index.mapping.total_fields.limit": 500,
+      "index.number_of_replicas": 0
     },
     "mappings": {
       "properties": {
@@ -13,10 +14,12 @@
           "ignore_malformed": true
         },
         "PID": {
-          "type": "integer"
+          "type": "long",
+          "ignore_malformed": true
         },
         "PPID": {
-          "type": "integer"
+          "type": "long",
+          "ignore_malformed": true
         },
         "Threads": {
           "type": "integer"

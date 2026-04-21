@@ -1,0 +1,42 @@
+{
+  "description": "v1: normalize winlog.event_data.Data polymorphism. Object shape kept structured + stringified to Data_raw. Non-object (string/list/scalar) removed from Data (preventing object-mapping conflict) + value preserved in Data_raw. Never rejects a document — both script-level and pipeline-level on_failure handlers defensively strip Data and record the error in a sidecar field so the doc always indexes. Script accepts both nested (ctx.winlog.event_data) and flat-dotted-key (ctx['winlog.event_data']) document shapes — parse_evtx emits the flat form, synthetic test docs use the nested form.",
+  "processors": [
+    {
+      "script": {
+        "source": "def ed = ctx.winlog?.event_data; if (ed == null) { ed = ctx['winlog.event_data']; } if (ed == null) { return; } def d = ed.Data; if (d == null) { return; } if (d instanceof Map) { ed.Data_raw = d.toString(); } else { ed.Data_raw = String.valueOf(d); ed.remove('Data'); }",
+        "on_failure": [
+          {
+            "remove": {
+              "field": "winlog.event_data.Data",
+              "ignore_missing": true,
+              "ignore_failure": true
+            }
+          },
+          {
+            "set": {
+              "field": "winlog.event_data._pipeline_error",
+              "value": "winlog_data_normalize_v1 script: {{ _ingest.on_failure_message }}",
+              "ignore_failure": true
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "on_failure": [
+    {
+      "remove": {
+        "field": "winlog.event_data.Data",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "field": "winlog.event_data._pipeline_error",
+        "value": "winlog_data_normalize_v1 pipeline: {{ _ingest.on_failure_message }}",
+        "ignore_failure": true
+      }
+    }
+  ]
+}

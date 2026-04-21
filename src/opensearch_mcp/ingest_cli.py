@@ -24,6 +24,52 @@ from opensearch_mcp.tools import TOOLS
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
 
 
+def _preflight_shard_capacity(
+    client,
+    ingest_type: str,
+    host_count: int = 1,
+    case_id: str = "",
+    run_id: str = "",
+) -> None:
+    """Refuse to start ingest if cluster shard capacity is exhausted.
+
+    On refusal, writes a terminal status file via write_status with the
+    error field prefixed by HALT_SHARD_CAPACITY so portal /
+    idx_ingest_status can startswith()-render the halt reason. Calls
+    sys.exit(1) after. Fail-open on stats-query errors (handled inside
+    check_shard_headroom).
+
+    Template installation is handled at MCP server boot
+    (server._get_os) and must run before ingest — no install performed
+    here.
+    """
+    from opensearch_mcp.ingest_status import HALT_SHARD_CAPACITY
+    from opensearch_mcp.shard_capacity import (
+        _estimate_new_shards,
+        check_shard_headroom,
+    )
+
+    ok, reason = check_shard_headroom(
+        client,
+        expected_new_shards=_estimate_new_shards(ingest_type, host_count=host_count),
+        min_headroom_pct=10.0,
+    )
+    if not ok:
+        if case_id:
+            write_status(
+                case_id=case_id,
+                pid=os.getpid(),
+                run_id=run_id,
+                status="failed",
+                hosts=[],
+                totals={},
+                started=datetime.now(timezone.utc).isoformat(),
+                error=f"{HALT_SHARD_CAPACITY}: {reason}",
+            )
+        print(f"ABORT: {reason}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _write_bg_status(
     case_id,
     run_id,
@@ -37,6 +83,8 @@ def _write_bg_status(
     files_total=0,
 ):
     """Write status for background ingest (delimited/json/accesslog)."""
+    from opensearch_mcp.bulk import get_last_bulk_reason
+
     art = {"name": artifact_name, "status": status, "indexed": indexed}
     if files_total:
         art["files_total"] = files_total
@@ -58,6 +106,7 @@ def _write_bg_status(
         },
         started=started,
         elapsed_seconds=elapsed,
+        bulk_failed_reason=get_last_bulk_reason(),
     )
 
 
@@ -66,7 +115,13 @@ _VHIR_CONFIG = vhir_dir() / "config.yaml"
 
 def _resolve_case_id(args_case: str | None) -> str:
     if args_case:
-        case_dir = vhir_dir() / "cases" / args_case
+        # Canonical case directory resolution matches aiir/vhir_cli:
+        # $VHIR_CASES_DIR (env) or ~/cases/. Previously hard-coded to
+        # ~/.vhir/cases/ which is the wrong path — caused a false
+        # "Case not found in case system" warning on every CLI ingest
+        # against the real cases root.
+        cases_root = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
+        case_dir = cases_root / args_case
         # Suppress warning in background mode (parent already validated)
         if not case_dir.is_dir() and not os.environ.get("VHIR_INGEST_RUN_ID"):
             print(
@@ -436,9 +491,18 @@ def cmd_scan(args: argparse.Namespace) -> None:
         import os
         import uuid
 
-        client = get_client()
-        audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
         run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
+
+        client = get_client()
+        _preflight_shard_capacity(
+            client,
+            "evtx",
+            host_count=len(hosts) or 1,
+            case_id=case_id,
+            run_id=run_id,
+        )
+
+        audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
 
         def _cli_progress(event: str, **kw) -> None:
             if event == "host_start":
@@ -475,22 +539,43 @@ def cmd_scan(args: argparse.Namespace) -> None:
             elif event == "artifact_failed":
                 print(f"FAILED: {kw['error']}")
 
-        result = ingest(
-            hosts=hosts,
-            client=client,
-            audit=audit,
-            case_id=case_id,
-            status_pid=os.getpid(),
-            status_run_id=run_id,
-            include=include,
-            exclude=exclude,
-            full=getattr(args, "full", False),
-            time_from=time_from,
-            time_to=time_to,
-            reduced_ids=reduced_ids,
-            reduced_log_names=reduced_log_names,
-            on_progress=_cli_progress,
-        )
+        from opensearch_mcp.bulk import ShardCapacityExhausted
+        from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
+
+        try:
+            result = ingest(
+                hosts=hosts,
+                client=client,
+                audit=audit,
+                case_id=case_id,
+                status_pid=os.getpid(),
+                status_run_id=run_id,
+                include=include,
+                exclude=exclude,
+                full=getattr(args, "full", False),
+                time_from=time_from,
+                time_to=time_to,
+                reduced_ids=reduced_ids,
+                reduced_log_names=reduced_log_names,
+                on_progress=_cli_progress,
+            )
+        except ShardCapacityExhausted as _sce:
+            # Circuit-breaker trip mid-run. Write a terminal status so
+            # idx_ingest_status surfaces the halt reason via the
+            # error-prefix convention (replaces pre-0.6.2 halt-state
+            # taxonomy; portal startswith()-renders the prefix).
+            write_status(
+                case_id=case_id,
+                pid=os.getpid(),
+                run_id=run_id,
+                status="failed",
+                hosts=[],
+                totals={},
+                started=datetime.now(timezone.utc).isoformat(),
+                error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
+            )
+            print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
+            raise
 
         # Summary
         errors = []
@@ -508,10 +593,19 @@ def cmd_scan(args: argparse.Namespace) -> None:
         print(f"\nDone in {minutes:.1f} minutes. ", end="")
         print(f"{len(result.hosts)} host(s), {result.total_indexed:,} entries indexed.")
         if total_bulk_failed:
+            # Primary action: presume loss until proven otherwise
+            # (safer default — matches operator mental model that
+            # "failed" means "re-run"). Secondary: offer the
+            # verification path because some rejections are recoverable
+            # via pipeline on_failure (e.g., Data.#text mapping
+            # conflicts). Structural answer is Part 5 #17 (source vs
+            # indexed count verification).
             print(
                 f"\n*** {total_bulk_failed:,} events failed to index. ***"
                 f"\n  Re-run ingest on the same evidence to recover"
                 f" — dedup prevents duplicates."
+                f"\n  To verify before re-running, run idx_search on"
+                f" the expected timestamp range."
             )
         if errors:
             print(f"\n{len(errors)} issue(s):")
@@ -524,12 +618,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
             if shutil.which("hayabusa") and any(h.evtx_dir for h in hosts):
                 # Layer 6: update status to show Hayabusa phase
-                from datetime import datetime
-                from datetime import timezone as tz
-
                 from opensearch_mcp.ingest import run_hayabusa_batch
 
-                hayabusa_started = datetime.now(tz.utc).isoformat()
+                hayabusa_started = datetime.now(timezone.utc).isoformat()
                 # BUG-4 fix: preserve full host/artifact checklist, append hayabusa
                 existing_hosts = [
                     {
@@ -708,7 +799,12 @@ def cmd_csv(args: argparse.Namespace) -> None:
     audit.log(
         tool=f"idx_ingest_csv_{tool_name}",
         audit_id=aid,
-        params={"hostname": hostname, "tool": tool_name, "file": str(csv_path)},
+        params={
+            "hostname": hostname,
+            "tool": tool_name,
+            "file": str(csv_path),
+            "bulk_failed": bf,
+        },
         result_summary=f"{count} indexed"
         + (f", {sk} skipped" if sk else "")
         + (f", {bf} bulk failed" if bf else ""),
@@ -731,6 +827,9 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
     Accepts pre-parsed args from vhir (unlike main() which parses its own).
     Delegates to cmd_scan with the right attribute mapping.
     """
+    from opensearch_mcp.bulk import reset_circuit_breaker
+
+    reset_circuit_breaker()
     # Ensure all expected attributes exist with defaults
     if not hasattr(args, "examiner"):
         args.examiner = examiner
@@ -752,7 +851,10 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest JSON/JSONL files."""
     from opensearch_mcp import __version__
+    from opensearch_mcp.bulk import reset_circuit_breaker
     from opensearch_mcp.parse_json import ingest_json
+
+    reset_circuit_breaker()
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
@@ -772,6 +874,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
+    _preflight_shard_capacity(client, "json", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
 
@@ -792,54 +895,75 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             files_total=len(files),
         )
 
-    total = total_sk = total_bf = 0
-    for idx, f in enumerate(files):
-        suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
-        if not suffix.startswith("json-"):
-            suffix = f"json-{suffix}"
-        from opensearch_mcp.paths import build_index_name as _build_idx_j
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+    from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
-        index_name = _build_idx_j(case_id, suffix, hostname)
-        print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-        cnt, sk, bf, hr = ingest_json(
-            f,
-            client,
-            index_name,
-            hostname,
-            time_field=time_field,
-            source_file=str(f),
-            ingest_audit_id=aid,
-            pipeline_version=f"opensearch-mcp-{__version__}",
-            time_from=time_from,
-            time_to=time_to,
-            batch_size=batch_size,
-        )
-        print(f"{cnt:,} entries")
-        if hr:
-            print("    NOTE: 'host' field renamed to 'source_host' (conflicts with host.name)")
-        total += cnt
-        total_sk += sk
-        total_bf += bf
-        if run_id:
-            _write_bg_status(
-                case_id,
-                run_id,
-                "running",
+    total = total_sk = total_bf = 0
+    try:
+        for idx, f in enumerate(files):
+            suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
+            if not suffix.startswith("json-"):
+                suffix = f"json-{suffix}"
+            from opensearch_mcp.paths import build_index_name as _build_idx_j
+
+            index_name = _build_idx_j(case_id, suffix, hostname)
+            print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
+            cnt, sk, bf, hr = ingest_json(
+                f,
+                client,
+                index_name,
                 hostname,
-                "json",
-                started_ts,
-                time.monotonic() - start_mono,
-                indexed=total,
-                files_done=idx + 1,
-                files_total=len(files),
+                time_field=time_field,
+                source_file=str(f),
+                ingest_audit_id=aid,
+                pipeline_version=f"opensearch-mcp-{__version__}",
+                time_from=time_from,
+                time_to=time_to,
+                batch_size=batch_size,
             )
+            print(f"{cnt:,} entries")
+            if hr:
+                print("    NOTE: 'host' field renamed to 'source_host' (conflicts with host.name)")
+            total += cnt
+            total_sk += sk
+            total_bf += bf
+            if run_id:
+                _write_bg_status(
+                    case_id,
+                    run_id,
+                    "running",
+                    hostname,
+                    "json",
+                    started_ts,
+                    time.monotonic() - start_mono,
+                    indexed=total,
+                    files_done=idx + 1,
+                    files_total=len(files),
+                )
+    except ShardCapacityExhausted as _sce:
+        write_status(
+            case_id=case_id,
+            pid=os.getpid(),
+            run_id=run_id or "",
+            status="failed",
+            hosts=[],
+            totals={},
+            started=datetime.now(timezone.utc).isoformat(),
+            error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
+        )
+        print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
+        raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
     audit.log(
         tool="idx_ingest_json",
         audit_id=aid,
-        params={"path": str(input_path), "hostname": hostname},
-        result_summary=f"{total} indexed",
+        params={
+            "path": str(input_path),
+            "hostname": hostname,
+            "bulk_failed": total_bf,
+        },
+        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -866,6 +990,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest delimited files."""
     from opensearch_mcp import __version__
+    from opensearch_mcp.bulk import reset_circuit_breaker
+
+    reset_circuit_breaker()
     from opensearch_mcp.parse_delimited import ingest_delimited
 
     input_path = Path(args.path)
@@ -931,6 +1058,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
+    _preflight_shard_capacity(client, "delimited", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
 
@@ -968,73 +1096,94 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 indexed=indexed_so_far,
             )
 
-    total = total_sk = total_bf = 0
-    for idx, f in enumerate(files):
-        fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
-        detected = fmt.get("format", "csv")
-        user_suffix = getattr(args, "index_suffix", None)
-        if user_suffix:
-            suffix = user_suffix
-            if not suffix.startswith(("delim-", "zeek-", "bodyfile-")):
-                suffix = f"delim-{suffix}"
-        elif detected == "zeek":
-            suffix = f"zeek-{f.stem}"
-        elif detected == "bodyfile":
-            suffix = f"bodyfile-{f.stem}"
-        else:
-            suffix = f"delim-{f.stem}"
-        from opensearch_mcp.paths import build_index_name as _build_idx_d
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+    from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
-        index_name = _build_idx_d(case_id, suffix, hostname)
-        print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
-        if detected == "unknown":
-            print("skipped (unrecognized format)")
-            continue
-        try:
-            cnt, sk, bf, hr = ingest_delimited(
-                f,
-                client,
-                index_name,
-                hostname,
-                fmt=fmt,
-                delimiter=delimiter,
-                time_field=time_field,
-                source_file=str(f),
-                ingest_audit_id=aid,
-                pipeline_version=f"opensearch-mcp-{__version__}",
-                time_from=time_from,
-                time_to=time_to,
-                batch_size=batch_size,
-                on_progress=_on_progress if run_id else None,
-            )
-            print(f"{cnt:,} entries")
-            if hr:
-                print("    NOTE: 'host' renamed to 'source_host' (conflicts with host.name)")
-            total += cnt
-            total_sk += sk
-            total_bf += bf
-            if run_id:
-                _write_bg_status(
-                    case_id,
-                    run_id,
-                    "running",
+    total = total_sk = total_bf = 0
+    try:
+        for idx, f in enumerate(files):
+            fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
+            detected = fmt.get("format", "csv")
+            user_suffix = getattr(args, "index_suffix", None)
+            if user_suffix:
+                suffix = user_suffix
+                if not suffix.startswith(("delim-", "zeek-", "bodyfile-")):
+                    suffix = f"delim-{suffix}"
+            elif detected == "zeek":
+                suffix = f"zeek-{f.stem}"
+            elif detected == "bodyfile":
+                suffix = f"bodyfile-{f.stem}"
+            else:
+                suffix = f"delim-{f.stem}"
+            from opensearch_mcp.paths import build_index_name as _build_idx_d
+
+            index_name = _build_idx_d(case_id, suffix, hostname)
+            print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
+            if detected == "unknown":
+                print("skipped (unrecognized format)")
+                continue
+            try:
+                cnt, sk, bf, hr = ingest_delimited(
+                    f,
+                    client,
+                    index_name,
                     hostname,
-                    "delimited",
-                    started_ts,
-                    time.monotonic() - start_mono,
-                    indexed=total,
-                    files_done=idx + 1,
-                    files_total=len(files),
+                    fmt=fmt,
+                    delimiter=delimiter,
+                    time_field=time_field,
+                    source_file=str(f),
+                    ingest_audit_id=aid,
+                    pipeline_version=f"opensearch-mcp-{__version__}",
+                    time_from=time_from,
+                    time_to=time_to,
+                    batch_size=batch_size,
+                    on_progress=_on_progress if run_id else None,
                 )
-        except (ValueError, OSError) as e:
-            print(f"skipped ({e})")
+                print(f"{cnt:,} entries")
+                if hr:
+                    print("    NOTE: 'host' renamed to 'source_host' (conflicts with host.name)")
+                total += cnt
+                total_sk += sk
+                total_bf += bf
+                if run_id:
+                    _write_bg_status(
+                        case_id,
+                        run_id,
+                        "running",
+                        hostname,
+                        "delimited",
+                        started_ts,
+                        time.monotonic() - start_mono,
+                        indexed=total,
+                        files_done=idx + 1,
+                        files_total=len(files),
+                    )
+            except (ValueError, OSError) as e:
+                print(f"skipped ({e})")
+    except ShardCapacityExhausted as _sce:
+        write_status(
+            case_id=case_id,
+            pid=os.getpid(),
+            run_id=run_id or "",
+            status="failed",
+            hosts=[],
+            totals={},
+            started=datetime.now(timezone.utc).isoformat(),
+            error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
+        )
+        print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
+        raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
     audit.log(
         tool="idx_ingest_delimited",
         audit_id=aid,
-        params={"path": str(input_path), "hostname": hostname},
-        result_summary=f"{total} indexed",
+        params={
+            "path": str(input_path),
+            "hostname": hostname,
+            "bulk_failed": total_bf,
+        },
+        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -1061,7 +1210,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__
+    from opensearch_mcp.bulk import reset_circuit_breaker
     from opensearch_mcp.parse_accesslog import ingest_accesslog
+
+    reset_circuit_breaker()
 
     input_path = Path(args.path)
     case_id = _resolve_case_id(getattr(args, "case", None))
@@ -1079,6 +1231,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
+    _preflight_shard_capacity(client, "accesslog", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
     suffix = getattr(args, "index_suffix", None) or "accesslog"
@@ -1104,47 +1257,68 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             files_total=len(files),
         )
 
-    total = total_sk = total_bf = 0
-    for idx, f in enumerate(files):
-        from opensearch_mcp.paths import build_index_name as _build_idx_a
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+    from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
-        index_name = _build_idx_a(case_id, suffix, hostname)
-        print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-        cnt, sk, bf = ingest_accesslog(
-            f,
-            client,
-            index_name,
-            hostname,
-            time_from=time_from,
-            time_to=time_to,
-            source_file=str(f),
-            ingest_audit_id=aid,
-            pipeline_version=f"opensearch-mcp-{__version__}",
-        )
-        print(f"{cnt:,} entries ({sk} skipped)")
-        total += cnt
-        total_sk += sk
-        total_bf += bf
-        if run_id:
-            _write_bg_status(
-                case_id,
-                run_id,
-                "running",
+    total = total_sk = total_bf = 0
+    try:
+        for idx, f in enumerate(files):
+            from opensearch_mcp.paths import build_index_name as _build_idx_a
+
+            index_name = _build_idx_a(case_id, suffix, hostname)
+            print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
+            cnt, sk, bf = ingest_accesslog(
+                f,
+                client,
+                index_name,
                 hostname,
-                "accesslog",
-                started_ts,
-                time.monotonic() - start_mono,
-                indexed=total,
-                files_done=idx + 1,
-                files_total=len(files),
+                time_from=time_from,
+                time_to=time_to,
+                source_file=str(f),
+                ingest_audit_id=aid,
+                pipeline_version=f"opensearch-mcp-{__version__}",
             )
+            print(f"{cnt:,} entries ({sk} skipped)")
+            total += cnt
+            total_sk += sk
+            total_bf += bf
+            if run_id:
+                _write_bg_status(
+                    case_id,
+                    run_id,
+                    "running",
+                    hostname,
+                    "accesslog",
+                    started_ts,
+                    time.monotonic() - start_mono,
+                    indexed=total,
+                    files_done=idx + 1,
+                    files_total=len(files),
+                )
+    except ShardCapacityExhausted as _sce:
+        write_status(
+            case_id=case_id,
+            pid=os.getpid(),
+            run_id=run_id or "",
+            status="failed",
+            hosts=[],
+            totals={},
+            started=datetime.now(timezone.utc).isoformat(),
+            error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
+        )
+        print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
+        raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
     audit.log(
         tool="idx_ingest_accesslog",
         audit_id=aid,
-        params={"path": str(input_path), "hostname": hostname},
-        result_summary=f"{total} indexed",
+        params={
+            "path": str(input_path),
+            "hostname": hostname,
+            "bulk_failed": total_bf,
+        },
+        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -1235,7 +1409,10 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
 def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Parse a memory image with Volatility 3 and index results."""
     from opensearch_mcp import __version__
+    from opensearch_mcp.bulk import ShardCapacityExhausted, reset_circuit_breaker
     from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3, ingest_memory
+
+    reset_circuit_breaker()
 
     image_path = Path(args.path)
     _mem_extract_dir = None  # Track for cleanup
@@ -1301,14 +1478,16 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             print("Non-interactive mode. Use --yes to skip.", file=sys.stderr)
             sys.exit(1)
 
-    client = get_client()
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
-    aid = audit._next_audit_id()
-
-    # Status tracking (BUG-8: was completely missing for memory ingest)
+    # Derive run_id BEFORE pre-flight so halt-status has correlation.
     run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
     started_ts = datetime.now(timezone.utc).isoformat()
     start_mono = time.monotonic()
+
+    client = get_client()
+    _preflight_shard_capacity(client, "memory", case_id=case_id, run_id=run_id)
+
+    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    aid = audit._next_audit_id()
 
     # Build plugin checklist for status
     status_plugins = [{"name": p, "status": "pending"} for p in plugin_list]
@@ -1318,6 +1497,8 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     }
 
     def _write_mem_status(status: str, error: str = "") -> None:
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
         total_indexed = sum(r.get("indexed", 0) for r in _plugin_results.values())
         n_done = sum(1 for a in status_plugins if a["status"] == "complete")
         write_status(
@@ -1336,6 +1517,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             started_ts,
             error=error,
             elapsed_seconds=time.monotonic() - start_mono,
+            bulk_failed_reason=get_last_bulk_reason(),
         )
 
     _plugin_results: dict = {}
@@ -1371,8 +1553,14 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                     break
             print(f"FAILED: {kw['error']}")
 
-    def _audit_log(tool, params, result_summary):
-        audit.log(tool=tool, audit_id=aid, params=params, result_summary=result_summary)
+    def _audit_log(tool, params, result_summary, input_files=None):
+        audit.log(
+            tool=tool,
+            audit_id=aid,
+            params=params,
+            result_summary=result_summary,
+            input_files=input_files,
+        )
 
     # Initial status
     _write_mem_status("running")
@@ -1388,10 +1576,21 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             plugins=plugins,
             timeout=timeout,
             ingest_audit_id=aid,
+            run_id=run_id,
             pipeline_version=f"opensearch-mcp-{__version__}",
             on_progress=_progress,
             audit_log=_audit_log,
         )
+    except ShardCapacityExhausted as e:
+        # Distinct status so monitoring can differentiate capacity
+        # failures from generic errors. The _write_mem_status helper
+        # wraps write_status — the prefixed error string carries the
+        # halt reason (error-prefix convention replaces pre-0.6.2
+        # halt-state taxonomy).
+        from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
+
+        _write_mem_status("failed", error=f"{HALT_CIRCUIT_BREAKER}: {e}")
+        raise
     except Exception as e:
         _write_mem_status("failed", error=str(e))
         raise
@@ -1407,6 +1606,8 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     _write_mem_status("complete")
 
     # Audit the overall operation
+    # Aggregate bulk rejections across all plugins for visibility.
+    total_bulk_failed = sum(r.get("bulk_failed", 0) for r in results.values())
     audit.log(
         tool="idx_ingest_memory",
         audit_id=aid,
@@ -1414,8 +1615,10 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             "image": str(image_path),
             "hostname": hostname,
             "tier": tier,
+            "run_id": run_id,
+            "bulk_failed": total_bulk_failed,
         },
-        result_summary=f"{total} indexed, {len(failed)} failed",
+        result_summary=(f"{total} indexed, {len(failed)} failed, {total_bulk_failed} bulk failed"),
         input_files=[str(image_path)],
     )
 

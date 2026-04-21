@@ -139,75 +139,21 @@ curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_cluster/settings" \
     -d '{"persistent":{"cluster.max_shards_per_node":3000}}' >/dev/null 2>&1
 echo "  max_shards_per_node: 3000"
 
-# --- 0-replica template for single-node (halves shard count) ---
-curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_index_template/vhir-single-node" \
-    -H "Content-Type: application/json" \
-    -d '{"index_patterns":["case-*"],"priority":1,"template":{"settings":{"number_of_replicas":0}}}' >/dev/null 2>&1
-echo "  case-* replicas: 0 (single-node)"
-
-# --- 5. Register index template ---
-TEMPLATE_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/evtx_ecs_template.json"
-if [ -f "$TEMPLATE_FILE" ]; then
-    echo "Registering ECS index template..."
-    # Delete legacy template name if it exists (renamed from vhir-evtx to vhir-evtx-ecs)
-    curl -sk -u "admin:$OS_PASSWORD" -X DELETE "$OS_URL/_index_template/vhir-evtx" >/dev/null 2>&1 || true
-    curl -sk -u "admin:$OS_PASSWORD" \
-        -X PUT "$OS_URL/_index_template/vhir-evtx-ecs" \
-        -H "Content-Type: application/json" \
-        -d @"$TEMPLATE_FILE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-else
-    echo "Warning: Template file not found: $TEMPLATE_FILE"
-fi
-
-# Register CSV index template (Phase 2)
-CSV_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/csv_template.json"
-if [ -f "$CSV_TEMPLATE" ]; then
-    echo "Registering CSV index template..."
-    curl -sk -u "admin:$OS_PASSWORD" \
-        -X PUT "$OS_URL/_index_template/vhir-csv" \
-        -H "Content-Type: application/json" \
-        -d @"$CSV_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-fi
-
-# Register Plaso index templates (Phase 3)
-PREFETCH_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/prefetch_template.json"
-if [ -f "$PREFETCH_TEMPLATE" ]; then
-    echo "Registering Prefetch index template..."
-    curl -sk -u "admin:$OS_PASSWORD" \
-        -X PUT "$OS_URL/_index_template/vhir-prefetch" \
-        -H "Content-Type: application/json" \
-        -d @"$PREFETCH_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-fi
-
-SRUM_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/srum_template.json"
-if [ -f "$SRUM_TEMPLATE" ]; then
-    echo "Registering SRUM index template..."
-    curl -sk -u "admin:$OS_PASSWORD" \
-        -X PUT "$OS_URL/_index_template/vhir-srum" \
-        -H "Content-Type: application/json" \
-        -d @"$SRUM_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-fi
-
-TRANSCRIPT_TEMPLATE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/transcripts_template.json"
-if [ -f "$TRANSCRIPT_TEMPLATE" ]; then
-    echo "Registering Transcripts index template..."
-    curl -sk -u "admin:$OS_PASSWORD" \
-        -X PUT "$OS_URL/_index_template/vhir-transcripts" \
-        -H "Content-Type: application/json" \
-        -d @"$TRANSCRIPT_TEMPLATE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-fi
-
-# Register text log parser templates (W3C, Defender, Tasks, WER, SSH)
-for TPL_NAME in w3c defender tasks wer ssh vol3 json delimited accesslog hayabusa; do
-    TPL_FILE="$SCRIPT_DIR/../src/opensearch_mcp/mappings/${TPL_NAME}_template.json"
-    if [ -f "$TPL_FILE" ]; then
-        echo "Registering ${TPL_NAME} index template..."
-        curl -sk -u "admin:$OS_PASSWORD" \
-            -X PUT "$OS_URL/_index_template/vhir-${TPL_NAME}" \
-            -H "Content-Type: application/json" \
-            -d @"$TPL_FILE" | python3 -c "import sys,json; r=json.load(sys.stdin); print('  Template:', 'OK' if r.get('acknowledged') else r)"
-    fi
-done
+# --- 5. Index templates ---
+#
+# Removed 2026-04-22: template + vhir-single-node catch-all installs
+# previously done here are now handled by
+# src/opensearch_mcp/mappings/__init__.py (ensure_winlog_pipeline +
+# install_all_templates) at every MCP startup and ingest pre-flight.
+# That makes template edits on disk reach deployed clusters without
+# re-running this script. Having both paths install templates was a
+# drift trap: a template added to the registry but forgotten here (or
+# vice versa) left one installer in the wrong state.
+#
+# Every case-* template now declares index.number_of_replicas: 0
+# explicitly, so the priority-1 vhir-single-node catch-all that used
+# to live here is obsolete.
+echo "Index templates: installed by opensearch-mcp at MCP startup (see ensure_winlog_pipeline)."
 
 # --- 6. Smoke test ---
 echo "Running smoke test..."

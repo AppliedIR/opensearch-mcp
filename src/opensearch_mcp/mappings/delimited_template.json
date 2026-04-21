@@ -1,7 +1,10 @@
 {
   "index_patterns": ["case-*-delim-*", "case-*-zeek-*", "case-*-bodyfile-*"],
   "template": {
-    "settings": { "index.mapping.total_fields.limit": 1000 },
+    "settings": {
+      "index.mapping.total_fields.limit": 1000,
+      "index.number_of_replicas": 0
+    },
     "mappings": {
       "properties": {
         "@timestamp": {"type": "date", "ignore_malformed": true},

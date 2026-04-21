@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -14,6 +16,8 @@ from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_index(index: str) -> str | None:
@@ -257,6 +261,25 @@ def _get_os():
         try:
             _client.cluster.health()
             _client_verified = True
+            # Auto-install winlog pipeline + evtx template + 14 non-evtx
+            # templates on first verified connection. Idempotent —
+            # validate-before-PUT means a broken pipeline body never
+            # replaces the running one.
+            try:
+                from opensearch_mcp.mappings import ensure_winlog_pipeline
+
+                _install_result = ensure_winlog_pipeline(_client)
+                if _install_result.get("status") != "ok":
+                    logger.warning(
+                        "winlog pipeline install reported %s: %s",
+                        _install_result.get("status"),
+                        _install_result.get("error") or _install_result.get("other_templates"),
+                    )
+            except Exception as _install_e:
+                logger.warning(
+                    "winlog pipeline auto-install failed (non-fatal): %s",
+                    _install_e,
+                )
         except Exception as e:
             _client = None
             raise RuntimeError(
@@ -906,6 +929,142 @@ def idx_status() -> dict:
 
 
 @server.tool()
+def idx_shard_status() -> dict:
+    """Report OpenSearch shard usage and capacity headroom.
+
+    Returns current shard count, configured max_shards_per_node,
+    effective cluster-wide max (max_per_node x data_nodes), and
+    headroom percentage. Use before large ingests to sanity-check
+    capacity.
+    """
+    from opensearch_mcp.shard_capacity import _resolve_setting
+
+    client = _get_os()
+    try:
+        stats = client.cluster.stats(
+            filter_path=["indices.shards.total", "nodes.count.data"],
+            request_timeout=10,
+        )
+        # flat_settings=True conflicts with dotted filter_path; drop it.
+        settings = client.cluster.get_settings(
+            include_defaults=True,
+            filter_path=[
+                "persistent.cluster.max_shards_per_node",
+                "transient.cluster.max_shards_per_node",
+                "defaults.cluster.max_shards_per_node",
+            ],
+            request_timeout=10,
+        )
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    current = (stats.get("indices") or {}).get("shards", {}).get("total", 0) or 0
+    data_nodes = (stats.get("nodes") or {}).get("count", {}).get("data", 1) or 1
+    try:
+        max_per_node = int(_resolve_setting(settings, "cluster.max_shards_per_node", default=1000))
+    except (TypeError, ValueError):
+        max_per_node = 1000
+    max_total = max_per_node * int(data_nodes)
+    headroom_pct = round(((max_total - current) / max_total) * 100, 1) if max_total else 0.0
+
+    # Top 10 indices by shard count for capacity diagnosis.
+    # Exclude system/hidden indices (.opendistro_security, .tasks, etc.)
+    # so the top-10 reflects case data, not cluster housekeeping.
+    try:
+        indices_info = client.cat.indices(format="json", request_timeout=10) or []
+    except Exception:
+        indices_info = []
+    visible = [i for i in indices_info if not (i.get("index") or "").startswith(".")]
+    top_indices = sorted(
+        visible,
+        key=lambda i: int(i.get("pri", 0) or 0) + int(i.get("rep", 0) or 0),
+        reverse=True,
+    )[:10]
+    top = [
+        {
+            "index": i.get("index"),
+            "primary_shards": int(i.get("pri", 0) or 0),
+            "replica_shards": int(i.get("rep", 0) or 0),
+            "doc_count": int(i.get("docs.count", 0) or 0),
+            "size": i.get("store.size"),
+        }
+        for i in top_indices
+    ]
+
+    aid = audit.log(
+        tool="idx_shard_status",
+        params={},
+        result_summary=(f"{current}/{max_total} shards ({headroom_pct}% headroom)"),
+    )
+    resp = {
+        "current_shards": int(current),
+        "max_shards_per_node": max_per_node,
+        "data_nodes": int(data_nodes),
+        "max_total": max_total,
+        "headroom_pct": headroom_pct,
+        "status": ("ok" if headroom_pct >= 10 else "warning" if headroom_pct >= 2 else "critical"),
+        "top_indices_by_shard_count": top,
+    }
+    if aid:
+        resp["audit_id"] = aid
+    return resp
+
+
+@server.tool()
+def idx_install_pipelines() -> dict:
+    """Install or verify the winlog_data_normalize ingest pipeline and
+    evtx template.
+
+    Idempotent. Runs collision detection against operator-installed
+    templates; simulates the pipeline against all 3 expected input
+    shapes (object/string/list) BEFORE PUT so a broken new pipeline
+    cannot overwrite a working one. Writes an audit entry.
+
+    Returns status="ok" on success, status="error" with actionable
+    reason otherwise.
+    """
+    from opensearch_mcp.mappings import ensure_winlog_pipeline
+
+    client = _get_os()
+    result = ensure_winlog_pipeline(client)
+
+    # Surface the non-evtx template install outcome in the summary so
+    # operators running this manually see both halves of the work.
+    # Also promote per-template failures to an explicit `warnings` list
+    # on the response + a logger.warning so ops noticing template-install
+    # problems don't have to dig through the nested other_templates dict.
+    other = result.get("other_templates") or {}
+    failed_tpls = other.get("failed", [])
+    if failed_tpls:
+        warn_msgs = [
+            f"Template install failed: {f.get('template')} — {f.get('error', '')[:200]}"
+            for f in failed_tpls
+        ]
+        result.setdefault("warnings", []).extend(warn_msgs)
+        for m in warn_msgs:
+            logger.warning(m)
+    tpl_counts = (
+        f" templates:installed={len(other.get('installed', []))}"
+        f",failed={len(failed_tpls)}"
+        f",skipped={len(other.get('skipped', []))}"
+        if other
+        else ""
+    )
+    aid = audit.log(
+        tool="idx_install_pipelines",
+        params={},
+        result_summary=(
+            f"status={result.get('status')}"
+            + (f" error={result.get('error')[:200]}" if result.get("error") else "")
+            + tpl_counts
+        ),
+    )
+    if aid:
+        result["audit_id"] = aid
+    return result
+
+
+@server.tool()
 def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """Get a complete overview of indexed evidence for a case.
 
@@ -1307,6 +1466,59 @@ def idx_ingest(
         return resp
 
     # dry_run=False: launch ingest as a subprocess that survives gateway restart.
+    # Defensive reset — breaker state is module-level in the MCP
+    # server process; clear any inherited state from prior tool
+    # invocations in the same server lifetime.
+    from opensearch_mcp.bulk import reset_circuit_breaker as _reset_cb
+
+    _reset_cb()
+
+    # Pre-flight: abort if cluster shard capacity is exhausted. Halts
+    # loudly instead of discovering the condition mid-ingest through
+    # silent bulk rejections.
+    from opensearch_mcp.shard_capacity import (
+        _estimate_new_shards,
+        check_shard_headroom,
+    )
+
+    client = get_client()
+    ok, reason = check_shard_headroom(
+        client,
+        expected_new_shards=_estimate_new_shards("evtx"),
+        min_headroom_pct=10.0,
+    )
+    if not ok:
+        aid = audit.log(
+            tool="idx_ingest",
+            params={"path": path, "dry_run": False},
+            result_summary=f"aborted: {reason[:120]}",
+        )
+        # Write terminal status so idx_ingest_status surfaces the
+        # refusal (otherwise it returns "no active ingests" after a
+        # refuse). Error-prefix convention: HALT_SHARD_CAPACITY.
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        from opensearch_mcp.ingest_status import (
+            HALT_SHARD_CAPACITY,
+            write_status,
+        )
+
+        write_status(
+            case_id=case_id,
+            pid=os.getpid(),
+            run_id="",  # no run yet — refusal happens before subprocess spawn
+            status="failed",
+            hosts=[],
+            totals={},
+            started=_dt.now(_tz.utc).isoformat(),
+            error=f"{HALT_SHARD_CAPACITY}: {reason}",
+        )
+        resp = {"status": "failed", "error": "shard_capacity", "message": reason}
+        if aid:
+            resp["audit_id"] = aid
+        return resp
+
     import os as _os
     import uuid as _uuid
 
@@ -1425,18 +1637,32 @@ def idx_ingest_status(case_id: str = "") -> dict:
         minutes = int(elapsed // 60)
 
         totals = ing.get("totals", {})
+        bf = ing.get("bulk_failed", 0) or totals.get("bulk_failed", 0)
         s = {
             "case_id": ing.get("case_id"),
             "status": status,
             "pid": ing.get("pid"),
             "elapsed": f"{minutes}m",
             "total_indexed": totals.get("indexed", 0),
+            "bulk_failed": bf,
             "hosts_complete": totals.get("hosts_complete", 0),
             "hosts_total": totals.get("hosts_total", 0),
             "artifacts_complete": totals.get("artifacts_complete", 0),
             "artifacts_total": totals.get("artifacts_total", 0),
             "log_file": ing.get("log_file", ""),
         }
+        # Warn the LLM/user when rejections occurred — makes silent
+        # drops visible in the response payload, not only in stderr.
+        if bf > 0:
+            warnings = s.setdefault("warnings", [])
+            reason = ing.get("bulk_failed_reason", "")
+            warn_msg = f"{bf:,} events rejected by OpenSearch during bulk write"
+            if reason:
+                warn_msg += f" (first reason: {reason[:160]})"
+            warn_msg += (
+                ". Likely cluster capacity or mapping issue. Run idx_shard_status() to diagnose."
+            )
+            warnings.append(warn_msg)
 
         # Build per-host checklist for the LLM to present
         checklist = []
@@ -1481,6 +1707,33 @@ def idx_ingest_status(case_id: str = "") -> dict:
             s["message"] = (
                 "Ingest process died unexpectedly. Re-run to continue — dedup prevents duplicates."
             )
+        elif status == "failed":
+            # Error-prefix convention: refuse sites write status=failed
+            # with error="<halt_token>: <reason>". Surface the prefix
+            # in the message so the client sees which halt path fired.
+            _err = ing.get("error", "") or ""
+            _prefix = ""
+            if ":" in _err:
+                _prefix = _err.split(":", 1)[0].strip()
+            s["halt_reason"] = _prefix or "unspecified"
+            if _prefix == "shard_capacity_exhausted":
+                s["message"] = (
+                    f"Ingest refused before start ({_prefix}). No documents "
+                    f"were indexed. Address the underlying condition "
+                    f"(raise cluster.max_shards_per_node, archive old cases, "
+                    f"or run idx_shard_status() to inspect) then re-run."
+                )
+            elif _prefix == "circuit_breaker_tripped":
+                s["message"] = (
+                    f"Ingest halted mid-run ({_prefix}). "
+                    f"{totals.get('indexed', 0):,} docs indexed before halt. "
+                    f"Re-run on the same evidence after resolving capacity; "
+                    f"dedup prevents duplicates."
+                )
+            elif _prefix == "hayabusa_no_rules":
+                s["message"] = f"Ingest failed ({_prefix}): {_err[:200]}"
+            else:
+                s["message"] = f"Ingest failed: {_err[:200]}"
         elif status == "complete":
             invalidate_index_cache()  # new indices may exist
             errors = [
@@ -1916,7 +2169,48 @@ def _launch_background(
     import uuid as _uuid
     from datetime import datetime, timezone
 
+    # Defensive breaker reset — covers idx_ingest_json/delimited/accesslog.
+    from opensearch_mcp.bulk import reset_circuit_breaker as _reset_cb
     from opensearch_mcp.ingest_status import read_active_ingests, write_status
+
+    _reset_cb()
+
+    # Pre-flight shard capacity check — single insertion point covers
+    # json / delimited / accesslog subcommands routed through here.
+    # (idx_ingest and idx_ingest_memory have their own pre-flight
+    # before their specific subprocess launches.)
+    from opensearch_mcp.shard_capacity import (
+        _estimate_new_shards,
+        check_shard_headroom,
+    )
+
+    ok, reason = check_shard_headroom(
+        get_client(),
+        expected_new_shards=_estimate_new_shards(subcommand),
+        min_headroom_pct=10.0,
+    )
+    if not ok:
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        from opensearch_mcp.ingest_status import (
+            HALT_SHARD_CAPACITY,
+            write_status,
+        )
+
+        _active_case = _get_active_case() or ""
+        if _active_case:
+            write_status(
+                case_id=_active_case,
+                pid=os.getpid(),
+                run_id="",
+                status="failed",
+                hosts=[],
+                totals={},
+                started=_dt.now(_tz.utc).isoformat(),
+                error=f"{HALT_SHARD_CAPACITY}: {reason}",
+            )
+        return {"status": "failed", "error": "shard_capacity", "message": reason}
 
     active_case = _get_active_case()
     if not active_case:
@@ -2066,7 +2360,52 @@ def idx_ingest_memory(
             resp["audit_id"] = aid
         return resp
 
-    # dry_run=False: launch as subprocess
+    # dry_run=False: defensive reset, pre-flight, then launch subprocess.
+    from opensearch_mcp.bulk import reset_circuit_breaker as _reset_cb
+
+    _reset_cb()
+
+    from opensearch_mcp.shard_capacity import (
+        _estimate_new_shards,
+        check_shard_headroom,
+    )
+
+    ok, reason = check_shard_headroom(
+        get_client(),
+        expected_new_shards=_estimate_new_shards("memory"),
+        min_headroom_pct=10.0,
+    )
+    if not ok:
+        aid = audit.log(
+            tool="idx_ingest_memory",
+            params={"path": path, "dry_run": False, "tier": tier},
+            result_summary=f"aborted: {reason[:120]}",
+        )
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        from opensearch_mcp.ingest_status import (
+            HALT_SHARD_CAPACITY,
+            write_status,
+        )
+
+        _active = _get_active_case() or ""
+        if _active:
+            write_status(
+                case_id=_active,
+                pid=os.getpid(),
+                run_id="",
+                status="failed",
+                hosts=[],
+                totals={},
+                started=_dt.now(_tz.utc).isoformat(),
+                error=f"{HALT_SHARD_CAPACITY}: {reason}",
+            )
+        resp = {"status": "failed", "error": "shard_capacity", "message": reason}
+        if aid:
+            resp["audit_id"] = aid
+        return resp
+
     import os as _os
     import sys as _sys
     import uuid as _uuid
@@ -2153,7 +2492,7 @@ def idx_ingest_memory(
     }
     aid = audit.log(
         tool="idx_ingest_memory",
-        params={"path": path, "tier": tier, "pid": proc.pid},
+        params={"path": path, "tier": tier, "pid": proc.pid, "run_id": run_id},
         result_summary=f"started tier {tier} ({len(plugin_list)} plugins)",
         input_files=[path],
     )

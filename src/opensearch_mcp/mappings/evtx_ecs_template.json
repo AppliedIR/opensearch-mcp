@@ -7,7 +7,9 @@
       "vhir-sigma-windows": {}
     },
     "settings": {
-      "index.mapping.total_fields.limit": 5000
+      "index.mapping.total_fields.limit": 5000,
+      "index.default_pipeline": "winlog_data_normalize_v1",
+      "index.number_of_replicas": 0
     },
     "mappings": {
       "dynamic_templates": [
@@ -75,6 +77,27 @@
         },
         "script_block_text": {
           "type": "text"
+        },
+        "winlog.event_data.Data": {
+          "type": "object",
+          "dynamic": true
+        },
+        "winlog.event_data.Data.#text": {
+          "type": "keyword",
+          "ignore_above": 1024
+        },
+        "winlog.event_data.Data_raw": {
+          "type": "text",
+          "fields": {
+            "keyword": {
+              "type": "keyword",
+              "ignore_above": 10000
+            }
+          }
+        },
+        "winlog.event_data._pipeline_error": {
+          "type": "keyword",
+          "ignore_above": 512
         },
         "winlog.event_data.ScriptBlockText": {
           "type": "keyword",
@@ -155,5 +178,5 @@
       }
     }
   },
-  "priority": 19
+  "priority": 100
 }

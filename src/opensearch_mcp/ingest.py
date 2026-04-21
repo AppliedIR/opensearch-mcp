@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -223,6 +224,8 @@ def ingest(
     def _update_status(error: str = "") -> None:
         if not status_pid:
             return
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
         totals = _compute_totals(status_hosts)
         write_status(
             case_id=case_id,
@@ -233,6 +236,8 @@ def ingest(
             totals=totals,
             started=started_ts,
             error=error,
+            bulk_failed=totals.get("bulk_failed", 0),
+            bulk_failed_reason=get_last_bulk_reason(),
             elapsed_seconds=time.monotonic() - start,
         )
 
@@ -263,6 +268,8 @@ def ingest(
 
     # Final status
     if status_pid:
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
         totals = _compute_totals(status_hosts)
         has_errors = any(
             a.get("status") == "failed" for h in status_hosts for a in h.get("artifacts", [])
@@ -276,10 +283,56 @@ def ingest(
             totals=totals,
             started=started_ts,
             error="Some artifacts failed" if has_errors else "",
+            bulk_failed=totals.get("bulk_failed", 0),
+            bulk_failed_reason=get_last_bulk_reason(),
             elapsed_seconds=result.elapsed_seconds,
         )
 
     return result
+
+
+_HAYABUSA_RULES_CANDIDATES = (
+    "/usr/local/share/hayabusa-rules",
+    "/usr/share/hayabusa-rules",  # Debian / Ubuntu packaging
+    "/opt/hayabusa/rules",
+    "/opt/hayabusa-rules",
+)
+
+
+def _resolve_hayabusa_rules_dir() -> Path | None:
+    """Locate hayabusa rules directory.
+
+    Precedence:
+      1. $HAYABUSA_RULES_DIR env var
+      2. Standard install paths (see _HAYABUSA_RULES_CANDIDATES)
+      3. /opt/hayabusa*/rules (nested layout)
+      4. /opt/hayabusa* (direct layout — rules dir at the top level)
+
+    Returns None if nothing found. Only returns paths where the
+    directory AND a 'config' subdirectory both exist — hayabusa
+    needs both to function.
+    """
+    env_dir = os.environ.get("HAYABUSA_RULES_DIR", "").strip()
+    if env_dir:
+        p = Path(env_dir)
+        if p.is_dir() and (p / "config").is_dir():
+            return p
+    for candidate in _HAYABUSA_RULES_CANDIDATES:
+        p = Path(candidate)
+        if p.is_dir() and (p / "config").is_dir():
+            return p
+    opt = Path("/opt")
+    if opt.is_dir():
+        # Nested layout: /opt/hayabusa*/rules/
+        for sibling in sorted(opt.glob("hayabusa*")):
+            p = sibling / "rules"
+            if p.is_dir() and (p / "config").is_dir():
+                return p
+        # Direct layout: /opt/hayabusa*/ (no /rules subdir)
+        for sibling in sorted(opt.glob("hayabusa*")):
+            if sibling.is_dir() and (sibling / "config").is_dir():
+                return sibling
+    return None
 
 
 def run_hayabusa_batch(
@@ -309,12 +362,46 @@ def run_hayabusa_batch(
     for host in hosts:
         if not host.evtx_dir:
             continue
+
+        # Per-host rules-dir re-resolve. Environment state can change
+        # mid-case (external media unmounted, etc.) so don't cache
+        # once-per-batch. Fail loud if rules missing — previous
+        # silent-skip behavior caused the UAT-observed empty
+        # detection phase across an entire case.
+        rules_dir = _resolve_hayabusa_rules_dir()
+        if rules_dir is None:
+            if audit is not None:
+                audit.log(
+                    tool="ingest_hayabusa",
+                    params={"hostname": host.hostname},
+                    result_summary=(
+                        "SKIPPED: hayabusa rules directory not found. "
+                        "Set HAYABUSA_RULES_DIR env var or install rules "
+                        "to /usr/local/share/hayabusa-rules or /opt/hayabusa*."
+                    ),
+                )
+            if callable(on_progress):
+                on_progress(
+                    "hayabusa_failed",
+                    hostname=host.hostname,
+                    error="rules_not_found",
+                )
+            results[host.hostname] = {
+                "status": "failed",
+                "error": "rules_not_found",
+            }
+            continue
+
         _cid = _sanitize_index_component(case_id)
         _hn = _sanitize_index_component(host.hostname)
         csv_output = output_dir / f"hayabusa-{_cid}-{_hn}.csv"
         cmd = [
             hayabusa,
             "csv-timeline",
+            "-r",
+            str(rules_dir),
+            "-c",
+            str(rules_dir / "config"),
             "-d",
             str(host.evtx_dir),
             "-o",
@@ -373,6 +460,32 @@ def run_hayabusa_batch(
                 params={"hostname": host.hostname, "evtx_dir": str(host.evtx_dir)},
                 result_summary=f"{cnt} alerts indexed",
             )
+
+    # Rev 6 halt-state hygiene: if every host failed with rules_not_found,
+    # the entire detection phase was systematically disabled — write a
+    # halt-status file so portal + idx_ingest_status surface the reason.
+    hosts_with_results = [h for h in hosts if h.evtx_dir]
+    if hosts_with_results and all(
+        isinstance(results.get(h.hostname), dict)
+        and results[h.hostname].get("error") == "rules_not_found"
+        for h in hosts_with_results
+    ):
+        from opensearch_mcp.ingest_status import HALT_HAYABUSA_NO_RULES, write_status
+
+        write_status(
+            case_id=case_id,
+            pid=os.getpid(),
+            run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
+            status="failed",
+            hosts=[{"hostname": h.hostname} for h in hosts_with_results],
+            totals={},
+            started=datetime.now(timezone.utc).isoformat(),
+            error=(
+                f"{HALT_HAYABUSA_NO_RULES}: Hayabusa rules directory not "
+                f"found for any host. Set HAYABUSA_RULES_DIR env var or "
+                f"install rules to a standard path."
+            ),
+        )
 
     return results
 
@@ -479,6 +592,7 @@ def _ingest_hosts(
                                 "index_name": index_name,
                                 "file": str(evtx_file),
                                 "run_id": run_id,
+                                "bulk_failed": bf,
                             },
                             result_summary=f"{cnt} indexed, {sk} skipped"
                             + (f", {bf} bulk failed" if bf else ""),
@@ -656,6 +770,7 @@ def _ingest_hosts(
                         "tool": tool_name,
                         "file": str(artifact_path),
                         "run_id": run_id,
+                        "bulk_failed": bf,
                     },
                     result_summary=f"{cnt} indexed"
                     + (f", {sk} skipped" if sk else "")
@@ -781,6 +896,7 @@ def _ingest_plaso_artifact(
                 "tool": tool_name,
                 "path": str(artifact_path),
                 "run_id": run_id,
+                "bulk_failed": bf,
             },
             result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
             input_files=[str(artifact_path)],
@@ -878,7 +994,12 @@ def _ingest_custom_artifact(
         audit.log(
             tool=f"ingest_{tool_name}",
             audit_id=aid,
-            params={"hostname": host.hostname, "path": str(artifact_path), "run_id": run_id},
+            params={
+                "hostname": host.hostname,
+                "path": str(artifact_path),
+                "run_id": run_id,
+                "bulk_failed": bf,
+            },
             result_summary=f"{cnt} indexed"
             + (f", {sk} skipped" if sk else "")
             + (f", {bf} bulk failed" if bf else ""),
@@ -1103,6 +1224,7 @@ def _find_artifact_status(
 def _compute_totals(status_hosts: list[dict]) -> dict:
     """Compute aggregate totals from status host data."""
     total_indexed = 0
+    total_bulk_failed = 0
     artifacts_complete = 0
     artifacts_total = 0
     hosts_complete = 0
@@ -1112,6 +1234,7 @@ def _compute_totals(status_hosts: list[dict]) -> dict:
         for a in h.get("artifacts", []):
             artifacts_total += 1
             total_indexed += a.get("indexed", 0)
+            total_bulk_failed += a.get("bulk_failed", 0)
             if a.get("status") in ("complete", "failed"):
                 artifacts_complete += 1
             else:
@@ -1121,6 +1244,7 @@ def _compute_totals(status_hosts: list[dict]) -> dict:
 
     return {
         "indexed": total_indexed,
+        "bulk_failed": total_bulk_failed,
         "hosts_complete": hosts_complete,
         "hosts_total": len(status_hosts),
         "artifacts_complete": artifacts_complete,

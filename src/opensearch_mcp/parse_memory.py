@@ -297,6 +297,7 @@ def ingest_memory(
     plugins: list[str] | None = None,
     timeout: int = 3600,
     ingest_audit_id: str = "",
+    run_id: str = "",
     pipeline_version: str = "",
     on_progress=None,
     audit_log=None,
@@ -360,9 +361,16 @@ def ingest_memory(
             results[plugin] = {"status": "failed", "error": str(e)}
             if audit_log:
                 audit_log(
-                    tool=f"vol3_{suffix}",
-                    params={"plugin": plugin, "image": source_file},
+                    tool=f"ingest_vol3_{suffix}",
+                    params={
+                        "plugin": plugin,
+                        "image": source_file,
+                        "hostname": hostname,
+                        "index_name": index_name,
+                        "run_id": run_id,
+                    },
                     result_summary=f"FAILED: {e}",
+                    input_files=[str(image_path)],
                 )
             if on_progress:
                 on_progress("plugin_failed", plugin=plugin, error=str(e))
@@ -385,6 +393,27 @@ def ingest_memory(
             pipeline_version=pipeline_version,
         )
         results[plugin] = {"status": "complete", "indexed": count, "bulk_failed": bf}
+
+        # Per-plugin success audit — run_id + index_name required for
+        # resolver parser_step chaining (manager.py:1057, :1075).
+        # bulk_failed surfaces silent rejection counts per plugin so a
+        # shard-limit issue is visible in the audit trail, not only in
+        # stderr warnings.
+        if audit_log:
+            audit_log(
+                tool=f"ingest_vol3_{suffix}",
+                params={
+                    "plugin": plugin,
+                    "image": source_file,
+                    "hostname": hostname,
+                    "index_name": index_name,
+                    "run_id": run_id,
+                    "bulk_failed": bf,
+                },
+                result_summary=f"{count} indexed, {bf} bulk failed",
+                input_files=[str(image_path)],
+            )
+
         if on_progress:
             on_progress("plugin_done", plugin=plugin, indexed=count)
 

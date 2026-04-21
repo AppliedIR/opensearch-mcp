@@ -22,6 +22,8 @@ def write_status(
     totals: dict,
     started: str,
     error: str = "",
+    bulk_failed: int = 0,
+    bulk_failed_reason: str = "",
     elapsed_seconds: float = 0.0,
     log_file: str = "",
 ) -> None:
@@ -37,6 +39,8 @@ def write_status(
         "hosts": hosts,
         "totals": totals,
         "error": error,
+        "bulk_failed": bulk_failed,
+        "bulk_failed_reason": bulk_failed_reason,
         "elapsed_seconds": round(elapsed_seconds, 1),
     }
     if log_file:
@@ -55,6 +59,15 @@ def write_status(
         except OSError:
             pass
         raise
+
+
+# Error-prefix convention (replaces removed halt-state taxonomy).
+# Refuse sites write status="failed" via write_status() with the
+# error field prefixed by one of these tokens so the portal can
+# startswith()-render the halt reason without a separate schema.
+HALT_SHARD_CAPACITY = "shard_capacity_exhausted"
+HALT_CIRCUIT_BREAKER = "circuit_breaker_tripped"
+HALT_HAYABUSA_NO_RULES = "hayabusa_no_rules"
 
 
 def read_active_ingests() -> list[dict]:

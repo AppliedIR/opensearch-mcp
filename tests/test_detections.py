@@ -433,4 +433,5 @@ class TestDetectionsToolRegistration:
             for name, obj in inspect.getmembers(srv)
             if callable(obj) and name.startswith("idx_") and not name.startswith("_")
         ]
-        assert len(tool_names) == 17
+        # 17 original + idx_shard_status (shard-capacity) + idx_install_pipelines (Fix G)
+        assert len(tool_names) == 19
