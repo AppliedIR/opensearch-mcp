@@ -263,3 +263,64 @@ class TestCmdCsvValidation:
         with pytest.raises(SystemExit) as exc:
             cmd_csv(args)
         assert exc.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Fix 1.4 regression — .ndjson discovery in cmd_ingest_json walker
+# UAT 2026-04-22: newline-delimited JSON files using the .ndjson extension
+# (tshark, suricata eve-json, community convention) were silently skipped
+# in recursive mode because the allowlist was ("json", "jsonl") only.
+# This test asserts the allowlist now includes .ndjson and a file with
+# that extension is picked up by the walker's file-discovery glob.
+# ---------------------------------------------------------------------------
+
+
+class TestJsonWalkerNdjsonDiscovery:
+    def test_ndjson_in_allowlist(self, tmp_path):
+        """Regression: .ndjson extension must be discovered by the
+        walker's file filter. Reproduces the discovery step inline
+        (the exact filter idiom at ingest_cli.py:884) so the test
+        doesn't need live OpenSearch or a fully-wired cmd_ingest_json
+        invocation — it asserts the allowlist invariant directly."""
+        # Create a realistic mix of files at the walker's input-path level.
+        (tmp_path / "events.json").write_text('{"a": 1}\n')
+        (tmp_path / "events.jsonl").write_text('{"a": 1}\n')
+        (tmp_path / "suricata-eve.ndjson").write_text('{"a": 1}\n')
+        (tmp_path / "README.md").write_text("not json\n")
+        (tmp_path / "binary.dat").write_bytes(b"\x00\x01\x02")
+
+        # Mirror the exact filter at ingest_cli.py:884 post-Fix-1.4.
+        discovered = sorted(
+            f.name
+            for f in tmp_path.iterdir()
+            if f.suffix.lower() in (".json", ".jsonl", ".ndjson")
+        )
+        # .ndjson must appear; non-json extensions must not.
+        assert "suricata-eve.ndjson" in discovered
+        assert "events.json" in discovered
+        assert "events.jsonl" in discovered
+        assert "README.md" not in discovered
+        assert "binary.dat" not in discovered
+
+    def test_source_allowlist_literal_contains_ndjson(self):
+        """Belt-and-suspenders: grep the source to catch a future
+        refactor that accidentally drops .ndjson. Prevents the test
+        above from silently passing if someone changes the filter
+        to a dynamic set that excludes ndjson.
+
+        Resolves the source path via `__file__` so the test is
+        portable across clones, CI runners, and relocated repos.
+        """
+        from pathlib import Path
+
+        # tests/test_ingest_cli.py → repo root → src/opensearch_mcp/...
+        src = (
+            Path(__file__).resolve().parent.parent / "src" / "opensearch_mcp" / "ingest_cli.py"
+        ).read_text()
+        # The allowlist literal as it appears at line 884+.
+        assert '".ndjson"' in src, (
+            "ingest_cli.py must include '.ndjson' in the cmd_ingest_json "
+            "file-discovery allowlist (Fix 1.4). If the allowlist was "
+            "refactored to a module constant, update this assertion to "
+            "match the new symbol."
+        )

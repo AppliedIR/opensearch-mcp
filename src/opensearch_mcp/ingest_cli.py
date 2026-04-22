@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -881,7 +882,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     files = (
         [input_path]
         if input_path.is_file()
-        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
+        else sorted(
+            f for f in input_path.iterdir() if f.suffix.lower() in (".json", ".jsonl", ".ndjson")
+        )
     )
 
     if run_id:
@@ -899,6 +902,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
     total = total_sk = total_bf = 0
+    _json_failed_files: list[tuple[str, str]] = []
     try:
         for idx, f in enumerate(files):
             suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
@@ -908,25 +912,42 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 
             index_name = _build_idx_j(case_id, suffix, hostname)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-            cnt, sk, bf, hr = ingest_json(
-                f,
-                client,
-                index_name,
-                hostname,
-                time_field=time_field,
-                source_file=str(f),
-                ingest_audit_id=aid,
-                pipeline_version=f"opensearch-mcp-{__version__}",
-                time_from=time_from,
-                time_to=time_to,
-                batch_size=batch_size,
-            )
-            print(f"{cnt:,} entries")
-            if hr:
-                print("    NOTE: 'host' field renamed to 'source_host' (conflicts with host.name)")
-            total += cnt
-            total_sk += sk
-            total_bf += bf
+            try:
+                cnt, sk, bf, hr = ingest_json(
+                    f,
+                    client,
+                    index_name,
+                    hostname,
+                    time_field=time_field,
+                    source_file=str(f),
+                    ingest_audit_id=aid,
+                    pipeline_version=f"opensearch-mcp-{__version__}",
+                    time_from=time_from,
+                    time_to=time_to,
+                    batch_size=batch_size,
+                )
+                print(f"{cnt:,} entries")
+                if hr:
+                    print(
+                        "    NOTE: 'host' field renamed to 'source_host' "
+                        "(conflicts with host.name)"
+                    )
+                total += cnt
+                total_sk += sk
+                total_bf += bf
+            except ShardCapacityExhausted:
+                # Re-raise so the outer circuit-breaker handler fires
+                # — halting walk is the correct response to cluster
+                # capacity exhaustion. `except Exception` below must
+                # NOT swallow this.
+                raise
+            except Exception as e:  # noqa: BLE001 — per-file isolation (UAT 2026-04-22)
+                # parse_json imports _doc_id from parse_csv; identical
+                # TypeError crash class as delimited. Broad Exception
+                # ensures JSONL files with pathological rows skip-and-
+                # continue instead of aborting the walk.
+                _json_failed_files.append((str(f), str(e)[:200]))
+                print(f"skipped ({e})")
             if run_id:
                 _write_bg_status(
                     case_id,
@@ -955,6 +976,12 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    if _json_failed_files:
+        print(f"*** {len(_json_failed_files)} files failed to parse; continuing walk: ***")
+        for path, err in _json_failed_files[:10]:
+            print(f"  {path}: {err}")
+        if len(_json_failed_files) > 10:
+            print(f"  ... and {len(_json_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_json",
         audit_id=aid,
@@ -962,8 +989,11 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             "path": str(input_path),
             "hostname": hostname,
             "bulk_failed": total_bf,
+            "failed_files_count": len(_json_failed_files),
         },
-        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
+        result_summary=f"{total} indexed"
+        + (f", {total_bf} bulk failed" if total_bf else "")
+        + (f", {len(_json_failed_files)} files skipped" if _json_failed_files else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -1034,13 +1064,35 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         )
         import copy
 
+        from opensearch_mcp.bulk import ShardCapacityExhausted as _SCE
+
+        _failed_subdirs: list[tuple[str, str]] = []  # (path, error[:200])
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
             sub_args.hostname = d.name
             sub_args.recursive = False
             print(f"\n--- Host: {d.name} ---")
-            cmd_ingest_delimited(sub_args, examiner=examiner)
+            try:
+                cmd_ingest_delimited(sub_args, examiner=examiner)
+            except _SCE:
+                # Cluster capacity exhausted: halt the entire recursive
+                # walk, not just the current subdir. Re-raise past the
+                # except Exception below so the caller's halt-status
+                # path runs.
+                raise
+            except Exception as e:  # noqa: BLE001 — subdir-level isolation
+                # Subdir-level resilience (UAT 2026-04-22): a crash in
+                # one subdir must not abort the walk across sibling
+                # subdirs. Per-file isolation (fix inside the
+                # non-recursive path) covers within-subdir crashes;
+                # this wrapper covers subdir-level catastrophic failure.
+                _failed_subdirs.append((str(d), str(e)[:200]))
+                print(f"  SUBDIR SKIPPED ({d.name}): {e}", file=sys.stderr)
+        if _failed_subdirs:
+            print(f"\n*** {len(_failed_subdirs)} subdirs failed; walk continued: ***")
+            for path, err in _failed_subdirs:
+                print(f"  {path}: {err}")
         return
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
@@ -1100,6 +1152,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
     total = total_sk = total_bf = 0
+    _delim_failed_files: list[tuple[str, str]] = []  # (path, error[:200])
     try:
         for idx, f in enumerate(files):
             fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
@@ -1158,7 +1211,20 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                         files_done=idx + 1,
                         files_total=len(files),
                     )
-            except (ValueError, OSError) as e:
+            except ShardCapacityExhausted:
+                # Re-raise so the outer circuit-breaker handler fires.
+                # `except Exception` below must NOT swallow this; the
+                # whole walk must halt when cluster capacity is gone.
+                raise
+            except Exception as e:  # noqa: BLE001 — per-file isolation
+                # Walker resilience (UAT 2026-04-22): one bad file
+                # must not abort the walk. TypeError from _doc_id on
+                # prose-shaped content was the original crash; broad
+                # Exception covers that class + OSError + anything
+                # else. Failed files accumulate in _delim_failed_files
+                # (tracked below) so operators see "N skipped" in the
+                # summary, not silent data loss.
+                _delim_failed_files.append((str(f), str(e)[:200]))
                 print(f"skipped ({e})")
     except ShardCapacityExhausted as _sce:
         write_status(
@@ -1175,6 +1241,12 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    if _delim_failed_files:
+        print(f"*** {len(_delim_failed_files)} files failed to parse; continuing walk: ***")
+        for path, err in _delim_failed_files[:10]:
+            print(f"  {path}: {err}")
+        if len(_delim_failed_files) > 10:
+            print(f"  ... and {len(_delim_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_delimited",
         audit_id=aid,
@@ -1182,8 +1254,11 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             "path": str(input_path),
             "hostname": hostname,
             "bulk_failed": total_bf,
+            "failed_files_count": len(_delim_failed_files),
         },
-        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
+        result_summary=f"{total} indexed"
+        + (f", {total_bf} bulk failed" if total_bf else "")
+        + (f", {len(_delim_failed_files)} files skipped" if _delim_failed_files else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -1261,27 +1336,39 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
     total = total_sk = total_bf = 0
+    _alog_failed_files: list[tuple[str, str]] = []
     try:
         for idx, f in enumerate(files):
             from opensearch_mcp.paths import build_index_name as _build_idx_a
 
             index_name = _build_idx_a(case_id, suffix, hostname)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-            cnt, sk, bf = ingest_accesslog(
-                f,
-                client,
-                index_name,
-                hostname,
-                time_from=time_from,
-                time_to=time_to,
-                source_file=str(f),
-                ingest_audit_id=aid,
-                pipeline_version=f"opensearch-mcp-{__version__}",
-            )
-            print(f"{cnt:,} entries ({sk} skipped)")
-            total += cnt
-            total_sk += sk
-            total_bf += bf
+            try:
+                cnt, sk, bf = ingest_accesslog(
+                    f,
+                    client,
+                    index_name,
+                    hostname,
+                    time_from=time_from,
+                    time_to=time_to,
+                    source_file=str(f),
+                    ingest_audit_id=aid,
+                    pipeline_version=f"opensearch-mcp-{__version__}",
+                )
+                print(f"{cnt:,} entries ({sk} skipped)")
+                total += cnt
+                total_sk += sk
+                total_bf += bf
+            except ShardCapacityExhausted:
+                # Re-raise so the outer circuit-breaker handler fires.
+                raise
+            except Exception as e:  # noqa: BLE001 — per-file isolation (UAT 2026-04-22)
+                # General exception hygiene — OSError, UnicodeDecodeError,
+                # or unexpected parser failure. parse_accesslog uses its
+                # own hashlib.sha256 (not _doc_id) so it's not TypeError-
+                # vulnerable, but any crash should still skip-and-continue.
+                _alog_failed_files.append((str(f), str(e)[:200]))
+                print(f"skipped ({e})")
             if run_id:
                 _write_bg_status(
                     case_id,
@@ -1310,6 +1397,12 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    if _alog_failed_files:
+        print(f"*** {len(_alog_failed_files)} files failed to parse; continuing walk: ***")
+        for path, err in _alog_failed_files[:10]:
+            print(f"  {path}: {err}")
+        if len(_alog_failed_files) > 10:
+            print(f"  ... and {len(_alog_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_accesslog",
         audit_id=aid,
@@ -1317,8 +1410,11 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             "path": str(input_path),
             "hostname": hostname,
             "bulk_failed": total_bf,
+            "failed_files_count": len(_alog_failed_files),
         },
-        result_summary=f"{total} indexed" + (f", {total_bf} bulk failed" if total_bf else ""),
+        result_summary=f"{total} indexed"
+        + (f", {total_bf} bulk failed" if total_bf else "")
+        + (f", {len(_alog_failed_files)} files skipped" if _alog_failed_files else ""),
         input_files=[str(input_path)],
     )
     if run_id:
@@ -1634,7 +1730,83 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
 # ---------------------------------------------------------------------------
 
 
+def _install_terminal_status_guards() -> None:
+    """Worker terminal-status guards (UAT 2026-04-22 Fix 3.1).
+
+    On abnormal termination (uncaught Python exception, clean
+    sys.exit), write a terminal `failed` status before the worker
+    exits. Without this, the per-PID status file stays `running`
+    indefinitely, the concurrency cap blocks new ingests, and
+    operators must manually scrub the registry.
+
+    - `sys.excepthook`: captures uncaught exceptions with traceback
+    - `atexit`: idempotent fallback on clean interpreter shutdown —
+      only writes `failed` if the status file still says
+      `running`/`starting` (won't overwrite a clean `complete` or a
+      prior terminal write).
+
+    Signal coverage (verified live 2026-04-23):
+    - SIGINT (Ctrl-C): raises KeyboardInterrupt → excepthook fires
+    - SIGTERM: Python's default handler does NOT run atexit; process
+      exits silently. The liveness sweep in
+      `ingest_status.read_active_ingests()` is the backstop that
+      transitions `running`/`starting` → `failed`.
+    - SIGKILL, OOM-kill: no atexit, no excepthook. Same sweep backstop.
+    """
+    import atexit
+    import sys
+
+    def _write_terminal_if_running(error_prefix: str, detail: str) -> None:
+        try:
+            from opensearch_mcp.ingest_status import _STATUS_DIR
+
+            # Find our status file by PID — look for any JSON in
+            # _STATUS_DIR with our PID (ingest can be on any case).
+            pid = os.getpid()
+            for f in _STATUS_DIR.glob(f"*-{pid}.json"):
+                try:
+                    data = json.loads(f.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if data.get("status") not in ("running", "starting"):
+                    continue  # Idempotent: don't overwrite terminal
+                data["status"] = "failed"
+                prev_err = data.get("error") or ""
+                data["error"] = f"{error_prefix}: {detail}" + (
+                    f" | prior: {prev_err[:200]}" if prev_err else ""
+                )
+                try:
+                    tmp = f.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(data))
+                    os.replace(str(tmp), str(f))
+                except OSError:
+                    pass  # Best-effort; process is dying anyway
+        except Exception:  # noqa: BLE001
+            pass  # Absolutely must not raise from atexit/excepthook
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        _write_terminal_if_running(
+            "process_died_unexpectedly",
+            f"{exc_type.__name__}: {exc_value}",
+        )
+        # Also log traceback to stderr (default behavior preserved).
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _atexit_guard():
+        _write_terminal_if_running(
+            "process_died_unexpectedly",
+            "worker exited without writing terminal status",
+        )
+
+    sys.excepthook = _excepthook
+    atexit.register(_atexit_guard)
+
+
 def main() -> None:
+    # Install terminal-status guards before any subcommand runs so
+    # that crashes after VHIR_INGEST_RUN_ID is set are captured.
+    _install_terminal_status_guards()
+
     parser = argparse.ArgumentParser(
         prog="opensearch-ingest",
         description="Ingest forensic evidence into OpenSearch",

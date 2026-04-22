@@ -181,8 +181,12 @@ class TestReadActiveIngests:
         assert len(results) == 1
         assert results[0]["status"] == "running"
 
-    def test_marks_killed_when_pid_dead(self, status_dir):
-        """Dead process PID gets status changed to 'killed'."""
+    def test_marks_failed_when_pid_dead(self, status_dir):
+        """Dead process PID gets status changed to 'failed' with
+        `process_died_unexpectedly:` error prefix (UAT 2026-04-22
+        consolidation: 'killed' merged into 'failed', diagnostic
+        preserved via prefix so portal/CLI don't juggle a third
+        terminal state)."""
         write_status(
             case_id="INC001",
             pid=99999999,  # almost certainly not a real PID
@@ -192,11 +196,12 @@ class TestReadActiveIngests:
             totals={},
             started="2024-01-15T10:00:00Z",
         )
-        # Mock os.kill to raise ProcessLookupError
+        # Mock _is_process_alive to return False (zombie / dead / missing).
         with patch("opensearch_mcp.ingest_status._is_process_alive", return_value=False):
             results = read_active_ingests()
         assert len(results) == 1
-        assert results[0]["status"] == "killed"
+        assert results[0]["status"] == "failed"
+        assert results[0]["error"].startswith("process_died_unexpectedly:")
 
     def test_handles_corrupt_json_files(self, status_dir):
         """Corrupt JSON files are skipped, not crashed on."""

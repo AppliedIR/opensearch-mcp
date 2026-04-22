@@ -60,6 +60,13 @@ def _doc_id(
         stable = {k: v for k, v in row.items() if k not in volatile_keys}
     else:
         stable = row
+    # Coerce non-str keys to str and drop None keys — pathological
+    # rows (prose files walked as CSV, sloppy JSON emitters with null
+    # keys) can produce mixed-type dicts where json.dumps(sort_keys=True)
+    # fails with TypeError comparing None to str. Deterministic coerce
+    # keeps the hash stable for well-typed rows and prevents aborting
+    # the walk on bad rows. Used by delimited AND json ingests.
+    stable = {str(k): v for k, v in stable.items() if k is not None}
     content = json.dumps(stable, sort_keys=True)
     return hashlib.sha256(f"{index_name}:{content}".encode()).hexdigest()[:20]
 

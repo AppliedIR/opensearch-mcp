@@ -41,7 +41,20 @@ _ZEEK_NULL = {"-", "(empty)", ""}
 
 
 def _detect_delimited_format(path: Path) -> dict:
-    """Auto-detect format, delimiter, header style."""
+    """Auto-detect format, delimiter, header style.
+
+    After classification, verify the chosen delimiter has a consistent
+    count across first N lines. Prose files (license text, READMEs,
+    syslog) that happen to contain structured-looking characters get
+    rejected as "unknown" rather than parsed into a guaranteed-crash.
+    The walker's existing "unknown → skip" path then handles them
+    cleanly. Heuristic does not parse quoting; heavily-quoted CSV with
+    variable comma density in quoted fields may fall through as
+    unknown (rare in forensic output). Operators hitting this edge
+    case can ingest by explicit path (recursive=False). Fix 1.1's
+    broadened per-file except catches anything that still reaches the
+    parser.
+    """
     encoding = _detect_encoding(path)
     with open(path, "r", encoding=encoding, errors="replace") as f:
         first_lines = []
@@ -56,20 +69,33 @@ def _detect_delimited_format(path: Path) -> dict:
     if not first_lines:
         return {"format": "unknown"}
 
-    if first_lines[0].startswith("#separator") or first_lines[0].startswith("#fields"):
+    first = first_lines[0]
+    if first.startswith("#separator") or first.startswith("#fields"):
         return {"format": "zeek", "delimiter": "\t", "header": "zeek"}
 
-    first = first_lines[0]
     if "|" in first:
         parts = first.split("|")
         if len(parts) == 11 and len(parts[0]) in (0, 1, 32):
+            # Bodyfile: strict 11-column |-separated format. Parser-level
+            # validation catches bad rows. Bypass the variance check —
+            # it would pass anyway, but explicit bypass makes intent
+            # clear (bodyfile is a strict schema, not a heuristic match).
             return {"format": "bodyfile", "delimiter": "|", "header": None}
-        return {"format": "pipe", "delimiter": "|", "header": "first_line"}
+        candidate = {"format": "pipe", "delimiter": "|", "header": "first_line"}
+    elif first.count("\t") > 0 and first.count("\t") >= first.count(","):
+        candidate = {"format": "tsv", "delimiter": "\t", "header": "first_line"}
+    else:
+        candidate = {"format": "csv", "delimiter": ",", "header": "first_line"}
 
-    if first.count("\t") > 0 and first.count("\t") >= first.count(","):
-        return {"format": "tsv", "delimiter": "\t", "header": "first_line"}
-
-    return {"format": "csv", "delimiter": ",", "header": "first_line"}
+    # Variance check: the classified delimiter must appear consistently
+    # across first N lines. Prose has wildly varying counts; structured
+    # data has near-constant counts. Rejects license files, READMEs,
+    # syslog that happen to contain a classified delimiter character.
+    delim = candidate["delimiter"]
+    counts = [ln.count(delim) for ln in first_lines[:10]]
+    if min(counts) == 0 or (max(counts) - min(counts)) > max(counts) // 2:
+        return {"format": "unknown"}
+    return candidate
 
 
 def _parse_zeek_header(path: Path) -> list[str]:

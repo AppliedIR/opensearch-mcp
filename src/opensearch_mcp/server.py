@@ -1,4 +1,10 @@
-"""OpenSearch MCP server — 17 tools for forensic evidence querying, ingest, and enrichment."""
+"""OpenSearch MCP server — 17 tools for forensic evidence querying, ingest, and enrichment.
+
+Module-import side effect: installs a SIGCHLD reaper (see
+`_install_sigchld_reaper`) so child zombies from ingest subprocesses
+are reaped without blocking the gateway. Any process that imports
+this module gets the handler.
+"""
 
 from __future__ import annotations
 
@@ -2086,6 +2092,51 @@ def idx_enrich_triage(
 
 
 _MAX_CONCURRENT_INGESTS = 3
+
+
+def _install_sigchld_reaper() -> None:
+    """Install a SIGCHLD handler to reap child zombies (UAT 2026-04-22
+    Fix 3.3).
+
+    `_spawn_ingest` uses `start_new_session=True` + systemd-run which
+    detaches the ingest worker from the MCP server's session, but the
+    immediate Popen child (the systemd-run helper or the bare Popen
+    fallback) is still the MCP server's direct child from a fork
+    perspective. When it exits, it becomes a zombie until reaped.
+    Without this handler, zombies accumulate in `ps` until the server
+    restarts — cosmetic but annoying for operators.
+
+    Bug 3 concurrency cap is NOT blocked by this (fixed separately via
+    the liveness sweep in `ingest_status.read_active_ingests` which
+    now detects Z-state). This handler is pure kernel-table hygiene.
+
+    Idempotent: safe to call multiple times; signal.signal is replaced
+    each time with the same semantics.
+    """
+    import signal
+
+    def _reap(*_args):
+        try:
+            while True:
+                pid, _status = os.waitpid(-1, os.WNOHANG)
+                if pid == 0:
+                    break  # No more children ready to reap
+        except (ChildProcessError, InterruptedError):
+            pass
+        except Exception:  # noqa: BLE001
+            pass  # Handler must never raise
+
+    try:
+        signal.signal(signal.SIGCHLD, _reap)
+    except (OSError, ValueError):
+        # Some environments (Windows, restricted) don't allow SIGCHLD
+        # signal handlers. Silent no-op.
+        pass
+
+
+# Install on module import so the handler is active for any Popen
+# that runs through this process. Idempotent.
+_install_sigchld_reaper()
 
 
 def _spawn_ingest(cmd, env, stdout, run_id):

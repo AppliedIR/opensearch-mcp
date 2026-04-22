@@ -71,7 +71,22 @@ HALT_HAYABUSA_NO_RULES = "hayabusa_no_rules"
 
 
 def read_active_ingests() -> list[dict]:
-    """Read all ingest status files. Detects dead processes."""
+    """Read all ingest status files. Detects dead processes.
+
+    UAT 2026-04-22 fixes applied:
+    - Sweep inspects both "running" AND "starting" states (worker
+      that crashes during the brief pre-running phase used to stay
+      stuck forever and block the concurrency cap).
+    - Dead-pid finding is now PERSISTED to the status file on disk,
+      not just mutated in memory. External consumers (portal, CLI,
+      `jq`) reading the disk state directly see the update.
+    - `_is_process_alive` now detects zombie (Z-state) processes
+      via `/proc/{pid}/status` — `os.kill(pid, 0)` passes for
+      zombies and missed the exact UAT failure mode.
+    - "killed" consolidated to "failed" with a prefixed error token
+      (`process_died_unexpectedly:`) so portal/CLI don't juggle a
+      third terminal state; diagnostic preserved via the prefix.
+    """
     cleanup_old()
     if not _STATUS_DIR.exists():
         return []
@@ -84,11 +99,23 @@ def read_active_ingests() -> list[dict]:
         # Skip orphaned PID-0 placeholders
         if data.get("pid") == 0:
             continue
-        if data.get("status") == "running":
+        if data.get("status") in ("running", "starting"):
             pid = data.get("pid", 0)
             run_id = data.get("run_id", "")
             if pid and not _is_process_alive(pid, run_id):
-                data["status"] = "killed"
+                data["status"] = "failed"
+                prev_error = data.get("error") or ""
+                data["error"] = "process_died_unexpectedly: " + (
+                    prev_error if prev_error else "detected by sweep"
+                )
+                # Persist the sweep finding so external consumers
+                # reading the disk state directly see the update.
+                try:
+                    tmp = f.with_suffix(".json.tmp")
+                    tmp.write_text(json.dumps(data))
+                    os.replace(str(tmp), str(f))
+                except OSError:
+                    pass  # Best-effort — in-memory result is still correct
         results.append(data)
     return results
 
@@ -100,7 +127,13 @@ def _status_path_safe(case_id: str, pid: int) -> Path:
 
 
 def _is_process_alive(pid: int, run_id: str) -> bool:
-    """Check if a process is alive AND is our ingest process (not PID reuse)."""
+    """Check if a process is alive AND is our ingest process (not PID reuse).
+
+    UAT 2026-04-22: `os.kill(pid, 0)` succeeds for zombies (reparented
+    processes awaiting reap), so the prior check returned True for
+    crashed-but-not-yet-reaped workers. Now parses /proc/{pid}/status
+    and returns False on `State: Z` so sweep correctly flags them.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -109,7 +142,22 @@ def _is_process_alive(pid: int, run_id: str) -> bool:
         # Process exists but belongs to another user — treat as alive
         # (conservative: don't report "killed" for a running process)
         return True
-    # PID exists — verify it's our process via /proc environ
+    # Zombie detection — os.kill(pid, 0) passes for Z-state processes.
+    # Parse /proc/{pid}/status explicitly.
+    try:
+        with open(f"/proc/{pid}/status") as status_f:
+            for line in status_f:
+                if line.startswith("State:"):
+                    # Format: "State:\tR (running)" / "State:\tZ (zombie)"
+                    parts = line.split()
+                    if len(parts) >= 2 and "Z" in parts[1]:
+                        return False
+                    break
+    except OSError:
+        # /proc not readable — fall through to existing run_id/PID logic.
+        pass
+    # PID exists (and isn't zombie) — verify it's our process via
+    # /proc environ to guard against PID reuse.
     if run_id:
         try:
             environ = Path(f"/proc/{pid}/environ").read_bytes()
