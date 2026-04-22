@@ -98,6 +98,140 @@ class TestWriteStatus:
         data = json.loads(files[0].read_text())
         assert data["error"] == "Connection refused"
 
+    # -------------------------------------------------------------------
+    # UAT 2026-04-23: monotonic transitions. Terminal states (complete,
+    # failed) must not be overwritten by a later running/starting write.
+    # Race: fast-worker writes "complete" before MCP's post-spawn
+    # write_status(status="running", ...) at server.py:2336 lands; the
+    # later "running" clobbered the terminal so the sweep mislabeled the
+    # worker failed: process_died_unexpectedly.
+    # -------------------------------------------------------------------
+
+    def test_monotonic_running_does_not_downgrade_complete(self, status_dir):
+        """Worker's terminal complete must survive MCP's post-spawn running write."""
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-1",
+            status="complete",
+            hosts=[],
+            totals={"indexed": 42},
+            started="2024-01-15T10:00:00Z",
+        )
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-1",
+            status="running",
+            hosts=[],
+            totals={},
+            started="2024-01-15T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+        assert data["totals"]["indexed"] == 42  # Terminal payload preserved
+
+    def test_monotonic_running_does_not_downgrade_failed(self, status_dir):
+        """Worker's terminal failed must survive a later running write."""
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-2",
+            status="failed",
+            hosts=[],
+            totals={},
+            started="2024-01-15T10:00:00Z",
+            error="shard_capacity_exhausted: cluster full",
+        )
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-2",
+            status="running",
+            hosts=[],
+            totals={},
+            started="2024-01-15T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "failed"
+        assert "shard_capacity_exhausted" in data["error"]
+
+    def test_monotonic_starting_does_not_downgrade_complete(self, status_dir):
+        """Same guard applies to a late 'starting' write (belt-and-suspenders)."""
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-3",
+            status="complete",
+            hosts=[],
+            totals={},
+            started="2024-01-15T10:00:00Z",
+        )
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="race-3",
+            status="starting",
+            hosts=[],
+            totals={},
+            started="2024-01-15T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+
+    def test_monotonic_complete_overwrites_running(self, status_dir):
+        """Normal forward transition: running → complete must still work."""
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="normal-1",
+            status="running",
+            hosts=[],
+            totals={"indexed": 10},
+            started="2024-01-15T10:00:00Z",
+        )
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="normal-1",
+            status="complete",
+            hosts=[],
+            totals={"indexed": 100},
+            started="2024-01-15T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+        assert data["totals"]["indexed"] == 100
+
+    def test_monotonic_running_updates_allowed_when_no_terminal(self, status_dir):
+        """Running → running progress updates must still work (no terminal in file)."""
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="progress-1",
+            status="running",
+            hosts=[],
+            totals={"indexed": 10},
+            started="2024-01-15T10:00:00Z",
+        )
+        write_status(
+            case_id="INC001",
+            pid=12345,
+            run_id="progress-1",
+            status="running",
+            hosts=[],
+            totals={"indexed": 50},
+            started="2024-01-15T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "running"
+        assert data["totals"]["indexed"] == 50
+
     def test_sanitizes_case_id_path_traversal(self, status_dir):
         """case_id with ../ should not escape the status directory."""
         write_status(

@@ -27,8 +27,34 @@ def write_status(
     elapsed_seconds: float = 0.0,
     log_file: str = "",
 ) -> None:
-    """Write ingest progress atomically."""
+    """Write ingest progress atomically.
+
+    UAT 2026-04-23: terminal states (`complete`, `failed`) are
+    monotonic and must not be downgraded by a later `running` or
+    `starting` write. The specific race that surfaced this: a fast
+    worker (empty-walk) writes its terminal `complete` before the
+    MCP server's post-spawn `write_status(pid=proc.pid,
+    status="running", ...)` lands — and that later write clobbered
+    the terminal into `running`, after which the sweep saw a dead
+    PID on a `running` record and stamped `failed:
+    process_died_unexpectedly`. The guard below rejects any attempt
+    to regress from a terminal state so Fix 3.1's worker-side
+    terminal write always survives.
+    """
     _STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _status_path_safe(case_id, pid)
+    # Monotonic transition guard: terminal → running/starting is not
+    # a valid downgrade. Read-before-write is only best-effort (a
+    # race between the read and the atomic replace still allows one
+    # stale overwrite), but the window is orders of magnitude
+    # narrower than the unguarded case and closes the observed bug.
+    if status in ("running", "starting") and path.exists():
+        try:
+            existing = json.loads(path.read_text())
+            if existing.get("status") in ("complete", "failed"):
+                return
+        except (json.JSONDecodeError, OSError):
+            pass  # Unreadable existing file — fall through to write
     data = {
         "run_id": run_id,
         "pid": pid,
@@ -45,7 +71,6 @@ def write_status(
     }
     if log_file:
         data["log_file"] = log_file
-    path = _status_path_safe(case_id, pid)
     fd, tmp = tempfile.mkstemp(dir=str(_STATUS_DIR), suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
