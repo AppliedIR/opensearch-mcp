@@ -232,6 +232,135 @@ class TestWriteStatus:
         assert data["status"] == "running"
         assert data["totals"]["indexed"] == 50
 
+    # -------------------------------------------------------------------
+    # B79 follow-on (2026-04-23): intel path deserves the same
+    # fast-exit-race regression coverage as ingest. The race surface
+    # is identical — server.py:_launch_enrich_background writes a
+    # post-spawn `running` after a potentially fast worker already
+    # wrote terminal `complete` (no_iocs case) or `failed`
+    # (exception). The monotonic guard is generic, but wiring is
+    # easy to break per-artifact; these tests pin the intel shape.
+    # -------------------------------------------------------------------
+
+    def test_monotonic_intel_complete_survives_post_spawn_running(self, status_dir):
+        """Fast enrich worker (no_iocs path) writes terminal complete
+        before _launch_enrich_background's post-spawn running write
+        lands. The post-spawn running must not clobber the terminal;
+        otherwise the Z-state sweep flags the dead PID as
+        process_died_unexpectedly even though enrichment succeeded."""
+        # Worker finishes fast and writes terminal complete with the
+        # intel shape from ingest_cli.cmd_enrich_intel:1506-1578 —
+        # hostname="(enrich)" + artifact "intel".
+        intel_done = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "complete"}]}
+        ]
+        intel_running = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "running"}]}
+        ]
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99991,
+            run_id="intel-race-complete",
+            status="complete",
+            hosts=intel_done,
+            totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 1},
+            started="2026-04-23T10:00:00Z",
+        )
+        # Server.py post-spawn running write lands AFTER worker exit.
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99991,
+            run_id="intel-race-complete",
+            status="running",
+            hosts=intel_running,
+            totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+            started="2026-04-23T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+        # Terminal payload preserved — artifacts_complete=1, not 0.
+        assert data["totals"]["artifacts_complete"] == 1
+        # Shape preserved as intel, not ingest.
+        assert data["hosts"][0]["hostname"] == "(enrich)"
+        assert data["hosts"][0]["artifacts"][0]["name"] == "intel"
+        assert data["hosts"][0]["artifacts"][0]["status"] == "complete"
+
+    def test_monotonic_intel_failed_survives_post_spawn_running(self, status_dir):
+        """Worker crashes fast (e.g. enrich_case raises) → cmd_enrich_intel
+        writes terminal failed with the real exception; post-spawn
+        running must not clobber the failure record. If the guard
+        regresses, operators would see running → sweep would then
+        stamp process_died_unexpectedly, losing the real failure
+        reason from cmd_enrich_intel:1547-1552."""
+        intel_failed = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "failed"}]}
+        ]
+        intel_running = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "running"}]}
+        ]
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99992,
+            run_id="intel-race-failed",
+            status="failed",
+            hosts=intel_failed,
+            totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+            started="2026-04-23T10:00:00Z",
+            error="ConnectionError: gateway dropped connection",
+        )
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99992,
+            run_id="intel-race-failed",
+            status="running",
+            hosts=intel_running,
+            totals={},
+            started="2026-04-23T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "failed"
+        # Real exception text preserved — NOT replaced by sweep's
+        # process_died_unexpectedly framing.
+        assert "gateway dropped connection" in data["error"]
+        assert "process_died_unexpectedly" not in data["error"]
+
+    def test_monotonic_intel_starting_does_not_downgrade_complete(self, status_dir):
+        """Belt-and-suspenders: the pre-spawn pid=0 placeholder from
+        _launch_enrich_background writes status=starting. If the
+        worker's pid later collided (keyed on same (case, pid) tuple)
+        and landed before the placeholder cleanup, a 'starting'
+        regress must not overwrite a terminal complete either."""
+        intel_done = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "complete"}]}
+        ]
+        intel_starting = [
+            {"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "starting"}]}
+        ]
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99993,
+            run_id="intel-race-starting",
+            status="complete",
+            hosts=intel_done,
+            totals={"indexed": 5, "artifacts_total": 1, "artifacts_complete": 1},
+            started="2026-04-23T10:00:00Z",
+        )
+        write_status(
+            case_id="INC-ENRICH",
+            pid=99993,
+            run_id="intel-race-starting",
+            status="starting",
+            hosts=intel_starting,
+            totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+            started="2026-04-23T10:00:00Z",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+        assert data["totals"]["indexed"] == 5
+
     def test_sanitizes_case_id_path_traversal(self, status_dir):
         """case_id with ../ should not escape the status directory."""
         write_status(
