@@ -1476,7 +1476,13 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
 
 def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> None:
-    """Enrich indexed data with OpenCTI threat intel."""
+    """Enrich indexed data with OpenCTI threat intel.
+
+    Progress is written to the shared `ingest-status` dir with
+    `artifact_name="intel"` so the async MCP entry point
+    (`idx_enrich_intel` via `_launch_enrich_background`) can surface
+    it through `idx_ingest_status`.
+    """
     case_id = _resolve_case_id(getattr(args, "case", None))
     force = getattr(args, "force", False)
 
@@ -1498,30 +1504,79 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
             print("  (excluding already-enriched documents; use --force to include)")
         return
 
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    start_mono = time.monotonic()
+    started_ts = datetime.now(timezone.utc).isoformat()
+
+    def _write_enrich_status(status, indexed=0, files_done=0, files_total=0):
+        """Write enrichment status record. No-op if not running under run_id."""
+        if not run_id:
+            return
+        _write_bg_status(
+            case_id,
+            run_id,
+            status,
+            "(enrich)",
+            "intel",
+            started_ts,
+            time.monotonic() - start_mono,
+            indexed=indexed,
+            files_done=files_done,
+            files_total=files_total,
+        )
+
+    # Initial "running" write — idempotent under monotonic protection
+    # (server.py post-spawn also writes running; both values are equal).
+    _write_enrich_status("running")
+
+    # Closure state for the progress callback so we can thread total/done
+    # counts through to the status file without another arg passthrough.
+    _progress_state = {"total": 0, "done": 0}
+
     def _progress(event, **kw):
         if event == "extracting":
             print("Extracting unique IOCs from indexed data...")
         elif event == "extracted":
             print(f"  IPs: {kw['ips']}, Hashes: {kw['hashes']}, Domains: {kw['domains']}")
         elif event == "looking_up":
-            total = kw.get("total", 0)
+            total = kw.get("total", 0) or _progress_state["total"]
             done = kw.get("done", 0)
             if done:
+                _progress_state["done"] = done
                 print(f"  Looked up {done}/{total}...", flush=True)
+                _write_enrich_status("running", indexed=done, files_done=done, files_total=total)
             else:
+                _progress_state["total"] = total
                 print(f"Looking up {total} IOCs via OpenCTI...")
+                _write_enrich_status("running", files_total=total)
         elif event == "stamping":
             print(f"Stamping {kw['matched']} matched IOCs to documents...")
 
-    result = enrich_case(client, case_id, force=force, on_progress=_progress)
+    try:
+        result = enrich_case(client, case_id, force=force, on_progress=_progress)
+    except Exception as e:  # noqa: BLE001
+        # Terminal failed write — atexit guard would catch this too, but
+        # explicit terminal state with the real exception surface beats
+        # "process_died_unexpectedly:" framing for a known failure path.
+        _write_enrich_status("failed")
+        print(f"Enrichment failed: {e}", file=sys.stderr)
+        raise
 
     if result["status"] == "no_iocs":
         print("No external IOCs found in indexed data.")
+        _write_enrich_status("complete")
         return
 
     print(f"\nDone. {result['documents_updated']} documents updated.")
     print(f"  MALICIOUS: {result['malicious']}")
     print(f"  SUSPICIOUS: {result['suspicious']}")
+
+    _write_enrich_status(
+        "complete",
+        indexed=result.get("documents_updated", 0),
+        files_done=_progress_state["done"] or result.get("iocs_looked_up", 0),
+        files_total=_progress_state["total"] or result.get("iocs_extracted", 0),
+    )
 
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     audit.log(

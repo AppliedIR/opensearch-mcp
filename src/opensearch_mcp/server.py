@@ -2007,18 +2007,28 @@ def idx_enrich_intel(
         case_id: Case to enrich (default: active case).
         dry_run: Extract and count IOCs without lookup (default True).
         force: Re-enrich even if already enriched (default False).
+
+    Execute mode (dry_run=False) runs asynchronously. The tool returns
+    immediately with `{status: "started", pid, run_id, log_file}`; the
+    worker enriches in the background. For realistic corpora (1k–10k
+    IOCs × rate-limited OpenCTI), enrichment takes 15–60 minutes,
+    which is well past the gateway's 300-second synchronous tool
+    timeout — hence the async shape.
+
+    Progress is surfaced through the existing `idx_ingest_status`
+    tool. Enrichment runs appear alongside ingest runs with
+    `artifact_name="intel"` — use that to disambiguate.
     """
     from opensearch_mcp.paths import sanitize_index_component
-    from opensearch_mcp.threat_intel import enrich_case, extract_unique_iocs
+    from opensearch_mcp.threat_intel import extract_unique_iocs
 
     cid = case_id or _get_active_case()
     if not cid:
         return {"error": "No active case. Run 'vhir case activate' first."}
 
-    client = _get_os()
-    safe_case = sanitize_index_component(cid)
-
     if dry_run:
+        client = _get_os()
+        safe_case = sanitize_index_component(cid)
         iocs = extract_unique_iocs(client, f"case-{safe_case}-*", force=force)
         return {
             "status": "preview",
@@ -2029,20 +2039,7 @@ def idx_enrich_intel(
             "total_iocs": sum(len(v) for v in iocs.values()),
         }
 
-    result = enrich_case(client, cid, force=force)
-    aid = audit.log(
-        tool="idx_enrich_intel",
-        params={"case_id": cid, "force": force},
-        result_summary=(
-            f"{result.get('documents_updated', 0)} docs updated, "
-            f"{result.get('malicious', 0)} malicious"
-            if result.get("status") == "complete"
-            else result.get("status", "unknown")
-        ),
-    )
-    if aid:
-        result["audit_id"] = aid
-    return result
+    return _launch_enrich_background(cid, force=force)
 
 
 @server.tool()
@@ -2358,6 +2355,124 @@ def _launch_background(
         params={"path": path, "hostname": hostname},
         result_summary=f"Background ingest started (pid={proc.pid})",
         input_files=[path],
+    )
+    if aid:
+        resp["audit_id"] = aid
+    return resp
+
+
+def _launch_enrich_background(case_id: str, force: bool = False) -> dict:
+    """Launch idx_enrich_intel as a background subprocess.
+
+    Mirrors `_launch_background` but shaped for enrichment: no path
+    positional, no hostname, no shard-capacity preflight (enrichment
+    doesn't create new indices — it stamps existing docs). Returns
+    immediately with `{status: "started", pid, run_id, log_file}` so
+    the gateway's 300s synchronous tool timeout cannot kill a real
+    enrichment run (UAT 2026-04-23 B79: 5,426-IOC corpus × rate-limited
+    OpenCTI = 15–60 min, 3×–12× the timeout).
+
+    Status records use `artifact_name="intel"` so the sweep + monotonic
+    transition protection in `ingest_status` apply equally; operators
+    watch progress via `idx_ingest_status` (intel and ingest runs
+    interleave there — disambiguate on `artifact_name`).
+    """
+    import os as _os
+    import sys as _sys
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from opensearch_mcp.ingest_status import read_active_ingests, write_status
+
+    active_case = _get_active_case()
+    if not active_case:
+        return {"error": "No active case. Run 'vhir case activate' first."}
+    # An explicit case_id arg (not the active case) is respected: pass
+    # it through to the worker and use it for status-file keying.
+    status_case = case_id or active_case
+
+    # Concurrency gate — same cap as ingest. Enrichment is one-per-case
+    # and typically long; running multiple simultaneously would starve
+    # the rate limiter.
+    active = read_active_ingests()
+    running = [i for i in active if i.get("status") in ("running", "starting")]
+    if len(running) >= _MAX_CONCURRENT_INGESTS:
+        return {
+            "error": (
+                f"Too many concurrent ingest/enrich runs ({len(running)} "
+                f"running, max {_MAX_CONCURRENT_INGESTS}). Wait for "
+                "current runs to complete. Use idx_ingest_status() to check."
+            ),
+            "running": [{"case_id": r.get("case_id"), "pid": r.get("pid")} for r in running],
+        }
+
+    run_id = str(_uuid.uuid4())
+    env = _os.environ.copy()
+    env["VHIR_INGEST_RUN_ID"] = run_id
+
+    cmd = [
+        _sys.executable,
+        "-m",
+        "opensearch_mcp.ingest_cli",
+        "enrich-intel",
+        "--case",
+        status_case,
+    ]
+    if force:
+        cmd.append("--force")
+
+    from opensearch_mcp.paths import vhir_dir
+
+    log_dir = vhir_dir() / "ingest-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{run_id}.log"
+    log_fh = open(log_file, "w")
+
+    # Pre-spawn placeholder status so the TOCTOU window is closed.
+    started_ts = datetime.now(timezone.utc).isoformat()
+    write_status(
+        case_id=status_case,
+        pid=0,
+        run_id=run_id,
+        status="starting",
+        hosts=[{"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "starting"}]}],
+        totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+        started=started_ts,
+        log_file=str(log_file),
+    )
+
+    proc = _spawn_ingest(cmd, env, log_fh, run_id)
+    log_fh.close()
+    # Remove orphaned PID-0 placeholder.
+    _safe_case = status_case.replace("/", "_").replace("\\", "_").replace("..", "_")
+    _pid0 = vhir_dir() / "ingest-status" / f"{_safe_case}-0.json"
+    _pid0.unlink(missing_ok=True)
+    write_status(
+        case_id=status_case,
+        pid=proc.pid,
+        run_id=run_id,
+        status="running",
+        hosts=[{"hostname": "(enrich)", "artifacts": [{"name": "intel", "status": "running"}]}],
+        totals={"indexed": 0, "artifacts_total": 1, "artifacts_complete": 0},
+        started=started_ts,
+        log_file=str(log_file),
+    )
+
+    resp = {
+        "status": "started",
+        "pid": proc.pid,
+        "run_id": run_id,
+        "case_id": status_case,
+        "log_file": str(log_file),
+        "message": (
+            "Intel enrichment started. Call idx_ingest_status() to monitor "
+            f"progress (artifact_name='intel'). Log file: {log_file}"
+        ),
+    }
+    aid = audit.log(
+        tool="idx_enrich_intel",
+        params={"case_id": status_case, "force": force},
+        result_summary=f"Background enrichment started (pid={proc.pid})",
     )
     if aid:
         resp["audit_id"] = aid

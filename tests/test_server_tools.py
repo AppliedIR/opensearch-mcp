@@ -409,3 +409,130 @@ class TestIdxIngest:
             resp = idx_ingest_status()
         assert resp["ingests"] == []
         assert "No active" in resp["message"]
+
+
+# ---------------------------------------------------------------------------
+# idx_enrich_intel — async launch (UAT 2026-04-23 B79)
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichIntelAsync:
+    """B79: idx_enrich_intel with dry_run=False must return immediately
+    with {status: started, pid, run_id, ...} so the gateway's 300s
+    synchronous tool timeout cannot kill a real enrichment run. The
+    worker runs under systemd-run scope and writes progress to the
+    shared ingest-status dir with artifact_name='intel'."""
+
+    def test_dry_run_stays_synchronous(self, mock_client, monkeypatch):
+        """dry_run=True must keep the synchronous preview path — operators
+        rely on the IOC count for decide-before-run flow."""
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+        fake_iocs = {
+            "ip": {"1.2.3.4", "5.6.7.8"},
+            "hash": {"abc", "def", "ghi"},
+            "domain": {"evil.example"},
+        }
+        with patch("opensearch_mcp.threat_intel.extract_unique_iocs", return_value=fake_iocs):
+            resp = idx_enrich_intel(dry_run=True)
+        assert resp["status"] == "preview"
+        assert resp["ips"] == 2
+        assert resp["hashes"] == 3
+        assert resp["domains"] == 1
+        assert resp["total_iocs"] == 6
+
+    def test_execute_launches_background(self, mock_client, monkeypatch, tmp_path):
+        """dry_run=False must return {status: started, pid, run_id}
+        immediately — does NOT block on enrich_case."""
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 54321
+        # Run the background helper against mocked _spawn_ingest and
+        # write_status so nothing real forks.
+        with (
+            patch("opensearch_mcp.server._spawn_ingest", return_value=fake_proc),
+            patch("opensearch_mcp.ingest_status.write_status"),
+            patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=[]),
+            patch("opensearch_mcp.paths.vhir_dir", return_value=tmp_path),
+        ):
+            resp = idx_enrich_intel(dry_run=False)
+
+        assert resp["status"] == "started"
+        assert resp["pid"] == 54321
+        assert "run_id" in resp
+        assert resp["case_id"] == "TEST-CASE"
+        # Message points operators at the right status tool.
+        assert "idx_ingest_status" in resp["message"]
+        assert "intel" in resp["message"]
+
+    def test_execute_respects_explicit_case_arg(self, mock_client, monkeypatch, tmp_path):
+        """Explicit case_id must be passed to the worker, not silently
+        overridden by the active-case."""
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "ACTIVE-CASE")
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 11111
+        captured_cmd = []
+
+        def _capture_spawn(cmd, env, stdout, run_id):
+            captured_cmd.extend(cmd)
+            return fake_proc
+
+        with (
+            patch("opensearch_mcp.server._spawn_ingest", side_effect=_capture_spawn),
+            patch("opensearch_mcp.ingest_status.write_status"),
+            patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=[]),
+            patch("opensearch_mcp.paths.vhir_dir", return_value=tmp_path),
+        ):
+            resp = idx_enrich_intel(case_id="OVERRIDE-CASE", dry_run=False)
+
+        assert resp["case_id"] == "OVERRIDE-CASE"
+        # Worker cmd includes --case OVERRIDE-CASE, not ACTIVE-CASE.
+        assert "OVERRIDE-CASE" in captured_cmd
+        assert "ACTIVE-CASE" not in captured_cmd
+
+    def test_execute_force_flag_propagated(self, mock_client, monkeypatch, tmp_path):
+        """--force flag must reach the worker command line."""
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 22222
+        captured_cmd = []
+
+        def _capture_spawn(cmd, env, stdout, run_id):
+            captured_cmd.extend(cmd)
+            return fake_proc
+
+        with (
+            patch("opensearch_mcp.server._spawn_ingest", side_effect=_capture_spawn),
+            patch("opensearch_mcp.ingest_status.write_status"),
+            patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=[]),
+            patch("opensearch_mcp.paths.vhir_dir", return_value=tmp_path),
+        ):
+            idx_enrich_intel(dry_run=False, force=True)
+
+        assert "--force" in captured_cmd
+
+    def test_execute_concurrency_gate_blocks_at_cap(self, mock_client, monkeypatch):
+        """Enrichment must respect the same concurrency cap as ingest —
+        running 5+ long enrichments simultaneously would starve the
+        OpenCTI rate limiter and is a stability hazard."""
+        from opensearch_mcp.server import _MAX_CONCURRENT_INGESTS, idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+        full_roster = [
+            {"status": "running", "case_id": f"C{i}", "pid": 1000 + i}
+            for i in range(_MAX_CONCURRENT_INGESTS)
+        ]
+        with patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=full_roster):
+            resp = idx_enrich_intel(dry_run=False)
+        assert "error" in resp
+        assert "Too many concurrent" in resp["error"]
