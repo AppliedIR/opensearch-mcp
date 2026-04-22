@@ -1844,8 +1844,11 @@ def idx_ingest_delimited(
         index_suffix: Index suffix (default: format-{filename}).
         time_field: Timestamp field (default: auto-detect).
         delimiter: Delimiter character (default: auto-detect).
-        recursive: Treat subdirectories as hosts (dirname = hostname).
-            Eliminates need for per-host calls on multi-host directories.
+        recursive: Treat immediate subdirectories as hosts (dirname =
+            hostname). One level only — does NOT walk nested
+            subdirectories. Top-level files directly inside `path`
+            are ignored when recursive=True; use a non-recursive
+            per-host call or `hostname="auto"` for flat layouts.
         dry_run: Preview (default True). Set False to execute immediately.
     """
     path_err = _validate_path(path)
