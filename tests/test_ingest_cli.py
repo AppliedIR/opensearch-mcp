@@ -324,3 +324,99 @@ class TestJsonWalkerNdjsonDiscovery:
             "refactored to a module constant, update this assertion to "
             "match the new symbol."
         )
+
+
+# ---------------------------------------------------------------------------
+# UAT 2026-04-23 regression — cmd_ingest_delimited wrappers must write a
+# terminal "complete" status on clean exit. Fix 3.1's atexit guard stamps
+# `failed: process_died_unexpectedly` on any worker that exits while the
+# status file still says `running`/`starting`. When the recursive or
+# auto_hosts wrapper finishes with an empty subdirs/auto-hosts list, the
+# inner cmd_ingest_delimited never ran and no terminal status was ever
+# written — so the atexit guard mislabeled clean no-op walks as failed.
+# These tests assert the wrappers call _write_bg_status with
+# status="complete" before returning.
+# ---------------------------------------------------------------------------
+
+
+class TestDelimitedWrapperTerminalStatus:
+    def test_recursive_wrapper_writes_complete_on_empty_subdirs(self, tmp_path, monkeypatch):
+        """Empty-subdirs recursive walk must write a terminal 'complete'
+        status so the atexit guard no-ops instead of stamping failed."""
+        from opensearch_mcp import ingest_cli
+
+        # tmp_path has no subdirs matching the walker's ext filter.
+        monkeypatch.setenv("VHIR_INGEST_RUN_ID", "TEST-RUN-123")
+        monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
+        monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
+        monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+
+        args = argparse.Namespace(
+            path=str(tmp_path),
+            hostname="",
+            recursive=True,
+            auto_hosts="",
+            case=None,
+            time_field=None,
+            delimiter=None,
+            format=None,
+            time_from=None,
+            time_to=None,
+            batch_size=1000,
+            dry_run=False,
+            index_suffix=None,
+        )
+
+        captured = []
+
+        def _capture(*a, **kw):
+            # _write_bg_status signature: (case_id, run_id, status, hostname, ...)
+            captured.append(a[2] if len(a) >= 3 else kw.get("status"))
+
+        with patch.object(ingest_cli, "_write_bg_status", side_effect=_capture):
+            ingest_cli.cmd_ingest_delimited(args)
+
+        # Must have written at least one terminal "complete" status.
+        assert "complete" in captured, (
+            f"recursive wrapper exited without writing 'complete'; wrote: {captured}"
+        )
+
+    def test_auto_hosts_wrapper_writes_complete_on_empty_list(self, tmp_path, monkeypatch):
+        """Symmetric fix: auto_hosts wrapper with an empty effective
+        hosts list must also write terminal 'complete'."""
+        from opensearch_mcp import ingest_cli
+
+        monkeypatch.setenv("VHIR_INGEST_RUN_ID", "TEST-RUN-456")
+        monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
+        monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
+        monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+
+        args = argparse.Namespace(
+            path=str(tmp_path),
+            hostname="",
+            recursive=False,
+            # Comma-only string → split-and-strip yields empty list,
+            # wrapper enters the auto_hosts branch but loops 0 times.
+            auto_hosts=",,,",
+            case=None,
+            time_field=None,
+            delimiter=None,
+            format=None,
+            time_from=None,
+            time_to=None,
+            batch_size=1000,
+            dry_run=False,
+            index_suffix=None,
+        )
+
+        captured = []
+
+        def _capture(*a, **kw):
+            captured.append(a[2] if len(a) >= 3 else kw.get("status"))
+
+        with patch.object(ingest_cli, "_write_bg_status", side_effect=_capture):
+            ingest_cli.cmd_ingest_delimited(args)
+
+        assert "complete" in captured, (
+            f"auto_hosts wrapper exited without writing 'complete'; wrote: {captured}"
+        )

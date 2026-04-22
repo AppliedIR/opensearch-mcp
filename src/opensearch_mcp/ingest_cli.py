@@ -1039,6 +1039,15 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         )
         sys.exit(1)
 
+    # Hoisted so the recursive/auto_hosts wrappers below can write a
+    # terminal "complete" status before returning. UAT 2026-04-23: Fix
+    # 3.1's atexit guard otherwise stamps `failed:
+    # process_died_unexpectedly` on clean no-op walks (empty subdirs
+    # list or auto_hosts list) because no inner call ever wrote a
+    # terminal status.
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    started_ts = datetime.now(timezone.utc).isoformat()
+
     # Auto-hosts mode: flat directory, iterate detected hostnames sequentially
     if auto_hosts_str and input_path.is_dir():
         import copy
@@ -1050,6 +1059,19 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             sub_args.auto_hosts = ""
             print(f"\n--- Host: {h} ---")
             cmd_ingest_delimited(sub_args, examiner=examiner)
+        # Wrapper writes complete unconditionally on loop exit; partial-
+        # failure accounting is in inner calls' audit logs, not the
+        # process-level status. Matches the non-recursive path's pattern
+        # (writes "complete" even when _delim_failed_files is non-empty).
+        if run_id:
+            _write_bg_status(
+                case_id,
+                run_id,
+                "complete",
+                "(auto-hosts)",
+                "delimited",
+                started_ts,
+            )
         return
 
     # Recursive mode: iterate subdirs as hosts in a single process
@@ -1093,6 +1115,22 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"\n*** {len(_failed_subdirs)} subdirs failed; walk continued: ***")
             for path, err in _failed_subdirs:
                 print(f"  {path}: {err}")
+        # Wrapper writes complete unconditionally on loop exit; partial-
+        # failure accounting is in _failed_subdirs and inner audit logs,
+        # not the process-level status. Matches the non-recursive path's
+        # pattern (writes "complete" even when _delim_failed_files is
+        # non-empty). This is also the defense against UAT 2026-04-23's
+        # regression where an empty-subdirs walk exits without writing
+        # any terminal status and the atexit guard mislabels it failed.
+        if run_id:
+            _write_bg_status(
+                case_id,
+                run_id,
+                "complete",
+                hostname or "(recursive)",
+                "delimited",
+                started_ts,
+            )
         return
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
@@ -1105,9 +1143,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"Dry run: {input_path}")
         return
 
-    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
+    # run_id and started_ts were hoisted above the wrapper branches.
     start_mono = time.monotonic()
-    started_ts = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
     _preflight_shard_capacity(client, "delimited", case_id=case_id, run_id=run_id or "")
