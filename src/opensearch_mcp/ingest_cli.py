@@ -1947,7 +1947,15 @@ def main() -> None:
     p_delim = sub.add_parser("delimited", help="Ingest CSV/TSV/Zeek/bodyfile")
     p_delim.add_argument("path", help="Delimited file or directory")
     p_delim.add_argument("--hostname")
-    p_delim.add_argument("--recursive", action="store_true", help="Treat subdirectories as hosts")
+    p_delim.add_argument(
+        "--recursive",
+        action="store_true",
+        help=(
+            "Treat immediate subdirectories as hosts (one level only; "
+            "nested subdirectories are not walked). Top-level files "
+            "directly under the path are ignored."
+        ),
+    )
     p_delim.add_argument("--auto-hosts", help="Comma-separated hostnames to ingest sequentially")
     p_delim.add_argument("--index-suffix")
     p_delim.add_argument("--time-field")

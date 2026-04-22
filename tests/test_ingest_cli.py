@@ -420,3 +420,156 @@ class TestDelimitedWrapperTerminalStatus:
         assert "complete" in captured, (
             f"auto_hosts wrapper exited without writing 'complete'; wrote: {captured}"
         )
+
+
+# ---------------------------------------------------------------------------
+# B82 regression pin (2026-04-23) — `recursive=True` is ONE LEVEL ONLY.
+# Documented in idx_ingest_delimited's docstring + --recursive help text.
+# This test mechanically enforces the contract so a future refactor (e.g.
+# swapping iterdir() for rglob()) cannot silently change behavior without
+# breaking a test. Lands with the doc change per "tests land with the fix".
+# ---------------------------------------------------------------------------
+
+
+class TestDelimitedRecursiveIsOneLevel:
+    """Pin the one-level recursive contract. If this test fails, either
+    the walker's iterdir() was changed to rglob() (true-recursive) or the
+    subdir filter was widened to include nested dirs; in either case the
+    docstring at server.py idx_ingest_delimited and the --recursive help
+    at ingest_cli.py must also be updated."""
+
+    def test_recursive_does_not_descend_into_nested_subdirs(self, tmp_path, monkeypatch):
+        """A CSV at depth 2 (root/hostA/subdir/evidence.csv) must NOT be
+        ingested by recursive=True; only files at depth 1 (directly in
+        root/hostA/) are considered. Documented behavior per B82."""
+        from opensearch_mcp import ingest_cli
+
+        # Layout:
+        #   root/
+        #     shallow_host/
+        #       at_depth_1.csv          ← MUST be seen
+        #     deep_host/
+        #       nested/
+        #         at_depth_2.csv        ← MUST NOT be seen (too deep)
+        shallow = tmp_path / "shallow_host"
+        shallow.mkdir()
+        (shallow / "at_depth_1.csv").write_text("a,b\n1,2\n")
+
+        deep = tmp_path / "deep_host"
+        (deep / "nested").mkdir(parents=True)
+        (deep / "nested" / "at_depth_2.csv").write_text("a,b\n3,4\n")
+
+        monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
+        monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
+        monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+
+        ingested: list[str] = []
+
+        def _fake_ingest_delimited(f, *a, **kw):
+            ingested.append(str(f))
+            return (0, 0, 0, False)
+
+        # Also stub the OS client + preflight so the wrapper is reachable
+        # without a real OpenSearch. `get_client` is imported into
+        # ingest_cli at module scope, so patch there.
+        monkeypatch.setattr(ingest_cli, "get_client", lambda: object())
+        monkeypatch.setattr(
+            ingest_cli, "_preflight_shard_capacity", lambda *a, **kw: None, raising=False
+        )
+        monkeypatch.setattr(
+            "opensearch_mcp.parse_delimited.ingest_delimited",
+            _fake_ingest_delimited,
+        )
+        # The walker queries _detect_delimited_format on every file; return
+        # a trivial csv shape so the walker proceeds past detection.
+        monkeypatch.setattr(
+            "opensearch_mcp.parse_delimited._detect_delimited_format",
+            lambda f: {"format": "csv", "delimiter": ",", "header": "first_line"},
+        )
+
+        args = argparse.Namespace(
+            path=str(tmp_path),
+            hostname="",
+            recursive=True,
+            auto_hosts="",
+            case=None,
+            time_field=None,
+            delimiter=None,
+            format=None,
+            time_from=None,
+            time_to=None,
+            batch_size=1000,
+            dry_run=False,
+            index_suffix=None,
+        )
+
+        ingest_cli.cmd_ingest_delimited(args)
+
+        # Depth-1 file must have been sent to ingest_delimited.
+        assert any(p.endswith("at_depth_1.csv") for p in ingested), (
+            f"recursive walk missed the depth-1 file; saw: {ingested}"
+        )
+        # Depth-2 file must NOT have been sent — walker is one level only.
+        assert not any(p.endswith("at_depth_2.csv") for p in ingested), (
+            f"recursive walk descended into nested subdir (B82 contract broken); saw: {ingested}"
+        )
+
+    def test_recursive_ignores_top_level_files(self, tmp_path, monkeypatch):
+        """Per the updated docstring: files directly under `path` (not
+        in a subdir) are IGNORED when recursive=True. A top-level
+        `summary.csv` must not be ingested under the root's basename
+        — callers must use non-recursive mode for flat layouts."""
+        from opensearch_mcp import ingest_cli
+
+        (tmp_path / "summary.csv").write_text("a,b\n1,2\n")  # top-level, must be ignored
+        host = tmp_path / "hostA"
+        host.mkdir()
+        (host / "evidence.csv").write_text("a,b\n3,4\n")  # in subdir, must be seen
+
+        monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
+        monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
+        monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+
+        ingested: list[str] = []
+
+        def _fake_ingest_delimited(f, *a, **kw):
+            ingested.append(str(f))
+            return (0, 0, 0, False)
+
+        monkeypatch.setattr(ingest_cli, "get_client", lambda: object())
+        monkeypatch.setattr(
+            ingest_cli, "_preflight_shard_capacity", lambda *a, **kw: None, raising=False
+        )
+        monkeypatch.setattr(
+            "opensearch_mcp.parse_delimited.ingest_delimited",
+            _fake_ingest_delimited,
+        )
+        monkeypatch.setattr(
+            "opensearch_mcp.parse_delimited._detect_delimited_format",
+            lambda f: {"format": "csv", "delimiter": ",", "header": "first_line"},
+        )
+
+        args = argparse.Namespace(
+            path=str(tmp_path),
+            hostname="",
+            recursive=True,
+            auto_hosts="",
+            case=None,
+            time_field=None,
+            delimiter=None,
+            format=None,
+            time_from=None,
+            time_to=None,
+            batch_size=1000,
+            dry_run=False,
+            index_suffix=None,
+        )
+
+        ingest_cli.cmd_ingest_delimited(args)
+
+        assert any(p.endswith("evidence.csv") for p in ingested), (
+            f"recursive walk missed the subdir file; saw: {ingested}"
+        )
+        assert not any(p.endswith("summary.csv") for p in ingested), (
+            f"recursive walk picked up a top-level file (B82 contract broken); saw: {ingested}"
+        )
