@@ -394,9 +394,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if extracted_images:
                     img = extracted_images[0]
                     print(f"  Found disk image: {img.name}")
-                    if not hostname:
-                        hostname = input_path.stem.split(".")[0]
-                        print(f"  Hostname from archive: {hostname}")
+                    # Archive-basename stamp removed per host-identity spec
+                    # (silent "admin01-triage" pollution). Registry detect
+                    # against the mounted volume is the correct priority-2
+                    # step; happens below after mount. Basename lives on as
+                    # a hint for propose_canonical only.
                     volumes = mount_image(img, tmpdir, mount_ctx)
                     if not volumes:
                         print(
@@ -411,13 +413,21 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         if vss_volumes:
                             print(f"  Found {len(vss_volumes)} volume shadow copies")
 
+                    # Priority-2 registry detect — reads ComputerName+Domain
+                    # from the mounted volume's SYSTEM hive. Replaces the
+                    # removed archive-basename fallback with a grounded
+                    # source of truth.
+                    if not hostname and volumes:
+                        from opensearch_mcp.hostname import detect_hostname_from_volume
+
+                        detected = detect_hostname_from_volume(volumes[0])
+                        if detected:
+                            hostname = detected
+                            print(f"  Hostname from volume registry: {hostname}")
+
                 scan_root = tmpdir
 
         elif container_type in ("ewf", "raw", "nbd"):
-            # Default hostname from filename for disk images (B21)
-            if not hostname:
-                hostname = input_path.stem
-                print(f"  Hostname from filename: {hostname}")
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Mounting {input_path.name}...")
             volumes = mount_image(input_path, tmpdir, mount_ctx)
@@ -425,6 +435,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 print("Error: No NTFS partitions found in disk image.", file=sys.stderr)
                 sys.exit(1)
             print(f"  Mounted {len(volumes)} volume(s)")
+
+            # Priority-2 registry detect on the mounted volume. Takes
+            # precedence over the previous input_path.stem fallback so
+            # disk images get the real ComputerName, not the filename.
+            if not hostname:
+                from opensearch_mcp.hostname import detect_hostname_from_volume
+
+                detected = detect_hostname_from_volume(volumes[0])
+                if detected:
+                    hostname = detected
+                    print(f"  Hostname from volume registry: {hostname}")
 
             # VSS handling
             if vss_flag:
