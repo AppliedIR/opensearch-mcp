@@ -1,5 +1,6 @@
 {
   "index_patterns": ["case-*-delim-*", "case-*-zeek-*", "case-*-bodyfile-*"],
+  "composed_of": ["vhir-json-type-stability"],
   "template": {
     "settings": {
       "index.mapping.total_fields.limit": 1000,

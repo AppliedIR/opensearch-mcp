@@ -1,0 +1,74 @@
+{
+  "template": {
+    "settings": {
+      "index.mapping.ignore_malformed": true,
+      "index.mapping.total_fields.limit": 10000,
+      "index.mapping.depth.limit": 20
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "id_like_strings": {
+            "path_match": "*.id",
+            "match_mapping_type": "string",
+            "mapping": {"type": "keyword", "ignore_above": 2048}
+          }
+        },
+        {
+          "name_like_strings": {
+            "path_match": "*.name",
+            "match_mapping_type": "string",
+            "mapping": {"type": "keyword", "ignore_above": 2048}
+          }
+        },
+        {
+          "hostname_like_strings": {
+            "path_match": "*.hostname",
+            "match_mapping_type": "string",
+            "mapping": {"type": "keyword", "ignore_above": 2048}
+          }
+        },
+        {
+          "labels_as_flattened": {
+            "path_match": "*.labels",
+            "mapping": {"type": "flattened"}
+          }
+        },
+        {
+          "tags_as_flattened": {
+            "path_match": "*.tags",
+            "mapping": {"type": "flattened"}
+          }
+        },
+        {
+          "event_data_flattened": {
+            "path_match": "EventData",
+            "mapping": {"type": "flattened"}
+          }
+        },
+        {
+          "hash_variants_flattened": {
+            "path_match": "*.hash*",
+            "mapping": {"type": "flattened"}
+          }
+        },
+        {
+          "catchall_objects_flattened": {
+            "match_mapping_type": "object",
+            "mapping": {"type": "flattened"}
+          }
+        },
+        {
+          "catchall_strings_keyword": {
+            "match_mapping_type": "string",
+            "mapping": {"type": "keyword", "ignore_above": 2048}
+          }
+        }
+      ]
+    }
+  },
+  "_meta": {
+    "description": "Type-unstable JSON column floor (mode 2 of velociraptor-parser-research 2026-04-24). Composed into vhir-json + vhir-delimited. See specs/opensearch-dynamic-template-type-stability-2026-04-24.md Rev 2.",
+    "version": 1
+  }
+}

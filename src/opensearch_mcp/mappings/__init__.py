@@ -20,6 +20,14 @@ _MAPPINGS_DIR = Path(__file__).resolve().parent
 _PIPELINE_FILE = _MAPPINGS_DIR / "winlog_data_normalize_v1.json"
 _EVTX_TEMPLATE_FILE = _MAPPINGS_DIR / "evtx_ecs_template.json"
 
+# Component templates composed into composable templates via `composed_of`.
+# Must be PUT before any composable template that references them —
+# OpenSearch rejects composable PUT if referenced components don't yet
+# exist. See install_component_templates() below.
+_COMPONENT_TEMPLATES_REGISTRY: list[tuple[str, str]] = [
+    ("vhir-json-type-stability", "json_type_stability.json"),
+]
+
 _PIPELINE_ID = "winlog_data_normalize_v1"
 # Canonical evtx template name. scripts/setup-opensearch.sh uses the
 # same name. Earlier versions installed under "vhir-evtx"; that legacy
@@ -63,13 +71,41 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def install_component_templates(client) -> dict[str, Any]:
+    """Idempotent install of shared component templates.
+
+    Component templates (vhir-json-type-stability today) are composed
+    into composable index templates via `composed_of`. They must exist
+    on the cluster BEFORE any composable template PUT that references
+    them — OpenSearch rejects the composable otherwise. This function
+    runs first from install_all_templates().
+
+    Returns same shape as install_all_templates.
+    """
+    results: dict[str, Any] = {"installed": [], "failed": [], "skipped": []}
+    for comp_name, filename in _COMPONENT_TEMPLATES_REGISTRY:
+        path = _MAPPINGS_DIR / filename
+        if not path.exists():
+            results["skipped"].append(comp_name)
+            continue
+        try:
+            body = _load_json(path)
+            client.cluster.put_component_template(name=comp_name, body=body)
+            results["installed"].append(comp_name)
+        except Exception as e:
+            logger.warning("install_component_templates: %s failed: %s", comp_name, e)
+            results["failed"].append({"template": comp_name, "error": str(e)})
+    return results
+
+
 def install_all_templates(client) -> dict[str, Any]:
     """Idempotent install of all non-evtx case-* index templates.
 
-    Each template in _TEMPLATES_REGISTRY is PUT by name. Per-template
-    failures are collected and returned; a single failure does NOT
-    abort the remaining installs — a typo in one template file should
-    not strand the other 13.
+    Installs component templates FIRST (they're referenced by composable
+    templates via composed_of), then each composable template in
+    _TEMPLATES_REGISTRY. Per-template failures are collected and
+    returned; a single failure does NOT abort the remaining installs —
+    a typo in one template file should not strand the others.
 
     Called from the same sites as ensure_winlog_pipeline (server
     first-connection, ingest pre-flight, idx_install_pipelines tool).
@@ -82,9 +118,16 @@ def install_all_templates(client) -> dict[str, Any]:
           "installed": [template_name, ...],
           "failed":    [{"template": name, "error": str}, ...],
           "skipped":   [template_name, ...],    # file missing on disk
+          "components": {component-install sub-result dict},
         }
     """
-    results: dict[str, Any] = {"installed": [], "failed": [], "skipped": []}
+    comp_results = install_component_templates(client)
+    results: dict[str, Any] = {
+        "installed": [],
+        "failed": [],
+        "skipped": [],
+        "components": comp_results,
+    }
     for tpl_name, filename in _TEMPLATES_REGISTRY:
         path = _MAPPINGS_DIR / filename
         if not path.exists():
