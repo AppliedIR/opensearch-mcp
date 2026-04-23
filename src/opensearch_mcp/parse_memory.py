@@ -156,84 +156,6 @@ def _plugin_to_index_suffix(plugin: str) -> str:
     return f"vol-{parts[-1]}"
 
 
-def _available_vol3_plugins() -> set[str]:
-    """Query the installed Vol3 binary for its argparse plugin list.
-
-    UAT 2026-04-23 BUG 4 defensive mechanism: Vol3's plugin set drifts
-    across releases and between build variants. A plugin hard-coded in
-    our TIER lists that isn't in the installed binary errors with
-    `argument PLUGIN: invalid choice` on every invocation and produces
-    zero docs for that plugin. Auto-detecting the argparse choice list
-    lets us skip unavailable plugins with a clear warning instead of
-    silently producing error logs.
-
-    Returns a set of plugin names (case-preserved, dot-separated with
-    the trailing class suffix stripped — e.g. `windows.malfind` from
-    `windows.malfind.Malfind`). Returns empty set if the Vol3 `--help`
-    output can't be parsed — callers must treat empty as "unable to
-    detect, pass the full TIER list through" (preserves existing
-    behavior for test harnesses / unusual Vol3 builds).
-    """
-    import re
-
-    try:
-        cmd_parts = _find_vol3().split() + ["--help"]
-        result = subprocess.run(cmd_parts, capture_output=True, text=True, timeout=30)
-    except Exception:  # noqa: BLE001
-        # Vol3 not found / help timeout / parse failure — fall-through
-        # semantics in caller preserves existing "pass full TIER" behavior.
-        return set()
-
-    # argparse renders the plugin list as `(choose from X.Y.Class, A.B.Class, ...)`.
-    # The `(choose from ...)` block may span multiple lines.
-    match = re.search(r"\(choose from ([^)]+)\)", result.stdout, re.DOTALL)
-    if not match:
-        return set()
-    out = set()
-    for item in match.group(1).split(","):
-        name = item.strip()
-        if not name:
-            continue
-        # Strip the trailing class suffix (e.g. `.Malfind`, `.PsList`)
-        # so `windows.malfind.Malfind` → `windows.malfind`. Keep the
-        # spelling otherwise — case matters for Vol3's plugin lookup.
-        if "." in name:
-            head, tail = name.rsplit(".", 1)
-            # Heuristic: a class component starts with uppercase
-            # (Vol3 plugin classes are PascalCase). If the tail looks
-            # like one, drop it. Otherwise keep the full name.
-            if tail and tail[0].isupper():
-                name = head
-        out.add(name)
-    return out
-
-
-def _filter_available_plugins(plugins: list[str], available: set[str]) -> list[str]:
-    """Drop plugins absent from the installed Vol3 binary's plugin set.
-
-    If `available` is empty (detection failed), pass the input list
-    through unchanged — preserves existing behavior for test harnesses
-    and unusual Vol3 builds where --help can't be parsed.
-    """
-    import logging as _log
-
-    if not available:
-        return list(plugins)
-
-    kept: list[str] = []
-    skipped: list[str] = []
-    for p in plugins:
-        if p in available:
-            kept.append(p)
-        else:
-            skipped.append(p)
-    if skipped:
-        _log.getLogger(__name__).warning(
-            "Skipping Vol3 plugins not in installed version: %s", sorted(skipped)
-        )
-    return kept
-
-
 def run_vol3_plugin(
     image_path: Path,
     plugin: str,
@@ -403,11 +325,6 @@ def ingest_memory(
         plugin_list = TIER_2
     else:
         plugin_list = TIER_1
-
-    # UAT 2026-04-23 BUG 4: filter out plugins not in the installed
-    # Vol3 binary's argparse choice list. Silent fallthrough on empty
-    # `available` preserves legacy behavior when --help can't be parsed.
-    plugin_list = _filter_available_plugins(plugin_list, _available_vol3_plugins())
 
     source_file = str(image_path)
     results: dict = {}
