@@ -171,11 +171,18 @@ def _silent_failure_diagnostic(binary: str, artifact_path: Path, stderr: str) ->
     except OSError as e:
         parts.append(f"size=stat-failed({e})")
 
-    try:
-        magic = artifact_path.read_bytes()[:8] if artifact_path.is_file() else b""
-        parts.append(f"magic={magic!r}")
-    except OSError:
-        pass
+    # Read only the first 8 bytes — artifacts here can be multi-GB
+    # ($MFT, SRUDB.dat) and the prior `read_bytes()[:8]` loaded the
+    # entire file into memory before slicing. This diagnostic already
+    # fires on a degraded path; allocating gigabytes here is what
+    # turns a "silent failure" into a crash.
+    if artifact_path.is_file():
+        try:
+            with artifact_path.open("rb") as fh:
+                magic = fh.read(8)
+            parts.append(f"magic={magic!r}")
+        except OSError:
+            pass
 
     # Registry hive LOG files (dirty hive → needs log replay). Only
     # check when the artifact is a file (skips directory-shaped

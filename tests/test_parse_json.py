@@ -107,6 +107,63 @@ class TestDetectJsonFormatSingleObject:
                 fh.write(chunk)
         assert _detect_json_format(f) == "unknown"
 
+    def test_empty_dir_walker_emits_diagnostic_line(self, tmp_path, capsys, monkeypatch):
+        """CR-flagged gap (UAT 2026-04-24): when `cmd_ingest_json` is
+        pointed at a directory with zero matching files, the stderr
+        diagnostic must surface the reason (non-recursive walker,
+        entry + subdir counts) instead of the prior silent
+        `Done. 0 indexed...` output. Pins the one-line fix at
+        ingest_cli.py so a future refactor can't silently regress it."""
+        import argparse
+        import types
+
+        # Build a dir with ONLY subdirs (no .json/.jsonl/.ndjson files
+        # at this level) — mimics pointing the walker at
+        # velociraptor/datastore/ where all JSON sits 4+ levels deep.
+        (tmp_path / "clients").mkdir()
+        (tmp_path / "client_idx").mkdir()
+        (tmp_path / "README.md").write_text("not-a-json-file")
+
+        from opensearch_mcp import ingest_cli
+
+        # Stub the heavy machinery so we exercise ONLY the walker
+        # discovery + diagnostic branch.
+        monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST")
+        monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
+        monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+        monkeypatch.setattr(ingest_cli, "get_client", lambda: object())
+        monkeypatch.setattr(
+            ingest_cli, "_preflight_shard_capacity", lambda *a, **kw: None, raising=False
+        )
+        # AuditWriter is heavy; stub to a no-op object.
+        fake_audit = types.SimpleNamespace(_next_audit_id=lambda: "aid", log=lambda *a, **kw: None)
+        monkeypatch.setattr(
+            ingest_cli,
+            "AuditWriter",
+            lambda mcp_name="": fake_audit,
+            raising=False,
+        )
+
+        args = argparse.Namespace(
+            path=str(tmp_path),
+            hostname="",
+            case=None,
+            time_field=None,
+            time_from=None,
+            time_to=None,
+            batch_size=1000,
+            dry_run=False,
+            index_suffix=None,
+        )
+
+        ingest_cli.cmd_ingest_json(args)
+        err = capsys.readouterr().err
+
+        # Contract pin: diagnostic must name the walker constraint +
+        # the subdir count so operators see WHY 0 docs ingested.
+        assert "non-recursive walker" in err, f"missing walker framing in stderr: {err!r}"
+        assert "2 subdirectories" in err, f"expected subdir count in stderr; got: {err!r}"
+
     def test_single_object_ingest_full_pipeline(self, tmp_path):
         """End-to-end: a pretty-printed single-object file is now
         ingestable via `ingest_json` without raising ValueError.
