@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from opensearch_mcp.threat_intel import (
     _is_rate_limit,
+    _is_valid_domain,
+    _is_valid_hash,
     _parse_wait_hint,
+    extract_unique_iocs,
 )
 
 
@@ -374,3 +379,229 @@ class TestEnrichWorkerResilience:
     # ("test_monotonic_intel_*") since those tests sit next to the
     # sibling monotonic tests and exercise all three regress paths
     # (running→complete, running→failed, starting→complete).
+
+
+# ---------------------------------------------------------------------------
+# IOC extractor structural validation (UAT 2026-04-23 follow-up to
+# rate-limit raise). The original B78 runtime observation was that
+# extractor shipped non-hash text fragments to OpenCTI as
+# ioc_type=hash, OpenCTI fuzzy-matched them against label substrings,
+# and ~845K docs got stamped SUSPICIOUS + 8 MALICIOUS with real-looking
+# labels (malware-bazaar, rat, loader). Validators must reject any
+# value that doesn't parse as its claimed type BEFORE it leaves the
+# extractor — without this, raising the rate limit just makes the
+# garbage pipeline faster. Fast + noisy is worse than slow + noisy.
+# ---------------------------------------------------------------------------
+
+
+class TestIsValidHash:
+    """Accept every STIX file-hash type OpenCTI's stix_cyber_observable
+    schema recognises. Reject anything else — length mismatch, non-hex,
+    text fragments, empty, None."""
+
+    # Accept: hex hashes at every recognised cryptographic length.
+    @pytest.mark.parametrize(
+        "length,example",
+        [
+            (32, "d41d8cd98f00b204e9800998ecf8427e"),  # MD5 of empty string
+            (40, "da39a3ee5e6b4b0d3255bfef95601890afd80709"),  # SHA-1 of empty
+            (56, "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"),  # SHA-224
+            (64, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),  # SHA-256
+            (
+                96,
+                "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+            ),  # noqa: E501 SHA-384  # noqa: E501
+            (
+                128,
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+            ),  # noqa: E501 SHA-512  # noqa: E501
+        ],
+    )
+    def test_accepts_all_stix_hex_lengths(self, length, example):
+        assert len(example) == length  # sanity
+        assert _is_valid_hash(example) is True
+
+    def test_accepts_tlsh(self):
+        # T1 prefix + 70 hex = 72 total chars
+        assert _is_valid_hash("T1" + "a" * 70) is True
+        assert _is_valid_hash("T2" + "F" * 70) is True
+
+    def test_accepts_telfhash(self):
+        # 70 lowercase alphanumeric
+        assert _is_valid_hash("a" * 70) is True
+        assert _is_valid_hash("abc123" + "z" * 64) is True
+
+    def test_accepts_ssdeep(self):
+        assert (
+            _is_valid_hash(
+                "24576:Sh1lHDmFAFg4zIQ7nkCqWXB1cxh5mNNjsh3iOmHWVg+M/GknT3:SPFn4ISqWRAMsh3c2Vg+M/GUT3"
+            )
+            is True
+        )  # noqa: E501
+        assert _is_valid_hash("3:aaX:aX") is True  # trivial SSDEEP
+
+    # Reject: the exact bug repro from the B79 runtime observation.
+    def test_rejects_text_fragment_from_amcache_field(self):
+        """The exact false-positive input from UAT 2026-04-23: an
+        amcache text fragment wrongly mapped to a hash field. Pre-fix
+        code shipped this to OpenCTI, which fuzzy-matched and stamped
+        MALICIOUS. Post-fix: rejected before it leaves the extractor."""
+        garbage = "astloggedonuser:[(-1,1)]deviceusers:[(-1,"
+        assert _is_valid_hash(garbage) is False
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",  # empty
+            "a" * 33,  # off-by-one: 33 chars, not a valid length
+            "a" * 63,  # off-by-one: 63 chars
+            "g" * 32,  # 32 chars, NOT hex (g is not 0-9a-f)
+            "   d41d8cd98f00b204e9800998ecf8427e",  # whitespace
+            "d41d8cd98f00b204e9800998ecf8427e ",  # trailing space
+            "d41d8cd9-8f00-b204-e980-0998ecf8427e",  # dashes
+            "http://example.com/hash/abc",  # URL-shaped
+            "a" * 71,  # 71 chars is not a valid length
+            "Z1" + "a" * 70,  # TLSH prefix wrong (Z not T)
+            "T1" + "g" * 70,  # TLSH bad-hex (g)
+            "A" * 70,  # TELFHASH uppercase (rejected — it's lowercase-only)  # noqa: E501
+        ],
+    )
+    def test_rejects_invalid_shapes(self, bad):
+        assert _is_valid_hash(bad) is False
+
+
+class TestIsValidDomain:
+    """RFC 1035 labels, ≥2 labels (reject NetBIOS single-label), reject
+    whitespace / control chars / path separators / IP literals."""
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "example.com",
+            "sub.example.com",
+            "deeply.nested.subdomain.example.co.uk",
+            "_dmarc.example.com",  # underscores OK in non-TLD labels (DMARC/DKIM)
+            "mail.google.com",
+            "a.co",  # minimal valid TLD
+        ],
+    )
+    def test_accepts_real_domains(self, domain):
+        assert _is_valid_domain(domain) is True
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "hostname",  # single label — NetBIOS, not a DNS observable
+            "1.2.3.4",  # IPv4 literal — belongs on ip path
+            "::1",  # IPv6 literal
+            "example.com/path",  # path separator
+            "example.com\\foo",  # backslash
+            "example com",  # whitespace
+            "example.com\x00",  # control char (null)
+            "example.1",  # numeric TLD
+            "example.",  # trailing dot (creates empty label)
+            ".example.com",  # leading dot
+            "-example.com",  # label starting with dash
+            "example-.com",  # label ending with dash
+            "a" * 254,  # total length >253
+            "astloggedonuser:[(-1,1)]",  # B79 garbage fragment
+        ],
+    )
+    def test_rejects_invalid_shapes(self, bad):
+        assert _is_valid_domain(bad) is False
+
+
+class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
+    """End-to-end extractor test: given a mock client that returns a
+    mix of valid + garbage aggregation buckets, the extractor must
+    drop the garbage, keep the valid, AND surface per-field rejection
+    counts to stderr so operators can tune the field list.
+
+    This is the regression test that would fail on pre-fix code — the
+    `astloggedonuser:[(-1,1)]` sample used here is the exact
+    observation from the UAT run that drove 845K false-positive
+    SUSPICIOUS stamps."""
+
+    def _mock_client(self, buckets_by_field: dict[str, list[str]]) -> MagicMock:
+        """Build a MagicMock OpenSearch client whose `search()` returns
+        a different agg-values bucket list based on the `field` aggs
+        key in the query body. The extractor's agg key is `values`
+        (see threat_intel.py:329)."""
+        client = MagicMock()
+
+        def _search(*, index, body, **kwargs):
+            field = body["aggs"]["values"]["terms"]["field"]
+            vals = buckets_by_field.get(field, [])
+            return {
+                "aggregations": {
+                    "values": {
+                        "sum_other_doc_count": 0,
+                        "buckets": [{"key": v, "doc_count": 1} for v in vals],
+                    }
+                }
+            }
+
+        client.search.side_effect = _search
+        return client
+
+    def test_garbage_hash_fragment_rejected(self, capsys):
+        """The canonical bug input: `astloggedonuser:[(-1,1)]...` was
+        surfacing as ioc_type=hash on pre-fix code. Post-fix: dropped,
+        counted, attributed to source field."""
+        # Put the garbage on a hash-typed field so the hash validator runs.
+        # Pair with a VALID hash on the same field so we prove positive
+        # extraction still works.
+        from opensearch_mcp.threat_intel import _HASH_FIELDS
+
+        first_hash_field = next(iter(_HASH_FIELDS))
+        buckets = {
+            first_hash_field: [
+                "d41d8cd98f00b204e9800998ecf8427e",  # valid MD5
+                "astloggedonuser:[(-1,1)]deviceusers:[(-1,",  # garbage
+                "T1" + "a" * 70,  # valid TLSH
+                "not a hash at all",  # garbage
+            ],
+        }
+        client = self._mock_client(buckets)
+        iocs = extract_unique_iocs(client, "case-test-*")
+
+        # Valid hashes kept.
+        assert "d41d8cd98f00b204e9800998ecf8427e" in iocs["hash"]
+        assert "T1" + "a" * 70 in iocs["hash"]
+        # Garbage dropped.
+        assert "astloggedonuser:[(-1,1)]deviceusers:[(-1," not in iocs["hash"]
+        assert "not a hash at all" not in iocs["hash"]
+        # And every ioc_type should NOT have leaked through as "hash".
+        assert all("astloggedonuser" not in v for v in iocs["hash"] | iocs["ip"] | iocs["domain"])
+
+        # Field attribution surfaced to stderr.
+        captured = capsys.readouterr()
+        assert "dropped 2 malformed values" in captured.err
+        assert first_hash_field in captured.err
+
+    def test_per_field_rejects_sorted_high_to_low(self, capsys):
+        """When multiple fields produce garbage, the top offender must
+        appear first in the stderr INFO output so operators can tune
+        the noisiest field first."""
+        from opensearch_mcp.threat_intel import _HASH_FIELDS
+
+        fields = list(_HASH_FIELDS)[:2]
+        buckets = {
+            # Field 0: 3 garbage entries
+            fields[0]: ["garbage1", "garbage2", "garbage3"],
+            # Field 1: 1 garbage entry
+            fields[1]: ["garbage_other"],
+        }
+        client = self._mock_client(buckets)
+        extract_unique_iocs(client, "case-test-*")
+
+        captured = capsys.readouterr().err
+        # Field 0 has more rejects; it must appear before Field 1.
+        idx0 = captured.find(fields[0])
+        idx1 = captured.find(fields[1])
+        assert idx0 != -1 and idx1 != -1
+        assert idx0 < idx1, (
+            f"top-offender field ({fields[0]}) must appear before "
+            f"the lower-count field ({fields[1]}) in stderr output:\n{captured}"
+        )

@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from opensearchpy import OpenSearch
 
@@ -160,6 +161,117 @@ def _is_external(ip_str: str) -> bool:
         return False
 
 
+# Hash validation — covers every STIX file-hash type OpenCTI's
+# stix_cyber_observable schema accepts (UAT 2026-04-23 follow-up to the
+# rate-limit raise). Without this, the extractor used to ship any value
+# from a SHA256/SHA1/MD5 field to OpenCTI, including text fragments
+# that looked nothing like a hash — OpenCTI's fuzzy search would return
+# real-looking label matches (malware-bazaar, rat, loader) and stamp
+# clean docs MALICIOUS. Fast + noisy is worse than slow + noisy, so
+# validator ships before any bulk run against the raised rate limit.
+#
+# Hex hash lengths (all length-ambiguous — we do NOT pre-classify by
+# length; OpenCTI's stix_cyber_observable.list(search=...) multi-field
+# matches across all hash fields. Pre-classification would misattribute
+# IMPHASH as MD5, PESHA1 as SHA-1, etc.):
+#   32  — MD5, IMPHASH, AUTHENTIHASH, GIMPHASH, MD6, JA3, JA3S
+#   40  — SHA-1, RIPEMD-160, PESHA1  (NOTE: Ethereum wallets are 40-hex
+#         but always carry a `0x` prefix → _HEX_RE rejects them here;
+#         the 0x prefix makes the total length 42 and the `x` fails the
+#         hex class. Wallets in hash fields are therefore correctly
+#         dropped; a future crypto-wallet observable type would extract
+#         them from a dedicated field.)
+#   56  — SHA-224, SHA3-224
+#   64  — SHA-256, SHA3-256, PESHA256, BLAKE2s, BLAKE3
+#   96  — SHA-384, SHA3-384
+#   128 — SHA-512, SHA3-512, WHIRLPOOL, BLAKE2b
+#
+# Fuzzy hashes (non-hex):
+#   SSDEEP   — <n>:<base64ish>:<base64ish>
+#   TLSH     — T1/T2 + 70 hex (first char is T)
+#   TELFHASH — 70 lowercase alphanumeric
+#
+# Not supported (fall through to reject — rare enough in forensic
+# corpora that the 2-line addition isn't worth the surface area):
+#   JA4      — colon-segmented (e.g. t13d1516h2_8daaf6152771_...)
+#   JARM     — 62 hex
+# Add to _HEX_HASH_LENGTHS / a dedicated regex if they become needed.
+_HEX_HASH_LENGTHS = frozenset({32, 40, 56, 64, 96, 128})
+_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+_SSDEEP_RE = re.compile(r"^\d+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$")
+_TLSH_RE = re.compile(r"^T[12][0-9A-Fa-f]{70}$")
+_TELFHASH_RE = re.compile(r"^[a-z0-9]{70}$")
+
+
+def _is_valid_hash(val: str) -> bool:
+    """Validate a hash observable against STIX file-hash formats.
+
+    Accepts any hex hash at a recognised cryptographic length, plus
+    SSDEEP / TLSH / TELFHASH fuzzy hashes. Rejects everything else —
+    including text fragments from mis-mapped amcache/evtx/mft fields
+    that previously slipped through as `ioc_type=hash` and drove the
+    observed false-positive MALICIOUS stamps.
+    """
+    if not val:
+        return False
+    length = len(val)
+    if length in _HEX_HASH_LENGTHS and _HEX_RE.match(val):
+        return True
+    if length == 72 and _TLSH_RE.match(val):
+        return True
+    if length == 70 and _TELFHASH_RE.match(val):
+        return True
+    if _SSDEEP_RE.match(val):
+        return True
+    return False
+
+
+# Domain validation — RFC 1035 label rules, with pragmatic concessions:
+# single-label hostnames are rejected (netbios names aren't OpenCTI
+# observables), IP-as-string is rejected here (gets routed to ip path),
+# anything with whitespace, control chars, or path separators is
+# rejected (source_host.keyword picks up a lot of these from evtx).
+_DOMAIN_LABEL_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)$")
+
+
+def _is_valid_domain(val: str) -> bool:
+    """Validate a domain observable against RFC 1035 label rules.
+
+    Rejects single-label hostnames (netbios), IP literals (routed via
+    the ip path), and anything with whitespace / control chars /
+    path separators. Accepts underscores ONLY in labels that are not
+    the TLD — pure-DNS policies reject underscores but many real
+    records (DMARC, DKIM TXT) include them, and OpenCTI stores them.
+    """
+    if not val or len(val) > 253:
+        return False
+    # Reject control chars, whitespace, slashes, and common garbage.
+    if any(c.isspace() or c in "\\/:\x00" for c in val):
+        return False
+    # Reject IP literals — they belong on the ip path.
+    try:
+        ipaddress.ip_address(val)
+        return False
+    except ValueError:
+        pass
+    labels = val.split(".")
+    if len(labels) < 2:
+        return False  # Single-label hostnames aren't DNS observables
+    for label in labels:
+        # Allow underscores in non-TLD labels (DMARC / DKIM etc.).
+        check = _DOMAIN_LABEL_RE
+        if label is not labels[-1] and "_" in label:
+            if not re.match(r"^(?!-)[A-Za-z0-9_-]{1,63}(?<!-)$", label):
+                return False
+            continue
+        if not check.match(label):
+            return False
+    tld = labels[-1]
+    if len(tld) < 2 or not tld.isalpha():
+        return False
+    return True
+
+
 def extract_unique_iocs(
     client: OpenSearch,
     index_pattern: str,
@@ -171,6 +283,11 @@ def extract_unique_iocs(
     """
     iocs: dict[str, set[str]] = {"ip": set(), "hash": set(), "domain": set()}
     warnings: list[str] = []
+    # Per-field rejection counts. Without field attribution, operators
+    # can't tell WHICH field is feeding garbage values into the
+    # extractor — and can't tune the field list. Aggregate rejects
+    # per field and surface them as warnings at the end.
+    rejected_by_field: dict[str, int] = {}
     any_succeeded = False
 
     query: dict = {"match_all": {}}
@@ -181,11 +298,27 @@ def extract_unique_iocs(
             }
         }
 
+    # Per-type validators (UAT 2026-04-23): without these, any value
+    # aggregated from a *_HASH_FIELDS / *_DOMAIN_FIELDS field was passed
+    # through to OpenCTI. OpenCTI's fuzzy-label match then produced
+    # real-looking MALICIOUS stamps on doc fragments like
+    # "astloggedonuser:[(-1,1)]..." — ~845K false positives in the
+    # observed case. Validators reject malformed values at extraction
+    # time so OpenCTI only ever sees something that parses as its
+    # claimed type. IP already had _is_external (which requires a
+    # parseable address).
+    validators: dict[str, Any] = {
+        "ip": _is_external,
+        "hash": _is_valid_hash,
+        "domain": _is_valid_domain,
+    }
+
     for ioc_type, fields in [
         ("ip", _IP_FIELDS),
         ("hash", _HASH_FIELDS),
         ("domain", _DOMAIN_FIELDS),
     ]:
+        validate = validators[ioc_type]
         for field in fields:
             try:
                 result = client.search(
@@ -205,13 +338,15 @@ def extract_unique_iocs(
                         f"{field}: {other_count} additional unique values "
                         "not included (limit 10000)"
                     )
+                field_rejects = 0
                 for bucket in agg_vals["buckets"]:
                     val = str(bucket["key"])
-                    if ioc_type == "ip":
-                        if _is_external(val):
-                            iocs["ip"].add(val)
-                    else:
+                    if validate(val):
                         iocs[ioc_type].add(val)
+                    else:
+                        field_rejects += 1
+                if field_rejects:
+                    rejected_by_field[field] = rejected_by_field.get(field, 0) + field_rejects
             except Exception as e:
                 if "AuthorizationException" in type(e).__name__:
                     print(
@@ -225,6 +360,21 @@ def extract_unique_iocs(
 
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
+
+    # Surface per-field rejection totals so operators can audit which
+    # mapped field is producing non-IOC text (e.g. amcache
+    # astloggedonuser bleeding into SHA256.keyword). Sorted high→low so
+    # the top offender is obvious.
+    if rejected_by_field:
+        total = sum(rejected_by_field.values())
+        print(
+            f"INFO: dropped {total} malformed values at extraction "
+            "(failed type validation; would otherwise produce OpenCTI "
+            "false-positive stamps):",
+            file=sys.stderr,
+        )
+        for field, count in sorted(rejected_by_field.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"  {field}: {count} rejected", file=sys.stderr)
 
     return iocs
 
