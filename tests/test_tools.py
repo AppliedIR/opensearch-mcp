@@ -305,7 +305,7 @@ class TestRunAndIngest:
         from opensearch_mcp.tools import run_and_ingest
 
         # Create a CSV file that would be the tool output
-        mock_run.return_value = None  # success
+        mock_run.return_value = ("", "")  # (stdout, stderr)
         mock_ingest.return_value = (10, 0, 0)
 
         # Mock tempfile to use tmp_path
@@ -350,7 +350,7 @@ class TestRunAndIngest:
         """run_and_ingest returns (0, 0, 0) when no CSV output produced."""
         from opensearch_mcp.tools import run_and_ingest
 
-        mock_run.return_value = None  # success but no CSV produced
+        mock_run.return_value = ("", "")  # (stdout, stderr) — no CSV produced
 
         with patch("opensearch_mcp.tools.tempfile.mkdtemp", return_value=str(tmp_path)):
             cnt, sk, bf = run_and_ingest(
@@ -399,3 +399,112 @@ class TestBuildCommandRegressions:
         d_idx = cmd.index("-d")
         # The directory argument should be the parent, not the file itself
         assert cmd[d_idx + 1] == str(hive_file.parent)
+
+
+# ---------------------------------------------------------------------------
+# UAT 2026-04-23 BUG 6: EZ-tool silent-failure diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestRunToolReturnsCapturedStreams:
+    """`_run_tool` now returns (stdout, stderr) on success so callers
+    can surface the streams in diagnostics. Pre-fix both streams were
+    discarded on returncode==0, which hid the root cause when a tool
+    exited 0 but produced no output."""
+
+    @patch("opensearch_mcp.tools.subprocess.run")
+    def test_returns_stdout_stderr_tuple_on_success(self, mock_run):
+        from opensearch_mcp.tools import _run_tool
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="tool stdout", stderr="tool stderr")
+        result = _run_tool(["fake"], "FakeTool")
+        assert result == ("tool stdout", "tool stderr")
+
+
+class TestSilentFailureDiagnostic:
+    """BUG 6 regression coverage — when an EZ tool exits 0 but produces
+    no CSV output, the diagnostic must include path, size, magic bytes,
+    any `.LOGx` files (dirty-hive signal for registry artifacts), and
+    captured stderr. Applies to every Zimmerman binary in TOOLS."""
+
+    def test_includes_path_and_size(self, tmp_path):
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        hive = tmp_path / "Amcache.hve"
+        hive.write_bytes(b"regf" + b"\x00" * 100)
+        msg = _silent_failure_diagnostic("AmcacheParser", hive, "")
+        assert f"path={hive}" in msg
+        assert "size=104" in msg
+
+    def test_includes_magic_bytes(self, tmp_path):
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        hive = tmp_path / "Amcache.hve"
+        hive.write_bytes(b"regf" + b"\x00" * 100)
+        msg = _silent_failure_diagnostic("AmcacheParser", hive, "")
+        # Must surface the first bytes so operator can see if the
+        # "hive" isn't actually a registry hive (regf magic).
+        assert "magic=b'regf" in msg
+
+    def test_includes_log_files_for_dirty_hive(self, tmp_path):
+        """Registry hives with unreplayed transaction logs (.LOG1,
+        .LOG2) signal a dirty hive the parser may refuse. Diagnostic
+        must list them so the operator knows to replay logs before
+        re-running."""
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        hive = tmp_path / "SYSTEM"
+        hive.write_bytes(b"regf" + b"\x00" * 100)
+        (tmp_path / "SYSTEM.LOG1").write_bytes(b"")
+        (tmp_path / "SYSTEM.LOG2").write_bytes(b"")
+        msg = _silent_failure_diagnostic("RECmd", hive, "")
+        assert "SYSTEM.LOG1" in msg
+        assert "SYSTEM.LOG2" in msg
+
+    def test_includes_captured_stderr(self, tmp_path):
+        """Captured stderr (previously dropped on success) must be
+        surfaced in the diagnostic so operator can see any non-fatal
+        message the tool emitted."""
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        hive = tmp_path / "Amcache.hve"
+        hive.write_bytes(b"regf")
+        msg = _silent_failure_diagnostic(
+            "AmcacheParser", hive, "No InventoryApplicationFile entries found"
+        )
+        assert "No InventoryApplicationFile entries found" in msg
+
+    def test_empty_stderr_not_rendered(self, tmp_path):
+        """Empty stderr must not add an empty `stderr=` clause —
+        keeps the log line readable."""
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        hive = tmp_path / "Amcache.hve"
+        hive.write_bytes(b"regf")
+        msg = _silent_failure_diagnostic("AmcacheParser", hive, "")
+        assert "stderr=" not in msg
+
+    def test_missing_file_graceful(self, tmp_path):
+        """Graceful degradation when the artifact path doesn't exist
+        (edge case: tool deletes the input mid-run, caller passes a
+        stale path). Diagnostic must still emit."""
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        missing = tmp_path / "does-not-exist"
+        msg = _silent_failure_diagnostic("AmcacheParser", missing, "")
+        assert "size=-1" in msg
+        # No magic / logs clause (both require file presence) — but
+        # the diagnostic must still produce the path line.
+        assert f"path={missing}" in msg
+
+    def test_binary_name_in_message_header(self, tmp_path):
+        """The binary name (AmcacheParser, PECmd, etc.) must prefix
+        the diagnostic so operators can see which EZ tool silently
+        failed — the diagnostic format is shared across all of them."""
+        from opensearch_mcp.tools import _silent_failure_diagnostic
+
+        f = tmp_path / "Prefetch.prf"
+        f.write_bytes(b"")
+        for binary in ("AmcacheParser", "PECmd", "RECmd", "SBECmd", "EvtxECmd"):
+            msg = _silent_failure_diagnostic(binary, f, "")
+            assert msg.startswith(f"{binary} completed but produced no CSV output:")

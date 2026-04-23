@@ -135,11 +135,65 @@ _RECMD_BATCH = "/opt/zimmermantools/RECmd/BatchExamples/Kroll_Batch.reb"
 _TOOL_TIMEOUT = 7200  # 2 hours — generous for MFT/large artifacts
 
 
-def _run_tool(cmd: list[str], label: str) -> None:
-    """Run an EZ tool subprocess, raising on failure."""
+def _run_tool(cmd: list[str], label: str) -> tuple[str, str]:
+    """Run an EZ tool subprocess, raising on failure.
+
+    Returns (stdout, stderr) captured from the subprocess so callers
+    can surface diagnostics when the tool exits 0 but produces no
+    output (UAT 2026-04-23 BUG 6: previously stderr was discarded on
+    success, leaving operators no way to root-cause a silent-empty
+    run).
+    """
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TOOL_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"{label} failed (exit {result.returncode}): {result.stderr[:500]}")
+    return result.stdout, result.stderr
+
+
+def _silent_failure_diagnostic(binary: str, artifact_path: Path, stderr: str) -> str:
+    """Build a diagnostic line for the "tool exited 0 but produced no
+    output" case. Includes file size, magic bytes, associated log
+    files (for registry hives: LOG1/LOG2 indicate dirty hive needing
+    log replay), and any captured stderr. Operators previously had to
+    re-collect evidence blind; this line tells them whether the hive
+    is empty/truncated (size), malformed (magic), dirty (LOG files),
+    or the tool itself emitted a stderr message that used to be
+    silently discarded.
+
+    Applies to every EZ tool in TOOLS (AmcacheParser, PECmd, RECmd,
+    SBECmd, EvtxECmd, SrumECmd, etc.) — not just AmcacheParser. The
+    framing is artifact-agnostic so it works across Zimmerman binaries.
+    """
+    parts = [f"path={artifact_path}"]
+    try:
+        size = artifact_path.stat().st_size if artifact_path.exists() else -1
+        parts.append(f"size={size}")
+    except OSError as e:
+        parts.append(f"size=stat-failed({e})")
+
+    try:
+        magic = artifact_path.read_bytes()[:8] if artifact_path.is_file() else b""
+        parts.append(f"magic={magic!r}")
+    except OSError:
+        pass
+
+    # Registry hive LOG files (dirty hive → needs log replay). Only
+    # check when the artifact is a file (skips directory-shaped
+    # artifacts like EvtxECmd's per-channel dir input).
+    if artifact_path.is_file():
+        try:
+            log_files = sorted(
+                p.name for p in artifact_path.parent.glob(f"{artifact_path.name}.LOG*")
+            )
+            if log_files:
+                parts.append(f"logs={log_files}")
+        except OSError:
+            pass
+
+    if stderr and stderr.strip():
+        parts.append(f"stderr={stderr[:500]!r}")
+
+    return f"{binary} completed but produced no CSV output: " + " ".join(parts)
 
 
 def run_and_ingest(
@@ -178,16 +232,21 @@ def run_and_ingest(
     try:
         # Build command
         cmd = _build_command(cfg, tool_name, artifact_path, tmpdir)
-        _run_tool(cmd, cfg.binary)
+        _stdout, _stderr = _run_tool(cmd, cfg.binary)
 
-        # Collect CSV output — warn if tool exited 0 but produced nothing
+        # Collect CSV output — warn with diagnostics if tool exited 0
+        # but produced nothing (UAT 2026-04-23 BUG 6). Previously this
+        # was a one-line warning with no context; operators had to
+        # re-collect evidence blind. Now emits artifact path, size,
+        # magic bytes, associated LOG files (dirty hive signal), and
+        # captured stderr (which `_run_tool` now returns on success).
         csv_files = sorted(Path(tmpdir).glob("*.csv"))
 
         if not csv_files:
             import sys
 
             print(
-                f"WARNING: {cfg.binary} completed but produced no CSV output",
+                "WARNING: " + _silent_failure_diagnostic(cfg.binary, artifact_path, _stderr),
                 file=sys.stderr,
             )
             return 0, 0, 0
