@@ -720,8 +720,22 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     on_progress=_hayabusa_progress,
                 )
                 total_alerts = _sum_hayabusa_alerts(hb_results)
-                if total_alerts:
-                    print(f"Hayabusa: {total_alerts:,} alerts indexed")
+                # Post-B84 visibility (UAT 2026-04-24): surface the
+                # per-host failure count alongside indexed-total so
+                # operators see that a partial-success summary actually
+                # had failures, not the silent "N alerts" post-B84-guard
+                # framing. Hayabusa failure dicts are values shaped
+                # {"status": "failed", "error": "..."} per ingest.py:389.
+                failed_hosts = (
+                    sum(1 for v in hb_results.values() if isinstance(v, dict))
+                    if isinstance(hb_results, dict)
+                    else 0
+                )
+                if total_alerts or failed_hosts:
+                    line = f"Hayabusa: {total_alerts:,} alerts indexed"
+                    if failed_hosts:
+                        line += f" ({failed_hosts} hosts failed — see progress log)"
+                    print(line)
 
                 # Layer 6: update status after Hayabusa (preserve full checklist)
                 existing_hosts[-1]["artifacts"][0].update(
