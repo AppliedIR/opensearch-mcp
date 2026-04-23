@@ -73,3 +73,35 @@ class TestWriteIngestManifest:
         m = json.loads(manifest.read_text())
         assert "sha256" not in m
         assert m["doc_count"] == 5
+
+    def test_colliding_stems_do_not_overwrite(self, tmp_path, monkeypatch):
+        """Real Defender EVTX channels whose first 50 chars of stem
+        collide must land in separate manifests. Regression for the
+        `[:50]` truncation overwriting on every RDP-enabled Windows host.
+        """
+        case_dir = _setup_active_case(tmp_path, monkeypatch)
+
+        collisions = [
+            "/ev/rd01/evtx/Microsoft-Windows-TerminalServices-LocalSessionManager%4Operational.evtx",
+            "/ev/rd01/evtx/Microsoft-Windows-TerminalServices-LocalSessionManager%4Admin.evtx",
+        ]
+        for p in collisions:
+            _write_ingest_manifest(p, "rd01", "evtx", doc_count=1)
+
+        manifests = list((case_dir / "audit" / "ingest-manifests").glob("*.manifest.json"))
+        assert len(manifests) == 2, (
+            f"Expected 2 manifests; got {len(manifests)}. Stem truncation "
+            "is overwriting colliding channel names."
+        )
+        sources = {json.loads(m.read_text())["source_path"] for m in manifests}
+        assert sources == set(collisions)
+
+    def test_written_at_field_name(self, tmp_path, monkeypatch):
+        """Field reflects actual semantics — nothing is 'registered' now."""
+        case_dir = _setup_active_case(tmp_path, monkeypatch)
+        _write_ingest_manifest("/x/y.evtx", "host1", "evtx")
+        m = json.loads(
+            next((case_dir / "audit" / "ingest-manifests").glob("*.manifest.json")).read_text()
+        )
+        assert "written_at" in m
+        assert "registered_at" not in m

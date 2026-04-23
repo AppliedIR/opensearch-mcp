@@ -40,6 +40,7 @@ def _write_ingest_manifest(
     and human debugging.
     """
     try:
+        import hashlib as _hashlib
         import json as _json
         from datetime import datetime as _dt
         from datetime import timezone as _tz
@@ -56,16 +57,23 @@ def _write_ingest_manifest(
         manifests_dir = case_dir / "audit" / "ingest-manifests"
         manifests_dir.mkdir(parents=True, exist_ok=True)
 
+        # Name includes path-hash suffix to disambiguate stems that collide
+        # under the 50-char truncation. Real collision: Defender EVTX
+        # "Microsoft-Windows-TerminalServices-LocalSessionManager%4Admin"
+        # and ".../LocalSessionManager%4Operational" both truncate to
+        # "Microsoft-Windows-TerminalServices-LocalSessionMan" — without
+        # the suffix, one silently overwrites the other on every ingest.
         safe_host = hostname.replace("/", "_").replace("\\", "_")
         safe_type = artifact_type.replace("/", "_").replace("\\", "_")
         safe_file = Path(file_path).stem.replace("/", "_").replace("\\", "_")[:50]
-        manifest_name = f"{safe_host}-{safe_type}-{safe_file}.manifest.json"
+        path_sig = _hashlib.sha1(file_path.encode("utf-8", "replace")).hexdigest()[:8]
+        manifest_name = f"{safe_host}-{safe_type}-{safe_file}-{path_sig}.manifest.json"
 
         manifest = {
             "source_path": file_path,
             "hostname": hostname,
             "artifact_type": artifact_type,
-            "registered_at": _dt.now(_tz.utc).isoformat(),
+            "written_at": _dt.now(_tz.utc).isoformat(),
             "doc_count": doc_count,
         }
         if sha256:
