@@ -556,3 +556,113 @@ class TestCleanupOld:
     def test_no_status_dir_is_safe(self, status_dir):
         """cleanup_old does not error when status dir doesn't exist."""
         cleanup_old()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# UAT 2026-04-23 follow-on: _write_bg_status passes status through verbatim
+# (no "complete"/"running" coercion) and carries error text into the status
+# file. Previously, a caller passing status="failed" got silently rewritten
+# to "running", then the excepthook guard re-labelled it as
+# "failed: process_died_unexpectedly: …" — misframing a caught exception as
+# an uncaught crash and making the real exception invisible to
+# idx_ingest_status consumers.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteBgStatusErrorPropagation:
+    def test_failed_status_passes_through_verbatim(self, status_dir):
+        """status='failed' from caller must land as status='failed' on
+        disk — not silently rewritten to 'running'."""
+        from opensearch_mcp.ingest_cli import _write_bg_status
+
+        _write_bg_status(
+            "INC-ENRICH",
+            "run-enrich-fail",
+            "failed",
+            "(enrich)",
+            "intel",
+            "2026-04-23T00:00:00Z",
+            error="ConnectionError: gateway unreachable",
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "failed"
+        assert "gateway unreachable" in data["error"]
+        # Terminal payload (error) must reach the artifact-level status too.
+        assert data["hosts"][0]["artifacts"][0]["status"] == "failed"
+
+    def test_complete_status_still_works(self, status_dir):
+        """Regression guard: the coercion removal must not break the
+        'complete' path — normal happy-path still records correctly."""
+        from opensearch_mcp.ingest_cli import _write_bg_status
+
+        _write_bg_status(
+            "INC-ENRICH",
+            "run-ok",
+            "complete",
+            "(enrich)",
+            "intel",
+            "2026-04-23T00:00:00Z",
+            indexed=42,
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "complete"
+        assert data["totals"]["artifacts_complete"] == 1
+        assert data["totals"]["indexed"] == 42
+
+    def test_running_status_still_works(self, status_dir):
+        """Progress update path: status='running' stays 'running'."""
+        from opensearch_mcp.ingest_cli import _write_bg_status
+
+        _write_bg_status(
+            "INC-ENRICH",
+            "run-ongoing",
+            "running",
+            "(enrich)",
+            "intel",
+            "2026-04-23T00:00:00Z",
+            indexed=10,
+        )
+        files = list(status_dir.glob("*.json"))
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "running"
+
+    def test_failed_monotonic_guard_survives_later_running(self, status_dir):
+        """End-to-end integration with the monotonic guard: a caller's
+        'failed' write must survive a subsequent spurious 'running'
+        write from another code path (e.g. a race with server.py's
+        post-spawn write). Combines the coercion removal with the
+        existing monotonic protection."""
+        from opensearch_mcp.ingest_cli import _write_bg_status
+        from opensearch_mcp.ingest_status import write_status
+
+        _write_bg_status(
+            "INC-ENRICH",
+            "race-failed",
+            "failed",
+            "(enrich)",
+            "intel",
+            "2026-04-23T00:00:00Z",
+            error="OSError: cluster unreachable",
+        )
+        # Spurious later "running" write — monotonic guard must refuse.
+        files = list(status_dir.glob("*.json"))
+        pid = int(files[0].stem.rsplit("-", 1)[1])
+        write_status(
+            case_id="INC-ENRICH",
+            pid=pid,
+            run_id="race-failed",
+            status="running",
+            hosts=[
+                {
+                    "hostname": "(enrich)",
+                    "artifacts": [{"name": "intel", "status": "running"}],
+                }
+            ],
+            totals={},
+            started="2026-04-23T00:00:00Z",
+        )
+        data = json.loads(files[0].read_text())
+        assert data["status"] == "failed"
+        assert "OSError: cluster unreachable" in data["error"]

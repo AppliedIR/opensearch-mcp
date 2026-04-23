@@ -82,8 +82,19 @@ def _write_bg_status(
     indexed=0,
     files_done=0,
     files_total=0,
+    error="",
 ):
-    """Write status for background ingest (delimited/json/accesslog)."""
+    """Write status for background ingest (delimited/json/accesslog/enrich).
+
+    UAT 2026-04-23 follow-up: `status` is now passed through verbatim
+    instead of being coerced to "complete"/"running". Callers can pass
+    "failed" and populate `error` so the terminal failure record lands
+    in the status file with the real exception text — previously the
+    except-path in cmd_enrich_intel landed as a "running" record and
+    the excepthook guard later rewrote it as
+    "failed: process_died_unexpectedly: …" which misrepresented a
+    caught exception as an uncaught crash.
+    """
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     art = {"name": artifact_name, "status": status, "indexed": indexed}
@@ -96,7 +107,7 @@ def _write_bg_status(
         case_id=case_id,
         pid=os.getpid(),
         run_id=run_id,
-        status="complete" if status == "complete" else "running",
+        status=status,
         hosts=[{"hostname": hostname, "artifacts": [art]}],
         totals={
             "indexed": indexed,
@@ -106,6 +117,7 @@ def _write_bg_status(
             "hosts_complete": done,
         },
         started=started,
+        error=error,
         elapsed_seconds=elapsed,
         bulk_failed_reason=get_last_bulk_reason(),
     )
@@ -1508,7 +1520,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     start_mono = time.monotonic()
     started_ts = datetime.now(timezone.utc).isoformat()
 
-    def _write_enrich_status(status, indexed=0, files_done=0, files_total=0):
+    def _write_enrich_status(status, indexed=0, files_done=0, files_total=0, error=""):
         """Write enrichment status record. No-op if not running under run_id."""
         if not run_id:
             return
@@ -1523,6 +1535,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
             indexed=indexed,
             files_done=files_done,
             files_total=files_total,
+            error=error,
         )
 
     # Initial "running" write — idempotent under monotonic protection
@@ -1555,10 +1568,17 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     try:
         result = enrich_case(client, case_id, force=force, on_progress=_progress)
     except Exception as e:  # noqa: BLE001
-        # Terminal failed write — atexit guard would catch this too, but
-        # explicit terminal state with the real exception surface beats
-        # "process_died_unexpectedly:" framing for a known failure path.
-        _write_enrich_status("failed")
+        # Terminal failed write with the real exception text so
+        # idx_ingest_status surfaces *why* enrichment failed without
+        # forcing the operator into the log file. The excepthook guard
+        # would otherwise stamp "process_died_unexpectedly: …" which
+        # misframes a caught exception as an uncaught crash.
+        # Length-cap so a verbose stacktrace doesn't bloat the status
+        # JSON beyond ~1KB.
+        _write_enrich_status(
+            "failed",
+            error=f"{type(e).__name__}: {e}"[:500],
+        )
         print(f"Enrichment failed: {e}", file=sys.stderr)
         raise
 
