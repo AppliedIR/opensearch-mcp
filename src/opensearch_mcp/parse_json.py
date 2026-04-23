@@ -24,7 +24,22 @@ _JSON_VOLATILE = {
 
 
 def _detect_json_format(path: Path) -> str:
-    """Detect: 'jsonl', 'json_array', or 'unknown'."""
+    """Detect: 'jsonl', 'json_array', 'json_single', or 'unknown'.
+
+    Format matrix:
+      - jsonl       — each line is a complete JSON object (NDJSON)
+      - json_array  — whole file is a JSON array (either inline or
+                      pretty-printed starting with a bare `[` on line 1)
+      - json_single — whole file is ONE pretty-printed JSON object.
+                      Covers client_info.json / collection_context.json
+                      from Velociraptor and any other producer that
+                      pretty-prints a single object (UAT 2026-04-24).
+      - unknown     — file cannot be classified; caller rejects it
+
+    `json_single` is detected by a full-file parse fallback when line 1
+    is a bare `{`. That fallback is size-capped (200MB) for the same
+    reason json_array is — streaming isn't possible on a bare object.
+    """
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -32,6 +47,26 @@ def _detect_json_format(path: Path) -> str:
                 continue
             if line == "[":
                 return "json_array"
+            if line == "{":
+                # Pretty-printed single-object JSON. Confirm by full-
+                # file parse; otherwise a malformed file would slip
+                # through.
+                try:
+                    size = path.stat().st_size
+                    if size > 200_000_000:
+                        # Too large to hold in memory; caller will
+                        # reject and log — consistent with json_array
+                        # treatment.
+                        return "unknown"
+                    with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
+                        data = json.load(fh)
+                    if isinstance(data, dict):
+                        return "json_single"
+                    if isinstance(data, list):
+                        return "json_array"
+                except (json.JSONDecodeError, OSError):
+                    pass
+                return "unknown"
             try:
                 obj = json.loads(line)
                 if isinstance(obj, dict):
@@ -75,6 +110,13 @@ def _iter_json_records(path: Path, fmt: str):
                 if isinstance(val, list):
                     yield from val
                     break
+    elif fmt == "json_single":
+        # Single pretty-printed JSON object — yield as one record.
+        # Size cap was already enforced in _detect_json_format.
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            yield data
 
 
 def ingest_json(

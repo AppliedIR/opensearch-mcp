@@ -899,6 +899,26 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         )
     )
 
+    # Silent-zero diagnostic (UAT 2026-04-24): when an operator points
+    # the walker at a directory that yields zero matching files, the
+    # result was `Done. 0 indexed, 0 skipped, 0 bulk failed.` with no
+    # indication of WHY. Surface this explicitly — the walker is non-
+    # recursive (one level only), so a deep tree like Velociraptor's
+    # `datastore/clients/C.*/collections/F.*/` returns zero matches
+    # when pointed at `datastore/`. Operator sees the reason without
+    # having to re-read the docstring.
+    if input_path.is_dir() and not files:
+        subdirs = [d for d in input_path.iterdir() if d.is_dir()]
+        total_entries = len(list(input_path.iterdir()))
+        print(
+            f"No .json/.jsonl/.ndjson files directly under {input_path} "
+            f"(non-recursive walker: {total_entries} entries, "
+            f"{len(subdirs)} subdirectories ignored). "
+            "Point at a directory that contains JSON files directly, "
+            "or ingest per-subdirectory.",
+            file=sys.stderr,
+        )
+
     if run_id:
         _write_bg_status(
             case_id,
