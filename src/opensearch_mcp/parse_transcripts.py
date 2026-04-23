@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 
@@ -11,47 +12,97 @@ from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _doc_id
 from opensearch_mcp.paths import resolve_case_insensitive
 
+logger = logging.getLogger(__name__)
+
 
 def _read_transcript_config(volume_root: Path) -> tuple[str | None, str | None]:
     """Read PS transcript GP config + system timezone from registry hives.
 
     Returns (gp_transcript_dir, windows_timezone_name).
+
+    UAT 2026-04-23 (BUG 1+3): `regipy.RegistryHive.get_key()` requires a
+    leading backslash (or `ROOT\\` prefix) to resolve fully-qualified
+    paths. Without it, every lookup silently raised
+    `RegistryKeyNotFoundException` and the previous `except Exception:
+    pass` swallowed the error — producing `(None, None)` on every host.
+    That broke `host.system_timezone`, which in turn made
+    `parse_transcripts` skip every PowerShell transcript (30-host SRL
+    corpus → 0 docs) and `parse_defender` skip every MPLog line on the
+    "no timezone, no Z" branch.
+
+    Silent-swallow is split by severity. Hive-open failures (corrupt,
+    missing, locked) emit at `logger.warning` so the next silent-gap
+    regression surfaces at default log level; key-not-found failures
+    (Transcription GPO not configured, alternate ControlSet absent)
+    stay at `logger.debug` because they're expected on most hosts and
+    warning-spamming every stock Windows install would drown out the
+    real hive-level diagnostics.
     """
     transcript_dir = None
     timezone = None
 
+    # Split hive-open from key-read logging levels:
+    # - hive-open failure (corrupt / missing / locked) → logger.warning
+    #   so operators see it at default log level; this class of failure
+    #   would cascade to the same "0 docs across 30 hosts" pattern.
+    # - key-not-found (policy not set, ControlSet variant absent) →
+    #   logger.debug because it's the expected path on many hosts
+    #   (e.g. PS Transcription GPO is off by default; only one
+    #   ControlSet is typically current).
     software = resolve_case_insensitive(volume_root, "Windows/System32/config/SOFTWARE")
     if software:
-        try:
-            from regipy.registry import RegistryHive
+        from regipy.registry import RegistryHive
 
+        try:
             reg = RegistryHive(str(software))
-            key = reg.get_key("Policies\\Microsoft\\Windows\\PowerShell\\Transcription")
-            for val in key.iter_values():
-                if val.name == "OutputDirectory" and val.value:
-                    transcript_dir = val.value
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("could not open SOFTWARE hive at %s: %s", software, e)
+            reg = None
+        if reg is not None:
+            try:
+                # Leading backslash required — see docstring.
+                key = reg.get_key("\\Policies\\Microsoft\\Windows\\PowerShell\\Transcription")
+                for val in key.iter_values():
+                    if val.name == "OutputDirectory" and val.value:
+                        transcript_dir = val.value
+            except Exception as e:
+                # Stays debug: the vast majority of hosts don't have PS
+                # Transcription GPO configured — not an error.
+                logger.debug("PS Transcription policy not set: %s", e)
 
     system = resolve_case_insensitive(volume_root, "Windows/System32/config/SYSTEM")
     if system:
-        try:
-            from regipy.registry import RegistryHive
+        from regipy.registry import RegistryHive
 
+        try:
             reg = RegistryHive(str(system))
+        except Exception as e:
+            logger.warning("could not open SYSTEM hive at %s: %s", system, e)
+            reg = None
+        if reg is not None:
             for cs in ["ControlSet001", "ControlSet002"]:
                 try:
-                    key = reg.get_key(f"{cs}\\Control\\TimeZoneInformation")
+                    # Leading backslash required — see docstring.
+                    key = reg.get_key(f"\\{cs}\\Control\\TimeZoneInformation")
+                    # Prefer TimeZoneKeyName (canonical, e.g. "Eastern
+                    # Standard Time"). Fall back to StandardName on older
+                    # Windows installs that predate TimeZoneKeyName.
                     for val in key.iter_values():
                         if val.name == "TimeZoneKeyName" and val.value:
                             timezone = val.value
                             break
+                    if not timezone:
+                        for val in key.iter_values():
+                            if val.name == "StandardName" and val.value:
+                                timezone = val.value
+                                break
                     if timezone:
                         break
-                except Exception:
+                except Exception as e:
+                    # Stays debug: only one ControlSet is typically the
+                    # current one; the other variant absent is expected.
+                    logger.debug("could not read %s TimeZoneInformation: %s", cs, e)
                     continue
-        except Exception:
-            pass
 
     return transcript_dir, timezone
 
