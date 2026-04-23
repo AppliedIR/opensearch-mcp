@@ -310,6 +310,34 @@ class TestEvtxTemplate:
         )
         assert data_hashtext["type"] == "keyword"
 
+    def test_vol3_userassist_timestamp_field_matches_vol3_output(self):
+        """Regression guard (UAT 2026-04-23): Vol3's registry.userassist
+        plugin emits `"Last Write Time"` (with spaces) — see volatility3
+        framework/plugins/windows/registry/userassist.py:380-390. The
+        JSON renderer preserves column names verbatim. Prior value
+        `"LastWriteTime"` (no spaces) never matched, so `@timestamp`
+        was silently unset on every userassist row. Pin both the
+        `_TIMESTAMP_FIELD` entry AND the template mapping so a future
+        refactor can't silently regress either side."""
+        from opensearch_mcp.parse_memory import _TIMESTAMP_FIELD
+
+        # Code side: `_TIMESTAMP_FIELD` must map the plugin to the
+        # exact column name Vol3 emits.
+        assert _TIMESTAMP_FIELD["windows.registry.userassist"] == "Last Write Time"
+
+        # Template side: `Last Write Time` must have an explicit date
+        # mapping in vol3_template. Without it, the field dynamic-maps
+        # as text on first sight and can't be used as @timestamp.
+        vol3_tpl = _EVTX_TEMPLATE_FILE.parent / "vol3_template.json"
+        body = json.loads(vol3_tpl.read_text())
+        props = body["template"]["mappings"]["properties"]
+        lwt = props.get("Last Write Time")
+        assert lwt is not None, (
+            "vol3_template must declare 'Last Write Time' (with spaces) "
+            "as a date field to match Vol3's emitted column name."
+        )
+        assert lwt["type"] == "date"
+
 
 class TestSingleNodeReplicasZero:
     """Every case-* template Valhuntir installs must declare

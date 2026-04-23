@@ -86,7 +86,13 @@ _TIMESTAMP_FIELD: dict[str, str | None] = {
     "windows.ldrmodules": None,
     "windows.callbacks": None,
     "windows.ssdt": None,
-    "windows.registry.userassist": "LastWriteTime",
+    # Vol3's registry.userassist TreeGrid column is "Last Write Time"
+    # (with spaces), not "LastWriteTime" — see volatility3 source:
+    # framework/plugins/windows/registry/userassist.py:380-390. The
+    # JSON renderer preserves column names verbatim. Prior value
+    # "LastWriteTime" never matched the emitted field, so @timestamp
+    # was silently left unset on every userassist row (UAT 2026-04-23).
+    "windows.registry.userassist": "Last Write Time",
     "windows.handles": None,
     "windows.filescan": None,
     "windows.malfind": None,

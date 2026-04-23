@@ -54,6 +54,10 @@
           "type": "date",
           "ignore_malformed": true
         },
+        "Last Write Time": {
+          "type": "date",
+          "ignore_malformed": true
+        },
         "LocalPort": {
           "type": "integer"
         },
