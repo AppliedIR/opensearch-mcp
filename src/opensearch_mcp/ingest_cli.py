@@ -734,7 +734,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if total_alerts or failed_hosts:
                     line = f"Hayabusa: {total_alerts:,} alerts indexed"
                     if failed_hosts:
-                        line += f" ({failed_hosts} hosts failed — see progress log)"
+                        noun = "host" if failed_hosts == 1 else "hosts"
+                        line += f" ({failed_hosts} {noun} failed — see progress log)"
                     print(line)
 
                 # Layer 6: update status after Hayabusa (preserve full checklist)

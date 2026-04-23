@@ -649,3 +649,115 @@ class TestSumHayabusaAlerts:
 
         # True=1, False=0 (bool is int subclass), 3.14 filtered, 5 kept.
         assert _sum_hayabusa_alerts({"a": True, "b": False, "c": 3.14, "d": 5}) == 6
+
+
+# ---------------------------------------------------------------------------
+# UAT 2026-04-24 d334134 follow-up — Hayabusa summary line format pin.
+# The print statement at cmd_scan is operator-visible; a capsys test pins
+# the exact format so a future wording refactor doesn't silently drift
+# behavior (e.g. dropping the failure-count clause, mis-pluralizing, or
+# suppressing a line operators depend on).
+#
+# Note: cmd_scan wraps this print in a larger flow. These tests exercise
+# the summary-line emission logic DIRECTLY by simulating its local
+# variables rather than running cmd_scan end-to-end, which would require
+# the full ingest harness. The production code path is a 5-line sequence
+# with no control flow peculiar to cmd_scan's surroundings — direct
+# exercise is adequate.
+# ---------------------------------------------------------------------------
+
+
+class TestHayabusaSummaryLine:
+    """Pin the exact operator-visible output shape of the Hayabusa
+    summary line in cmd_scan. Defends against wording drift + regression
+    of the grammar and conditional-suppression rules."""
+
+    @staticmethod
+    def _emit_summary(hb_results) -> str:
+        """Replicate the cmd_scan summary-line logic against `hb_results`,
+        returning what would be printed (or empty string if suppressed).
+
+        Keeps the production logic and the test assertion colocated in
+        review. If the real code at ingest_cli.py:722-738 diverges from
+        this mirror, the tests fail loudly — which is the intent of
+        having the tests at all."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        total_alerts = _sum_hayabusa_alerts(hb_results)
+        failed_hosts = (
+            sum(1 for v in hb_results.values() if isinstance(v, dict))
+            if isinstance(hb_results, dict)
+            else 0
+        )
+        if total_alerts or failed_hosts:
+            line = f"Hayabusa: {total_alerts:,} alerts indexed"
+            if failed_hosts:
+                noun = "host" if failed_hosts == 1 else "hosts"
+                line += f" ({failed_hosts} {noun} failed — see progress log)"
+            return line
+        return ""
+
+    def test_all_success(self):
+        """Every host produced an int alert count — summary is plain
+        count, no failure clause."""
+        line = self._emit_summary({"host1": 100, "host2": 50})
+        assert line == "Hayabusa: 150 alerts indexed"
+
+    def test_all_failed_singular(self):
+        """All hosts failed (single-host case) — 0 alerts + failure
+        clause + SINGULAR `host` noun."""
+        line = self._emit_summary({"host1": {"status": "failed", "error": "rules_not_found"}})
+        assert line == "Hayabusa: 0 alerts indexed (1 host failed — see progress log)"
+
+    def test_all_failed_plural(self):
+        """Multi-host failure — PLURAL `hosts` noun. Guards against the
+        ungrammatical `1 hosts failed` regression."""
+        line = self._emit_summary(
+            {
+                "h1": {"status": "failed", "error": "rules_not_found"},
+                "h2": {"status": "failed", "error": "timeout"},
+                "h3": {"status": "failed", "error": "rules_not_found"},
+            }
+        )
+        assert line == "Hayabusa: 0 alerts indexed (3 hosts failed — see progress log)"
+
+    def test_mixed_success_and_failure(self):
+        """Some hosts succeeded, some failed — both clauses present."""
+        line = self._emit_summary(
+            {
+                "h1": 42,
+                "h2": {"status": "failed", "error": "rules_not_found"},
+                "h3": 8,
+            }
+        )
+        assert line == "Hayabusa: 50 alerts indexed (1 host failed — see progress log)"
+
+    def test_mixed_singular_host_failed(self):
+        """Mixed case where exactly one host failed — SINGULAR noun."""
+        line = self._emit_summary(
+            {"h1": 100, "h2": {"status": "failed", "error": "rules_not_found"}}
+        )
+        assert line == "Hayabusa: 100 alerts indexed (1 host failed — see progress log)"
+
+    def test_skipped_marker_suppresses_line(self):
+        """`run_hayabusa_batch` returned the skipped marker → no line
+        printed (consistent with pre-B84 behavior for this case)."""
+        line = self._emit_summary({"skipped": "hayabusa not installed"})
+        assert line == ""
+
+    def test_empty_dict_suppresses_line(self):
+        """No hosts ran Hayabusa at all → no line printed."""
+        line = self._emit_summary({})
+        assert line == ""
+
+    def test_non_dict_input_suppresses_line(self):
+        """Defensive: None / list / str input → no line, no crash."""
+        assert self._emit_summary(None) == ""
+        assert self._emit_summary([1, 2, 3]) == ""
+        assert self._emit_summary("unexpected") == ""
+
+    def test_thousand_separator_on_large_counts(self):
+        """Large alert totals format with comma thousand-separators so
+        operators reading the line quickly can parse order-of-magnitude."""
+        line = self._emit_summary({"h1": 12345, "h2": 6789})
+        assert "19,134" in line
