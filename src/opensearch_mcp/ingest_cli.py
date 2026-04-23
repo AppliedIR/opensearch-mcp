@@ -236,6 +236,29 @@ def _load_config(config_path: str | None) -> dict:
     return yaml.safe_load(p.read_text()) or {}
 
 
+def _sum_hayabusa_alerts(hb_results) -> int:
+    """Sum per-host Hayabusa alert counts, tolerating failed-host dict values.
+
+    `run_hayabusa_batch` (ingest.py:338) returns one of three shapes:
+
+    1. `{"skipped": "hayabusa not installed"}` — caller-wide skip marker.
+    2. `{hostname: <int>}` — happy path: per-host alert count.
+    3. `{hostname: {"status": "failed", "error": "rules_not_found"}}` —
+       per-host failure on missing rules (ingest.py:389-392).
+
+    Any of the three can land in the dict simultaneously on a multi-host
+    scan where some hosts succeed and others fail. Prior code summed
+    `hb_results.values()` directly, which raised `TypeError` on mixed
+    int+dict values and crashed `cmd_scan` *after* every parser had
+    already completed — UAT 2026-04-24 B84. Filtering to `int` values
+    treats per-host failures as zero-alert contributions rather than
+    fatal.
+    """
+    if not isinstance(hb_results, dict) or "skipped" in hb_results:
+        return 0
+    return sum(v for v in hb_results.values() if isinstance(v, int))
+
+
 def _merge_config(args: argparse.Namespace, config: dict) -> None:
     """Merge config file values into args (CLI takes precedence)."""
     if not config:
@@ -696,9 +719,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     audit=audit,
                     on_progress=_hayabusa_progress,
                 )
-                total_alerts = 0
-                if isinstance(hb_results, dict) and "skipped" not in hb_results:
-                    total_alerts = sum(hb_results.values())
+                total_alerts = _sum_hayabusa_alerts(hb_results)
                 if total_alerts:
                     print(f"Hayabusa: {total_alerts:,} alerts indexed")
 

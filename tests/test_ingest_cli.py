@@ -573,3 +573,79 @@ class TestDelimitedRecursiveIsOneLevel:
         assert not any(p.endswith("summary.csv") for p in ingested), (
             f"recursive walk picked up a top-level file (B82 contract broken); saw: {ingested}"
         )
+
+
+# ---------------------------------------------------------------------------
+# UAT 2026-04-24 B84 — cmd_scan TypeError on mixed Hayabusa result dict
+# Pre-fix: `sum(hb_results.values())` choked on per-host failure dicts
+# returned when Hayabusa rules were missing, crashing cmd_scan *after*
+# every parser had already completed (docs indexed, but the scan-summary
+# step took the whole command down). Helper filters to ints so per-host
+# failures contribute 0 alerts rather than propagating a fatal.
+# ---------------------------------------------------------------------------
+
+
+class TestSumHayabusaAlerts:
+    def test_happy_path_all_int_values(self):
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        assert _sum_hayabusa_alerts({"host1": 10, "host2": 5}) == 15
+
+    def test_skipped_marker_returns_zero(self):
+        """`run_hayabusa_batch` returns this shape when hayabusa binary
+        is missing — not an error, just a skip."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        assert _sum_hayabusa_alerts({"skipped": "hayabusa not installed"}) == 0
+
+    def test_mixed_int_and_failure_dict_b84_regression(self):
+        """The exact B84 repro: some hosts succeed (int), others fail
+        with a dict value. Pre-fix `sum()` raised TypeError and
+        crashed cmd_scan. Post-fix the dict-valued entries contribute
+        zero."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        mixed = {
+            "host1": 42,
+            "host2": {"status": "failed", "error": "rules_not_found"},
+            "host3": 8,
+            "host4": {"status": "failed", "error": "timeout"},
+        }
+        # Pre-fix: `sum(mixed.values())` raises TypeError.
+        # Post-fix: filters to ints only → 42 + 8 = 50.
+        assert _sum_hayabusa_alerts(mixed) == 50
+
+    def test_all_failure_dicts_returns_zero(self):
+        """Every host failed → sum is zero, no crash."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        all_failed = {
+            "host1": {"status": "failed", "error": "rules_not_found"},
+            "host2": {"status": "failed", "error": "rules_not_found"},
+        }
+        assert _sum_hayabusa_alerts(all_failed) == 0
+
+    def test_non_dict_input_returns_zero(self):
+        """Defensive: any unexpected shape (None, list, str) must not
+        crash — cmd_scan's parser summary is too late in the flow to
+        swallow an exception gracefully."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        assert _sum_hayabusa_alerts(None) == 0
+        assert _sum_hayabusa_alerts([1, 2, 3]) == 0
+        assert _sum_hayabusa_alerts("unexpected") == 0
+
+    def test_empty_dict_returns_zero(self):
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        assert _sum_hayabusa_alerts({}) == 0
+
+    def test_bool_and_float_edge_cases(self):
+        """bool is a subclass of int in Python, so bool values count
+        as 1/0. Floats are filtered out. This test documents the
+        current behavior so a future isinstance refinement catches
+        if we intended something else."""
+        from opensearch_mcp.ingest_cli import _sum_hayabusa_alerts
+
+        # True=1, False=0 (bool is int subclass), 3.14 filtered, 5 kept.
+        assert _sum_hayabusa_alerts({"a": True, "b": False, "c": 3.14, "d": 5}) == 6
