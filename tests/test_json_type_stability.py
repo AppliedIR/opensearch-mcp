@@ -79,9 +79,7 @@ class TestCatchallKeywordDroppedText:
 
     def test_no_text_subfield_on_catchall_strings(self, dyn_templates):
         catchall = next(
-            d["catchall_strings_keyword"]
-            for d in dyn_templates
-            if "catchall_strings_keyword" in d
+            d["catchall_strings_keyword"] for d in dyn_templates if "catchall_strings_keyword" in d
         )
         mapping = catchall["mapping"]
         assert mapping["type"] == "keyword"
@@ -166,8 +164,17 @@ class TestInstallComponentTemplate:
         assert "template" in body
         assert body["template"]["settings"]["index.mapping.total_fields.limit"] == 10000
 
-    def test_components_installed_before_composables(self):
-        """Component template PUT must happen BEFORE any composable PUT."""
+    @pytest.mark.parametrize(
+        "composable_name",
+        ["vhir-json", "vhir-delimited"],
+        ids=["json", "delimited"],
+    )
+    def test_components_installed_before_composables(self, composable_name):
+        """Component template PUT must happen BEFORE any composable that
+        references it via composed_of. Parametrized over every composable
+        that wires vhir-json-type-stability in, so adding a new one
+        automatically extends the ordering guard.
+        """
         from opensearch_mcp.mappings import install_all_templates
 
         client = MagicMock()
@@ -176,30 +183,24 @@ class TestInstallComponentTemplate:
 
         result = install_all_templates(client)
 
-        # Component was installed via cluster.put_component_template
         assert client.cluster.put_component_template.called
-        # And composables went through indices.put_index_template
         assert client.indices.put_index_template.called
 
-        # Ordering check: compare mock_calls sequence by call name.
-        # cluster.put_component_template must appear BEFORE any
-        # indices.put_index_template(name="vhir-json" | "vhir-delimited")
-        # since those reference the component via composed_of.
         component_call_idx = None
-        json_template_call_idx = None
+        composable_call_idx = None
         for i, c in enumerate(client.mock_calls):
-            if c[0] == "cluster.put_component_template":
-                if component_call_idx is None:
-                    component_call_idx = i
+            if c[0] == "cluster.put_component_template" and component_call_idx is None:
+                component_call_idx = i
             if c[0] == "indices.put_index_template":
                 kwargs = c.kwargs if hasattr(c, "kwargs") else c[2]
-                if kwargs.get("name") == "vhir-json" and json_template_call_idx is None:
-                    json_template_call_idx = i
+                if kwargs.get("name") == composable_name and composable_call_idx is None:
+                    composable_call_idx = i
 
         assert component_call_idx is not None, "component template never installed"
-        assert json_template_call_idx is not None, "vhir-json never installed"
-        assert component_call_idx < json_template_call_idx, (
-            "component template must install BEFORE composable that composes it in"
+        assert composable_call_idx is not None, f"{composable_name} never installed"
+        assert component_call_idx < composable_call_idx, (
+            f"component template must install BEFORE {composable_name} "
+            f"(it's composed_of the component)"
         )
 
         # Result surface includes the component sub-dict
@@ -220,3 +221,108 @@ class TestInstallComponentTemplate:
         assert len(result["failed"]) == 1
         assert result["failed"][0]["template"] == "vhir-json-type-stability"
         assert "cluster 503" in result["failed"][0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# Cluster round-trip (env-gated; auto-runs when OpenSearch is reachable).
+#
+# WSL2 Test's deferred harness from 2026-04-24 — the polymorphic Labels
+# fixture they couldn't run in their sandbox (docker denied). Baking it
+# here so it runs automatically in any env where the OpenSearch client
+# resolves (SIFT workstation, docker-capable WSL2, CI, etc.).
+#
+# Pattern: same as tests/test_ingest_integration.py — skip when the
+# cluster isn't reachable; run otherwise.
+# ---------------------------------------------------------------------------
+
+
+import uuid  # noqa: E402 — grouped with integration imports
+
+
+@pytest.mark.integration
+class TestTypeStabilityClusterRoundtrip:
+    """Live-cluster verification that the component template's dynamic_templates
+    actually prevent bulk-reject on type-unstable columns. Runs only when
+    OpenSearch is reachable; otherwise skipped.
+
+    This is WSL2 Test's deferred harness (Test #1 of the 2026-04-24 plan)
+    — four polymorphic Labels shapes pushed against an index that composes
+    the type-stability template in. With the fix, all four land; without
+    it, a mapper_parsing_exception rejects doc 2 or 3.
+    """
+
+    @pytest.fixture
+    def os_client(self):
+        pytest.importorskip("opensearchpy")
+        try:
+            from opensearch_mcp.client import get_client
+            from opensearch_mcp.mappings import install_all_templates
+
+            client = get_client()
+            health = client.cluster.health()
+            if health.get("status") not in ("green", "yellow"):
+                pytest.skip("OpenSearch cluster not healthy")
+            install_all_templates(client)  # idempotent
+            return client
+        except FileNotFoundError:
+            pytest.skip("OpenSearch config not found (~/.vhir/opensearch.yaml)")
+        except Exception as e:
+            pytest.skip(f"OpenSearch not available: {e}")
+
+    @pytest.fixture
+    def test_json_index(self, os_client):
+        """Create a case-*-json-* index (picks up vhir-json + composed
+        type-stability) and clean up after."""
+        name = f"case-pytest-{uuid.uuid4().hex[:8]}-json-typestab"
+        os_client.indices.create(index=name)
+        yield name
+        try:
+            os_client.indices.delete(index=name, ignore=[404])
+        except Exception:
+            pass
+
+    def test_polymorphic_labels_all_land(self, os_client, test_json_index):
+        """The load-bearing contract — 4 shapes of `Labels` on the same
+        field, all must land without mapper_parsing_exception.
+        """
+        docs = [
+            {"Labels": "critical"},
+            {"Labels": ["critical", "tier1"]},
+            {"Labels": None},
+            {"Labels": {"tier": "A", "env": "prod"}},
+        ]
+        for i, doc in enumerate(docs):
+            resp = os_client.index(index=test_json_index, id=str(i), body=doc, refresh=True)
+            assert resp["result"] in ("created", "updated"), (
+                f"doc {i} with shape {type(doc['Labels']).__name__} was rejected: {resp}"
+            )
+
+        count = os_client.count(index=test_json_index)
+        assert count["count"] == 4, (
+            f"expected all 4 polymorphic docs indexed; got {count['count']}"
+        )
+
+    def test_labels_field_mapped_flattened(self, os_client, test_json_index):
+        """Verify the mapping OpenSearch settled on is `flattened` —
+        that's the mechanism that allows the polymorphic coexistence.
+        """
+        os_client.index(
+            index=test_json_index,
+            body={"Labels": {"tier": "A"}},
+            refresh=True,
+        )
+        mapping = os_client.indices.get_mapping(index=test_json_index)
+        props = mapping[test_json_index]["mappings"].get("properties", {})
+        labels = props.get("Labels", {})
+        assert labels.get("type") == "flattened", (
+            f"Labels should be flattened via dynamic_templates; got mapping={labels}"
+        )
+
+    def test_type_unstable_logon_type(self, os_client, test_json_index):
+        """Canonical repro — LogonType as string then as int on the
+        same field. Pre-fix would bulk-reject doc 2.
+        """
+        os_client.index(index=test_json_index, id="a", body={"LogonType": "3"}, refresh=True)
+        resp = os_client.index(index=test_json_index, id="b", body={"LogonType": 3}, refresh=True)
+        assert resp["result"] in ("created", "updated")
+        assert os_client.count(index=test_json_index)["count"] == 2

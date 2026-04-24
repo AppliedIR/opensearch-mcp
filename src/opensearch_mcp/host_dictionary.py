@@ -183,6 +183,20 @@ class HostDictionary:
             return None
         return self._alias_to_canonical.get(key)
 
+    def has_alias(self, key_normalized: str) -> bool:
+        """Public lookup companion to resolve() — checks if a pre-normalized
+        key is a known alias. Callers that have already normalized the
+        input can skip the re-normalize inside resolve(). Same contract:
+        pure, no side effects.
+        """
+        return bool(key_normalized) and key_normalized in self._alias_to_canonical
+
+    def get_canonical_for_alias(self, key_normalized: str) -> str | None:
+        """Public lookup for a pre-normalized key. Returns canonical or None."""
+        if not key_normalized:
+            return None
+        return self._alias_to_canonical.get(key_normalized)
+
     def __contains__(self, canonical: str) -> bool:
         return canonical in self.hosts
 
@@ -217,8 +231,8 @@ def propose_canonical(raw: str | None, host_dict: HostDictionary) -> tuple[str |
 
     stripped = _strip_for_proposal(raw, host_dict.domains)
 
-    if stripped and stripped in host_dict._alias_to_canonical:
-        return host_dict._alias_to_canonical[stripped], 1.00
+    if host_dict.has_alias(stripped):
+        return host_dict.get_canonical_for_alias(stripped), 1.00
 
     best_canonicals: list[str] = []
     best_score = 0.0

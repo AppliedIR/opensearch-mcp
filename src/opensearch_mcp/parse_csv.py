@@ -128,7 +128,16 @@ def ingest_csv(
                             skipped += 1
                             continue
 
-            row["host.name"] = hostname
+            # Per spec Rev 5 Fix C: prefer a per-row hostname from the
+            # shared priority list (Kansa "Host", Windows "ComputerName",
+            # Velociraptor "Hostname", nested "ClientInfo.Hostname", etc.)
+            # so multi-host CSVs stamp per-row correctly. Fall back to
+            # the operator/auto-detected ingest hostname when the row
+            # doesn't carry one of the priority fields.
+            from opensearch_mcp.hostname import extract_host_from_record
+
+            per_row_host = extract_host_from_record(row)
+            row["host.name"] = per_row_host or hostname
             if table_name:
                 row["vhir.table"] = table_name
 

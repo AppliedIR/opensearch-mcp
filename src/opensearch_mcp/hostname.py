@@ -25,8 +25,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from opensearch_mcp.paths import resolve_case_insensitive
+
+if TYPE_CHECKING:
+    from opensearch_mcp.host_dictionary import HostDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +144,7 @@ def detect_hostname_from_volume(volume_root: Path) -> str | None:
 
 def classify_host(
     raw: str | None,
-    host_dict,
+    host_dict: HostDictionary | None,
 ) -> tuple[str, str | None, str | None, float]:
     """Classify a raw hostname against the dictionary.
 
@@ -191,6 +195,95 @@ def write_host_unmapped_yaml(
         encoding="utf-8",
     )
     return path
+
+
+def peek_hostname_from_evidence(scan_root: Path) -> str | None:
+    """Walk `scan_root` for the first parseable CSV/JSONL/JSON file and
+    extract a hostname from its first record via `_HOST_FIELD_PRIORITY`.
+
+    Rev 1.5 Commit B fallback affordance — when registry detect fails,
+    gives cmd_scan's classify step a real hostname (from evidence
+    content) instead of directory-scan junk like `_mnt_1`. So when
+    host-unmapped.yaml lands, the operator sees a meaningful raw name
+    (e.g. `admin01.shieldbase.com` from evtx Computer field) that they
+    can propose a canonical for.
+
+    Returns None when:
+      - scan_root has no CSV/JSONL/JSON files (bare VHDX mount with
+        no pre-extracted artifacts)
+      - all candidate files fail to parse / have no priority-list field
+      - any filesystem error (scan_root missing, permission denied)
+
+    Skips `.index` sidecars (Velociraptor binary offsets) and respects
+    the extension allowlist used by idx_ingest_json.
+
+    Does NOT parse evtx — that requires pyevtx-rs spinning up a parser
+    per file; cost isn't worth it for a fallback affordance. Most
+    triage packages carry CSVs (Kansa, EZ-tool output) or JSON
+    (Velociraptor) alongside any evtx.
+    """
+    if not scan_root or not scan_root.exists():
+        return None
+
+    import csv
+    import json as _json
+
+    allowed_suffixes = {".csv", ".tsv", ".json", ".jsonl", ".ndjson"}
+    try:
+        candidates = sorted(
+            f
+            for f in scan_root.rglob("*")
+            if f.is_file()
+            and f.suffix.lower() in allowed_suffixes
+            and not f.name.endswith(".index")
+        )
+    except OSError:
+        return None
+
+    for path in candidates[:50]:  # cap walk cost — early hits are typical
+        try:
+            if path.suffix.lower() in (".json", ".jsonl", ".ndjson"):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    head = f.readline().strip()
+                    if not head:
+                        continue
+                    # jsonl first; array fallback; pretty single-object
+                    # not covered here (first-line `{` would parse OK via
+                    # a fuller read, but for a fallback-affordance peek
+                    # the jsonl / array shapes cover the interesting
+                    # cases)
+                    if head.startswith("["):
+                        rest = head + f.read()
+                        try:
+                            arr = _json.loads(rest)
+                        except _json.JSONDecodeError:
+                            continue
+                        if not arr:
+                            continue
+                        record = arr[0]
+                    else:
+                        try:
+                            record = _json.loads(head)
+                        except _json.JSONDecodeError:
+                            continue
+                if not isinstance(record, dict):
+                    continue
+                hn = extract_host_from_record(record)
+                if hn:
+                    return hn
+            else:  # .csv / .tsv
+                delim = "\t" if path.suffix.lower() == ".tsv" else ","
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    reader = csv.DictReader(f, delimiter=delim)
+                    row = next(reader, None)
+                if row is None:
+                    continue
+                hn = extract_host_from_record(dict(row))
+                if hn:
+                    return hn
+        except (OSError, UnicodeError):
+            continue
+    return None
 
 
 def archive_resolved_unmapped_yaml(case_dir: Path) -> Path | None:

@@ -184,7 +184,16 @@ def ingest_json(
 
         doc_id = _doc_id(index_name, record, volatile_keys=_JSON_VOLATILE)
 
-        record["host.name"] = hostname
+        # Per spec Rev 5 Fix C: prefer a per-doc hostname from the
+        # shared priority list (Velociraptor "Hostname" + nested
+        # "ClientInfo.Hostname", Windows "ComputerName", Kansa "Host",
+        # etc.). Multi-host JSON sources (Velociraptor server exports,
+        # log-forwarder dumps) stamp per-doc correctly instead of
+        # inheriting the single ingest-level hostname.
+        from opensearch_mcp.hostname import extract_host_from_record
+
+        per_doc_host = extract_host_from_record(record)
+        record["host.name"] = per_doc_host or hostname
         record["vhir.parse_method"] = "json-ingest"
         if source_file:
             record["vhir.source_file"] = source_file

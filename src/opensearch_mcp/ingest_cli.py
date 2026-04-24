@@ -25,6 +25,42 @@ from opensearch_mcp.tools import TOOLS
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
 
 
+def _case_dir_for(case_id: str) -> Path | None:
+    """Resolve the on-disk case directory for `case_id`.
+
+    Prefers `VHIR_CASES_DIR` env, falls back to `~/cases/`. Returns None
+    if the directory doesn't exist — callers (batch-discovery) treat
+    that as "no dict available, proceed with current behavior" rather
+    than aborting.
+    """
+    cases_root = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
+    case_dir = cases_root / case_id
+    return case_dir if case_dir.is_dir() else None
+
+
+def _load_case_host_dict(case_id: str):
+    """Load `<case>/host-dictionary.yaml` if it exists. Returns None if
+    the case dir or file is absent — which keeps pre-C1 cases working
+    (no dict = no fail-loud binding; status quo).
+    """
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None:
+        return None
+    path = case_dir / "host-dictionary.yaml"
+    if not path.exists():
+        return None
+    try:
+        from opensearch_mcp.host_dictionary import HostDictionary
+
+        return HostDictionary.load(path)
+    except Exception as e:
+        print(
+            f"Warning: could not load {path}: {e}; proceeding without host-dictionary validation.",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _preflight_shard_capacity(
     client,
     ingest_type: str,
@@ -396,9 +432,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     print(f"  Found disk image: {img.name}")
                     # Archive-basename stamp removed per host-identity spec
                     # (silent "admin01-triage" pollution). Registry detect
-                    # against the mounted volume is the correct priority-2
-                    # step; happens below after mount. Basename lives on as
-                    # a hint for propose_canonical only.
+                    # against the mounted volume happens below after mount.
                     volumes = mount_image(img, tmpdir, mount_ctx)
                     if not volumes:
                         print(
@@ -416,7 +450,12 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # Priority-2 registry detect — reads ComputerName+Domain
                     # from the mounted volume's SYSTEM hive. Replaces the
                     # removed archive-basename fallback with a grounded
-                    # source of truth.
+                    # source of truth. When it fails, warn the operator
+                    # explicitly — control falls through to discover()
+                    # which derives hostname from directory/mount names,
+                    # a weaker signal that can still pollute host.name
+                    # (silently-wrong of a different shape). C1 closes
+                    # this via batch-discovery + host-unmapped.yaml.
                     if not hostname and volumes:
                         from opensearch_mcp.hostname import detect_hostname_from_volume
 
@@ -424,6 +463,13 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         if detected:
                             hostname = detected
                             print(f"  Hostname from volume registry: {hostname}")
+                        else:
+                            print(
+                                "  WARNING: could not detect hostname from registry; "
+                                "falling back to directory-scan (weaker signal — "
+                                "consider passing --hostname <canonical> explicitly)",
+                                file=sys.stderr,
+                            )
 
                 scan_root = tmpdir
 
@@ -439,6 +485,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # Priority-2 registry detect on the mounted volume. Takes
             # precedence over the previous input_path.stem fallback so
             # disk images get the real ComputerName, not the filename.
+            # Warn on miss — see the archive-path block above for why.
             if not hostname:
                 from opensearch_mcp.hostname import detect_hostname_from_volume
 
@@ -446,6 +493,13 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if detected:
                     hostname = detected
                     print(f"  Hostname from volume registry: {hostname}")
+                else:
+                    print(
+                        "  WARNING: could not detect hostname from registry; "
+                        "falling back to directory-scan (weaker signal — "
+                        "consider passing --hostname <canonical> explicitly)",
+                        file=sys.stderr,
+                    )
 
             # VSS handling
             if vss_flag:
@@ -479,6 +533,80 @@ def cmd_scan(args: argparse.Namespace) -> None:
             container_type == "archive" and hostname
         )
         hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
+
+        # --- Pre-classify peek (spec Rev 5 Fix C step 3 fallback) ---
+        # When registry detect missed AND discover() produced hosts with
+        # directory/mount-scan-derived names (junk like `_mnt_1` because
+        # the scan_root happens to be the tmpdir), peek at the first
+        # parseable CSV/JSON artifact to pull a real hostname from the
+        # priority list. Feeds classify_host below with a meaningful raw
+        # name so host-unmapped.yaml is actionable for the operator.
+        if not hostname and hosts:
+            from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+            peeked = peek_hostname_from_evidence(scan_root)
+            if peeked:
+                print(f"  Hostname from first parseable artifact: {peeked}")
+                for h in hosts:
+                    # Only overwrite directory/mount-scan-derived values;
+                    # never stomp on anything discover() pulled from real
+                    # per-host evidence subdirs.
+                    if not h.hostname or h.hostname.startswith("_"):
+                        h.hostname = peeked
+
+        # --- Batch-discovery + fail-loud (spec Rev 5 Fix C Part 2) ---
+        # Before any parser runs, classify every discovered host's name
+        # against the case host-dictionary. If ANY host is unmapped:
+        # collect the full set, write <case>/host-unmapped.yaml with
+        # actionable `vhir case host add` commands, exit with a
+        # structured hostname_unmapped error. Operator resolves all in
+        # one pass, re-runs; the archive_resolved_unmapped_yaml call
+        # below renames the file on the clean re-run.
+        _host_dict = _load_case_host_dict(case_id)
+        if _host_dict is not None and hosts:
+            from opensearch_mcp.hostname import (
+                archive_resolved_unmapped_yaml,
+                classify_host,
+                write_host_unmapped_yaml,
+            )
+
+            unmapped_entries: list[dict] = []
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for h in hosts:
+                status, raw, proposed, conf = classify_host(h.hostname, _host_dict)
+                if status in ("unmapped-with-proposal", "unmapped-no-proposal"):
+                    flag = f"--alias-of {proposed}" if proposed else "--new-canonical"
+                    unmapped_entries.append(
+                        {
+                            "raw": raw,
+                            "first_seen": now_iso,
+                            "sources": [f"ingest:{input_path.name}"],
+                            "proposed_canonical": proposed,
+                            "confidence": conf,
+                            "action_required": (f"vhir case host add {raw} {flag}"),
+                        }
+                    )
+
+            case_dir = _case_dir_for(case_id)
+            if unmapped_entries:
+                if case_dir is not None:
+                    yaml_path = write_host_unmapped_yaml(case_dir, unmapped_entries)
+                    yaml_ref = str(yaml_path)
+                else:
+                    yaml_ref = "(case dir unavailable — see stderr entries below)"
+                print(
+                    "Error: hostname_unmapped — "
+                    f"{len(unmapped_entries)} host(s) not in dictionary. "
+                    f"See {yaml_ref}",
+                    file=sys.stderr,
+                )
+                for e in unmapped_entries:
+                    print(f"  - {e['raw']!r}: {e['action_required']}", file=sys.stderr)
+                sys.exit(2)  # distinct from generic error (1) so scripts can route
+            elif case_dir is not None:
+                # All mapped — clean up any prior host-unmapped.yaml left
+                # over from a previous failed ingest on the same case.
+                archive_resolved_unmapped_yaml(case_dir)
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and container_type in ("ewf", "raw", "nbd") and tmpdir and vss_volumes:

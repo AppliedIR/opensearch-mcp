@@ -296,3 +296,84 @@ class TestHostUnmappedYaml:
 
     def test_cleanup_returns_none_when_no_file(self, tmp_path):
         assert archive_resolved_unmapped_yaml(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# peek_hostname_from_evidence — pre-classify fallback affordance
+# ---------------------------------------------------------------------------
+
+
+class TestPeekHostnameFromEvidence:
+    """Walks scan_root for the first CSV/JSONL/JSON and extracts a
+    hostname from its first record — used as a fallback when registry
+    detect fails so host-unmapped.yaml carries a real raw value instead
+    of `_mnt_1` directory-scan junk."""
+
+    def test_finds_hostname_in_first_csv(self, tmp_path):
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        csv_file = tmp_path / "kansa.csv"
+        csv_file.write_text("Host,other\nadmin01.shieldbase.com,data\n")
+        assert peek_hostname_from_evidence(tmp_path) == "admin01.shieldbase.com"
+
+    def test_finds_hostname_in_jsonl(self, tmp_path):
+        import json
+
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        jsonl = tmp_path / "vr.jsonl"
+        jsonl.write_text(json.dumps({"Hostname": "admin01"}) + "\n")
+        assert peek_hostname_from_evidence(tmp_path) == "admin01"
+
+    def test_finds_hostname_in_nested_json_field(self, tmp_path):
+        import json
+
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        jsonl = tmp_path / "vr.jsonl"
+        jsonl.write_text(json.dumps({"ClientInfo": {"Hostname": "rd01"}}) + "\n")
+        assert peek_hostname_from_evidence(tmp_path) == "rd01"
+
+    def test_returns_none_when_no_evidence_files(self, tmp_path):
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        assert peek_hostname_from_evidence(tmp_path) is None
+
+    def test_returns_none_when_no_priority_field(self, tmp_path):
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("col1,col2\nv1,v2\n")
+        assert peek_hostname_from_evidence(tmp_path) is None
+
+    def test_skips_index_sidecars(self, tmp_path):
+        """Velociraptor binary `.index` offsets must not be parsed."""
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        (tmp_path / "a.json.index").write_bytes(b"\x00\x01\x02\x03")
+        import json
+
+        (tmp_path / "a.jsonl").write_text(json.dumps({"Hostname": "admin01"}) + "\n")
+        assert peek_hostname_from_evidence(tmp_path) == "admin01"
+
+    def test_nonexistent_scan_root_returns_none(self, tmp_path):
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        assert peek_hostname_from_evidence(tmp_path / "does-not-exist") is None
+
+    def test_walks_subdirectories(self, tmp_path):
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        sub = tmp_path / "host1" / "kansa"
+        sub.mkdir(parents=True)
+        (sub / "out.csv").write_text("ComputerName,x\nADMIN01,1\n")
+        assert peek_hostname_from_evidence(tmp_path) == "ADMIN01"
+
+    def test_first_record_has_empty_priority_falls_through_to_next_file(self, tmp_path):
+        import json
+
+        from opensearch_mcp.hostname import peek_hostname_from_evidence
+
+        (tmp_path / "a.jsonl").write_text(json.dumps({"random": "value"}) + "\n")
+        (tmp_path / "b.jsonl").write_text(json.dumps({"Hostname": "rd01"}) + "\n")
+        assert peek_hostname_from_evidence(tmp_path) == "rd01"
