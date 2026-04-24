@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,17 +44,19 @@ _ZEEK_NULL = {"-", "(empty)", ""}
 def _detect_delimited_format(path: Path) -> dict:
     """Auto-detect format, delimiter, header style.
 
-    After classification, verify the chosen delimiter has a consistent
-    count across first N lines. Prose files (license text, READMEs,
-    syslog) that happen to contain structured-looking characters get
-    rejected as "unknown" rather than parsed into a guaranteed-crash.
-    The walker's existing "unknown → skip" path then handles them
-    cleanly. Heuristic does not parse quoting; heavily-quoted CSV with
-    variable comma density in quoted fields may fall through as
-    unknown (rare in forensic output). Operators hitting this edge
-    case can ingest by explicit path (recursive=False). Fix 1.1's
-    broadened per-file except catches anything that still reaches the
-    parser.
+    After classification, verify the chosen delimiter produces a
+    consistent field count across first N lines. Prose files (license
+    text, READMEs, syslog) that happen to contain structured-looking
+    characters get rejected as "unknown" — random commas in sentences
+    parse as wildly-varying field counts, variance check fires, caller
+    skips.
+
+    Quote-aware via `csv.reader`: Hayabusa detection output and other
+    heavily-quoted CSVs whose quoted fields contain inline delimiters
+    now parse correctly. Pre-fix versions did raw character counts and
+    silently rejected Hayabusa (89k+ hits dropped per rd01 ingest).
+    Multi-line quoted fields stitch correctly because we feed the
+    joined head to a single csv.reader rather than per-line counting.
     """
     encoding = _detect_encoding(path)
     with open(path, "r", encoding=encoding, errors="replace") as f:
@@ -87,13 +90,20 @@ def _detect_delimited_format(path: Path) -> dict:
     else:
         candidate = {"format": "csv", "delimiter": ",", "header": "first_line"}
 
-    # Variance check: the classified delimiter must appear consistently
-    # across first N lines. Prose has wildly varying counts; structured
-    # data has near-constant counts. Rejects license files, READMEs,
-    # syslog that happen to contain a classified delimiter character.
+    # Variance check — quote-aware via csv.reader. Join first N lines
+    # so multi-line quoted fields reconstruct naturally; csv.reader
+    # consumes them as single logical rows. Field counts (not raw
+    # character counts) are what a real parser would see, which is
+    # what the consistency check should be gating on.
     delim = candidate["delimiter"]
-    counts = [ln.count(delim) for ln in first_lines[:10]]
-    if min(counts) == 0 or (max(counts) - min(counts)) > max(counts) // 2:
+    try:
+        reader = csv.reader(io.StringIO("\n".join(first_lines[:10])), delimiter=delim)
+        counts = [len(row) for row in reader]
+    except csv.Error:
+        return {"format": "unknown"}
+    if not counts or min(counts) < 2:
+        return {"format": "unknown"}
+    if (max(counts) - min(counts)) > max(counts) // 2:
         return {"format": "unknown"}
     return candidate
 
