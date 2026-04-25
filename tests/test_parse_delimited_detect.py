@@ -28,7 +28,7 @@ class TestHayabusaShapedCsv:
         path = _write(
             tmp_path / "hayabusa.csv",
             (
-                'Timestamp,Level,Computer,RuleTitle,Details,ExtraFieldInfo\n'
+                "Timestamp,Level,Computer,RuleTitle,Details,ExtraFieldInfo\n"
                 # Row 1 — short details
                 '2026-04-24T10:00:00Z,high,admin01,"WMI Persist","Created","src=7,dst=8"\n'
                 # Row 2 — LONG details with 8 inline commas (exactly the
@@ -76,13 +76,7 @@ class TestHayabusaShapedCsv:
         """Regression — plain CSV without quoting continues to work."""
         path = _write(
             tmp_path / "simple.csv",
-            (
-                "id,name,value\n"
-                "1,alpha,10\n"
-                "2,beta,20\n"
-                "3,gamma,30\n"
-                "4,delta,40\n"
-            ),
+            ("id,name,value\n1,alpha,10\n2,beta,20\n3,gamma,30\n4,delta,40\n"),
         )
         result = _detect_delimited_format(path)
         assert result["format"] == "csv"
@@ -97,7 +91,7 @@ class TestHayabusaShapedCsv:
         path = _write(
             tmp_path / "multiline.csv",
             (
-                'id,description,tail\n'
+                "id,description,tail\n"
                 '1,"line one\nline two\nline three",end\n'
                 '2,"single line",end\n'
                 '3,"another\nsplit",end\n'

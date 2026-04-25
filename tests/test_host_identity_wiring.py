@@ -311,9 +311,7 @@ def _run_batch_discovery(hosts, case_id):
 class TestCmdScanEndToEnd:
     """Spec Test 14 end-to-end + Test 4 archive-basename rejection."""
 
-    def test_14_unmapped_blocks_then_rerun_succeeds_and_cleans_up(
-        self, tmp_path, monkeypatch
-    ):
+    def test_14_unmapped_blocks_then_rerun_succeeds_and_cleans_up(self, tmp_path, monkeypatch):
         case_dir = _seed_case(
             tmp_path,
             "INC-14",
@@ -371,9 +369,7 @@ class TestCmdScanEndToEnd:
             _run_batch_discovery(discovered, "INC-4")
         assert exc.value.code == 2
 
-        payload = yaml.safe_load(
-            (tmp_path / "INC-4" / "host-unmapped.yaml").read_text()
-        )
+        payload = yaml.safe_load((tmp_path / "INC-4" / "host-unmapped.yaml").read_text())
         assert payload["entries"][0]["raw"] == "foo-triage"
 
     def test_peek_rescues_junk_hostname_flow(self, tmp_path, monkeypatch):
@@ -406,7 +402,5 @@ class TestCmdScanEndToEnd:
         discovered = [MagicMock(hostname=peeked)]
         with pytest.raises(SystemExit):
             _run_batch_discovery(discovered, "INC-PEEK")
-        payload = yaml.safe_load(
-            (tmp_path / "INC-PEEK" / "host-unmapped.yaml").read_text()
-        )
+        payload = yaml.safe_load((tmp_path / "INC-PEEK" / "host-unmapped.yaml").read_text())
         assert payload["entries"][0]["raw"] == "rd01.shieldbase.com"
