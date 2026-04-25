@@ -61,6 +61,77 @@ def _load_case_host_dict(case_id: str):
         return None
 
 
+def _classify_or_fail(case_id: str, hosts: list, ingest_label: str) -> None:
+    """Batch-discovery + fail-loud (spec Rev 5 Fix C Part 2).
+
+    Before any parser runs, classify every discovered host's name
+    against the case host-dictionary. If ANY host is unmapped: collect
+    the full set, write `<case>/host-unmapped.yaml` with actionable
+    `vhir case host add` commands, exit code 2 ("hostname_unmapped" —
+    distinct from generic 1 so operator scripts can route).
+
+    Operator resolves all entries in one pass, re-runs ingest. The
+    all-mapped branch fires `archive_resolved_unmapped_yaml` to rename
+    any leftover yaml from the prior failed run.
+
+    No-op when:
+      - host-dictionary.yaml absent (pre-C1 case — preserves legacy
+        behavior, no fail-loud binding)
+      - hosts list is empty
+
+    Single shared call site for cmd_scan + tests (extracted from an
+    inline block per CR review 2026-04-25 — the inline form drove tests
+    to re-implement the loop as a harness, breaking on every refactor).
+    """
+    host_dict = _load_case_host_dict(case_id)
+    if host_dict is None or not hosts:
+        return
+
+    from opensearch_mcp.hostname import (
+        archive_resolved_unmapped_yaml,
+        classify_host,
+        write_host_unmapped_yaml,
+    )
+
+    unmapped_entries: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for h in hosts:
+        status, raw, proposed, conf = classify_host(h.hostname, host_dict)
+        if status in ("unmapped-with-proposal", "unmapped-no-proposal"):
+            flag = f"--alias-of {proposed}" if proposed else "--new-canonical"
+            unmapped_entries.append(
+                {
+                    "raw": raw,
+                    "first_seen": now_iso,
+                    "sources": [f"ingest:{ingest_label}"],
+                    "proposed_canonical": proposed,
+                    "confidence": conf,
+                    "action_required": f"vhir case host add {raw} {flag}",
+                }
+            )
+
+    case_dir = _case_dir_for(case_id)
+    if unmapped_entries:
+        if case_dir is not None:
+            yaml_path = write_host_unmapped_yaml(case_dir, unmapped_entries)
+            yaml_ref = str(yaml_path)
+        else:
+            yaml_ref = "(case dir unavailable — see stderr entries below)"
+        print(
+            "Error: hostname_unmapped — "
+            f"{len(unmapped_entries)} host(s) not in dictionary. "
+            f"See {yaml_ref}",
+            file=sys.stderr,
+        )
+        for e in unmapped_entries:
+            print(f"  - {e['raw']!r}: {e['action_required']}", file=sys.stderr)
+        sys.exit(2)
+    elif case_dir is not None:
+        # All mapped — clean up any prior host-unmapped.yaml from a
+        # previous failed ingest on the same case.
+        archive_resolved_unmapped_yaml(case_dir)
+
+
 def _preflight_shard_capacity(
     client,
     ingest_type: str,
@@ -554,59 +625,12 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     if not h.hostname or h.hostname.startswith("_"):
                         h.hostname = peeked
 
-        # --- Batch-discovery + fail-loud (spec Rev 5 Fix C Part 2) ---
-        # Before any parser runs, classify every discovered host's name
-        # against the case host-dictionary. If ANY host is unmapped:
-        # collect the full set, write <case>/host-unmapped.yaml with
-        # actionable `vhir case host add` commands, exit with a
-        # structured hostname_unmapped error. Operator resolves all in
-        # one pass, re-runs; the archive_resolved_unmapped_yaml call
-        # below renames the file on the clean re-run.
-        _host_dict = _load_case_host_dict(case_id)
-        if _host_dict is not None and hosts:
-            from opensearch_mcp.hostname import (
-                archive_resolved_unmapped_yaml,
-                classify_host,
-                write_host_unmapped_yaml,
-            )
-
-            unmapped_entries: list[dict] = []
-            now_iso = datetime.now(timezone.utc).isoformat()
-            for h in hosts:
-                status, raw, proposed, conf = classify_host(h.hostname, _host_dict)
-                if status in ("unmapped-with-proposal", "unmapped-no-proposal"):
-                    flag = f"--alias-of {proposed}" if proposed else "--new-canonical"
-                    unmapped_entries.append(
-                        {
-                            "raw": raw,
-                            "first_seen": now_iso,
-                            "sources": [f"ingest:{input_path.name}"],
-                            "proposed_canonical": proposed,
-                            "confidence": conf,
-                            "action_required": (f"vhir case host add {raw} {flag}"),
-                        }
-                    )
-
-            case_dir = _case_dir_for(case_id)
-            if unmapped_entries:
-                if case_dir is not None:
-                    yaml_path = write_host_unmapped_yaml(case_dir, unmapped_entries)
-                    yaml_ref = str(yaml_path)
-                else:
-                    yaml_ref = "(case dir unavailable — see stderr entries below)"
-                print(
-                    "Error: hostname_unmapped — "
-                    f"{len(unmapped_entries)} host(s) not in dictionary. "
-                    f"See {yaml_ref}",
-                    file=sys.stderr,
-                )
-                for e in unmapped_entries:
-                    print(f"  - {e['raw']!r}: {e['action_required']}", file=sys.stderr)
-                sys.exit(2)  # distinct from generic error (1) so scripts can route
-            elif case_dir is not None:
-                # All mapped — clean up any prior host-unmapped.yaml left
-                # over from a previous failed ingest on the same case.
-                archive_resolved_unmapped_yaml(case_dir)
+        # Batch-discovery + fail-loud — single call site for the
+        # spec Rev 5 Fix C Part 2 contract. Implementation lives in
+        # `_classify_or_fail` so the wiring test exercises the same
+        # function (no harness drift). Raises SystemExit(2) on any
+        # unmapped host; no-op when the case has no host-dictionary.
+        _classify_or_fail(case_id, hosts, input_path.name)
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and container_type in ("ewf", "raw", "nbd") and tmpdir and vss_volumes:

@@ -294,48 +294,18 @@ def _seed_case(cases_dir: Path, case_id: str, dict_hosts: dict | None = None) ->
 
 
 def _run_batch_discovery(hosts, case_id):
-    """Re-invoke cmd_scan's batch-discovery block verbatim (without
-    spinning up mounts or parsers). The block is self-contained — its
-    only dependencies are (discovered hosts, case_id) → yaml write +
-    SystemExit. Any future refactor of that block changes this harness
-    and surfaces here.
+    """Invoke the EXACT function cmd_scan calls — no harness drift.
+
+    Per CR review 2026-04-25, the previous version of this helper
+    re-implemented cmd_scan's batch-discovery block, which would silently
+    pass even if cmd_scan's call site got refactored away. The
+    `_classify_or_fail` helper extracted into ingest_cli.py is now the
+    single shared call site; this test wrapper just thins-passes through
+    so failures on the production code path always surface here.
     """
-    from datetime import datetime, timezone
+    from opensearch_mcp.ingest_cli import _classify_or_fail
 
-    from opensearch_mcp.hostname import (
-        archive_resolved_unmapped_yaml,
-        classify_host,
-        write_host_unmapped_yaml,
-    )
-    from opensearch_mcp.ingest_cli import _case_dir_for, _load_case_host_dict
-
-    host_dict = _load_case_host_dict(case_id)
-    if host_dict is None or not hosts:
-        return
-
-    unmapped = []
-    now = datetime.now(timezone.utc).isoformat()
-    for h in hosts:
-        status, raw, proposed, conf = classify_host(h.hostname, host_dict)
-        if status in ("unmapped-with-proposal", "unmapped-no-proposal"):
-            flag = f"--alias-of {proposed}" if proposed else "--new-canonical"
-            unmapped.append(
-                {
-                    "raw": raw,
-                    "first_seen": now,
-                    "sources": ["ingest:test"],
-                    "proposed_canonical": proposed,
-                    "confidence": conf,
-                    "action_required": f"vhir case host add {raw} {flag}",
-                }
-            )
-
-    case_dir = _case_dir_for(case_id)
-    if unmapped:
-        write_host_unmapped_yaml(case_dir, unmapped)
-        raise SystemExit(2)
-    elif case_dir is not None:
-        archive_resolved_unmapped_yaml(case_dir)
+    _classify_or_fail(case_id, hosts, "test")
 
 
 class TestCmdScanEndToEnd:
