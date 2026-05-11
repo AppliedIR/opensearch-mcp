@@ -27,7 +27,7 @@ opensearch-ingest = "opensearch_mcp.ingest_cli:main"
 opensearch = "opensearch_mcp.vhir_plugin:register"
 
 [project.optional-dependencies]
-http = ["uvicorn>=0.20", "starlette"]
+http = ["uvicorn>=0.46.0", "starlette"]
 test = [
     "pytest>=7.0",
     "pytest-timeout>=2.0",
