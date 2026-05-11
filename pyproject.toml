@@ -14,7 +14,7 @@ dependencies = [
     "mcp>=1.26",
     "pyyaml>=6.0.3",
     "sift-common",
-    "regipy>=4.0",
+    "regipy>=6.2.1",
     "python-dateutil>=2.9.0.post0",
     "defusedxml>=0.7",
 ]
