@@ -12,7 +12,7 @@ dependencies = [
     "opensearch-py>=2.4",
     "evtx>=0.8",
     "mcp>=1.26",
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.3",
     "sift-common",
     "regipy>=4.0",
     "python-dateutil>=2.8",
