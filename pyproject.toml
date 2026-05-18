@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "opensearch-py>=2.4",
-    "evtx>=0.8",
+    "evtx>=0.11.0",
     "mcp>=1.26",
     "pyyaml>=6.0.3",
     "sift-common",
