@@ -241,6 +241,7 @@ def _index_vol3_records(
     source_file: str,
     ingest_audit_id: str,
     pipeline_version: str,
+    host_dict=None,
 ) -> tuple[int, int]:
     """Index vol3 JSON records into OpenSearch."""
     count = 0
@@ -260,6 +261,12 @@ def _index_vol3_records(
         doc_id = _vol3_doc_id(index_name, plugin, record, source_file)
 
         record["host.name"] = hostname
+        if hostname:
+            if host_dict is not None:
+                _resolved = host_dict.resolve(hostname)
+                record["host.id"] = _resolved if _resolved else hostname
+            else:
+                record["host.id"] = hostname
         record["vhir.source_file"] = source_file
         record["vhir.parse_method"] = f"vol3-{plugin}"
         if ingest_audit_id:
@@ -312,6 +319,7 @@ def ingest_memory(
     pipeline_version: str = "",
     on_progress=None,
     audit_log=None,
+    host_dict=None,
 ) -> dict:
     """Run vol3 plugins and index results.
 
@@ -402,6 +410,7 @@ def ingest_memory(
             source_file=source_file,
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
+            host_dict=host_dict,
         )
         results[plugin] = {"status": "complete", "indexed": count, "bulk_failed": bf}
 

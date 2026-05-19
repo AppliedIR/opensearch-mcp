@@ -272,6 +272,7 @@ def ingest_transcripts(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Discover and ingest transcript files from a directory.
 
@@ -301,6 +302,12 @@ def ingest_transcripts(
 
         rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
         doc["host.name"] = hostname
+        if hostname:
+            if host_dict is not None:
+                _resolved = host_dict.resolve(hostname)
+                doc["host.id"] = _resolved if _resolved else hostname
+            else:
+                doc["host.id"] = hostname
         doc["vhir.source_file"] = rel
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id

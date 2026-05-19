@@ -119,6 +119,19 @@ def _iter_json_records(path: Path, fmt: str):
             yield data
 
 
+def _resolve_cached(host_dict, raw: str) -> str | None:
+    """Per-batch resolve memoization (see parse_evtx._resolve_cached)."""
+    cache = getattr(host_dict, "_resolve_cache", None)
+    if cache is None:
+        cache = {}
+        host_dict._resolve_cache = cache
+    if raw in cache:
+        return cache[raw]
+    val = host_dict.resolve(raw)
+    cache[raw] = val
+    return val
+
+
 def ingest_json(
     path: Path,
     client: OpenSearch,
@@ -131,6 +144,7 @@ def ingest_json(
     time_from: datetime | None = None,
     time_to: datetime | None = None,
     batch_size: int = 1000,
+    host_dict=None,
 ) -> tuple[int, int, int, int]:
     """Ingest JSON/JSONL. Returns (indexed, skipped, bulk_failed, host_renamed)."""
     fmt = _detect_json_format(path)
@@ -140,6 +154,10 @@ def ingest_json(
     count = skipped = bulk_failed = host_renamed = 0
     actions: list[dict] = []
     ts_field = time_field
+
+    # L4: per-call cache reset (see parse_evtx note).
+    if host_dict is not None and hasattr(host_dict, "_resolve_cache"):
+        host_dict._resolve_cache = {}
 
     for record in _iter_json_records(path, fmt):
         if ts_field is None and not time_field:
@@ -193,7 +211,16 @@ def ingest_json(
         from opensearch_mcp.hostname import extract_host_from_record
 
         per_doc_host = extract_host_from_record(record)
-        record["host.name"] = per_doc_host or hostname
+        raw_host = per_doc_host or hostname
+        record["host.name"] = raw_host
+        # host.id stamping (v1 host-identity). Resolve via dict;
+        # on miss, stamp host.id = raw (parser resolve-miss policy).
+        if raw_host:
+            if host_dict is not None:
+                resolved = _resolve_cached(host_dict, raw_host)
+                record["host.id"] = resolved if resolved else raw_host
+            else:
+                record["host.id"] = raw_host
         record["vhir.parse_method"] = "json-ingest"
         if source_file:
             record["vhir.source_file"] = source_file

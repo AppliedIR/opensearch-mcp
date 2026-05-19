@@ -72,6 +72,7 @@ def parse_wer_dir(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Parse all Report.wer files in directory tree."""
     count = 0
@@ -90,6 +91,12 @@ def parse_wer_dir(
 
         rel = relative_evidence_path(wer_file, volume_root) if volume_root else str(wer_file)
         doc["host.name"] = hostname
+        if hostname:
+            if host_dict is not None:
+                _resolved = host_dict.resolve(hostname)
+                doc["host.id"] = _resolved if _resolved else hostname
+            else:
+                doc["host.id"] = hostname
         doc["vhir.source_file"] = rel
         if ingest_audit_id:
             doc["vhir.ingest_audit_id"] = ingest_audit_id

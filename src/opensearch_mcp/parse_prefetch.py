@@ -18,6 +18,7 @@ def parse_prefetch(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int, str]:
     """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note).
 
@@ -43,6 +44,7 @@ def parse_prefetch(
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
                 source_file=source_file,
+                host_dict=host_dict,
             )
             return cnt, bf, ""
         except Exception as e:
@@ -60,6 +62,7 @@ def parse_prefetch(
             pipeline_version=pipeline_version,
             vss_id=vss_id,
             source_file=source_file,
+            host_dict=host_dict,
         )
         return cnt, bf, _fallback_note
     except subprocess.CalledProcessError as e:
@@ -79,6 +82,7 @@ def _parse_prefetch_wintools(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse prefetch via PECmd on Windows (wintools-mcp)."""
     from opensearch_mcp.parse_csv import ingest_csv
@@ -108,6 +112,7 @@ def _parse_prefetch_wintools(
             pipeline_version=pipeline_version,
             vss_id=vss_id,
             parse_method="PECmd",
+            host_dict=host_dict,
         )
         total_count += count
         total_failed += bf
@@ -124,6 +129,7 @@ def _parse_prefetch_plaso(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse prefetch via Plaso prefetch parser."""
     from opensearch_mcp.parse_plaso import parse_prefetch as _plaso_prefetch
@@ -137,4 +143,5 @@ def _parse_prefetch_plaso(
         pipeline_version=pipeline_version,
         vss_id=vss_id,
         source_file=source_file,
+        host_dict=host_dict,
     )

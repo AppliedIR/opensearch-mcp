@@ -20,6 +20,7 @@ def parse_srum(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int, str]:
     """Parse SRUM database. Returns (count_indexed, count_bulk_failed, note).
 
@@ -46,6 +47,7 @@ def parse_srum(
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
                 source_file=source_file,
+                host_dict=host_dict,
             )
             return cnt, bf, ""  # wintools succeeded — no note
         except Exception as e:
@@ -63,6 +65,7 @@ def parse_srum(
             pipeline_version=pipeline_version,
             vss_id=vss_id,
             source_file=source_file,
+            host_dict=host_dict,
         )
         return cnt, bf, _fallback_note  # Plaso succeeded with reduced fidelity
     except subprocess.CalledProcessError:
@@ -84,6 +87,7 @@ def _parse_srum_wintools(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse SRUM via SrumECmd on Windows (wintools-mcp).
 
@@ -136,6 +140,7 @@ def _parse_srum_wintools(
             pipeline_version=pipeline_version,
             vss_id=vss_id,
             parse_method="SrumECmd",
+            host_dict=host_dict,
         )
         total_count += count
         total_failed += bf
@@ -152,6 +157,7 @@ def _parse_srum_plaso(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse SRUM via Plaso esedb/srum parser."""
     from opensearch_mcp.parse_plaso import parse_srum as _plaso_srum
@@ -165,4 +171,5 @@ def _parse_srum_plaso(
         pipeline_version=pipeline_version,
         vss_id=vss_id,
         source_file=source_file,
+        host_dict=host_dict,
     )

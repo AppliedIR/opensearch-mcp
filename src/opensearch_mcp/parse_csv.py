@@ -71,6 +71,19 @@ def _doc_id(
     return hashlib.sha256(f"{index_name}:{content}".encode()).hexdigest()[:20]
 
 
+def _resolve_cached(host_dict, raw: str) -> str | None:
+    """Per-batch resolve memoization (see parse_evtx._resolve_cached)."""
+    cache = getattr(host_dict, "_resolve_cache", None)
+    if cache is None:
+        cache = {}
+        host_dict._resolve_cache = cache
+    if raw in cache:
+        return cache[raw]
+    val = host_dict.resolve(raw)
+    cache[raw] = val
+    return val
+
+
 def ingest_csv(
     csv_path: Path,
     client: OpenSearch,
@@ -86,6 +99,7 @@ def ingest_csv(
     time_to: datetime | None = None,
     vss_id: str = "",
     parse_method: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -97,6 +111,10 @@ def ingest_csv(
     bulk_failed = 0
     actions: list[dict] = []
     replacements_logged = False
+
+    # L4: per-call cache reset (see parse_evtx note).
+    if host_dict is not None and hasattr(host_dict, "_resolve_cache"):
+        host_dict._resolve_cache = {}
 
     encoding = _detect_encoding(csv_path)
 
@@ -137,7 +155,16 @@ def ingest_csv(
             from opensearch_mcp.hostname import extract_host_from_record
 
             per_row_host = extract_host_from_record(row)
-            row["host.name"] = per_row_host or hostname
+            raw_host = per_row_host or hostname
+            row["host.name"] = raw_host
+            # host.id stamping (v1 host-identity). Resolve via dict;
+            # on miss, stamp host.id = raw (parser resolve-miss policy).
+            if raw_host:
+                if host_dict is not None:
+                    resolved = _resolve_cached(host_dict, raw_host)
+                    row["host.id"] = resolved if resolved else raw_host
+                else:
+                    row["host.id"] = raw_host
             if table_name:
                 row["vhir.table"] = table_name
 

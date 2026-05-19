@@ -28,6 +28,7 @@ def parse_ssh_log(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Parse sshd.log files — extract auth events.
 
@@ -66,6 +67,12 @@ def parse_ssh_log(
                     "host.name": hostname,
                     "vhir.source_file": rel,
                 }
+                if hostname:
+                    if host_dict is not None:
+                        _resolved = host_dict.resolve(hostname)
+                        doc["host.id"] = _resolved if _resolved else hostname
+                    else:
+                        doc["host.id"] = hostname
 
                 ts_match = _SSH_LINE.match(line)
                 if not ts_match:

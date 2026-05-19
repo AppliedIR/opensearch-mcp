@@ -133,6 +133,7 @@ def parse_mplog(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Parse all MPLog files in directory. Returns (indexed, skipped, bulk_failed)."""
     count = 0
@@ -171,6 +172,12 @@ def parse_mplog(
                     continue
 
                 doc: dict = {"host.name": hostname}
+                if hostname:
+                    if host_dict is not None:
+                        _resolved = host_dict.resolve(hostname)
+                        doc["host.id"] = _resolved if _resolved else hostname
+                    else:
+                        doc["host.id"] = hostname
 
                 ts_match = _TS_PATTERN.match(line)
                 if ts_match:

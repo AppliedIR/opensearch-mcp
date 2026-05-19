@@ -22,6 +22,7 @@ from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
+from opensearch_mcp.host_dictionary import detect_host_id_mapping_type
 
 logger = logging.getLogger(__name__)
 
@@ -1786,6 +1787,25 @@ def idx_ingest_status(case_id: str = "") -> dict:
             )
             s["next_steps"] = next_steps
 
+        # Attach the preflight host-discovery report for THIS ingest's
+        # run_id. Per-run-id keying prevents concurrent ingests from
+        # overwriting each other's reports.
+        _hd_case = s.get("case_id") or filter_case
+        _hd_run_id = ing.get("run_id", "")
+        if _hd_case and _hd_case != "*" and _hd_run_id:
+            import json as _json
+            import os as _os
+
+            _cases_root = _os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases"))
+            _hd_path = (
+                Path(_cases_root) / _hd_case / "host-discovery-reports" / f"{_hd_run_id}.json"
+            )
+            if _hd_path.exists():
+                try:
+                    s["host_discovery"] = _json.loads(_hd_path.read_text(encoding="utf-8"))
+                except (OSError, _json.JSONDecodeError):
+                    pass  # Non-fatal — operator can read the file directly.
+
         summaries.append(s)
 
     return {"ingests": summaries}
@@ -2815,6 +2835,276 @@ def idx_list_detections(
     )
     if aid:
         resp["audit_id"] = aid
+    return resp
+
+
+@server.tool()
+def case_host_fix(raw: str, new_canonical: str) -> dict:
+    """MCP tool entry — outer guard wraps the implementation so any
+    InvalidHostnameValue (or other structured error) returns an
+    isError-envelope dict rather than bubbling to FastMCP as an
+    unstructured tool error.
+    """
+    from opensearch_mcp.host_dictionary import InvalidHostnameValue
+
+    try:
+        return _case_host_fix_impl(raw, new_canonical)
+    except InvalidHostnameValue as e:
+        return {
+            "status": "rejected",
+            "error": f"InvalidHostnameValue: {e}",
+            "raw": raw,
+            "new_canonical": new_canonical,
+            "dict_saved": False,
+            "isError": True,
+        }
+    except Exception as e:
+        # Last-resort envelope — any unexpected exception still returns
+        # a structured response with isError: True rather than bubbling
+        # to FastMCP as a generic ToolError.
+        return {
+            "status": "error",
+            "error": f"{type(e).__name__}: {e}",
+            "raw": raw,
+            "new_canonical": new_canonical,
+            "isError": True,
+        }
+
+
+def _case_host_fix_impl(raw: str, new_canonical: str) -> dict:
+    """Correct a wrong host.id mapping in the active case.
+
+    Use this tool when an earlier `idx_ingest` auto-applied a wrong
+    decision (e.g., proposed `wkstn01` for raw `wksn01` but the operator
+    confirms `wksn01` is actually a separate host).
+
+    Behavior:
+      1. Edits the case host-dictionary in memory: removes `raw` from
+         any existing canonical's alias list, then either adds `raw` to
+         `new_canonical`'s alias list (if `new_canonical` exists) or
+         creates `new_canonical` with `raw` as its first alias.
+      2. **Saves the dictionary atomically to disk.** This happens
+         BEFORE the reindex so a crash mid-call leaves the dict
+         reflecting operator intent.
+      3. Runs `update_by_query` across the case indices with a term
+         filter on `host.name:<raw>`, scripting `host.id = new_canonical`.
+         host.name is never touched.
+
+    On large hosts (5M+ docs) the `update_by_query` may exceed the
+    sift-gateway 300s tool-call timeout. When that happens: the dict is
+    already saved, OpenSearch continues the reindex server-side, and a
+    re-call is idempotent (dict no-op + finishes the remaining reindex).
+
+    Returns:
+      {"raw": ..., "new_canonical": ..., "docs_updated": N, "dict_path": ...}
+    """
+    from opensearch_mcp.host_dictionary import HostDictionary
+
+    # Resolve active case → case dir → dict path.
+    from opensearch_mcp.paths import vhir_dir
+
+    active_case = vhir_dir() / "active_case"
+    if not active_case.exists():
+        return {"error": "No active case. Run 'vhir case activate' first."}
+    case_raw = active_case.read_text().strip()
+    if not case_raw:
+        return {"error": "No active case."}
+    case_id = Path(case_raw).name
+    if not case_id or Path(case_id).name != case_id:
+        # Defense against active_case containing path components.
+        return {
+            "status": "rejected",
+            "error": f"invalid case_id: {case_raw!r}",
+            "isError": True,
+        }
+    import os as _os
+
+    cases_root = Path(_os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
+    case_dir = cases_root / case_id
+    if not case_dir.is_dir():
+        return {"error": f"Case directory not found: {case_dir}"}
+    dict_path = case_dir / "host-dictionary.yaml"
+    if not dict_path.exists():
+        return {
+            "error": (
+                f"host-dictionary.yaml not found at {dict_path}. "
+                "Run idx_ingest at least once to create it."
+            )
+        }
+
+    # 1. In-memory dict edits.
+    host_dict = HostDictionary.load(dict_path)
+
+    # Edge case: `raw` is itself a canonical name (operator wants to
+    # collapse it into another canonical). If we leave the orphan
+    # canonical entry in place, _rebuild_alias_map sets raw → raw via
+    # the canonical-self-mapping, which overrides the new alias and
+    # makes the fix invisible. Delete the canonical entry to ensure
+    # the new mapping wins.
+    if raw in host_dict.hosts and raw != new_canonical:
+        del host_dict.hosts[raw]
+
+    for canonical, entry in host_dict.hosts.items():
+        aliases = entry.get("aliases", []) or []
+        if raw in aliases and canonical != new_canonical:
+            aliases.remove(raw)
+
+    # Catch adversarial-input rejection from add_alias/add_canonical and
+    # return a structured error response. Without this, the exception
+    # propagates to MCP framework as a generic ToolError — the operator
+    # loses the dict-saved/retry context.
+    from opensearch_mcp.host_dictionary import InvalidHostnameValue
+
+    try:
+        if new_canonical in host_dict.hosts:
+            host_dict.add_alias(raw, new_canonical)
+        else:
+            host_dict.add_canonical(new_canonical)
+            if raw != new_canonical:
+                host_dict.add_alias(raw, new_canonical)
+        host_dict._rebuild_alias_map()
+    except InvalidHostnameValue as e:
+        return {
+            "status": "rejected",
+            "error": f"InvalidHostnameValue: {e}",
+            "raw": raw,
+            "new_canonical": new_canonical,
+            "dict_saved": False,
+            "isError": True,
+        }
+
+    # 2. Save BEFORE reindex.
+    host_dict.save()
+
+    # 3. update_by_query with term-DSL filter (NOT query_string — raw
+    # values may contain Lucene metacharacters; term filter treats them
+    # as exact-value).
+    client = _get_os()
+    index_pattern = f"case-{case_id.lower()}-*"
+
+    # H1 defensive: refuse to write through indices where host.id is
+    # non-keyword (pre-v1 upgrade path). Uses the shared detector
+    # imported at module top so a long-running gateway picks it up via
+    # the host_dictionary module path, not lazy through ingest_cli.
+    try:
+        _mappings = client.indices.get_mapping(index=index_pattern, allow_no_indices=True)
+        _bad_indices = []
+        for _idx_name, _body in (_mappings or {}).items():
+            _props = _body.get("mappings", {}).get("properties", {})
+            _ht = detect_host_id_mapping_type(_props)
+            if _ht is not None and _ht != "keyword":
+                _bad_indices.append(_idx_name)
+        if _bad_indices:
+            return {
+                "status": "mapping_upgrade_required",
+                "error": (
+                    f"{len(_bad_indices)} indices have host.id as non-keyword "
+                    "from a pre-v1 ingest. case_host_fix would silently leave "
+                    "host.id unqueryable on those indices. Reindex or delete "
+                    "before retrying."
+                ),
+                "indices_text": _bad_indices,
+                "raw": raw,
+                "new_canonical": new_canonical,
+                "dict_saved": True,
+                "dict_path": str(dict_path),
+                "isError": True,
+            }
+    except Exception:
+        # Mapping check is best-effort; cluster errors fall through.
+        pass
+
+    # Scoped reindex: filter to docs where host.name matches raw AND
+    # host.id is not yet new_canonical. Retry-after-timeout only
+    # touches docs that still need flipping.
+    #
+    # Defense in depth (WSL2 R5): also gate inside the painless script
+    # with `ctx.op = 'noop'` when host.id is already at new_canonical.
+    # Reason: the must_not term query depends on host.id being a
+    # keyword-mapped field. On a pre-v1 text-mapped index the term
+    # query against host.id can match unexpectedly (analyzed text
+    # tokenization), so the bool filter alone isn't enough. The script
+    # guard works regardless of mapping type — the engine treats noop
+    # as "no write, no version bump" and the cost stays bounded.
+    body = {
+        "query": {
+            "bool": {
+                "must": [{"term": {"host.name": raw}}],
+                "must_not": [{"term": {"host.id": new_canonical}}],
+            }
+        },
+        "script": {
+            "source": (
+                "if (ctx._source['host.id'] == params.id) { ctx.op = 'noop'; return; } "
+                "ctx._source['host.id'] = params.id"
+            ),
+            "lang": "painless",
+            "params": {"id": new_canonical},
+        },
+    }
+    try:
+        # WSL2 R4 Test 3: default client read_timeout (~10s) fires
+        # false-negative on multi-hundred-thousand-doc hosts even when
+        # the cluster completes the work. Raise to 600s so v1 covers
+        # ~6M-doc hosts at typical 10K/sec throughput. v2 backlog has
+        # `wait_for_completion=false` + task polling for larger.
+        result = client.update_by_query(
+            index=index_pattern,
+            body=body,
+            refresh=True,
+            conflicts="proceed",
+            request_timeout=600,
+        )
+    except Exception as e:
+        err_resp = {
+            "status": "reindex_failed",
+            "error": f"update_by_query failed: {type(e).__name__}: {e}",
+            "raw": raw,
+            "new_canonical": new_canonical,
+            "dict_saved": True,
+            "dict_path": str(dict_path),
+            "retry_hint": (
+                "Dict is saved with the new mapping. Re-call case_host_fix "
+                "with the same args to retry the reindex."
+            ),
+            "isError": True,
+        }
+        try:
+            audit.log(
+                tool="case_host_fix",
+                params={
+                    "raw": raw,
+                    "new_canonical": new_canonical,
+                    "case_id": case_id,
+                },
+                result_summary=(f"dict saved at {dict_path}; reindex failed ({type(e).__name__})"),
+            )
+        except Exception:
+            pass
+        return err_resp
+    resp = {
+        "raw": raw,
+        "new_canonical": new_canonical,
+        "docs_updated": result.get("updated", 0),
+        "took_ms": result.get("took", 0),
+        "dict_path": str(dict_path),
+    }
+    try:
+        aid = audit.log(
+            tool="case_host_fix",
+            params={
+                "raw": raw,
+                "new_canonical": new_canonical,
+                "case_id": case_id,
+            },
+            result_summary=(
+                f"dict updated, {resp['docs_updated']} docs reindexed on host.name={raw!r}"
+            ),
+        )
+        if aid:
+            resp["audit_id"] = aid
+    except Exception:
+        pass
     return resp
 
 

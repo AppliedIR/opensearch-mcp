@@ -182,6 +182,7 @@ def ingest(
     status_pid: int = 0,
     status_run_id: str = "",
     on_progress: object = None,
+    host_dict=None,
 ) -> IngestResult:
     """Ingest artifacts for discovered hosts.
 
@@ -265,6 +266,7 @@ def ingest(
         result=result,
         start=start,
         run_id=status_run_id,
+        host_dict=host_dict,
     )
 
     result.elapsed_seconds = time.monotonic() - start
@@ -344,6 +346,7 @@ def run_hayabusa_batch(
     case_id: str,
     audit=None,
     on_progress=None,
+    host_dict=None,
 ) -> dict:
     """Run Hayabusa on all hosts' evtx dirs, ingest CSV results.
 
@@ -446,6 +449,7 @@ def run_hayabusa_batch(
                 host.hostname,
                 source_file=str(csv_output),
                 pipeline_version=_PIPELINE_VERSION,
+                host_dict=host_dict,
             )
             results[host.hostname] = cnt
             if callable(on_progress):
@@ -515,6 +519,7 @@ def _ingest_hosts(
     result,
     start,
     run_id="",
+    host_dict=None,
 ):
     """Inner ingest loop — processes all hosts and artifacts."""
     for host_idx, host in enumerate(hosts):
@@ -575,6 +580,7 @@ def _ingest_hosts(
                             time_to=time_to,
                             reduced_ids=reduced_ids,
                             vss_id=host.vss_id,
+                            host_dict=host_dict,
                         )
                         ar.indexed += cnt
                         ar.skipped += sk
@@ -671,6 +677,7 @@ def _ingest_hosts(
                     _progress=_progress,
                     _update_status=_update_status,
                     run_id=run_id,
+                    host_dict=host_dict,
                 )
                 continue
 
@@ -693,6 +700,7 @@ def _ingest_hosts(
                     time_from=time_from,
                     time_to=time_to,
                     run_id=run_id,
+                    host_dict=host_dict,
                 )
                 continue
 
@@ -754,6 +762,7 @@ def _ingest_hosts(
                     time_to=time_to,
                     vss_id=host.vss_id,
                     natural_key_override=natural_key,
+                    host_dict=host_dict,
                 )
                 ar.indexed = cnt
                 ar.skipped = sk
@@ -834,6 +843,7 @@ def _ingest_plaso_artifact(
     _progress,
     _update_status,
     run_id: str = "",
+    host_dict=None,
 ) -> None:
     """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback)."""
     from opensearch_mcp.parse_prefetch import parse_prefetch
@@ -873,6 +883,7 @@ def _ingest_plaso_artifact(
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
                 source_file=_plaso_src,
+                host_dict=host_dict,
             )
         else:
             cnt, bf, _note = parse_srum(
@@ -885,6 +896,7 @@ def _ingest_plaso_artifact(
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
                 source_file=_plaso_src,
+                host_dict=host_dict,
             )
         ar.indexed = cnt
         ar.bulk_failed = bf
@@ -957,6 +969,7 @@ def _ingest_custom_artifact(
     time_from=None,
     time_to=None,
     run_id: str = "",
+    host_dict=None,
 ) -> None:
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
     _cid = _sanitize_index_component(case_id)
@@ -989,6 +1002,7 @@ def _ingest_custom_artifact(
             aid,
             time_from,
             time_to,
+            host_dict=host_dict,
         )
         ar.indexed = cnt
         ar.skipped = sk
@@ -1047,7 +1061,15 @@ def _ingest_custom_artifact(
 
 
 def _run_custom_parser(
-    tool_name, artifact_path, client, index_name, host, aid, time_from, time_to
+    tool_name,
+    artifact_path,
+    client,
+    index_name,
+    host,
+    aid,
+    time_from,
+    time_to,
+    host_dict=None,
 ):
     """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed)."""
     from opensearch_mcp.paths import relative_evidence_path
@@ -1058,6 +1080,7 @@ def _run_custom_parser(
         "hostname": host.hostname,
         "ingest_audit_id": aid,
         "pipeline_version": _PIPELINE_VERSION,
+        "host_dict": host_dict,
     }
     if host.vss_id:
         kw["vss_id"] = host.vss_id

@@ -78,6 +78,7 @@ def _ingest_jsonl(
     ingest_audit_id: str = "",
     pipeline_version: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Index Plaso JSONL records into OpenSearch.
 
@@ -98,6 +99,12 @@ def _ingest_jsonl(
                 continue
 
             record["host.name"] = hostname
+            if hostname:
+                if host_dict is not None:
+                    _resolved = host_dict.resolve(hostname)
+                    record["host.id"] = _resolved if _resolved else hostname
+                else:
+                    record["host.id"] = hostname
 
             # Dedup: compute ID BEFORE adding provenance fields.
             # host.name is stable (same host = same value). Plaso-native
@@ -141,6 +148,7 @@ def parse_prefetch(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse .pf files with Plaso, index into OpenSearch.
 
@@ -158,6 +166,7 @@ def parse_prefetch(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            host_dict=host_dict,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -172,6 +181,7 @@ def parse_srum(
     pipeline_version: str = "",
     vss_id: str = "",
     source_file: str = "",
+    host_dict=None,
 ) -> tuple[int, int]:
     """Parse SRUM database with Plaso, index into OpenSearch.
 
@@ -192,6 +202,7 @@ def parse_srum(
             ingest_audit_id=ingest_audit_id,
             pipeline_version=pipeline_version,
             vss_id=vss_id,
+            host_dict=host_dict,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

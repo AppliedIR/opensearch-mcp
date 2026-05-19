@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -32,7 +33,13 @@ def _case_dir_for(case_id: str) -> Path | None:
     if the directory doesn't exist — callers (batch-discovery) treat
     that as "no dict available, proceed with current behavior" rather
     than aborting.
+
+    M1 guard: reject case_id with any path component (e.g. "../etc",
+    "/abs/path", "foo/bar"). Only the bare directory name is allowed;
+    anything else is path-traversal hygiene.
     """
+    if not case_id or Path(case_id).name != case_id:
+        return None
     cases_root = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
     case_dir = cases_root / case_id
     return case_dir if case_dir.is_dir() else None
@@ -61,75 +68,300 @@ def _load_case_host_dict(case_id: str):
         return None
 
 
-def _classify_or_fail(case_id: str, hosts: list, ingest_label: str) -> None:
-    """Batch-discovery + fail-loud (spec Rev 5 Fix C Part 2).
+# Re-export from host_dictionary so existing call sites keep working;
+# canonical definition lives in host_dictionary where server.py can
+# import it without going through ingest_cli (avoids lazy-import
+# stale-loaded-code surface in long-running MCP gateway).
+from opensearch_mcp.host_dictionary import (  # noqa: E402  (after sys path setup)
+    detect_host_id_mapping_type as _detect_host_id_mapping_type,
+)
 
-    Before any parser runs, classify every discovered host's name
-    against the case host-dictionary. If ANY host is unmapped: collect
-    the full set, write `<case>/host-unmapped.yaml` with actionable
-    `vhir case host add` commands, exit code 2 ("hostname_unmapped" —
-    distinct from generic 1 so operator scripts can route).
 
-    Operator resolves all entries in one pass, re-runs ingest. The
-    all-mapped branch fires `archive_resolved_unmapped_yaml` to rename
-    any leftover yaml from the prior failed run.
+def _ensure_host_id_keyword_mapping(case_id: str) -> dict:
+    """Add host.id as keyword on every existing case index that lacks it.
+
+    Closes H1 (upgrade path) — index templates only apply at index
+    CREATION, so a case that existed before the v1 upgrade has indices
+    where host.id is either absent (about to be dynamic-mapped as
+    text+keyword on first write) or already dynamic-mapped as text in
+    nested form.
+
+    Strategy:
+      - GET _mapping case-<id>-*
+      - For each index: probe host.id via both flat-dotted AND nested
+        forms via `_detect_host_id_mapping_type`.
+        * Type = keyword → ok, no change.
+        * Type != keyword (text or otherwise) → indices_text[].
+        * Field absent → PUT _mapping; if PUT fails (e.g., already
+          dynamic-mapped under a different shape we didn't detect),
+          treat as text/upgrade-required, NOT as ok.
 
     No-op when:
-      - host-dictionary.yaml absent (pre-C1 case — preserves legacy
-        behavior, no fail-loud binding)
-      - hosts list is empty
-
-    Single shared call site for cmd_scan + tests (extracted from an
-    inline block per CR review 2026-04-25 — the inline form drove tests
-    to re-implement the loop as a harness, breaking on every refactor).
+      - No indices exist for the case yet (fresh case)
+      - OpenSearch client unavailable / network error
     """
+    try:
+        from opensearch_mcp.client import get_client
+
+        client = get_client()
+    except Exception as e:
+        return {"status": "skipped", "reason": f"client unavailable: {type(e).__name__}"}
+
+    index_pattern = f"case-{case_id.lower()}-*"
+    try:
+        mappings = client.indices.get_mapping(index=index_pattern, allow_no_indices=True)
+    except Exception as e:
+        return {"status": "skipped", "reason": f"get_mapping failed: {type(e).__name__}: {e}"}
+
+    indices_patched: list[str] = []
+    indices_text: list[str] = []
+    log = logging.getLogger(__name__)
+
+    for idx_name, body in (mappings or {}).items():
+        props = body.get("mappings", {}).get("properties", {})
+        existing_type = _detect_host_id_mapping_type(props)
+
+        if existing_type == "keyword":
+            continue
+        if existing_type is not None:
+            # Field exists with wrong type — operator must reindex.
+            indices_text.append(idx_name)
+            continue
+        # Field absent in both flat and nested forms — try to claim it
+        # as keyword. If PUT fails, OpenSearch has the field mapped
+        # somewhere our detection missed; treat as upgrade-required
+        # rather than swallow silently.
+        try:
+            client.indices.put_mapping(
+                index=idx_name,
+                body={"properties": {"host.id": {"type": "keyword"}}},
+            )
+            indices_patched.append(idx_name)
+        except Exception as e:
+            log.warning(
+                "put_mapping host.id=keyword on %s failed: %s: %s — "
+                "treating as mapping_upgrade_required",
+                idx_name,
+                type(e).__name__,
+                e,
+            )
+            indices_text.append(idx_name)
+
+    if indices_text:
+        return {
+            "status": "mapping_upgrade_required",
+            "indices_text": indices_text,
+            "indices_patched": indices_patched,
+            "action_required": (
+                f"{len(indices_text)} existing case indices have host.id mapped "
+                "as a non-keyword type (likely from pre-v1 ingest). Reindex those "
+                "indices to the v1 mapping, or delete + re-ingest. Otherwise term "
+                "queries on host.id and case_host_fix reindex will silently miss."
+            ),
+        }
+    return {"status": "ok", "indices_patched": indices_patched}
+
+
+def _warn_if_mapping_upgrade_required(case_id: str) -> None:
+    """Standalone entry-point H1 back-patch (CR R4b).
+
+    cmd_ingest_delimited/json/accesslog/memory don't run the full
+    preflight, so the H1 mapping back-patch wouldn't fire from those
+    paths. Call this helper right after dict load on each entry so a
+    pre-v1 case still gets host.id=keyword on its existing indices.
+
+    Stderr warning if any index is text-mapped — operator gets the
+    breadcrumb before case_host_fix later refuses with the same error.
+    """
+    result = _ensure_host_id_keyword_mapping(case_id)
+    if result.get("status") == "mapping_upgrade_required":
+        print(
+            f"WARNING: {len(result.get('indices_text', []))} case indices have "
+            "host.id as non-keyword (pre-v1 mapping). case_host_fix will "
+            "refuse on these indices. Reindex or delete + re-ingest. "
+            f"Affected: {result.get('indices_text', [])}",
+            file=sys.stderr,
+        )
+
+
+def _preflight_host_discovery(
+    case_id: str, scan_root: Path, hosts: list
+) -> tuple[dict, "object | None"]:
+    """Discover hostnames, auto-apply best-guess decisions, save dict.
+
+    Replaces the prior fail-loud `_classify_or_fail`. v1 policy is
+    always-proceed: every host the discovery sweep finds gets a
+    decision in the dictionary before parsers run. If the case has no
+    dictionary yet, one is created (auto-applied decisions populate it).
+
+    For each raw value not already in the dict:
+      - confidence=1.00 (exact-strip match against existing canonical)
+        → add_alias(raw, proposed)
+      - confidence ≥ 0.85 (Levenshtein near-match)
+        → add_alias(raw, proposed)   (best guess; operator can fix later)
+      - no close match
+        → add_canonical(raw)         (raw becomes own canonical)
+
+    Saves the dictionary atomically.
+
+    Returns (report, host_dict). host_dict is the loaded/created
+    HostDictionary instance — caller plumbs it through to parsers so
+    they resolve host.id at parse time. None when case_dir is
+    unavailable (preserves legacy no-op behavior).
+    """
+    from opensearch_mcp.host_dictionary import HostDictionary
+    from opensearch_mcp.host_discovery import discover_hosts
+
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None:
+        return {"status": "no_case_dir", "decisions_applied": []}, None
+
+    dict_path = case_dir / "host-dictionary.yaml"
     host_dict = _load_case_host_dict(case_id)
-    if host_dict is None or not hosts:
-        return
+    if host_dict is None:
+        # First-ever ingest on this case: create an empty dict. The
+        # preflight's auto-applied decisions populate it.
+        host_dict = HostDictionary(path=dict_path)
+    elif host_dict.path is None:
+        host_dict.path = dict_path
 
-    from opensearch_mcp.hostname import (
-        archive_resolved_unmapped_yaml,
-        classify_host,
-        write_host_unmapped_yaml,
-    )
+    report = discover_hosts(scan_root, host_dict)
 
-    unmapped_entries: list[dict] = []
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Also classify any hosts the existing `discover()` produced — these
+    # carry per-host-subdir names that may differ from what evtx/peek
+    # surfaced.
+    from opensearch_mcp.host_discovery import HostEntry, _classify
+
+    seen = {e.raw for e in report.entries}
     for h in hosts:
-        status, raw, proposed, conf = classify_host(h.hostname, host_dict)
-        if status in ("unmapped-with-proposal", "unmapped-no-proposal"):
-            flag = f"--alias-of {proposed}" if proposed else "--new-canonical"
-            unmapped_entries.append(
+        if h.hostname and h.hostname not in seen:
+            entry = HostEntry(raw=h.hostname)
+            entry.add_source("discover", str(scan_root))
+            _classify(entry, host_dict)
+            report.entries.append(entry)
+            seen.add(h.hostname)
+
+    decisions_applied: list[dict] = []
+    for entry in report.entries:
+        if entry.status == "mapped":
+            decisions_applied.append(
                 {
-                    "raw": raw,
-                    "first_seen": now_iso,
-                    "sources": [f"ingest:{ingest_label}"],
-                    "proposed_canonical": proposed,
-                    "confidence": conf,
-                    "action_required": f"vhir case host add {raw} {flag}",
+                    "raw": entry.raw,
+                    "applied_canonical": entry.proposed_canonical,
+                    "decision": "already_mapped",
+                    "confidence": 1.00,
+                    "sources": entry.sources,
+                }
+            )
+            continue
+        if entry.status == "propose_with_match":
+            host_dict.add_alias(entry.raw, entry.proposed_canonical)
+            decisions_applied.append(
+                {
+                    "raw": entry.raw,
+                    "applied_canonical": entry.proposed_canonical,
+                    "decision": "auto_alias",
+                    "confidence": entry.confidence,
+                    "sources": entry.sources,
+                    "rationale": (
+                        f"Levenshtein {entry.confidence:.3f} vs canonical "
+                        f"'{entry.proposed_canonical}' — best-guess applied; "
+                        f"review when convenient"
+                        if entry.confidence < 1.00
+                        else f"Exact-strip match against canonical '{entry.proposed_canonical}'"
+                    ),
+                }
+            )
+        else:  # propose_no_match
+            host_dict.add_canonical(entry.raw)
+            decisions_applied.append(
+                {
+                    "raw": entry.raw,
+                    "applied_canonical": entry.raw,
+                    "decision": "auto_new_canonical",
+                    "confidence": 0.0,
+                    "sources": entry.sources,
+                    "rationale": "No close match — treated as a new host",
                 }
             )
 
-    case_dir = _case_dir_for(case_id)
-    if unmapped_entries:
-        if case_dir is not None:
-            yaml_path = write_host_unmapped_yaml(case_dir, unmapped_entries)
-            yaml_ref = str(yaml_path)
-        else:
-            yaml_ref = "(case dir unavailable — see stderr entries below)"
-        print(
-            "Error: hostname_unmapped — "
-            f"{len(unmapped_entries)} host(s) not in dictionary. "
-            f"See {yaml_ref}",
-            file=sys.stderr,
+    # Save dict BEFORE returning. Any parser that starts up after this
+    # point sees the new mapping. (Arch's correctness finding for
+    # case_host_fix applies here too: save before the next phase begins.)
+    # Always save when the dict file doesn't exist yet — first-ever ingest
+    # on a fresh case must persist even when no decisions were applied.
+    # `merge=True`: concurrent ingests applying ADD-ONLY decisions must
+    # union their results, not last-write-wins (closes WSL2 Test B2).
+    if any(d["decision"] != "already_mapped" for d in decisions_applied) or not dict_path.exists():
+        host_dict.save(merge=True)
+
+    # H1: preventive PUT _mapping for host.id=keyword on existing pre-v1
+    # indices that lack the explicit mapping. Templates apply only at
+    # index creation; existing case indices need this back-patch or
+    # host.id would be dynamic-mapped as text on first v1 write.
+    mapping_status = _ensure_host_id_keyword_mapping(case_id)
+
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "")
+    report = {
+        "status": "ok",
+        "run_id": run_id,
+        "decisions_applied": decisions_applied,
+        "mapping_status": mapping_status,
+        "action_recommended": (
+            "Review decisions_applied with the operator. If any decision is "
+            "wrong, call case_host_fix(raw, new_canonical) to correct."
+        ),
+    }
+    if mapping_status.get("status") == "mapping_upgrade_required":
+        report["status"] = "mapping_upgrade_required"
+        report["action_required"] = mapping_status["action_required"]
+
+    # Audit trail for the preflight invocation (closes WSL2 Test B4).
+    # Every dict mutation needs a forensic audit-trail entry; case_host_fix
+    # already logs, preflight didn't.
+    try:
+        _audit = AuditWriter(mcp_name=f"opensearch-preflight-{os.getpid()}")
+        _audit.log(
+            tool="_preflight_host_discovery",
+            params={
+                "case_id": case_id,
+                "evidence_root": str(scan_root),
+                "run_id": run_id,
+            },
+            result_summary=(
+                f"{len([d for d in decisions_applied if d['decision'] != 'already_mapped'])} "
+                f"decisions applied, {len(decisions_applied)} hosts total"
+            ),
+            input_files=[str(scan_root)],
         )
-        for e in unmapped_entries:
-            print(f"  - {e['raw']!r}: {e['action_required']}", file=sys.stderr)
-        sys.exit(2)
-    elif case_dir is not None:
-        # All mapped — clean up any prior host-unmapped.yaml from a
-        # previous failed ingest on the same case.
-        archive_resolved_unmapped_yaml(case_dir)
+    except Exception:
+        pass  # Non-fatal — audit failure shouldn't block ingest.
+
+    # Persist the report keyed by run_id so concurrent ingests don't
+    # overwrite each other. idx_ingest_status reads the file per-summary
+    # and only when an ingest run_id is present — skip the write entirely
+    # when no run_id is available (CLI direct invocation, tests) to avoid
+    # leaving an orphan file the MCP layer will never read.
+    if run_id:
+        import json as _json
+
+        reports_dir = case_dir / "host-discovery-reports"
+        try:
+            reports_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        report_path = reports_dir / f"{run_id}.json"
+        # M4: atomic temp+rename so idx_ingest_status doesn't read a
+        # half-written file. write_text on the destination would leave
+        # the file truncated between truncate and final close.
+        tmp_path = reports_dir / f"{run_id}.json.tmp"
+        try:
+            tmp_path.write_text(_json.dumps(report, indent=2), encoding="utf-8")
+            os.replace(tmp_path, report_path)
+        except OSError:
+            pass  # Non-fatal — printed to stdout below.
+
+    return report, host_dict
 
 
 def _preflight_shard_capacity(
@@ -235,6 +467,17 @@ _VHIR_CONFIG = vhir_dir() / "config.yaml"
 
 def _resolve_case_id(args_case: str | None) -> str:
     if args_case:
+        # M1 path-traversal guard — hard-fail loud, not silent None
+        # (WSL2 Test round-3 UX nit). A case_id with path components is
+        # never legitimate; reject at entry so operator sees the error
+        # immediately rather than the downstream "case dir not found".
+        if Path(args_case).name != args_case:
+            print(
+                f"Error: invalid case_id {args_case!r} — must be a bare "
+                "directory name, no path components.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         # Canonical case directory resolution matches aiir/vhir_cli:
         # $VHIR_CASES_DIR (env) or ~/cases/. Previously hard-coded to
         # ~/.vhir/cases/ which is the wrong path — caused a false
@@ -605,13 +848,13 @@ def cmd_scan(args: argparse.Namespace) -> None:
         )
         hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 
-        # --- Pre-classify peek (spec Rev 5 Fix C step 3 fallback) ---
+        # --- Pre-preflight peek fallback ---
         # When registry detect missed AND discover() produced hosts with
         # directory/mount-scan-derived names (junk like `_mnt_1` because
         # the scan_root happens to be the tmpdir), peek at the first
         # parseable CSV/JSON artifact to pull a real hostname from the
-        # priority list. Feeds classify_host below with a meaningful raw
-        # name so host-unmapped.yaml is actionable for the operator.
+        # priority list. Gives _preflight_host_discovery a meaningful
+        # raw value to apply as a canonical instead of mount-path junk.
         if not hostname and hosts:
             from opensearch_mcp.hostname import peek_hostname_from_evidence
 
@@ -625,12 +868,33 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     if not h.hostname or h.hostname.startswith("_"):
                         h.hostname = peeked
 
-        # Batch-discovery + fail-loud — single call site for the
-        # spec Rev 5 Fix C Part 2 contract. Implementation lives in
-        # `_classify_or_fail` so the wiring test exercises the same
-        # function (no harness drift). Raises SystemExit(2) on any
-        # unmapped host; no-op when the case has no host-dictionary.
-        _classify_or_fail(case_id, hosts, input_path.name)
+        # Preflight host discovery — auto-apply best-guess decisions to
+        # the case dictionary BEFORE parsers run. v1 always proceeds;
+        # response carries the proposal block so AI/operator can review.
+        # Replaces the prior fail-loud `_classify_or_fail`.
+        host_discovery_report, case_host_dict = _preflight_host_discovery(
+            case_id, scan_root, hosts
+        )
+        if host_discovery_report["decisions_applied"]:
+            print(f"Host discovery: {len(host_discovery_report['decisions_applied'])} hosts")
+            for d in host_discovery_report["decisions_applied"]:
+                if d["decision"] != "already_mapped":
+                    print(
+                        f"  {d['raw']!r} → {d['applied_canonical']!r} "
+                        f"({d['decision']}, confidence {d['confidence']:.2f})"
+                    )
+        # CR round-4 UX: surface mapping_upgrade_required on the CLI
+        # path. The MCP path already exposes it via idx_ingest_status;
+        # CLI operators see it via stderr.
+        _ms = host_discovery_report.get("mapping_status", {})
+        if _ms.get("status") == "mapping_upgrade_required":
+            print(
+                f"WARNING: {len(_ms.get('indices_text', []))} case indices have "
+                "host.id as non-keyword (pre-v1 mapping). case_host_fix will "
+                "refuse on these indices. Reindex or delete + re-ingest. "
+                f"Affected: {_ms.get('indices_text', [])}",
+                file=sys.stderr,
+            )
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and container_type in ("ewf", "raw", "nbd") and tmpdir and vss_volumes:
@@ -767,6 +1031,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 reduced_ids=reduced_ids,
                 reduced_log_names=reduced_log_names,
                 on_progress=_cli_progress,
+                host_dict=case_host_dict,
             )
         except ShardCapacityExhausted as _sce:
             # Circuit-breaker trip mid-run. Write a terminal status so
@@ -891,6 +1156,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     case_id,
                     audit=audit,
                     on_progress=_hayabusa_progress,
+                    host_dict=case_host_dict,
                 )
                 total_alerts = _sum_hayabusa_alerts(hb_results)
                 # Post-B84 visibility (UAT 2026-04-24): surface the
@@ -972,7 +1238,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
 
 def cmd_csv(args: argparse.Namespace) -> None:
-    """Ingest a pre-parsed CSV (examiner identifies the tool)."""
+    """Ingest a pre-parsed CSV (examiner identifies the tool).
+
+    Note: this path deliberately skips `_preflight_host_discovery`.
+    Single-file CSV ingest with explicit operator `--hostname` is the
+    "I know what I'm doing" path — the operator has already named the
+    host. The case host-dictionary is loaded so parsers stamp `host.id`,
+    but no auto-application of decisions happens here.
+    """
     tool_name = args.tool_name
     csv_path = Path(args.csv_path)
 
@@ -1006,6 +1279,9 @@ def cmd_csv(args: argparse.Namespace) -> None:
 
     print(f"Ingesting {csv_path.name} as {tool_name} -> {index_name}")
 
+    case_host_dict = _load_case_host_dict(case_id)
+    _warn_if_mapping_upgrade_required(case_id)
+
     count, sk, bf = ingest_csv(
         csv_path=csv_path,
         client=client,
@@ -1016,6 +1292,7 @@ def cmd_csv(args: argparse.Namespace) -> None:
         pipeline_version=pipeline_version,
         natural_key=cfg.natural_key,
         time_field=cfg.time_field,
+        host_dict=case_host_dict,
     )
 
     audit.log(
@@ -1099,6 +1376,8 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     _preflight_shard_capacity(client, "json", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
+    case_host_dict = _load_case_host_dict(case_id)
+    _warn_if_mapping_upgrade_required(case_id)
 
     files = (
         [input_path]
@@ -1166,6 +1445,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
                     time_from=time_from,
                     time_to=time_to,
                     batch_size=batch_size,
+                    host_dict=case_host_dict,
                 )
                 print(f"{cnt:,} entries")
                 if hr:
@@ -1391,6 +1671,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     _preflight_shard_capacity(client, "delimited", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
+    case_host_dict = _load_case_host_dict(case_id)
+    _warn_if_mapping_upgrade_required(case_id)
 
     exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
     files = (
@@ -1469,6 +1751,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                     time_to=time_to,
                     batch_size=batch_size,
                     on_progress=_on_progress if run_id else None,
+                    host_dict=case_host_dict,
                 )
                 print(f"{cnt:,} entries")
                 if hr:
@@ -1587,6 +1870,8 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     _preflight_shard_capacity(client, "accesslog", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
+    case_host_dict = _load_case_host_dict(case_id)
+    _warn_if_mapping_upgrade_required(case_id)
     suffix = getattr(args, "index_suffix", None) or "accesslog"
 
     files = (
@@ -1632,6 +1917,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
                     source_file=str(f),
                     ingest_audit_id=aid,
                     pipeline_version=f"opensearch-mcp-{__version__}",
+                    host_dict=case_host_dict,
                 )
                 print(f"{cnt:,} entries ({sk} skipped)")
                 total += cnt
@@ -2002,6 +2288,9 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     # Initial status
     _write_mem_status("running")
 
+    _mem_host_dict = _load_case_host_dict(case_id)
+    _warn_if_mapping_upgrade_required(case_id)
+
     timeout = getattr(args, "timeout", 3600)
     try:
         results = ingest_memory(
@@ -2017,6 +2306,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             pipeline_version=f"opensearch-mcp-{__version__}",
             on_progress=_progress,
             audit_log=_audit_log,
+            host_dict=_mem_host_dict,
         )
     except ShardCapacityExhausted as e:
         # Distinct status so monitoring can differentiate capacity

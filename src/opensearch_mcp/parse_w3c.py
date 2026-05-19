@@ -35,6 +35,7 @@ def parse_w3c_log(
     pipeline_version: str = "",
     parse_method: str = "",
     vss_id: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Parse W3C log file and bulk index.
 
@@ -142,6 +143,12 @@ def parse_w3c_log(
 
             # Provenance (after ID computation)
             row["host.name"] = hostname
+            if hostname:
+                if host_dict is not None:
+                    _resolved = host_dict.resolve(hostname)
+                    row["host.id"] = _resolved if _resolved else hostname
+                else:
+                    row["host.id"] = hostname
             if source_file:
                 row["vhir.source_file"] = source_file
             if ingest_audit_id:

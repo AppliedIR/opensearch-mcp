@@ -216,6 +216,7 @@ def run_and_ingest(
     time_to=None,
     vss_id: str = "",
     natural_key_override: str | None = None,
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Run an EZ tool against an artifact and ingest the CSV output.
 
@@ -288,6 +289,7 @@ def run_and_ingest(
                 time_to=time_to,
                 vss_id=vss_id,
                 parse_method=cfg.cli_name,
+                host_dict=host_dict,
             )
             total_count += count
             total_skipped += sk

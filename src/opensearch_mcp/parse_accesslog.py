@@ -40,6 +40,7 @@ def ingest_accesslog(
     source_file: str = "",
     ingest_audit_id: str = "",
     pipeline_version: str = "",
+    host_dict=None,
 ) -> tuple[int, int, int]:
     """Parse and index access log. Returns (indexed, skipped, bulk_failed)."""
     count = skipped = bulk_failed = 0
@@ -102,6 +103,12 @@ def ingest_accesslog(
             doc_id = hashlib.sha256(id_input.encode()).hexdigest()[:20]
 
             doc["host.name"] = hostname
+            if hostname:
+                if host_dict is not None:
+                    resolved = host_dict.resolve(hostname)
+                    doc["host.id"] = resolved if resolved else hostname
+                else:
+                    doc["host.id"] = hostname
             doc["vhir.parse_method"] = "accesslog"
             if source_file:
                 doc["vhir.source_file"] = source_file

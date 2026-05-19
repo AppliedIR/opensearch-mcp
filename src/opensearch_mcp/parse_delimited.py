@@ -181,6 +181,7 @@ def ingest_delimited(
     time_to: datetime | None = None,
     batch_size: int = 1000,
     on_progress: object = None,
+    host_dict=None,
 ) -> tuple[int, int, int, int]:
     """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed).
 
@@ -246,6 +247,13 @@ def ingest_delimited(
 
         # Use per-row Computer field if present (Hayabusa, EvtxECmd), else CLI hostname
         record["host.name"] = record.pop("Computer", None) or hostname
+        _raw_host = record.get("host.name")
+        if _raw_host:
+            if host_dict is not None:
+                _resolved = host_dict.resolve(_raw_host)
+                record["host.id"] = _resolved if _resolved else _raw_host
+            else:
+                record["host.id"] = _raw_host
         record["vhir.parse_method"] = f"delimited-{format_name}"
         if source_file:
             record["vhir.source_file"] = source_file
