@@ -232,13 +232,157 @@ class TestAutoAcceptHighConfidenceRoundtrip:
         assert reloaded["auto_accept_high_confidence"] is False
         assert reloaded["version"] == 1
 
-    def test_save_is_not_yet_implemented(self):
-        """SC-8 stub — save() raises until Commit D fills it in."""
-        d = HostDictionary()
-        with pytest.raises(NotImplementedError, match="Commit D"):
+
+class TestSaveAtomic:
+    """v1 Test 1 — save() writes via temp+rename; crash mid-write leaves prior file."""
+
+    def test_save_writes_full_yaml(self, tmp_path):
+        p = tmp_path / "host-dictionary.yaml"
+        d = HostDictionary(
+            domains=["shieldbase.com"],
+            hosts={"admin01": {"aliases": ["admin01", "ADMIN01"]}},
+            path=p,
+        )
+        d.save()
+        assert p.exists()
+        reloaded = HostDictionary.load(p)
+        assert "admin01" in reloaded.hosts
+        assert "ADMIN01" in reloaded.hosts["admin01"]["aliases"]
+
+    def test_save_atomic_temp_rename(self, tmp_path):
+        """The implementation writes to <path>.tmp then os.replace.
+
+        Verify that .tmp file is gone after a successful save (os.replace
+        removes the source name on POSIX).
+        """
+        p = tmp_path / "host-dictionary.yaml"
+        d = HostDictionary(hosts={"x": {"aliases": ["x"]}}, path=p)
+        d.save()
+        assert not (tmp_path / "host-dictionary.yaml.tmp").exists()
+
+    def test_save_partial_write_leaves_prior_state(self, tmp_path, monkeypatch):
+        """If os.replace fails after tmp write, prior file is preserved."""
+        p = tmp_path / "host-dictionary.yaml"
+        # First successful save establishes a prior state on disk.
+        HostDictionary(hosts={"prior": {"aliases": ["prior"]}}, path=p).save()
+        before = p.read_text()
+
+        # Now construct a new dict and simulate os.replace failure.
+        d = HostDictionary(hosts={"new": {"aliases": ["new"]}}, path=p)
+        import os
+
+        real_replace = os.replace
+
+        def fail_replace(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError):
+            d.save()
+        # Prior file content intact
+        assert p.read_text() == before
+        monkeypatch.setattr(os, "replace", real_replace)
+
+    def test_save_without_path_raises(self):
+        d = HostDictionary(hosts={"x": {"aliases": ["x"]}})
+        with pytest.raises(ValueError, match="path"):
             d.save()
 
-    def test_add_alias_is_not_yet_implemented(self):
-        d = HostDictionary()
-        with pytest.raises(NotImplementedError, match="Commit D"):
-            d.add_alias("foo", "bar")
+    def test_save_merge_unions_concurrent_adds(self, tmp_path):
+        """WSL2 Test B2 — concurrent ADD-ONLY save with merge=True
+        unions both processes' adds on disk. Without merge, the second
+        save's changes clobber the first."""
+        p = tmp_path / "host-dictionary.yaml"
+        # Establish a base on disk.
+        HostDictionary(
+            hosts={"admin01": {"aliases": ["admin01"]}},
+            path=p,
+        ).save()
+
+        # Simulate Process A: loads, adds OFFDEVS-TUHMGJE
+        a = HostDictionary.load(p)
+        a.add_canonical("OFFDEVS-TUHMGJE")
+
+        # Simulate Process B: also loads, adds host-B
+        b = HostDictionary.load(p)
+        b.add_canonical("host-B")
+
+        # Both save with merge=True (preflight semantics)
+        a.save(merge=True)
+        b.save(merge=True)
+
+        # On disk, both adds survive — last save unioned with first.
+        reloaded = HostDictionary.load(p)
+        assert "OFFDEVS-TUHMGJE" in reloaded.hosts, (
+            "Process A's add was clobbered by Process B's save — merge-on-save is broken"
+        )
+        assert "host-B" in reloaded.hosts
+        assert "admin01" in reloaded.hosts
+
+    def test_save_replace_mode_preserves_deletions(self, tmp_path):
+        """case_host_fix deletes a canonical when collapsing into another.
+        `merge=False` (default) preserves that deletion — merge=True
+        would un-delete it from disk."""
+        p = tmp_path / "host-dictionary.yaml"
+        HostDictionary(
+            hosts={
+                "admin01": {"aliases": ["admin01"]},
+                "wkstn01": {"aliases": ["wkstn01"]},
+            },
+            path=p,
+        ).save()
+
+        d = HostDictionary.load(p)
+        del d.hosts["wkstn01"]
+        d._rebuild_alias_map()
+        d.save()  # default merge=False
+
+        reloaded = HostDictionary.load(p)
+        assert "wkstn01" not in reloaded.hosts, (
+            "default save() must preserve deletions; merge=False is the right default"
+        )
+
+
+class TestAddAlias:
+    """v1 Test 2 — add_alias adds raw to existing canonical's alias list."""
+
+    def test_add_alias_to_existing_canonical(self):
+        d = _dict3()
+        d.add_alias("admin01-triage", "admin01")
+        assert "admin01-triage" in d.hosts["admin01"]["aliases"]
+        # Lookup map rebuilt — new alias resolves.
+        assert d.resolve("admin01-triage") == "admin01"
+
+    def test_add_alias_idempotent(self):
+        d = _dict3()
+        d.add_alias("admin01-triage", "admin01")
+        d.add_alias("admin01-triage", "admin01")
+        # No duplicate
+        assert d.hosts["admin01"]["aliases"].count("admin01-triage") == 1
+
+    def test_add_alias_unknown_canonical_raises(self):
+        d = _dict3()
+        with pytest.raises(ValueError, match="not in dictionary"):
+            d.add_alias("foo", "bar-canonical-that-doesnt-exist")
+
+
+class TestAddCanonical:
+    """v1 Test 3 — add_canonical creates a new canonical entry."""
+
+    def test_add_canonical_creates_entry(self):
+        d = _dict3()
+        d.add_canonical("WIN-3BVS460J98U")
+        assert "WIN-3BVS460J98U" in d.hosts
+        assert d.hosts["WIN-3BVS460J98U"]["aliases"] == ["WIN-3BVS460J98U"]
+        # Self-resolves immediately after add.
+        assert d.resolve("WIN-3BVS460J98U") == "WIN-3BVS460J98U"
+
+    def test_add_canonical_idempotent(self):
+        d = _dict3()
+        d.add_canonical("admin01")  # Already exists.
+        # Untouched.
+        assert d.hosts["admin01"]["aliases"] == [
+            "admin01",
+            "ADMIN01",
+            "admin01.shieldbase.com",
+        ]

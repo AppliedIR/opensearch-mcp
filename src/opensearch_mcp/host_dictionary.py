@@ -13,12 +13,13 @@ model. Key pins this file implements:
 - **SC-5:** Trailing-dot FQDN normalized.
 - **SC-6:** Schema `version: 1` only; others raise UnsupportedHostDictVersion.
 - **SC-7:** yaml.safe_load exclusively.
-- **SC-8:** `save()` and `add_alias()` shaped here as stubs — Commit D
-  fills them in when the CLI needs to persist edits.
+- **SC-8:** `save()`, `add_alias()`, and `add_canonical()` mutate the
+  dictionary. `save()` writes via atomic temp+rename. Callers decide
+  when to persist; mutation is sequenced before persistence.
 
 OD1 auto-accept (confidence=1.00) lives OUTSIDE `resolve()` — the flag is
-stored on the dict, but the auto-accept action happens in Commit B's
-single-threaded batch-discovery phase.
+stored on the dict, but the auto-accept action happens in the preflight
+discovery phase.
 """
 
 from __future__ import annotations
@@ -34,6 +35,71 @@ _TRIAGE_SUFFIXES = ("-triage", "_triage")
 
 class UnsupportedHostDictVersion(Exception):
     """Raised when a loaded host-dictionary.yaml carries a non-matching version."""
+
+
+class InvalidHostnameValue(ValueError):
+    """Raised when a hostname value is unsafe to store in the dictionary.
+
+    yaml.safe_dump escape-encodes NULL bytes and ASCII control chars
+    rather than raising — adversarial values would survive into
+    host-dictionary.yaml as escape-encoded strings and contaminate
+    downstream queries. The dict primitives gate at the write boundary
+    so every mutation path (preflight, case_host_fix, future CLI) is
+    covered.
+    """
+
+
+def detect_host_id_mapping_type(props: dict) -> str | None:
+    """Detect host.id mapping type across flat-dotted vs nested forms.
+
+    OpenSearch dynamic mapping can store `host.id` in two shapes:
+      1. Flat dotted property: `properties["host.id"] = {"type": ...}`
+         — what our v1 templates declare.
+      2. Nested object: `properties["host"]["properties"]["id"] = {...}`
+         — what default dynamic mapping creates for pre-v1 docs.
+
+    Returns the type string (e.g. "keyword", "text") or None if the
+    field is genuinely absent from both forms.
+
+    Lives in host_dictionary (not ingest_cli) because both server.py's
+    case_host_fix and ingest_cli's preflight need it; lazy-import from
+    ingest_cli created a stale-loaded-code surface where a long-running
+    MCP gateway could miss this detector.
+    """
+    # Flat dotted form (v1 template shape).
+    flat = props.get("host.id")
+    if isinstance(flat, dict) and "type" in flat:
+        return flat.get("type")
+    # Nested form (default dynamic mapping shape).
+    host_node = props.get("host")
+    if isinstance(host_node, dict):
+        host_props = host_node.get("properties") or {}
+        id_node = host_props.get("id")
+        if isinstance(id_node, dict) and "type" in id_node:
+            return id_node.get("type")
+    return None
+
+
+def _validate_hostname_for_storage(value: str | None, context: str) -> None:
+    """Reject NULL byte / ASCII control characters at the dict-write boundary.
+
+    Allowed: anything with no NULL byte and no ASCII control char below
+    0x20 except tab. Lucene metacharacters, Unicode, and Punycode pass
+    through — they're safe under the term-DSL query path.
+    """
+    if not isinstance(value, str):
+        raise InvalidHostnameValue(
+            f"{context}: hostname must be a string, got {type(value).__name__}"
+        )
+    if not value:
+        raise InvalidHostnameValue(f"{context}: hostname must not be empty")
+    if "\x00" in value:
+        raise InvalidHostnameValue(f"{context}: hostname contains NULL byte")
+    for ch in value:
+        if ord(ch) < 0x20 and ch != "\t":
+            raise InvalidHostnameValue(
+                f"{context}: hostname contains ASCII control char {ord(ch):#04x}"
+            )
 
 
 def _normalize(raw: str | None) -> str:
@@ -200,18 +266,138 @@ class HostDictionary:
     def __contains__(self, canonical: str) -> bool:
         return canonical in self.hosts
 
-    def save(self) -> None:
-        """Atomic temp+rename write — Commit A stub. Commit D fills it in."""
-        raise NotImplementedError(
-            "HostDictionary.save() is a Commit A stub. Wait for Commit D "
-            "(vhir case host ... CLI) to implement persistence."
-        )
+    def save(self, *, merge: bool = False) -> None:
+        """Atomic temp+rename write to self.path, serialized under a
+        per-case `fcntl.LOCK_EX` file lock.
+
+        Two modes (closes WSL2 Test B2 — concurrent last-write-wins):
+
+        - **`merge=False` (default, replacing semantics)**: the
+          in-memory state IS the operator's intent. Save writes it
+          verbatim. Use for `case_host_fix` where deletions and
+          remappings must take effect (caller is responsible for
+          calling load() under the same lock if needed for atomicity).
+
+        - **`merge=True` (additive semantics)**: before write, re-read
+          the file from disk and union hosts/aliases. Use for preflight
+          where multiple concurrent ingests may have applied different
+          ADDITIONS to the same case dict. Union prevents Run A's adds
+          from being clobbered by Run B's save.
+
+        The lock is `fcntl.LOCK_EX` on `<path>.lock`. POSIX only.
+        Windows hosts never call save() directly.
+
+        Atomicity: write to `<path>.tmp`, then `os.replace`. A crash
+        between open and replace leaves the prior file intact.
+        """
+        if self.path is None:
+            raise ValueError("HostDictionary.save() requires path; got None")
+        import fcntl
+        import os
+
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        # M2: open in 'a+b' — atomic create-if-missing + append-mode, no
+        # TOCTOU race between touch() and open().
+        with open(lock_path, "a+b") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                if merge and self.path.exists():
+                    self._merge_from_disk()
+                tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+                tmp.write_text(self.to_yaml(), encoding="utf-8")
+                os.replace(tmp, self.path)
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    def _merge_from_disk(self) -> None:
+        """Union hosts/aliases AND preserve disk-only non-list fields.
+
+        Called from save() under file lock. Other savers' changes get
+        preserved — in-memory copy is treated as the latest delta, not
+        as authoritative replacement.
+
+        Merge policy:
+          - canonical on disk but not in self.hosts → copy disk's entry verbatim.
+          - canonical in both → union aliases; for any non-list field
+            (role, notes, rename_history, ...) present on disk but
+            absent in in-memory → copy from disk. In-memory wins on
+            conflict (same key with different value).
+
+        This closes the M3 silent-overwrite gap: if Process A sets
+        `role: workstation` and Process B saves (with merge=True) at
+        the same time, Process B's save preserves Process A's role
+        rather than dropping it.
+        """
+        try:
+            other = HostDictionary.load(self.path)
+        except (OSError, UnsupportedHostDictVersion):
+            return  # Disk file unreadable; in-memory wins.
+        for canonical, entry in other.hosts.items():
+            if canonical not in self.hosts:
+                self.hosts[canonical] = entry
+                continue
+            mine = self.hosts[canonical]
+            mine_aliases = mine.setdefault("aliases", [])
+            for alias in entry.get("aliases", []) or []:
+                if alias not in mine_aliases:
+                    mine_aliases.append(alias)
+            # M3: preserve disk-only non-list fields (role, notes,
+            # rename_history, etc). In-memory wins on key conflict.
+            for key, value in entry.items():
+                if key == "aliases":
+                    continue
+                if key not in mine:
+                    mine[key] = value
+        self._rebuild_alias_map()
 
     def add_alias(self, raw: str, canonical: str) -> None:
-        """Add raw as alias of canonical — Commit A stub. Commit D fills it in."""
-        raise NotImplementedError(
-            "HostDictionary.add_alias() is a Commit A stub. Wait for Commit D."
-        )
+        """Add `raw` as an alias of an existing `canonical`.
+
+        Mutates `self.hosts` and rebuilds the lookup map. Does NOT write
+        to disk — caller decides when to `save()`. If `canonical` is not
+        in `self.hosts`, raises ValueError; use `add_canonical` to create
+        a new canonical.
+
+        Idempotent: re-adding an existing alias is a no-op.
+        Inputs are validated via `_validate_hostname_for_storage` — gate
+        applies regardless of caller (preflight, case_host_fix, CLI).
+        """
+        _validate_hostname_for_storage(raw, "add_alias raw")
+        _validate_hostname_for_storage(canonical, "add_alias canonical")
+        if canonical not in self.hosts:
+            raise ValueError(
+                f"add_alias: canonical {canonical!r} not in dictionary; "
+                f"use add_canonical to create it"
+            )
+        aliases = self.hosts[canonical].setdefault("aliases", [])
+        if raw not in aliases:
+            aliases.append(raw)
+        self._rebuild_alias_map()
+
+    def add_canonical(self, raw: str) -> None:
+        """Create a new canonical entry with `raw` as its first alias.
+
+        Used when preflight discovers a host that has no close match in
+        the existing dictionary — `raw` becomes its own canonical. Also
+        used by `case_host_fix` when the operator targets a new
+        canonical that doesn't exist yet.
+
+        Mutates `self.hosts` and rebuilds the lookup map. Idempotent —
+        duplicate-check normalizes case to prevent `ADMIN01` from
+        creating a second canonical when `admin01` exists.
+
+        Inputs validated via `_validate_hostname_for_storage`.
+        """
+        _validate_hostname_for_storage(raw, "add_canonical raw")
+        if raw in self.hosts:
+            return
+        # Normalize duplicate check so case variants don't create
+        # redundant canonicals.
+        norm_raw = _normalize(raw)
+        if norm_raw and norm_raw in {_normalize(k) for k in self.hosts}:
+            return
+        self.hosts[raw] = {"aliases": [raw]}
+        self._rebuild_alias_map()
 
 
 def propose_canonical(raw: str | None, host_dict: HostDictionary) -> tuple[str | None, float]:

@@ -12,17 +12,13 @@ import sys
 import types
 from pathlib import Path
 
-import yaml
-
 from opensearch_mcp.host_dictionary import HostDictionary
 from opensearch_mcp.hostname import (
     _HOST_FIELD_PRIORITY,
     _dotted_get,
-    archive_resolved_unmapped_yaml,
     classify_host,
     detect_hostname_from_volume,
     extract_host_from_record,
-    write_host_unmapped_yaml,
 )
 
 # ---------------------------------------------------------------------------
@@ -241,61 +237,10 @@ class TestClassifyHost:
         assert status == "empty"
 
 
-# ---------------------------------------------------------------------------
-# Batch discovery — host-unmapped.yaml (Test 14)
-# ---------------------------------------------------------------------------
-
-
-class TestHostUnmappedYaml:
-    """Spec Test 14 — batch writes all unmapped + cleanup rename on re-run."""
-
-    def test_writes_yaml_with_entries(self, tmp_path):
-        entries = [
-            {
-                "raw": "wksn01",
-                "first_seen": "2026-04-24T18:00:00Z",
-                "sources": ["evtx:admin01:Security:4624"],
-                "proposed_canonical": "wkstn01",
-                "confidence": 0.857,
-                "action_required": ("vhir case host add wksn01 --alias-of wkstn01"),
-            },
-            {
-                "raw": "WIN-3BVS460J98U",
-                "first_seen": "2026-04-24T18:02:00Z",
-                "sources": ["evtx:elf01:System:6009"],
-                "proposed_canonical": None,
-                "confidence": 0.0,
-                "action_required": ("vhir case host add WIN-3BVS460J98U --new-canonical"),
-            },
-        ]
-
-        path = write_host_unmapped_yaml(tmp_path, entries)
-        assert path == tmp_path / "host-unmapped.yaml"
-        assert path.exists()
-
-        payload = yaml.safe_load(path.read_text())
-        assert "note" in payload
-        assert "host-unmapped.yaml.resolved" in payload["note"]
-        assert len(payload["entries"]) == 2
-        assert payload["entries"][0]["raw"] == "wksn01"
-        assert payload["entries"][0]["proposed_canonical"] == "wkstn01"
-        assert payload["entries"][1]["proposed_canonical"] is None
-
-    def test_cleanup_rename_after_resolution(self, tmp_path):
-        """After re-run with all entries resolved, file renamed to .resolved.<ts>."""
-        write_host_unmapped_yaml(tmp_path, [{"raw": "wksn01"}])
-        assert (tmp_path / "host-unmapped.yaml").exists()
-
-        new_path = archive_resolved_unmapped_yaml(tmp_path)
-        assert new_path is not None
-        assert new_path.parent == tmp_path
-        assert new_path.name.startswith("host-unmapped.yaml.resolved.")
-        assert new_path.name.endswith("Z")
-        assert new_path.exists()
-        assert not (tmp_path / "host-unmapped.yaml").exists()
-
-    def test_cleanup_returns_none_when_no_file(self, tmp_path):
-        assert archive_resolved_unmapped_yaml(tmp_path) is None
+# TestHostUnmappedYaml deleted — write_host_unmapped_yaml /
+# archive_resolved_unmapped_yaml were removed in v1 along with the
+# fail-loud surface. The deletion regression guard lives in
+# test_host_identity_wiring.py::TestDeletionGuard.
 
 
 # ---------------------------------------------------------------------------

@@ -1,23 +1,33 @@
-"""Hostname detection for idx_ingest auto-hostname priority chain.
+"""Hostname extraction primitives consumed by the v1 host-identity preflight.
 
-See `specs/host-identity-normalization-2026-04-24.md` Rev 5 — Fix C. The
-ingest-time priority order:
+See `specs/host-identity-2026-05-11.md` v1. The discovery orchestrator
+(`host_discovery.discover_hosts`) calls these primitives once per
+ingest to populate the case host-dictionary with auto-applied
+decisions. Parsers then resolve `host.id` from that dictionary at
+parse time.
 
-  1. `hostname=` param (operator override)                    [caller]
-  2. Mounted volume registry → ComputerName + Domain          [this file]
-  3. Evidence-internal field-priority (first doc's hostname)  [this file]
-  4. Fail loud — `hostname_unmapped` response + proposal      [caller]
+Exports:
+  - `_HOST_FIELD_PRIORITY` — first-hit-wins field list for CSV/JSON.
+  - `extract_host_from_record` — walk the priority list on one record.
+  - `detect_hostname_from_volume` — read ComputerName+Domain from a
+    mounted volume's SYSTEM hive.
+  - `peek_hostname_from_evidence` — first parseable CSV/JSON file in
+    the evidence root; extract the hostname from its first record.
+  - `classify_host` — `(status, raw, proposed, confidence)` against a
+    dictionary; used by both `host_discovery._classify` and downstream
+    consumers.
 
-Archive basename is NEVER used as host.name — that fallback is removed in
-this same commit (ingest_cli.py line 398 pre-fix).
+Archive basename is NEVER used as host.name. The shipped Rev 8
+fail-loud surface (`write_host_unmapped_yaml`,
+`archive_resolved_unmapped_yaml`, `_classify_or_fail` in
+ingest_cli.py) is removed in v1; the always-proceed preflight in
+`ingest_cli._preflight_host_discovery` replaces it.
 
 IMPLEMENTATION CONTRACT (regipy leading-backslash):
   `regipy.RegistryHive.get_key()` requires a leading `\\` on the path.
   Without it the call silently raises RegistryKeyNotFoundException.
-  This was the root cause of BUG 1 in the parse_defender 3-bug chain
-  and cost a full session to rediscover. See
-  `parse_transcripts._read_transcript_config` (commit 93cdd27) for the
-  established precedent — same ControlSet001/002 fallback, same
+  See `parse_transcripts._read_transcript_config` (commit 93cdd27) for
+  the established precedent — same ControlSet001/002 fallback, same
   graceful-None error posture.
 """
 
@@ -170,33 +180,6 @@ def classify_host(
     return "unmapped-no-proposal", raw, None, 0.0
 
 
-def write_host_unmapped_yaml(
-    case_dir: Path,
-    entries: list[dict],
-) -> Path:
-    """Write `<case-dir>/host-unmapped.yaml` with entries + actionable cmds.
-
-    Each entry dict should carry at least:
-        raw, first_seen, sources, proposed_canonical, confidence
-    """
-    import yaml
-
-    path = case_dir / "host-unmapped.yaml"
-    payload = {
-        "note": (
-            "Ingest blocked — resolve each entry below by running the "
-            "suggested command. Re-run idx_ingest after all are resolved; "
-            "this file will be renamed to host-unmapped.yaml.resolved.<ts>."
-        ),
-        "entries": entries,
-    }
-    path.write_text(
-        yaml.safe_dump(payload, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
-    )
-    return path
-
-
 def peek_hostname_from_evidence(scan_root: Path) -> str | None:
     """Walk `scan_root` for the first parseable CSV/JSONL/JSON file and
     extract a hostname from its first record via `_HOST_FIELD_PRIORITY`.
@@ -284,20 +267,3 @@ def peek_hostname_from_evidence(scan_root: Path) -> str | None:
         except (OSError, UnicodeError):
             continue
     return None
-
-
-def archive_resolved_unmapped_yaml(case_dir: Path) -> Path | None:
-    """Rename host-unmapped.yaml to host-unmapped.yaml.resolved.<ISO8601>.
-
-    Returns the new path, or None if no file to rename. Called after a
-    successful re-run where every previously-unmapped entry now resolves.
-    """
-    from datetime import datetime, timezone
-
-    src = case_dir / "host-unmapped.yaml"
-    if not src.exists():
-        return None
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    dest = case_dir / f"host-unmapped.yaml.resolved.{ts}"
-    src.rename(dest)
-    return dest
