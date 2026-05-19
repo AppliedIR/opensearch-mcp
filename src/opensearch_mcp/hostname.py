@@ -264,6 +264,9 @@ def peek_hostname_from_evidence(scan_root: Path) -> str | None:
                 hn = extract_host_from_record(dict(row))
                 if hn:
                     return hn
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError, csv.Error):
+            # csv.Error catches Python 3.10's "line contains NUL"; later
+            # Pythons may not raise but the input is still adversarial
+            # and the discover gate drops it downstream regardless.
             continue
     return None
