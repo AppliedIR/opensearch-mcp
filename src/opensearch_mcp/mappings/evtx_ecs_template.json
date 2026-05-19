@@ -42,6 +42,9 @@
         "host.name": {
           "type": "keyword"
         },
+        "host.id": {
+          "type": "keyword"
+        },
         "user.name": {
           "type": "keyword"
         },

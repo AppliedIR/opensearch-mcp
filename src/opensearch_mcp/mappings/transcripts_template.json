@@ -13,6 +13,7 @@
         "user.domain": {"type": "keyword"},
         "user.runas": {"type": "keyword"},
         "host.name": {"type": "keyword"},
+        "host.id": {"type": "keyword"},
         "host.os.version": {"type": "keyword"},
         "transcript.machine": {"type": "keyword"},
         "process.name": {"type": "keyword"},

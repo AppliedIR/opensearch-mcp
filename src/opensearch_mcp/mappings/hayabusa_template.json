@@ -9,6 +9,7 @@
         "@timestamp": {"type": "date", "ignore_malformed": true},
         "Timestamp": {"type": "date", "format": "yyyy-MM-dd HH:mm:ss.SSSXXX||strict_date_optional_time||epoch_millis", "ignore_malformed": true},
         "host.name": {"type": "keyword"},
+        "host.id": {"type": "keyword"},
         "Channel": {"type": "keyword"},
         "EventID": {"type": "integer"},
         "Level": {"type": "keyword"},
