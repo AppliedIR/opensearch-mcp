@@ -29,7 +29,7 @@ opensearch = "opensearch_mcp.vhir_plugin:register"
 [project.optional-dependencies]
 http = ["uvicorn>=0.20", "starlette"]
 test = [
-    "pytest>=7.0",
+    "pytest>=9.0.3",
     "pytest-timeout>=2.0",
 ]
 
