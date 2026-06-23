@@ -11,7 +11,7 @@ license = {text = "MIT"}
 dependencies = [
     "opensearch-py>=2.4",
     "evtx>=0.8",
-    "mcp>=1.26",
+    "mcp>=1.27.1",
     "pyyaml>=6.0.3",
     "sift-common",
     "regipy>=4.0",
