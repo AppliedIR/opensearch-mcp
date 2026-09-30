@@ -511,6 +511,26 @@ class TestAnUnreadableTemplateFile:
         assert [f["template"] for f in result["failed"]] == ["vhir-json"]
         assert sorted(self._read(client)) == sorted(_ALL_COMPOSING)
 
+    @pytest.mark.parametrize(
+        "filename,field",
+        [("csv_template.json", "composed_of"), ("json_template.json", "index_patterns")],
+        ids=["composed_of-null", "index_patterns-null"],
+    )
+    def test_a_valid_but_malformed_template_costs_only_the_patch(
+        self, scratch_mappings, filename, field
+    ):
+        """Valid JSON with a null where a list belongs installs as before
+        (14, like the tree before the patch existed); whatever the patch step
+        raises is recorded under `patched_indices`, never raised."""
+        path = scratch_mappings / filename
+        path.write_text(json.dumps({**json.loads(path.read_text()), field: None}))
+        _, result = self._install()
+
+        assert len(result["installed"]) == 14
+        assert result["failed"] == []
+        assert result["patched_indices"]["patched"] == []
+        assert "NoneType" in result["patched_indices"]["failed"][0]["error"]
+
     def test_the_component_itself(self, scratch_mappings):
         (scratch_mappings / "json_type_stability.json").write_text("{ not json")
         client, result = self._install()

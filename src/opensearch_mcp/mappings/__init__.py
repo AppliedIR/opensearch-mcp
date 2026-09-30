@@ -143,7 +143,12 @@ def install_all_templates(client) -> dict[str, Any]:
         except Exception as e:
             logger.warning("install_all_templates: %s failed: %s", tpl_name, e)
             results["failed"].append({"template": tpl_name, "error": str(e)})
-    results["patched_indices"] = patch_flattened_indices(client, _composing_index_patterns(loaded))
+    try:
+        patterns = _composing_index_patterns(loaded)
+        results["patched_indices"] = patch_flattened_indices(client, patterns)
+    except Exception as e:  # never cost the install its per-template results
+        logger.warning("install_all_templates: patching existing indices failed: %s", e)
+        results["patched_indices"] = {"patched": [], "failed": [{"index": "*", "error": str(e)}]}
     return results
 
 
