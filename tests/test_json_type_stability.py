@@ -6,6 +6,8 @@ mapping, and gives numbers and dates field-level `ignore_malformed`.
 
 - Structure: no object templates, no index-level `ignore_malformed`, the
   string templates unchanged, install order.
+- Every mapping file declares only types OpenSearch has — checked on the
+  declared values, not the file text.
 """
 
 from __future__ import annotations
@@ -123,6 +125,138 @@ class TestKeywordPaths:
         assert rule["match_mapping_type"] == "string"
         assert rule["mapping"]["type"] == "keyword"
         assert rule["mapping"]["ignore_above"] == 2048
+
+
+# ---------------------------------------------------------------------------
+# Declared types are OpenSearch types
+# ---------------------------------------------------------------------------
+
+# Field types OpenSearch 3.5.0 accepts, measured by creating a mapping with
+# each (`semantic` and `sparse_vector` need parameters; their handlers exist).
+# `flattened` is Elasticsearch's: "No handler for type [flattened]".
+OPENSEARCH_FIELD_TYPES = frozenset(
+    {
+        "alias", "binary", "boolean", "byte", "completion", "constant_keyword",
+        "date", "date_nanos", "date_range", "double", "double_range",
+        "flat_object", "float", "float_range", "geo_point", "geo_shape",
+        "half_float", "integer", "integer_range", "ip", "ip_range", "join",
+        "keyword", "knn_vector", "long", "long_range", "match_only_text",
+        "nested", "object", "percolator", "rank_feature", "rank_features",
+        "scaled_float", "search_as_you_type", "semantic", "short",
+        "sparse_vector", "text", "token_count", "unsigned_long", "version",
+        "wildcard", "xy_point", "xy_shape",
+    }
+)  # fmt: skip
+# A dynamic template may leave the type to the detected one.
+_DYNAMIC_PLACEHOLDER = "{dynamic_type}"
+
+
+def _field_types(field: dict, path: str):
+    """(path, type) for a field definition, its multi-fields and sub-fields."""
+    if "type" in field:
+        yield path, field["type"]
+    for name, sub in field.get("fields", {}).items():
+        yield from _field_types(sub, f"{path}.{name}")
+    for name, sub in field.get("properties", {}).items():
+        yield from _field_types(sub, f"{path}.{name}")
+
+
+def _declared_types(mappings: dict):
+    """Every declared type VALUE in a mappings body, with where it sits.
+
+    Reads the structure — properties, multi-fields, dynamic templates — and
+    never the text, so a note that names a type, or a field named `type`,
+    is not a declaration.
+    """
+    for name, field in mappings.get("properties", {}).items():
+        yield from _field_types(field, name)
+    for entry in mappings.get("dynamic_templates", []):
+        for name, rule in entry.items():
+            yield from _field_types(rule.get("mapping", {}), f"dynamic_templates.{name}")
+
+
+def _mapping_bodies(document):
+    """Every `mappings` object in a template file."""
+    if isinstance(document, dict):
+        for key, value in document.items():
+            if key == "mappings" and isinstance(value, dict):
+                yield value
+            else:
+                yield from _mapping_bodies(value)
+    elif isinstance(document, list):
+        for value in document:
+            yield from _mapping_bodies(value)
+
+
+def _unknown_types(document) -> list[tuple[str, str]]:
+    return [
+        (path, declared)
+        for body in _mapping_bodies(document)
+        for path, declared in _declared_types(body)
+        if declared not in OPENSEARCH_FIELD_TYPES and declared != _DYNAMIC_PLACEHOLDER
+    ]
+
+
+class TestMappingTypesAreOpenSearchTypes:
+    @pytest.mark.parametrize("path", sorted(_MAPPINGS_DIR.glob("*.json")), ids=lambda p: p.name)
+    def test_every_mapping_file_declares_only_opensearch_types(self, path):
+        assert _unknown_types(json.loads(path.read_text())) == []
+
+    def test_the_mapping_files_are_found(self):
+        """The guard reads real declarations, not an empty walk."""
+        declared = [
+            t
+            for path in _MAPPINGS_DIR.glob("*.json")
+            for body in _mapping_bodies(json.loads(path.read_text()))
+            for _, t in _declared_types(body)
+        ]
+        assert len(declared) > 100
+        assert {"keyword", "date", "long", "integer", "ip"} <= set(declared)
+
+    @pytest.mark.parametrize(
+        "document,where",
+        [
+            (
+                {"template": {"mappings": {"dynamic_templates": [
+                    {"objects": {"match_mapping_type": "object", "mapping": {"type": "flattened"}}}
+                ]}}},
+                "dynamic_templates.objects",
+            ),
+            (
+                {"template": {"mappings": {"properties": {
+                    "a": {"properties": {"b": {"type": "flattened"}}}
+                }}}},
+                "a.b",
+            ),
+            (
+                {"template": {"mappings": {"properties": {
+                    "s": {"type": "keyword", "fields": {"f": {"type": "flattened"}}}
+                }}}},
+                "s.f",
+            ),
+            ({"mappings": {"properties": {"h": {"type": "histogram"}}}}, "h"),
+        ],
+        ids=["dynamic-template", "nested-property", "multi-field", "other-es-only-type"],
+    )  # fmt: skip
+    def test_the_guard_sees_a_planted_declaration(self, document, where):
+        assert [path for path, _ in _unknown_types(document)] == [where]
+
+    def test_the_guard_reads_values_not_text(self):
+        """A note that names the type, and a field NAMED `flattened` or
+        `type`, declare nothing. The component's own `_meta` names it."""
+        document = {
+            "template": {
+                "mappings": {
+                    "properties": {
+                        "flattened": {"type": "keyword"},
+                        "type": {"type": "keyword"},
+                    }
+                }
+            },
+            "_meta": {"description": "the earlier rules used `flattened`"},
+        }
+        assert _unknown_types(document) == []
+        assert "flattened" in _COMPONENT_FILE.read_text()
 
 
 # ---------------------------------------------------------------------------
