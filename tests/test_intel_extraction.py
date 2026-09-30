@@ -214,6 +214,11 @@ def case(os_client):
                 {"source.ip": "[::]"},
             ],
             f"{tag}-delim-arp": [{"IPAddress": "224.0.0.22"}, {"ForeignAddress": "ff02::fb"}],
+            # A scalar `source` column (syslog, firewall, generic CSV), and an
+            # object where an address is usually found.
+            f"{tag}-json-syslog": [{"source": "fw01", "message": "accepted"}],
+            f"{tag}-delim-firewall": [{"source": "fw01", "action": "drop"}],
+            f"{tag}-json-oddsource": [{"source": {"ip": {"addr": "1.2.3.4"}}}],
         }
         for index, records in docs.items():
             for i, record in enumerate(records):
@@ -273,6 +278,19 @@ class TestExtractionReadsTheEvidence:
         assert os_client.count(index=index)["count"] == 3
         ignored = {"query": {"term": {"_ignored": "source.ip"}}}
         assert os_client.count(index=index, body=ignored)["count"] == 2
+
+    @pytest.mark.parametrize("name", ["json-syslog", "delim-firewall"])
+    def test_a_record_with_a_scalar_source_is_indexed(self, os_client, case, name):
+        """Declaring `source.ip` as a property made `source` an object, and
+        every record with a scalar `source` was rejected."""
+        assert os_client.count(index=case.replace("*", name))["count"] == 1
+
+    def test_an_object_at_source_ip_keeps_its_contents_searchable(self, os_client, case):
+        """A rule matching any type there mapped it `ip` and dropped the
+        object's contents without marking them."""
+        index = case.replace("*", "json-oddsource")
+        query = {"query": {"term": {"source.ip.addr": "1.2.3.4"}}}
+        assert os_client.count(index=index, body=query)["count"] == 1
 
     def test_multicast_is_never_extracted(self, os_client, case):
         iocs = extract_unique_iocs(os_client, case, force=True)
