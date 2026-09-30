@@ -119,6 +119,7 @@ def install_all_templates(client) -> dict[str, Any]:
           "failed":    [{"template": name, "error": str}, ...],
           "skipped":   [template_name, ...],    # file missing on disk
           "components": {component-install sub-result dict},
+          "patched_indices": {patch_flattened_indices sub-result dict},
         }
     """
     comp_results = install_component_templates(client)
@@ -140,6 +141,68 @@ def install_all_templates(client) -> dict[str, Any]:
         except Exception as e:
             logger.warning("install_all_templates: %s failed: %s", tpl_name, e)
             results["failed"].append({"template": tpl_name, "error": str(e)})
+    results["patched_indices"] = patch_flattened_indices(client, _composing_index_patterns())
+    return results
+
+
+def _composing_index_patterns() -> list[str]:
+    """Index patterns of every registered template composing a component."""
+    components = {name for name, _ in _COMPONENT_TEMPLATES_REGISTRY}
+    patterns: list[str] = []
+    for _, filename in _TEMPLATES_REGISTRY:
+        path = _MAPPINGS_DIR / filename
+        if not path.exists():
+            continue
+        body = _load_json(path)
+        if components & set(body.get("composed_of", [])):
+            patterns.extend(body.get("index_patterns", []))
+    return patterns
+
+
+def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]:
+    """Replace `dynamic_templates` on existing open indices still carrying a
+    `flattened` rule, with the component's current list.
+
+    `flattened` is not an OpenSearch type, so those rules rejected every
+    record holding an object or a dotted key. Dynamic templates live in the
+    index's own mapping, so installing a fixed component template leaves
+    existing indices unchanged; one `put_mapping` per index replaces the list
+    on the open index without closing it. Index-level settings are static
+    and stay as they were.
+    """
+    results: dict[str, Any] = {"patched": [], "failed": []}
+    if not index_patterns:
+        return results
+    component = _load_json(_MAPPINGS_DIR / "json_type_stability.json")
+    replacement = component["template"]["mappings"]["dynamic_templates"]
+    try:
+        current = client.indices.get_mapping(
+            index=",".join(index_patterns),
+            expand_wildcards="open",
+            allow_no_indices=True,
+            ignore_unavailable=True,
+            filter_path="*.mappings.dynamic_templates",
+        )
+    except Exception as e:
+        logger.warning("patch_flattened_indices: reading mappings failed: %s", e)
+        results["failed"].append({"index": ",".join(index_patterns), "error": str(e)})
+        return results
+    if not isinstance(current, dict):
+        return results
+    for index, body in current.items():
+        rules = body.get("mappings", {}).get("dynamic_templates", [])
+        if not any(
+            rule.get("mapping", {}).get("type") == "flattened"
+            for entry in rules
+            for rule in entry.values()
+        ):
+            continue
+        try:
+            client.indices.put_mapping(index=index, body={"dynamic_templates": replacement})
+            results["patched"].append(index)
+        except Exception as e:
+            logger.warning("patch_flattened_indices: %s failed: %s", index, e)
+            results["failed"].append({"index": index, "error": str(e)})
     return results
 
 

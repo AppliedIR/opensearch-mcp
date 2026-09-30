@@ -8,6 +8,7 @@ mapping, and gives numbers and dates field-level `ignore_malformed`.
   string templates unchanged, install order.
 - Every mapping file declares only types OpenSearch has — checked on the
   declared values, not the file text.
+- Existing indices still carrying a `flattened` rule are patched in place.
 - Cluster rows, through the shipped composed templates and `flush_bulk`.
 """
 
@@ -348,6 +349,102 @@ class TestInstallComponentTemplate:
 
 
 # The dynamic_templates every index created from the April component carries.
+APRIL_DYNAMIC_TEMPLATES = [
+    {"id_like_strings": {"path_match": "*.id", "match_mapping_type": "string",
+                         "mapping": {"type": "keyword", "ignore_above": 2048}}},
+    {"name_like_strings": {"path_match": "*.name", "match_mapping_type": "string",
+                           "mapping": {"type": "keyword", "ignore_above": 2048}}},
+    {"hostname_like_strings": {"path_match": "*.hostname", "match_mapping_type": "string",
+                               "mapping": {"type": "keyword", "ignore_above": 2048}}},
+    {"labels_as_flattened": {"path_match": "*.labels", "mapping": {"type": "flattened"}}},
+    {"tags_as_flattened": {"path_match": "*.tags", "mapping": {"type": "flattened"}}},
+    {"event_data_flattened": {"path_match": "EventData", "mapping": {"type": "flattened"}}},
+    {"hash_variants_flattened": {"path_match": "*.hash*", "mapping": {"type": "flattened"}}},
+    {"catchall_objects_flattened": {"match_mapping_type": "object",
+                                    "mapping": {"type": "flattened"}}},
+    {"catchall_strings_keyword": {"match_mapping_type": "string",
+                                  "mapping": {"type": "keyword", "ignore_above": 2048}}},
+]  # fmt: skip
+
+
+def _mapping_response(dynamic_templates: dict[str, list]) -> dict:
+    return {i: {"mappings": {"dynamic_templates": d}} for i, d in dynamic_templates.items()}
+
+
+class TestPatchFlattenedIndices:
+    """Existing indices keep the dynamic templates they were created with, so
+    the fixed component does not reach them on its own."""
+
+    def test_only_indices_carrying_flattened_are_patched_with_the_component_list(
+        self, dyn_templates
+    ):
+        from opensearch_mcp.mappings import patch_flattened_indices
+
+        client = MagicMock()
+        client.indices.get_mapping.return_value = _mapping_response(
+            {"case-a-json-old": APRIL_DYNAMIC_TEMPLATES, "case-a-json-new": dyn_templates}
+        )
+        result = patch_flattened_indices(client, ["case-*-json-*"])
+
+        assert result == {"patched": ["case-a-json-old"], "failed": []}
+        client.indices.put_mapping.assert_called_once_with(
+            index="case-a-json-old", body={"dynamic_templates": dyn_templates}
+        )
+
+    def test_open_indices_only_and_nothing_is_closed(self):
+        from opensearch_mcp.mappings import patch_flattened_indices
+
+        client = MagicMock()
+        client.indices.get_mapping.return_value = _mapping_response({"i": APRIL_DYNAMIC_TEMPLATES})
+        patch_flattened_indices(client, ["case-*-json-*", "case-*-delim-*"])
+
+        kwargs = client.indices.get_mapping.call_args.kwargs
+        assert kwargs["index"] == "case-*-json-*,case-*-delim-*"
+        assert kwargs["expand_wildcards"] == "open"
+        assert not client.indices.close.called and not client.indices.open.called
+        assert not client.indices.put_settings.called
+
+    def test_a_failure_is_collected_and_the_rest_are_patched(self):
+        from opensearch_mcp.mappings import patch_flattened_indices
+
+        client = MagicMock()
+        client.indices.get_mapping.return_value = _mapping_response(
+            {"a": APRIL_DYNAMIC_TEMPLATES, "b": APRIL_DYNAMIC_TEMPLATES}
+        )
+        client.indices.put_mapping.side_effect = [RuntimeError("503"), {"acknowledged": True}]
+        result = patch_flattened_indices(client, ["case-*"])
+
+        assert result["patched"] == ["b"]
+        assert result["failed"] == [{"index": "a", "error": "503"}]
+
+    def test_an_unreadable_mapping_is_reported_not_raised(self):
+        from opensearch_mcp.mappings import patch_flattened_indices
+
+        client = MagicMock()
+        client.indices.get_mapping.side_effect = RuntimeError("timeout")
+        result = patch_flattened_indices(client, ["case-*-json-*"])
+
+        assert result["patched"] == []
+        assert "timeout" in result["failed"][0]["error"]
+
+    def test_installing_the_templates_patches_every_composing_pattern(self):
+        """The call site: installing runs the patch over every index pattern
+        of a template that composes the component."""
+        from opensearch_mcp.mappings import install_all_templates
+
+        client = MagicMock()
+        client.indices.get_mapping.return_value = _mapping_response(
+            {"old": APRIL_DYNAMIC_TEMPLATES}
+        )
+        result = install_all_templates(client)
+
+        patterns = json.loads(_JSON_TEMPLATE.read_text())["index_patterns"]
+        patterns += json.loads(_DELIMITED_TEMPLATE.read_text())["index_patterns"]
+        read = client.indices.get_mapping.call_args.kwargs["index"].split(",")
+        assert sorted(read) == sorted(patterns)
+        assert result["patched_indices"]["patched"] == ["old"]
+
+
 # ---------------------------------------------------------------------------
 # Cluster rows (auto-run when OpenSearch is reachable).
 #
@@ -536,3 +633,37 @@ class TestTypeStabilityClusterRoundtrip:
         assert self._write(os_client, index, docs[:1]) == (1, 0)
         assert self._write(os_client, index, docs[1:]) == (0, 1)
         assert f"[{field}]" in get_last_bulk_reason()
+
+    # -- SPEC-902: an index created from the April component --------------------
+
+    def test_an_old_index_accepts_objects_and_dotted_keys_after_the_patch(
+        self, os_client, templates
+    ):
+        from opensearch_mcp.mappings import patch_flattened_indices
+
+        index = f"{templates}-json-old-{uuid.uuid4().hex[:8]}"
+        os_client.indices.create(
+            index=index, body={"settings": {"index.mapping.ignore_malformed": True}}
+        )
+        os_client.indices.put_mapping(
+            index=index, body={"dynamic_templates": APRIL_DYNAMIC_TEMPLATES}
+        )
+        assert self._write(os_client, index, [{"kept": "before"}]) == (1, 0)
+        # Control: the old rules reject the record.
+        assert self._write(os_client, index, [{"o": {"a": "x"}}]) == (0, 1)
+
+        assert patch_flattened_indices(os_client, [index]) == {"patched": [index], "failed": []}
+        assert patch_flattened_indices(os_client, [index]) == {"patched": [], "failed": []}
+
+        docs = [{"o": {"a": "x"}}, {"source.ip": "8.8.8.8"}, {"Hash": {"MD5": _MD5}}]
+        from opensearch_mcp.bulk import flush_bulk
+
+        actions = [{"_index": index, "_id": f"n{i}", "_source": d} for i, d in enumerate(docs)]
+        assert flush_bulk(os_client, actions) == (3, 0)
+        os_client.indices.refresh(index=index)
+        assert self._hits(os_client, index, "o.a", "x") == 1
+        assert self._hits(os_client, index, "source.ip", "8.8.8.8") == 1
+        assert self._buckets(os_client, index, "Hash.MD5") == [_MD5]
+        assert os_client.count(index=index)["count"] == 4, "the earlier record is still there"
+        state = os_client.cluster.state(index=index, metric="metadata")
+        assert state["metadata"]["indices"][index]["state"] == "open"
