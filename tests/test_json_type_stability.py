@@ -8,10 +8,12 @@ mapping, and gives numbers and dates field-level `ignore_malformed`.
   string templates unchanged, install order.
 - Every mapping file declares only types OpenSearch has — checked on the
   declared values, not the file text.
+- Cluster rows, through the shipped composed templates and `flush_bulk`.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -346,3 +348,191 @@ class TestInstallComponentTemplate:
 
 
 # The dynamic_templates every index created from the April component carries.
+# ---------------------------------------------------------------------------
+# Cluster rows (auto-run when OpenSearch is reachable).
+#
+# The shipped component and the shipped vhir-json / vhir-delimited bodies are
+# installed under names of their own, matching only this suite's indices, so
+# a test run never replaces the live templates or touches a live index.
+# Writes go through `flush_bulk`, the production path.
+# ---------------------------------------------------------------------------
+
+
+import uuid  # noqa: E402 — grouped with integration imports
+
+_MD5 = "0cc175b9c0f1b6a831c399e269772661"
+_SHA1 = "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8"
+_SHA256 = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+
+
+@pytest.fixture(scope="module")
+def os_client():
+    pytest.importorskip("opensearchpy")
+    try:
+        from opensearch_mcp.client import get_client
+
+        client = get_client()
+        health = client.cluster.health()
+        if health.get("status") not in ("green", "yellow"):
+            pytest.skip("OpenSearch cluster not healthy")
+        return client
+    except FileNotFoundError:
+        pytest.skip("OpenSearch config not found (~/.vhir/opensearch.yaml)")
+    except Exception as e:
+        pytest.skip(f"OpenSearch not available: {e}")
+
+
+@pytest.fixture(scope="module")
+def templates(os_client):
+    """The shipped composition under this run's own names."""
+    tag = f"pytest-typestab-{uuid.uuid4().hex[:8]}"
+    component = json.loads(_COMPONENT_FILE.read_text())
+    os_client.cluster.put_component_template(name=f"{tag}-comp", body=component)
+    for kind, path in (("json", _JSON_TEMPLATE), ("delim", _DELIMITED_TEMPLATE)):
+        body = copy.deepcopy(json.loads(path.read_text()))
+        body["template"].pop("aliases", None)  # never join a live alias
+        body["index_patterns"] = [f"{tag}-{kind}-*"]
+        body["composed_of"] = [f"{tag}-comp"]
+        body["priority"] = 900
+        os_client.indices.put_index_template(name=f"{tag}-{kind}", body=body)
+    yield tag
+    for name in os_client.indices.get(index=f"{tag}-*", expand_wildcards="all"):
+        os_client.indices.delete(index=name, ignore=[404])
+    for kind in ("json", "delim"):
+        os_client.indices.delete_index_template(name=f"{tag}-{kind}", ignore=[404])
+    os_client.cluster.delete_component_template(name=f"{tag}-comp", ignore=[404])
+
+
+@pytest.mark.integration
+class TestTypeStabilityClusterRoundtrip:
+    @pytest.fixture(autouse=True)
+    def _clean_bulk_state(self):
+        from opensearch_mcp.bulk import clear_last_bulk_reason, reset_circuit_breaker
+
+        reset_circuit_breaker()
+        clear_last_bulk_reason()
+        yield
+
+    @pytest.fixture(params=["json", "delim"])
+    def index(self, request, templates):
+        return f"{templates}-{request.param}-{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _write(client, index, docs):
+        from opensearch_mcp.bulk import flush_bulk
+
+        actions = [{"_index": index, "_id": str(i), "_source": d} for i, d in enumerate(docs)]
+        result = flush_bulk(client, actions)
+        client.indices.refresh(index=index)
+        return result
+
+    @staticmethod
+    def _hits(client, index, field, value):
+        body = {"query": {"term": {field: value}}}
+        return client.search(index=index, body=body)["hits"]["total"]["value"]
+
+    @staticmethod
+    def _buckets(client, index, field):
+        body = {"size": 0, "aggs": {"v": {"terms": {"field": field}}}}
+        resp = client.search(index=index, body=body)
+        return [b["key"] for b in resp["aggregations"]["v"]["buckets"]]
+
+    # -- Row 1 -----------------------------------------------------------------
+
+    def test_objects_are_indexed_searchable_and_aggregatable_under_their_names(
+        self, os_client, index
+    ):
+        docs = [
+            {"foo": {"bar": "S1"}},
+            {"a": {"b": {"c": "S2"}}},
+            {"list": [{"k": "S3"}, {"k": "S3b"}]},
+            # The Velociraptor Windows.System.Pslist shape that failed most.
+            {"Pid": 4, "Name": "System", "Hash": {"MD5": _MD5, "SHA1": _SHA1, "SHA256": _SHA256}},
+        ]
+        assert self._write(os_client, index, docs) == (4, 0)
+        for field, value in [
+            ("foo.bar", "S1"),
+            ("a.b.c", "S2"),
+            ("list.k", "S3"),
+            ("list.k", "S3b"),
+            ("Hash.MD5", _MD5),
+            ("Hash.SHA1", _SHA1),
+            ("Hash.SHA256", _SHA256),
+        ]:
+            assert self._hits(os_client, index, field, value) == 1, field
+        assert self._buckets(os_client, index, "Hash.MD5") == [_MD5]
+        assert self._buckets(os_client, index, "foo.bar") == ["S1"]
+
+    # -- Row 2 -----------------------------------------------------------------
+
+    def test_dotted_keys_are_indexed_and_searchable(self, os_client, index):
+        docs = [
+            {"source.ip": "8.8.8.8"},
+            {"file.hash.sha256": _SHA256},
+            {"EventData.TargetUserName": "S6"},
+        ]
+        assert self._write(os_client, index, docs) == (3, 0)
+        assert self._hits(os_client, index, "source.ip", "8.8.8.8") == 1
+        assert self._hits(os_client, index, "file.hash.sha256", _SHA256) == 1
+        assert self._hits(os_client, index, "EventData.TargetUserName", "S6") == 1
+
+    # -- Row 3: shape conflicts are loud, per record ---------------------------
+
+    @pytest.mark.parametrize(
+        "docs,field",
+        [
+            ([{"L": "x"}, {"L": {"a": "b"}}], "L"),
+            ([{"L": {"a": "b"}}, {"L": "x"}], "L"),
+        ],
+        ids=["scalar-then-object", "object-then-scalar"],
+    )
+    def test_a_shape_conflict_rejects_that_record_with_its_reason(
+        self, os_client, index, docs, field
+    ):
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
+        assert self._write(os_client, index, docs[:1]) == (1, 0)
+        assert self._write(os_client, index, docs[1:]) == (0, 1)
+        reason = get_last_bulk_reason()
+        assert f"[{field}]" in reason and "flattened" not in reason, reason
+        assert os_client.count(index=index)["count"] == 1
+
+    def test_a_mixed_scalar_and_object_array_is_rejected_with_its_reason(self, os_client, index):
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
+        assert self._write(os_client, index, [{"X": ["s", {"a": "b"}]}, {"ok": "y"}]) == (1, 1)
+        reason = get_last_bulk_reason()
+        assert "[X]" in reason and "flattened" not in reason, reason
+
+    # -- Row 4: a scalar of the wrong type keeps its row -----------------------
+
+    def test_a_number_then_a_string_keeps_the_row_and_marks_the_field(self, os_client, index):
+        assert self._write(os_client, index, [{"LogonType": 3}, {"LogonType": "S11"}]) == (2, 0)
+        ignored = {"query": {"term": {"_ignored": "LogonType"}}}
+        assert os_client.count(index=index, body=ignored)["count"] == 1
+        assert self._hits(os_client, index, "LogonType", 3) == 1
+
+    # -- Expected loud: accepted residuals -------------------------------------
+
+    @pytest.mark.parametrize(
+        "docs,field",
+        [
+            ([{"B": True}, {"B": "x"}], "B"),
+            ([{"B": True}, {"B": 1}], "B"),
+            ([{"ok": 1}, {"threat_intel.confidence": "high"}], "threat_intel.confidence"),
+            ([{"ok": 1}, {"threat_intel.enriched_at": "garbage"}], "threat_intel.enriched_at"),
+            ([{"ok": 1}, {"threat_intel.checked": "maybe"}], "threat_intel.checked"),
+        ],
+        ids=["boolean-then-string", "boolean-then-int", "confidence", "enriched_at", "checked"],
+    )
+    def test_where_ignore_malformed_does_not_reach_the_record_is_rejected_loudly(
+        self, os_client, index, docs, field
+    ):
+        """Boolean takes no `ignore_malformed`, and these declared fields set
+        none; with no index-level setting a wrong value there is a counted,
+        named rejection — the index-level setting dropped it silently."""
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
+        assert self._write(os_client, index, docs[:1]) == (1, 0)
+        assert self._write(os_client, index, docs[1:]) == (0, 1)
+        assert f"[{field}]" in get_last_bulk_reason()
