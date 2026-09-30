@@ -161,13 +161,13 @@ def ingest(tag, status_dir, monkeypatch):
             )  # fmt: skip
 
         @staticmethod
-        def delimited(path: Path, recursive: bool = False) -> None:
+        def delimited(path: Path, recursive: bool = False, auto_hosts: str = "") -> None:
             ingest_cli.cmd_ingest_delimited(
                 argparse.Namespace(
-                    path=str(path), hostname="" if recursive else "h1", recursive=recursive,
-                    auto_hosts="", case=None, time_field=None, delimiter=None, format=None,
-                    time_from=None, time_to=None, batch_size=1000, dry_run=False,
-                    index_suffix=None,
+                    path=str(path), hostname="" if recursive or auto_hosts else "h1",
+                    recursive=recursive, auto_hosts=auto_hosts, case=None, time_field=None,
+                    delimiter=None, format=None, time_from=None, time_to=None, batch_size=1000,
+                    dry_run=False, index_suffix=None,
                 )
             )  # fmt: skip
 
@@ -253,3 +253,18 @@ class TestRejectionsReachTheStatus:
         s = _status()
         assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 2, 78)
         assert "[proc" in s["warnings"][0]
+
+    def test_an_auto_hosts_run_reports_every_host(self, ingest, os_client, tmp_path):
+        """The same shared status file as the recursive walk: one host's
+        records all rejected, the other's all indexed."""
+        root = tmp_path / "flat"
+        root.mkdir()
+        _write_csv(root / "flags.csv", ["flag", "n"], [["maybe", "1"], ["maybe", "2"]])
+        os_client.indices.create(
+            index=ingest.name("delim-flags", host="hosta"),
+            body={"mappings": {"properties": {"flag": {"type": "boolean"}}}},
+        )
+        ingest.delimited(root, auto_hosts="hosta,hostb")
+        s = _status()
+        assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 2, 2)
+        assert "[flag]" in s["warnings"][0]

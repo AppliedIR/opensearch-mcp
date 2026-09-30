@@ -1595,24 +1595,34 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         import copy
 
         auto_hosts = [h.strip() for h in auto_hosts_str.split(",") if h.strip()]
+        hosts_indexed = hosts_failed = 0
+        hosts_reason = ""
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
             sub_args.auto_hosts = ""
             print(f"\n--- Host: {h} ---")
-            cmd_ingest_delimited(sub_args, examiner=examiner)
-        # Wrapper writes complete unconditionally on loop exit; partial-
-        # failure accounting is in inner calls' audit logs, not the
-        # process-level status. Matches the non-recursive path's pattern
-        # (writes "complete" even when _delim_failed_files is non-empty).
+            result = cmd_ingest_delimited(sub_args, examiner=examiner)
+            if result:
+                hosts_indexed += result[0]
+                hosts_failed += result[1]
+                hosts_reason = hosts_reason or result[2]
+        # Each host's own final write lands in this same status file, so the
+        # last one would stand for the whole run; write the sum. A clean
+        # no-op (no hosts) still ends `complete`.
         if run_id:
+            final_status, final_error = _terminal_status(hosts_indexed, hosts_failed, hosts_reason)
             _write_bg_status(
                 case_id,
                 run_id,
-                "complete",
+                final_status,
                 "(auto-hosts)",
                 "delimited",
                 started_ts,
+                indexed=hosts_indexed,
+                error=final_error,
+                bulk_failed=hosts_failed,
+                bulk_failed_reason=hosts_reason,
             )
         return
 
