@@ -1,18 +1,11 @@
-"""Tests for vhir-json-type-stability component template.
+"""Tests for the vhir-json-type-stability component template.
 
-Spec: `specs/opensearch-dynamic-template-type-stability-2026-04-24.md` Rev 2.
+The component is composed into `vhir-json` and `vhir-delimited`. It keeps
+objects, arrays of objects and dotted keys on OpenSearch's default object
+mapping, and gives numbers and dates field-level `ignore_malformed`.
 
-The 6 tests from the spec are adapted for local JSON-structure validation
-(the ones that need a live OpenSearch cluster are gated to call the
-install-install helper against a fake client). This file pins:
-
-- Template JSON is well-formed, has the expected dynamic_templates shape.
-- Install helper PUTs component templates BEFORE composable templates.
-- `vhir-json` and `vhir-delimited` composables reference the component
-  via `composed_of`.
-- Catchall keyword has NO `.text` subfield (CR's `.text` drop).
-- Priority + total_fields.limit match spec (10000, no per-doc priority
-  clash since this is a component template).
+- Structure: no object templates, no index-level `ignore_malformed`, the
+  string templates unchanged, install order.
 """
 
 from __future__ import annotations
@@ -39,6 +32,10 @@ def dyn_templates(component):
     return component["template"]["mappings"]["dynamic_templates"]
 
 
+def _rules(dyn_templates) -> dict[str, dict]:
+    return {name: rule for entry in dyn_templates for name, rule in entry.items()}
+
+
 # ---------------------------------------------------------------------------
 # Structural contract
 # ---------------------------------------------------------------------------
@@ -53,57 +50,60 @@ class TestComponentTemplateStructure:
         """dynamic_templates is a LIST (order matters — first match wins)."""
         assert isinstance(dyn_templates, list)
         names = [next(iter(d.keys())) for d in dyn_templates]
-        # Specific path_match rules must come BEFORE catchall match_mapping_type
         assert names.index("id_like_strings") < names.index("catchall_strings_keyword")
-        assert names.index("labels_as_flattened") < names.index("catchall_objects_flattened")
-        assert names.index("tags_as_flattened") < names.index("catchall_objects_flattened")
-        assert "tags_as_flattened" in names  # CR's addition
-        assert "hash_variants_flattened" in names
-        assert "event_data_flattened" in names
+        assert names.index("name_like_strings") < names.index("catchall_strings_keyword")
+        assert names.index("hostname_like_strings") < names.index("catchall_strings_keyword")
+
+    def test_no_rule_matches_an_object(self, dyn_templates):
+        """Objects keep OpenSearch's default object mapping. A rule without a
+        scalar `match_mapping_type` also matches objects — including the
+        intermediate object a dotted key like `source.ip` expands into — and
+        the earlier ones mapped them to `flattened`, which OpenSearch does not
+        have: every record with an object or a dotted key was rejected.
+        """
+        for name, rule in _rules(dyn_templates).items():
+            assert rule.get("match_mapping_type") in {"string", "long", "double", "date"}, name
+
+    @pytest.mark.parametrize(
+        "detected,mapped",
+        [("long", "long"), ("double", "float"), ("date", "date")],
+    )
+    def test_numbers_and_dates_ignore_malformed_per_field(self, dyn_templates, detected, mapped):
+        """The type dynamic mapping would choose for that JSON value (a
+        floating-point number maps `float`), plus `ignore_malformed`: a value
+        of the wrong type is dropped from that field and the record is kept.
+        """
+        matching = [
+            r for r in _rules(dyn_templates).values() if r["match_mapping_type"] == detected
+        ]
+        assert len(matching) == 1, detected
+        assert matching[0]["mapping"] == {"type": mapped, "ignore_malformed": True}
+        assert "path_match" not in matching[0] and "match" not in matching[0]
+
+    def test_no_index_level_ignore_malformed(self, component):
+        """At index level it also swallowed an object arriving at a field
+        already mapped as a scalar, with `_ignored` unset."""
+        assert "index.mapping.ignore_malformed" not in component["template"]["settings"]
 
     def test_total_fields_limit_is_10000(self, component):
-        """CR-bumped 5000 → 10000."""
         settings = component["template"]["settings"]
         assert settings["index.mapping.total_fields.limit"] == 10000
-
-    def test_ignore_malformed_true(self, component):
-        settings = component["template"]["settings"]
-        assert settings["index.mapping.ignore_malformed"] is True
 
     def test_depth_limit_20(self, component):
         assert component["template"]["settings"]["index.mapping.depth.limit"] == 20
 
 
 class TestCatchallKeywordDroppedText:
-    """CR optional fold — `.text` multi-field removed from catchall keyword."""
+    """`.text` multi-field removed from catchall keyword."""
 
     def test_no_text_subfield_on_catchall_strings(self, dyn_templates):
-        catchall = next(
-            d["catchall_strings_keyword"] for d in dyn_templates if "catchall_strings_keyword" in d
-        )
+        catchall = _rules(dyn_templates)["catchall_strings_keyword"]
         mapping = catchall["mapping"]
         assert mapping["type"] == "keyword"
-        # The core assertion: no .text subfield
         assert "fields" not in mapping, (
             "catchall keyword must not carry .text — storage halves, "
             "JSON sources use aggregation not grep"
         )
-
-
-class TestLabelsAndTagsFlattened:
-    """*.labels and *.tags both land as flattened (CR-added *.tags)."""
-
-    def test_labels_flattened(self, dyn_templates):
-        labels = next(
-            d["labels_as_flattened"] for d in dyn_templates if "labels_as_flattened" in d
-        )
-        assert labels["path_match"] == "*.labels"
-        assert labels["mapping"]["type"] == "flattened"
-
-    def test_tags_flattened(self, dyn_templates):
-        tags = next(d["tags_as_flattened"] for d in dyn_templates if "tags_as_flattened" in d)
-        assert tags["path_match"] == "*.tags"
-        assert tags["mapping"]["type"] == "flattened"
 
 
 class TestKeywordPaths:
@@ -118,7 +118,7 @@ class TestKeywordPaths:
         ],
     )
     def test_keyword_path_match(self, dyn_templates, rule_name, expected_path):
-        rule = next(d[rule_name] for d in dyn_templates if rule_name in d)
+        rule = _rules(dyn_templates)[rule_name]
         assert rule["path_match"] == expected_path
         assert rule["match_mapping_type"] == "string"
         assert rule["mapping"]["type"] == "keyword"
@@ -141,7 +141,7 @@ class TestComposedOfReferences:
 
 
 # ---------------------------------------------------------------------------
-# Install helper (Test 6: install-on-startup round-trip)
+# Install helper
 # ---------------------------------------------------------------------------
 
 
@@ -157,7 +157,6 @@ class TestInstallComponentTemplate:
 
         assert "vhir-json-type-stability" in result["installed"]
         assert result["failed"] == []
-        # The PUT call landed with the right name and a valid body.
         call = client.cluster.put_component_template.call_args
         assert call.kwargs["name"] == "vhir-json-type-stability"
         body = call.kwargs["body"]
@@ -171,9 +170,7 @@ class TestInstallComponentTemplate:
     )
     def test_components_installed_before_composables(self, composable_name):
         """Component template PUT must happen BEFORE any composable that
-        references it via composed_of. Parametrized over every composable
-        that wires vhir-json-type-stability in, so adding a new one
-        automatically extends the ordering guard.
+        references it via composed_of.
         """
         from opensearch_mcp.mappings import install_all_templates
 
@@ -182,9 +179,6 @@ class TestInstallComponentTemplate:
         client.indices = MagicMock()
 
         result = install_all_templates(client)
-
-        assert client.cluster.put_component_template.called
-        assert client.indices.put_index_template.called
 
         component_call_idx = None
         composable_call_idx = None
@@ -198,13 +192,7 @@ class TestInstallComponentTemplate:
 
         assert component_call_idx is not None, "component template never installed"
         assert composable_call_idx is not None, f"{composable_name} never installed"
-        assert component_call_idx < composable_call_idx, (
-            f"component template must install BEFORE {composable_name} "
-            f"(it's composed_of the component)"
-        )
-
-        # Result surface includes the component sub-dict
-        assert "components" in result
+        assert component_call_idx < composable_call_idx
         assert "vhir-json-type-stability" in result["components"]["installed"]
 
     def test_install_failure_is_collected_not_raised(self):
@@ -223,106 +211,4 @@ class TestInstallComponentTemplate:
         assert "cluster 503" in result["failed"][0]["error"]
 
 
-# ---------------------------------------------------------------------------
-# Cluster round-trip (env-gated; auto-runs when OpenSearch is reachable).
-#
-# WSL2 Test's deferred harness from 2026-04-24 — the polymorphic Labels
-# fixture they couldn't run in their sandbox (docker denied). Baking it
-# here so it runs automatically in any env where the OpenSearch client
-# resolves (SIFT workstation, docker-capable WSL2, CI, etc.).
-#
-# Pattern: same as tests/test_ingest_integration.py — skip when the
-# cluster isn't reachable; run otherwise.
-# ---------------------------------------------------------------------------
-
-
-import uuid  # noqa: E402 — grouped with integration imports
-
-
-@pytest.mark.integration
-class TestTypeStabilityClusterRoundtrip:
-    """Live-cluster verification that the component template's dynamic_templates
-    actually prevent bulk-reject on type-unstable columns. Runs only when
-    OpenSearch is reachable; otherwise skipped.
-
-    This is WSL2 Test's deferred harness (Test #1 of the 2026-04-24 plan)
-    — four polymorphic Labels shapes pushed against an index that composes
-    the type-stability template in. With the fix, all four land; without
-    it, a mapper_parsing_exception rejects doc 2 or 3.
-    """
-
-    @pytest.fixture
-    def os_client(self):
-        pytest.importorskip("opensearchpy")
-        try:
-            from opensearch_mcp.client import get_client
-            from opensearch_mcp.mappings import install_all_templates
-
-            client = get_client()
-            health = client.cluster.health()
-            if health.get("status") not in ("green", "yellow"):
-                pytest.skip("OpenSearch cluster not healthy")
-            install_all_templates(client)  # idempotent
-            return client
-        except FileNotFoundError:
-            pytest.skip("OpenSearch config not found (~/.vhir/opensearch.yaml)")
-        except Exception as e:
-            pytest.skip(f"OpenSearch not available: {e}")
-
-    @pytest.fixture
-    def test_json_index(self, os_client):
-        """Create a case-*-json-* index (picks up vhir-json + composed
-        type-stability) and clean up after."""
-        name = f"case-pytest-{uuid.uuid4().hex[:8]}-json-typestab"
-        os_client.indices.create(index=name)
-        yield name
-        try:
-            os_client.indices.delete(index=name, ignore=[404])
-        except Exception:
-            pass
-
-    def test_polymorphic_labels_all_land(self, os_client, test_json_index):
-        """The load-bearing contract — 4 shapes of `Labels` on the same
-        field, all must land without mapper_parsing_exception.
-        """
-        docs = [
-            {"Labels": "critical"},
-            {"Labels": ["critical", "tier1"]},
-            {"Labels": None},
-            {"Labels": {"tier": "A", "env": "prod"}},
-        ]
-        for i, doc in enumerate(docs):
-            resp = os_client.index(index=test_json_index, id=str(i), body=doc, refresh=True)
-            assert resp["result"] in ("created", "updated"), (
-                f"doc {i} with shape {type(doc['Labels']).__name__} was rejected: {resp}"
-            )
-
-        count = os_client.count(index=test_json_index)
-        assert count["count"] == 4, (
-            f"expected all 4 polymorphic docs indexed; got {count['count']}"
-        )
-
-    def test_labels_field_mapped_flattened(self, os_client, test_json_index):
-        """Verify the mapping OpenSearch settled on is `flattened` —
-        that's the mechanism that allows the polymorphic coexistence.
-        """
-        os_client.index(
-            index=test_json_index,
-            body={"Labels": {"tier": "A"}},
-            refresh=True,
-        )
-        mapping = os_client.indices.get_mapping(index=test_json_index)
-        props = mapping[test_json_index]["mappings"].get("properties", {})
-        labels = props.get("Labels", {})
-        assert labels.get("type") == "flattened", (
-            f"Labels should be flattened via dynamic_templates; got mapping={labels}"
-        )
-
-    def test_type_unstable_logon_type(self, os_client, test_json_index):
-        """Canonical repro — LogonType as string then as int on the
-        same field. Pre-fix would bulk-reject doc 2.
-        """
-        os_client.index(index=test_json_index, id="a", body={"LogonType": "3"}, refresh=True)
-        resp = os_client.index(index=test_json_index, id="b", body={"LogonType": 3}, refresh=True)
-        assert resp["result"] in ("created", "updated")
-        assert os_client.count(index=test_json_index)["count"] == 2
+# The dynamic_templates every index created from the April component carries.

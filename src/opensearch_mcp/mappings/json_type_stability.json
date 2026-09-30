@@ -1,7 +1,6 @@
 {
   "template": {
     "settings": {
-      "index.mapping.ignore_malformed": true,
       "index.mapping.total_fields.limit": 10000,
       "index.mapping.depth.limit": 20
     },
@@ -29,33 +28,21 @@
           }
         },
         {
-          "labels_as_flattened": {
-            "path_match": "*.labels",
-            "mapping": {"type": "flattened"}
+          "longs_ignore_malformed": {
+            "match_mapping_type": "long",
+            "mapping": {"type": "long", "ignore_malformed": true}
           }
         },
         {
-          "tags_as_flattened": {
-            "path_match": "*.tags",
-            "mapping": {"type": "flattened"}
+          "floats_ignore_malformed": {
+            "match_mapping_type": "double",
+            "mapping": {"type": "float", "ignore_malformed": true}
           }
         },
         {
-          "event_data_flattened": {
-            "path_match": "EventData",
-            "mapping": {"type": "flattened"}
-          }
-        },
-        {
-          "hash_variants_flattened": {
-            "path_match": "*.hash*",
-            "mapping": {"type": "flattened"}
-          }
-        },
-        {
-          "catchall_objects_flattened": {
-            "match_mapping_type": "object",
-            "mapping": {"type": "flattened"}
+          "dates_ignore_malformed": {
+            "match_mapping_type": "date",
+            "mapping": {"type": "date", "ignore_malformed": true}
           }
         },
         {
@@ -68,7 +55,7 @@
     }
   },
   "_meta": {
-    "description": "Type-unstable JSON column floor (mode 2 of velociraptor-parser-research 2026-04-24). Composed into vhir-json + vhir-delimited. See specs/opensearch-dynamic-template-type-stability-2026-04-24.md Rev 2.",
+    "description": "Composed into vhir-json and vhir-delimited. Objects, arrays of objects and dotted keys use OpenSearch's default object mapping, so nested fields keep their names and stay searchable and aggregatable. Numbers and dates get field-level ignore_malformed with the types dynamic mapping would choose, so a value of the wrong type is dropped from that field (marked in _ignored) and the record is kept. A field that is a scalar in one record and an object in another is rejected per record with the reason. There are no object templates: the earlier ones used `flattened`, which is not an OpenSearch type, and rejected every record containing an object or a dotted key.",
     "version": 1
   }
 }
