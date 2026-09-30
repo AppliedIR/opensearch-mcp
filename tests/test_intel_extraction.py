@@ -54,7 +54,7 @@ DEFAULT_HASHES = {
     SYSMON_SHA256.lower(),
     AMCACHE_SHA1,
 }
-EXTERNAL_IPS = {"8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4"}
+EXTERNAL_IPS = {"8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4", "208.67.222.222"}
 
 # The evtx template maps winlog.event_data.* strings `keyword` and source.ip
 # `ip`; this mirrors the fields read here.
@@ -193,6 +193,16 @@ def case(os_client):
             f"{tag}-csv-amcache": [{"SHA1": AMCACHE_SHA1}],  # no template: text + .keyword
             # Derived network evidence: Kansa netstat, Sysmon 3 and 22, a logon.
             f"{tag}-delim-netstat": [{"ForeignAddress": "8.8.8.8", "LocalAddress": "10.0.0.5"}],
+            # Velociraptor Windows.Network.Netstat: remote address in Raddr.IP.
+            f"{tag}-json-vrnetstat": [
+                {
+                    "Pid": 2484,
+                    "Name": "a.exe",
+                    "Status": "SYN_SENT",
+                    "Laddr": {"IP": "172.16.5.25", "Port": 55071},
+                    "Raddr": {"IP": "208.67.222.222", "Port": 443},
+                }
+            ],
             f"{tag}-evtx-dev01": [
                 {"winlog": {"event_data": {"Hashes": SYSMON_HASHES}}},
                 {"winlog": {"event_data": {"Hashes": f"SHA256={EMPTY['SHA256'].upper()}"}}},
@@ -265,6 +275,13 @@ class TestExtractionReadsTheEvidence:
         iocs = extract_unique_iocs(os_client, case, force=True)
         assert set(iocs["ip"]) == EXTERNAL_IPS
         assert iocs["domain"] == {"example.com": {("winlog.event_data.QueryName", "Example.COM")}}
+
+    def test_velociraptor_netstat_remote_address(self, os_client, case):
+        """Raddr.IP — where the one routable IP in the FOR508 evidence sits
+        (test's inventory). The local address is private and not read."""
+        iocs = extract_unique_iocs(os_client, case, force=True)
+        assert iocs["ip"]["208.67.222.222"] == {("Raddr.IP", "208.67.222.222")}
+        assert "172.16.5.25" not in iocs["ip"]
 
     def test_evtx_and_ecs_csv_source_ip_in_one_case(self, os_client, case):
         """source.ip was `ip` in evtx and `keyword` in an ECS CSV, and one

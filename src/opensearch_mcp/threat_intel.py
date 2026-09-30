@@ -145,6 +145,8 @@ _IP_FIELDS = [
     "LocalAddr.keyword",  # dynamic in vol3_template
     "ForeignAddress",  # Kansa netstat
     "ForeignAddress.keyword",
+    "Raddr.IP",  # Velociraptor Windows.Network.Netstat remote address
+    "Raddr.IP.keyword",
     "winlog.event_data.IpAddress",  # Security logons
     "winlog.event_data.IpAddress.keyword",
     "winlog.event_data.SourceIp",  # Sysmon network connections
