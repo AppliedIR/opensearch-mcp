@@ -126,6 +126,90 @@ class TestTheRule:
         assert time.perf_counter() - started < 1.0
 
 
+def _seconds(fn) -> float:
+    import gc
+
+    gc.collect()
+    started = time.perf_counter()
+    fn()
+    return time.perf_counter() - started
+
+
+def _peak_mib(fn) -> float:
+    import gc
+    import tracemalloc
+
+    gc.collect()
+    tracemalloc.start()
+    fn()
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return peak / 2**20
+
+
+def _chain(depth: int, key: str) -> dict:
+    """`depth` objects, each under `key` beside a scalar under `key`."""
+    record: dict = {key: "v"}
+    for _ in range(depth):
+        record = {key: record, f"{key}_s": "v"}
+    return record
+
+
+# Each sweep doubles the record at every step. The pairs are where the path
+# per child grew as a product: key length x children, depth x key length.
+# Width x key length is linear either way and anchors the other two.
+COST_SWEEPS = [
+    (
+        "key length x children",
+        lambda s: {"K" * (2_000 * s): {f"c{i}": {} for i in range(20_000 * s)}},
+        20,
+    ),
+    ("depth x key length", lambda s: _chain(5_000 * s, "K" * 100), 1_000_000),
+    ("width x key length", lambda s: {f"{'K' * 1_000}{i}": "v" for i in range(5_000 * s)}, 20),
+]
+
+
+class TestTheCheckIsLinear:
+    """The check runs on every json and delimited record before anything is
+    sent, so its cost bound has to hold on hostile input too."""
+
+    def test_a_1_mb_key_over_1000_empty_objects_peaks_under_5_mib(self):
+        record = {"K" * 1_000_000: {f"c{i}": {} for i in range(1_000)}}
+        peak = _peak_mib(lambda: bulk._too_deep(record, 20))
+        assert peak < 5.0, f"{peak:.1f} MiB"
+
+    @pytest.mark.parametrize("label,make,limit", COST_SWEEPS, ids=[x[0] for x in COST_SWEEPS])
+    def test_three_doublings_cost_at_most_2_5_times_each(self, label, make, limit):
+        """Memory by tracemalloc, which is exact. Time is measured in rounds,
+        the three sizes back to back, and the ratios within each round are
+        compared by their median: on a hybrid CPU the scheduler moves the
+        process between core types, and the same loop runs 2.2x slower on
+        one (measured on the dev box), so a sweep timed size by size can
+        straddle a move and read as growth.
+        """
+        import statistics
+
+        records = [make(size) for size in (1, 2, 4)]
+        for record in records:
+            assert bulk._too_deep(record, limit) is None, "control: nothing refused"
+
+        peaks = [_peak_mib(lambda r=r: bulk._too_deep(r, limit)) for r in records]
+        for m_a, m_b in zip(peaks, peaks[1:]):
+            assert m_b / m_a <= 2.5, f"memory MiB {[round(m, 2) for m in peaks]}"
+
+        rounds = [
+            [_seconds(lambda r=r: bulk._too_deep(r, limit)) for r in records] for _ in range(7)
+        ]
+        for step in (0, 1):
+            ratio = statistics.median(t[step + 1] / t[step] for t in rounds)
+            assert ratio <= 2.5, f"time ratio {ratio:.2f}; rounds {rounds}"
+
+    def test_the_refused_path_is_still_named_in_full(self):
+        """Joined once, for the refused record only."""
+        record = {"a": {"b": {"c": [{"d": {dotted(20, "q"): "v"}}]}}}
+        assert bulk._too_deep(record, 20) == "a.b.c.d." + dotted(20, "q")
+
+
 # ---------------------------------------------------------------------------
 # Where the limit comes from
 # ---------------------------------------------------------------------------
@@ -171,24 +255,46 @@ class TestTheLimit:
 
     @pytest.mark.parametrize(
         "simulated",
-        [{"template": {"settings": {}}}, {}, RuntimeError("503")],
-        ids=["no-setting", "no-template", "error"],
+        [{"template": {"settings": {}}}, {}],
+        ids=["no-setting", "no-template"],
     )
-    def test_an_absent_index_with_nothing_to_go_on_uses_20(self, simulated):
+    def test_an_absent_index_the_template_does_not_limit_uses_20(self, simulated):
+        """Absent from the settings and the template: OpenSearch's real
+        default applies."""
         client = MagicMock()
         client.indices.get_settings.side_effect = NotFoundError(404, "index_not_found_exception")
-        if isinstance(simulated, Exception):
-            client.indices.simulate_index_template.side_effect = simulated
-        else:
-            client.indices.simulate_index_template.return_value = simulated
+        client.indices.simulate_index_template.return_value = simulated
         assert bulk._index_depth_limit(client, "absent") == 20
 
-    @pytest.mark.parametrize("client", [MagicMock(), None], ids=["unconfigured-mock", "error"])
-    def test_an_unreadable_answer_uses_20(self, client):
-        if client is None:
-            client = MagicMock()
-            client.indices.get_settings.side_effect = RuntimeError("timeout")
-        assert bulk._index_depth_limit(client, "i") == 20
+    @staticmethod
+    def _failing(kind: str) -> MagicMock:
+        client = MagicMock()
+        if kind == "settings-error":
+            client.indices.get_settings.side_effect = RuntimeError("503")
+        elif kind == "simulate-error":
+            client.indices.get_settings.side_effect = NotFoundError(404, "index_not_found")
+            client.indices.simulate_index_template.side_effect = RuntimeError("503")
+        # "unreadable": an unconfigured mock answers nonsense to both
+        return client
+
+    @pytest.mark.parametrize("kind", ["settings-error", "simulate-error", "unreadable"])
+    def test_a_failed_read_checks_nothing(self, kind):
+        """Guessing 20 here refused records that a higher-limit index
+        accepts; unread, the cluster decides."""
+        assert bulk._index_depth_limit(self._failing(kind), "i") is None
+
+    def test_a_failed_read_sends_the_deep_record(self, monkeypatch):
+        sent_ids: list[str] = []
+
+        def fake_bulk(client, actions, **kw):
+            sent_ids.extend(a["_id"] for a in actions)
+            return len(actions), []
+
+        monkeypatch.setattr(bulk.helpers, "bulk", fake_bulk)
+        record = {"_index": "i", "_id": "deep30", "_source": {dotted(30): "v"}}
+        client = self._failing("settings-error")
+        assert bulk.flush_bulk(client, [record], depth_limit=True) == (1, 0)
+        assert sent_ids == ["deep30"]
 
     def test_off_unless_asked(self, monkeypatch):
         """Every other ingest path is unchanged: no settings read, no walk."""
@@ -357,6 +463,25 @@ class TestFlushBulkRefusesOnlyWhatTheClusterRejects:
         ]
         assert bulk.flush_bulk(os_client, batch, depth_limit=True) == (1, 1)
         assert "[5]" in bulk.get_last_bulk_reason()
+        assert _count(os_client, index) == 1
+
+    def test_a_failed_limit_read_leaves_the_decision_to_the_cluster(
+        self, os_client, tag, sent, monkeypatch
+    ):
+        """A limit-50 index whose settings cannot be read: a 30-deep record
+        it accepts is sent, not refused on a guessed 20."""
+        from opensearchpy.exceptions import TransportError
+
+        index = f"{tag}-json-{uuid.uuid4().hex[:8]}"
+        os_client.indices.create(index=index, body={"settings": {"index.mapping.depth.limit": 50}})
+
+        def failing(*a, **k):
+            raise TransportError(503, "unavailable")
+
+        monkeypatch.setattr(os_client.indices, "get_settings", failing)
+        action = {"_index": index, "_id": "deep30", "_source": {dotted(30): "v"}}
+        assert bulk.flush_bulk(os_client, [action], depth_limit=True) == (1, 0)
+        assert [a["_id"] for request in sent.requests for a in request] == ["deep30"]
         assert _count(os_client, index) == 1
 
     def test_an_existing_index_setting_of_5_is_honoured(self, os_client, tag, sent):

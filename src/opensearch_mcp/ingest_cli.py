@@ -470,13 +470,17 @@ def _write_bg_status(
 
 
 def _terminal_status(indexed: int, bulk_failed: int, reason: str) -> tuple[str, str]:
-    """(status, error) for a finished run: `failed`, naming the first
-    rejection, when OpenSearch rejected every record; else `complete`.
-    The status reader takes the text before the first colon as the reason
-    token, so the reason goes after it."""
-    from opensearch_mcp.ingest_status import ALL_RECORDS_REJECTED
+    """(status, error) for a finished run: `failed` when no record was
+    indexed and some failed, else `complete`. The token says which: records
+    OpenSearch rejected, or batches the transport gave up on — an outage
+    must not read as a rejection. The status reader takes the text before
+    the first colon as the reason token, so the reason goes after it."""
+    from opensearch_mcp.bulk import TRANSPORT_REASON_PREFIX
+    from opensearch_mcp.ingest_status import ALL_RECORDS_REJECTED, TRANSPORT_FAILED
 
     if bulk_failed > 0 and indexed == 0:
+        if reason.startswith(TRANSPORT_REASON_PREFIX):
+            return "failed", f"{TRANSPORT_FAILED}: {reason[len(TRANSPORT_REASON_PREFIX) :]}"
         return "failed", f"{ALL_RECORDS_REJECTED}: {reason or 'no reason recorded'}"
     return "complete", ""
 
@@ -1624,7 +1628,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed=hosts_failed,
                 bulk_failed_reason=hosts_reason,
             )
-        return
+        return hosts_indexed, hosts_failed, hosts_reason
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -1696,7 +1700,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed=walk_failed,
                 bulk_failed_reason=walk_reason,
             )
-        return
+        # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
+        return walk_indexed, walk_failed, walk_reason
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)

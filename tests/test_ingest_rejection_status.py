@@ -70,6 +70,12 @@ class TestTheWriter:
         assert status == expected
         assert error == ("all_records_rejected: why" if expected == "failed" else "")
 
+    def test_a_transport_give_up_is_not_called_a_rejection(self):
+        from opensearch_mcp.ingest_cli import _terminal_status
+
+        status, error = _terminal_status(0, 2, "transport: ConnectionTimeout: read timed out")
+        assert (status, error) == ("failed", "transport_failed: ConnectionTimeout: read timed out")
+
 
 # ---------------------------------------------------------------------------
 # Through the real status path, against the cluster
@@ -268,3 +274,39 @@ class TestRejectionsReachTheStatus:
         s = _status()
         assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 2, 2)
         assert "[flag]" in s["warnings"][0]
+
+    def test_auto_hosts_with_recursive_reports_the_walk(self, ingest, tmp_path):
+        """The two flags together: each auto-host runs the recursive walk,
+        whose sums must reach the auto-hosts total."""
+        root = tmp_path / "walk"
+        (root / "hosta").mkdir(parents=True)
+        (root / "hostb").mkdir()
+        rows = [[f"a{i}", f"b{i}"] for i in range(78)]
+        _write_csv(root / "hosta" / "a.csv", ["proc", "proc.name"], rows)
+        _write_csv(root / "hostb" / "b.csv", ["x", "y"], [["1", "2"], ["3", "4"]])
+        ingest.delimited(root, recursive=True, auto_hosts="h1")
+        s = _status()
+        assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 2, 78)
+        assert "[proc" in s["warnings"][0]
+
+    def test_a_run_the_transport_gave_up_on_names_the_transport(
+        self, ingest, tmp_path, monkeypatch
+    ):
+        """Every attempt times out: nothing reached OpenSearch, so the status
+        must not say OpenSearch rejected the records."""
+        from opensearchpy.exceptions import ConnectionTimeout
+
+        from opensearch_mcp import bulk
+
+        def timing_out(client, actions, **kw):
+            raise ConnectionTimeout("TIMEOUT", "read timed out", Exception("read timed out"))
+
+        monkeypatch.setattr(bulk.helpers, "bulk", timing_out)
+        monkeypatch.setattr(bulk, "_MAX_RETRIES", 1)
+        monkeypatch.setattr(bulk.time, "sleep", lambda _s: None)
+        ingest.json(_write_jsonl(tmp_path / "outage.jsonl", [{"x": 1}, {"x": 2}]))
+        s = _status()
+        assert (s["status"], s["bulk_failed"]) == ("failed", 2)
+        assert s["halt_reason"] == "transport_failed"
+        assert "ConnectionTimeout" in s["message"]
+        assert "all_records_rejected" not in s["message"]

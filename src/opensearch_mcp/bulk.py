@@ -6,7 +6,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 
 from opensearchpy import OpenSearch, helpers
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
@@ -38,6 +38,10 @@ _CIRCUIT_BREAKER_THRESHOLD = max(1, int(os.environ.get("VHIR_SHARD_BREAKER_THRES
 # in-process flush_bulk, migrate to contextvars.ContextVar — today
 # every ingest path subprocess-isolates so thread-local is enough.
 _tls = threading.local()
+
+# Prefixes the last bulk reason when the transport gave up on a batch, which
+# was then never delivered — as opposed to records OpenSearch rejected.
+TRANSPORT_REASON_PREFIX = "transport: "
 
 
 def _get_counter() -> int:
@@ -153,38 +157,49 @@ def _as_limit(value: object) -> int | None:
     return None
 
 
-def _index_depth_limit(client: OpenSearch, index: str) -> int:
+def _index_depth_limit(client: OpenSearch, index: str) -> int | None:
     """`index.mapping.depth.limit` for `index`: its own settings (defaults
     included) when it exists, the template it would be created from when
-    it does not, else OpenSearch's default. For an alias over several
-    indices, the largest, so nothing is refused that one of them accepts.
+    it does not, and OpenSearch's default when neither sets it. For an alias
+    over several indices, the largest, so nothing is refused that one of
+    them accepts.
+
+    None when the limit could not be READ — a request that failed, or an
+    answer that makes no sense. Nothing is then refused for this index and
+    the cluster decides: falling back to the default there would refuse
+    records that an index with a higher limit accepts.
     """
     try:
         resp = client.indices.get_settings(
             index=index, name=_DEPTH_SETTING, include_defaults=True, flat_settings=True
         )
-        found = (
-            [
-                _as_limit(entry.get("settings", {}).get(_DEPTH_SETTING))
-                or _as_limit(entry.get("defaults", {}).get(_DEPTH_SETTING))
-                for entry in resp.values()
-                if isinstance(entry, dict)
-            ]
-            if isinstance(resp, dict)
-            else []
-        )
+    except NotFoundError:
+        resp = None
+    except Exception:
+        return None
+    if resp is not None:
+        if not isinstance(resp, dict):
+            return None
+        found = [
+            _as_limit(entry.get("settings", {}).get(_DEPTH_SETTING))
+            or _as_limit(entry.get("defaults", {}).get(_DEPTH_SETTING))
+            for entry in resp.values()
+            if isinstance(entry, dict)
+        ]
         found = [limit for limit in found if limit]
         return max(found) if found else _DEFAULT_DEPTH_LIMIT
-    except NotFoundError:
-        pass
-    except Exception:
-        return _DEFAULT_DEPTH_LIMIT
     try:
         sim = client.indices.simulate_index_template(name=index)
-        depth = sim["template"]["settings"]["index"]["mapping"]["depth"]["limit"]
     except Exception:
+        return None
+    if not isinstance(sim, dict):
+        return None
+    depth = (sim.get("template", {}).get("settings", {}).get("index", {}).get("mapping", {})).get(
+        "depth", {}
+    )
+    if not isinstance(depth, dict) or "limit" not in depth:
         return _DEFAULT_DEPTH_LIMIT
-    return _as_limit(depth) or _DEFAULT_DEPTH_LIMIT
+    return _as_limit(depth["limit"])
 
 
 def _too_deep(source: Mapping, limit: int) -> str | None:
@@ -199,50 +214,89 @@ def _too_deep(source: Mapping, limit: int) -> str | None:
     dotted key creates no objects and is accepted at any depth; every other
     value, empty strings and lists included, does. Iterative, and it goes
     no deeper than `limit` + 1, so a 5,000-segment key costs one split.
+    Not modelled: an object an index maps `enabled: false` is not parsed, so
+    the cluster accepts depth under it that this refuses; no shipped mapping
+    declares one and dynamic mapping never creates one.
+
+    Depth-first over iterators: one frame per open object or list on the
+    current path, each with a (parent, key) link rather than its path, so
+    memory follows nesting, not width, and a path is joined only for the
+    record being refused. Building one per child copied a long key once per
+    child — a 1 MB key over 1,000 empty objects peaked at 954 MiB (measured)
+    before anything was sent — and pushing every child at once kept enough
+    tracked objects alive to make the garbage collector's full passes grow
+    with the record.
     """
-    stack: list[tuple[Mapping, int, str]] = [(source, 1, "")]
-    while stack:
-        obj, depth, prefix = stack.pop()
-        if depth > limit:
-            return prefix
-        for key, value in obj.items():
-            key = str(key)
-            segments = sum(1 for part in key.split(".") if part)
-            path = f"{prefix}.{key}" if prefix else key
-            if value is None:
-                continue
-            if isinstance(value, Mapping):
-                stack.append((value, depth + segments, path))
-                continue
-            if depth + segments - 1 > limit:
-                return path
-            if isinstance(value, (list, tuple)):
-                pending = [value]
-                while pending:
-                    for item in pending.pop():
-                        if isinstance(item, Mapping):
-                            stack.append((item, depth + segments, path))
-                        elif isinstance(item, (list, tuple)):
-                            pending.append(item)
+    if limit < 1:
+        return ""
+    # (is an object, iterator, depth of the objects it yields, link)
+    frames: list[tuple[bool, Iterator, int, tuple | None]] = [
+        (True, iter(source.items()), 1, None)
+    ]
+    while frames:
+        is_object, items, depth, link = frames[-1]
+        child = None
+        if is_object:
+            for key, value in items:
+                if value is None:
+                    continue
+                key = str(key)
+                segments = sum(1 for part in key.split(".") if part)
+                if isinstance(value, Mapping):
+                    if depth + segments > limit:
+                        return _joined((link, key))
+                    child = (True, iter(value.items()), depth + segments, (link, key))
+                    break
+                if depth + segments - 1 > limit:
+                    return _joined((link, key))
+                if isinstance(value, (list, tuple)):
+                    child = (False, iter(value), depth + segments, (link, key))
+                    break
+        else:
+            for item in items:
+                if isinstance(item, Mapping):
+                    if depth > limit:
+                        return _joined(link)
+                    child = (True, iter(item.items()), depth, link)
+                    break
+                if isinstance(item, (list, tuple)):
+                    child = (False, iter(item), depth, link)
+                    break
+        if child is None:
+            frames.pop()
+        else:
+            frames.append(child)
     return None
+
+
+def _joined(link: tuple | None) -> str:
+    """The dotted field path a (parent, key) link chain names."""
+    keys: list[str] = []
+    while link is not None:
+        link, key = link
+        keys.append(key)
+    return ".".join(reversed(keys))
 
 
 def _refuse_too_deep(client: OpenSearch, actions: list[dict]) -> tuple[list[dict], int]:
     """`actions` without the records their index would reject for depth,
     and how many were refused."""
-    limits: dict[str, int] = {}
+    limits: dict[str, int | None] = {}
     kept: list[dict] = []
     refused: list[tuple[dict, str, int]] = []
     for action in actions:
         index = action.get("_index", "")
         if index not in limits:
             limits[index] = _index_depth_limit(client, index)
+        limit = limits[index]
         source = action.get("_source")
-        path = _too_deep(source, limits[index]) if isinstance(source, Mapping) else None
+        path = (
+            _too_deep(source, limit) if limit is not None and isinstance(source, Mapping) else None
+        )
         if path is None:
             kept.append(action)
         else:
-            refused.append((action, path, limits[index]))
+            refused.append((action, path, limit))
     if refused:
         action, path, limit = refused[0]
         shown = path if len(path) <= 200 else f"{path[:200]}…"
@@ -321,7 +375,7 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
             print(msg, file=sys.stderr)
         return success, failed
 
-    except (ConnectionTimeout, OSConnectionError):
+    except (ConnectionTimeout, OSConnectionError) as e:
         if attempt >= _MAX_RETRIES:
             index = actions[0].get("_index", "") if actions else ""
             print(
@@ -330,6 +384,7 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
                 f"  Recovery: re-run ingest on the same evidence (dedup is safe)\n",
                 file=sys.stderr,
             )
+            _tls.last_bulk_reason = f"{TRANSPORT_REASON_PREFIX}{type(e).__name__}: {e}"[:500]
             return 0, len(actions)
 
         # If batch is large enough, split and retry smaller chunks
@@ -362,6 +417,7 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
                 f"  Recovery: re-run ingest on the same evidence (dedup is safe)\n",
                 file=sys.stderr,
             )
+            _tls.last_bulk_reason = f"{TRANSPORT_REASON_PREFIX}{type(e).__name__}: {e}"[:500]
             return 0, len(actions)
 
         wait = min(_INITIAL_BACKOFF * (2**attempt), _MAX_BACKOFF)
