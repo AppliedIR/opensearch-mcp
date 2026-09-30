@@ -42,6 +42,8 @@ SYSMON_HASHES = f"MD5={SYSMON_MD5},SHA256={SYSMON_SHA256},IMPHASH={IMPHASH}"
 AMCACHE_SHA1 = _h("sha1", "amcache")
 BODYFILE_MD5 = _h("md5", "bodyfile")
 PREFETCH_PATH_HASH = "1A2B3C4D"  # PECmd's hash of the executable's path
+# pslist hashes a process with no image path (System, Registry) as zero bytes.
+EMPTY = {"MD5": _h("md5", ""), "SHA1": _h("sha1", ""), "SHA256": _h("sha256", "")}
 
 DEFAULT_HASHES = {
     PSLIST["MD5"],
@@ -178,8 +180,14 @@ def case(os_client):
         os_client.indices.create(index=f"{tag}-evtx-dev01", body={"mappings": EVTX_MAPPING})
 
         docs = {
-            f"{tag}-json-pslist": [{"Pid": 4, "Name": "a.exe", "Hash": PSLIST}],
-            f"{tag}-delim-procswmi": [{"ProcessName": "b.exe", "Hash": KANSA_MD5}],
+            f"{tag}-json-pslist": [
+                {"Pid": 4, "Name": "a.exe", "Hash": PSLIST},
+                {"Pid": 4, "Name": "System", "Exe": "", "Hash": EMPTY},
+            ],
+            f"{tag}-delim-procswmi": [
+                {"ProcessName": "b.exe", "Hash": KANSA_MD5},
+                {"ProcessName": "Registry", "Hash": EMPTY["MD5"].upper()},
+            ],
             f"{tag}-delim-prefetch": [{"ExecutableName": "C.EXE", "Hash": PREFETCH_PATH_HASH}],
             f"{tag}-delim-bodyfile": [{"name": "/Windows/x.dll", "md5": BODYFILE_MD5}],
             f"{tag}-csv-amcache": [{"SHA1": AMCACHE_SHA1}],  # no template: text + .keyword
@@ -187,6 +195,7 @@ def case(os_client):
             f"{tag}-delim-netstat": [{"ForeignAddress": "8.8.8.8", "LocalAddress": "10.0.0.5"}],
             f"{tag}-evtx-dev01": [
                 {"winlog": {"event_data": {"Hashes": SYSMON_HASHES}}},
+                {"winlog": {"event_data": {"Hashes": f"SHA256={EMPTY['SHA256'].upper()}"}}},
                 {"winlog": {"event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "1.1.1.1"}}},
                 {
                     "winlog": {
@@ -231,6 +240,12 @@ class TestExtractionReadsTheEvidence:
         assert iocs["hash"][KANSA_MD5.lower()] == {("Hash", KANSA_MD5)}
         assert iocs["hash"][SYSMON_MD5.lower()] == {("winlog.event_data.Hashes", SYSMON_HASHES)}
         assert iocs["hash"][PSLIST["SHA256"]] == {("Hash.SHA256", PSLIST["SHA256"])}
+
+    def test_the_hashes_of_zero_bytes_are_never_extracted(self, os_client, case):
+        """Threat intel lists them as indicators (confidence 70, measured),
+        which would mark System and Registry suspicious."""
+        iocs = extract_unique_iocs(os_client, case, force=True, include_filesystem=True)
+        assert not set(EMPTY.values()) & set(iocs["hash"])
 
     def test_bodyfile_hashes_only_on_request(self, os_client, case):
         default = extract_unique_iocs(os_client, case, force=True)

@@ -560,7 +560,8 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
         first_hash_field = next(iter(_HASH_FIELDS))
         buckets = {
             first_hash_field: [
-                "d41d8cd98f00b204e9800998ecf8427e",  # valid MD5
+                # valid MD5, of "x" (the empty-input MD5 is excluded from extraction)
+                "9dd4e461268c8034f5c8564e155c67a6",
                 "astloggedonuser:[(-1,1)]deviceusers:[(-1,",  # garbage
                 "T1" + "a" * 70,  # valid TLSH
                 "not a hash at all",  # garbage
@@ -570,7 +571,7 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
         iocs = extract_unique_iocs(client, "case-test-*")
 
         # Valid hashes kept.
-        assert "d41d8cd98f00b204e9800998ecf8427e" in iocs["hash"]
+        assert "9dd4e461268c8034f5c8564e155c67a6" in iocs["hash"]
         assert "T1" + "a" * 70 in iocs["hash"]
         # Garbage dropped.
         assert "astloggedonuser:[(-1,1)]deviceusers:[(-1," not in iocs["hash"]

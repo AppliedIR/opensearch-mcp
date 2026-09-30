@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -179,6 +180,13 @@ _DOMAIN_FIELDS = [
     "winlog.event_data.QueryName",  # Sysmon DNS queries
     "winlog.event_data.QueryName.keyword",
 ]
+
+# The hashes of zero bytes. They identify no file — pslist records them for
+# processes with no image path (System, Registry) — and threat-intel sources
+# list them as indicators, so a lookup would mark those processes suspicious.
+_EMPTY_INPUT_HASHES = frozenset(
+    hashlib.new(algorithm, b"").hexdigest() for algorithm in ("md5", "sha1", "sha256")
+)
 
 # Hash kinds kept from a Sysmon `Hashes` value. IMPHASH hashes a PE's import
 # table, not the file, so it is never looked up as a file hash.
@@ -421,6 +429,8 @@ def extract_unique_iocs(
                 for val in split(stored) if split else [stored]:
                     if validate(val):
                         lookup = _lookup_form(ioc_type, val)
+                        if ioc_type == "hash" and lookup in _EMPTY_INPUT_HASHES:
+                            continue
                         iocs[ioc_type].setdefault(lookup, set()).add((field, stored))
                     else:
                         field_rejects += 1
