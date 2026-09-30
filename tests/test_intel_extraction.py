@@ -1,6 +1,6 @@
 """IOC extraction reads the fields the evidence uses.
 
-On three real cases (FOR508 pslist, Kansa, bodyfile, Sysmon/Security evtx)
+On three real cases (Velociraptor pslist, Kansa, bodyfile, Sysmon/Security evtx)
 extraction returned 0 IPs, 0 hashes and 0 domains: the evidence held them
 under names the field lists never read. Each record below has the shape of
 one real source; the values are DERIVED (hashes of fixed strings, public
@@ -177,7 +177,7 @@ def case(os_client):
             body["composed_of"] = [f"{tag}-comp"]
             body["priority"] = 900
             os_client.indices.put_index_template(name=f"{tag}-{kind}", body=body)
-        os_client.indices.create(index=f"{tag}-evtx-dev01", body={"mappings": EVTX_MAPPING})
+        os_client.indices.create(index=f"{tag}-evtx-host-a", body={"mappings": EVTX_MAPPING})
 
         docs = {
             f"{tag}-json-pslist": [
@@ -203,7 +203,7 @@ def case(os_client):
                     "Raddr": {"IP": "208.67.222.222", "Port": 443},
                 }
             ],
-            f"{tag}-evtx-dev01": [
+            f"{tag}-evtx-host-a": [
                 {"winlog": {"event_data": {"Hashes": SYSMON_HASHES}}},
                 {"winlog": {"event_data": {"Hashes": f"SHA256={EMPTY['SHA256'].upper()}"}}},
                 {"winlog": {"event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "1.1.1.1"}}},
@@ -270,15 +270,14 @@ class TestExtractionReadsTheEvidence:
         assert flagged["hash"][BODYFILE_MD5] == {("md5", BODYFILE_MD5)}
 
     def test_external_ips_and_domains(self, os_client, case):
-        """Derived fixture (routable values), pending test's inventory of
-        real evidence with routable values."""
+        """Derived fixture: routable, public-resolver values."""
         iocs = extract_unique_iocs(os_client, case, force=True)
         assert set(iocs["ip"]) == EXTERNAL_IPS
         assert iocs["domain"] == {"example.com": {("winlog.event_data.QueryName", "Example.COM")}}
 
     def test_velociraptor_netstat_remote_address(self, os_client, case):
-        """Raddr.IP — where the one routable IP in the FOR508 evidence sits
-        (test's inventory). The local address is private and not read."""
+        """Raddr.IP — a Velociraptor netstat's remote address. The local
+        address is private and not read."""
         iocs = extract_unique_iocs(os_client, case, force=True)
         assert iocs["ip"]["208.67.222.222"] == {("Raddr.IP", "208.67.222.222")}
         assert "172.16.5.25" not in iocs["ip"]

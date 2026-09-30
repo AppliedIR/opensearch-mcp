@@ -48,7 +48,7 @@ DOCS = {
     "winevt-sysmonmd5": [
         {"winlog": {"event_data": {"Hashes": f"MD5={PSLIST['MD5'].upper()}"}}} for _ in range(3)
     ],
-    "amcache-dev01": [{"SHA1": AMCACHE} for _ in range(3)],  # live csv template
+    "amcache-host-a": [{"SHA1": AMCACHE} for _ in range(3)],  # live csv template
     "delim-netstat": [{"ForeignAddress": "8.8.8.8"} for _ in range(3)],
     "winevt-network": [{"winlog": {"event_data": {"DestinationIp": "1.1.1.1"}}} for _ in range(3)],
     "winevt-logon": [{"winlog": {"event_data": {"IpAddress": "9.9.9.9"}}} for _ in range(3)],
@@ -64,7 +64,7 @@ CARRIED = {
     "delim-procswmi": {PSLIST["MD5"], KANSA.lower()},
     "winevt-sysmon": {SYSMON_MD5.lower(), SYSMON_SHA256.lower()},
     "winevt-sysmonmd5": {PSLIST["MD5"]},
-    "amcache-dev01": {AMCACHE},
+    "amcache-host-a": {AMCACHE},
     "delim-netstat": {"8.8.8.8"},
     "winevt-network": {"1.1.1.1"},
     "winevt-logon": {"9.9.9.9"},
