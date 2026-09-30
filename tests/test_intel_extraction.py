@@ -162,51 +162,60 @@ def os_client():
 def case(os_client):
     """One case holding every source, each in the index kind that produces it."""
     tag = f"pytest-extract-{uuid.uuid4().hex[:8]}"
-    component = json.loads((_MAPPINGS_DIR / "json_type_stability.json").read_text())
-    os_client.cluster.put_component_template(name=f"{tag}-comp", body=component)
-    for kind, filename in (("json", "json_template.json"), ("delim", "delimited_template.json")):
-        body = copy.deepcopy(json.loads((_MAPPINGS_DIR / filename).read_text()))
-        body["template"].pop("aliases", None)
-        body["index_patterns"] = [f"{tag}-{kind}-*"]
-        body["composed_of"] = [f"{tag}-comp"]
-        body["priority"] = 900
-        os_client.indices.put_index_template(name=f"{tag}-{kind}", body=body)
-    os_client.indices.create(index=f"{tag}-evtx-dev01", body={"mappings": EVTX_MAPPING})
+    try:
+        component = json.loads((_MAPPINGS_DIR / "json_type_stability.json").read_text())
+        os_client.cluster.put_component_template(name=f"{tag}-comp", body=component)
+        for kind, filename in (
+            ("json", "json_template.json"),
+            ("delim", "delimited_template.json"),
+        ):
+            body = copy.deepcopy(json.loads((_MAPPINGS_DIR / filename).read_text()))
+            body["template"].pop("aliases", None)
+            body["index_patterns"] = [f"{tag}-{kind}-*"]
+            body["composed_of"] = [f"{tag}-comp"]
+            body["priority"] = 900
+            os_client.indices.put_index_template(name=f"{tag}-{kind}", body=body)
+        os_client.indices.create(index=f"{tag}-evtx-dev01", body={"mappings": EVTX_MAPPING})
 
-    docs = {
-        f"{tag}-json-pslist": [{"Pid": 4, "Name": "a.exe", "Hash": PSLIST}],
-        f"{tag}-delim-procswmi": [{"ProcessName": "b.exe", "Hash": KANSA_MD5}],
-        f"{tag}-delim-prefetch": [{"ExecutableName": "C.EXE", "Hash": PREFETCH_PATH_HASH}],
-        f"{tag}-delim-bodyfile": [{"name": "/Windows/x.dll", "md5": BODYFILE_MD5}],
-        f"{tag}-csv-amcache": [{"SHA1": AMCACHE_SHA1}],  # no template: text + .keyword
-        # Derived network evidence: Kansa netstat, Sysmon 3 and 22, a logon.
-        f"{tag}-delim-netstat": [{"ForeignAddress": "8.8.8.8", "LocalAddress": "10.0.0.5"}],
-        f"{tag}-evtx-dev01": [
-            {"winlog": {"event_data": {"Hashes": SYSMON_HASHES}}},
-            {"winlog": {"event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "1.1.1.1"}}},
-            {
-                "winlog": {
-                    "event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "239.255.255.250"}
-                }
-            },
-            {"winlog": {"event_data": {"QueryName": "Example.COM"}}},
-            {"winlog": {"event_data": {"IpAddress": "9.9.9.9"}}},
-            {"source": {"ip": "8.8.4.4"}},
-        ],
-        # The same field as the evtx `source.ip`, from an ECS-header CSV —
-        # with netstat's unbound-address forms.
-        f"{tag}-delim-ecs": [{"source.ip": "10.1.2.3"}, {"source.ip": "*"}, {"source.ip": "[::]"}],
-        f"{tag}-delim-arp": [{"IPAddress": "224.0.0.22"}, {"ForeignAddress": "ff02::fb"}],
-    }
-    for index, records in docs.items():
-        for i, record in enumerate(records):
-            os_client.index(index=index, id=str(i), body=record)
-    os_client.indices.refresh(index=f"{tag}-*")
-    yield f"{tag}-*"
-    os_client.indices.delete(index=f"{tag}-*", ignore=[404])
-    for kind in ("json", "delim"):
-        os_client.indices.delete_index_template(name=f"{tag}-{kind}", ignore=[404])
-    os_client.cluster.delete_component_template(name=f"{tag}-comp", ignore=[404])
+        docs = {
+            f"{tag}-json-pslist": [{"Pid": 4, "Name": "a.exe", "Hash": PSLIST}],
+            f"{tag}-delim-procswmi": [{"ProcessName": "b.exe", "Hash": KANSA_MD5}],
+            f"{tag}-delim-prefetch": [{"ExecutableName": "C.EXE", "Hash": PREFETCH_PATH_HASH}],
+            f"{tag}-delim-bodyfile": [{"name": "/Windows/x.dll", "md5": BODYFILE_MD5}],
+            f"{tag}-csv-amcache": [{"SHA1": AMCACHE_SHA1}],  # no template: text + .keyword
+            # Derived network evidence: Kansa netstat, Sysmon 3 and 22, a logon.
+            f"{tag}-delim-netstat": [{"ForeignAddress": "8.8.8.8", "LocalAddress": "10.0.0.5"}],
+            f"{tag}-evtx-dev01": [
+                {"winlog": {"event_data": {"Hashes": SYSMON_HASHES}}},
+                {"winlog": {"event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "1.1.1.1"}}},
+                {
+                    "winlog": {
+                        "event_data": {"SourceIp": "10.0.0.5", "DestinationIp": "239.255.255.250"}
+                    }
+                },
+                {"winlog": {"event_data": {"QueryName": "Example.COM"}}},
+                {"winlog": {"event_data": {"IpAddress": "9.9.9.9"}}},
+                {"source": {"ip": "8.8.4.4"}},
+            ],
+            # The same field as the evtx `source.ip`, from an ECS-header CSV —
+            # with netstat's unbound-address forms.
+            f"{tag}-delim-ecs": [
+                {"source.ip": "10.1.2.3"},
+                {"source.ip": "*"},
+                {"source.ip": "[::]"},
+            ],
+            f"{tag}-delim-arp": [{"IPAddress": "224.0.0.22"}, {"ForeignAddress": "ff02::fb"}],
+        }
+        for index, records in docs.items():
+            for i, record in enumerate(records):
+                os_client.index(index=index, id=str(i), body=record)
+        os_client.indices.refresh(index=f"{tag}-*")
+        yield f"{tag}-*"
+    finally:
+        os_client.indices.delete(index=f"{tag}-*", ignore=[404])
+        for kind in ("json", "delim"):
+            os_client.indices.delete_index_template(name=f"{tag}-{kind}", ignore=[404])
+        os_client.cluster.delete_component_template(name=f"{tag}-comp", ignore=[404])
 
 
 @pytest.mark.integration

@@ -605,24 +605,24 @@ def stamp_documents(
     client: OpenSearch,
     index_pattern: str,
     ioc_results: dict[str, dict],
+    origins: dict[str, set[tuple[str, str]]],
 ) -> int:
-    """Stamp indexed documents with threat_intel.* fields via update-by-query."""
+    """Stamp indexed documents with threat_intel.* fields via update-by-query.
+
+    `origins` maps each looked-up value to the (field, value as stored) pairs
+    extraction found it under. The documents are matched on those: the lookup
+    value is lower-cased, and a Sysmon `Hashes` part is stored inside the
+    whole string, so a term on the lookup value missed both.
+    """
     now = datetime.now(timezone.utc).isoformat()
     total_updated = 0
 
     for ioc_value, intel in ioc_results.items():
-        ioc_type = intel.get("threat_intel.ioc_type", "")
-
-        if ioc_type == "ip":
-            fields = _IP_FIELDS
-        elif ioc_type == "hash":
-            fields = _HASH_FIELDS
-        elif ioc_type == "domain":
-            fields = _DOMAIN_FIELDS
-        else:
+        where = origins.get(ioc_value)
+        if not where:
             continue
 
-        should_clauses = [{"term": {field: ioc_value}} for field in fields]
+        should_clauses = [{"term": {field: stored}} for field, stored in sorted(where)]
 
         intel_with_ts = dict(intel)
         intel_with_ts["threat_intel.enriched_at"] = now
@@ -713,7 +713,8 @@ def enrich_case(
 
     if on_progress:
         on_progress("stamping", matched=len(results))
-    updated = stamp_documents(client, index_pattern, results)
+    origins = {value: where for found in iocs.values() for value, where in found.items()}
+    updated = stamp_documents(client, index_pattern, results, origins)
 
     return {
         "status": "complete",
