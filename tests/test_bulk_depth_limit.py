@@ -127,12 +127,14 @@ class TestTheRule:
 
 
 def _seconds(fn) -> float:
+    """CPU time of this process: wall time also counts time the machine
+    gave to others, which on a loaded runner reads as growth."""
     import gc
 
     gc.collect()
-    started = time.perf_counter()
+    started = time.process_time()
     fn()
-    return time.perf_counter() - started
+    return time.process_time() - started
 
 
 def _peak_mib(fn) -> float:
@@ -193,9 +195,11 @@ class TestTheCheckIsLinear:
         for record in records:
             assert bulk._too_deep(record, limit) is None, "control: nothing refused"
 
+        # With a 0.1 MiB floor: two sweeps peak near 0.001 MiB, where
+        # allocator noise alone could break a pure ratio.
         peaks = [_peak_mib(lambda r=r: bulk._too_deep(r, limit)) for r in records]
         for m_a, m_b in zip(peaks, peaks[1:]):
-            assert m_b / m_a <= 2.5, f"memory MiB {[round(m, 2) for m in peaks]}"
+            assert m_b <= 2.5 * m_a + 0.1, f"memory MiB {[round(m, 3) for m in peaks]}"
 
         rounds = [
             [_seconds(lambda r=r: bulk._too_deep(r, limit)) for r in records] for _ in range(7)
