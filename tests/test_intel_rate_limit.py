@@ -358,7 +358,7 @@ class TestEnrichWorkerResilience:
                 "domain": {},
             },
         )
-        monkeypatch.setattr(threat_intel, "stamp_documents", lambda *a, **kw: (2, 0))
+        monkeypatch.setattr(threat_intel, "stamp_documents", lambda *a, **kw: (2, 0, 0))
 
         # Minimal plumbing so cmd_enrich_intel can run without a real
         # OpenSearch connection or case system.

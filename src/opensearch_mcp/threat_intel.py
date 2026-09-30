@@ -45,8 +45,11 @@ def _rate_limit_max_retries() -> int:
 
 
 class IntelEnrichmentHalted(RuntimeError):
-    """Raised when enrichment halts due to consecutive non-rate-limit
-    errors exceeding the circuit-breaker threshold."""
+    """Raised when an enrichment run cannot report itself complete: an
+    extracted IOC has no confirmed lookup (gateway missing, lookups failing,
+    rate limit exhausted, an unconfirmed not-found, the circuit breaker), or
+    a stamp did not land. The verdicts that were confirmed are still
+    stamped; the message says what is missing and why."""
 
 
 def _parse_wait_hint(msg: str, default: float = 20.0) -> float:
@@ -478,11 +481,7 @@ def batch_lookup(
     from opensearch_mcp.gateway import call_tool, gateway_available
 
     if not gateway_available():
-        print(
-            "WARNING: Gateway not configured — skipping OpenCTI lookup",
-            file=sys.stderr,
-        )
-        return {}
+        raise IntelEnrichmentHalted("gateway not configured — no IOC was looked up")
 
     run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or f"enrich-{os.getpid()}"
     coverage_path = _coverage_path_for_run(run_id)
@@ -567,6 +566,14 @@ def batch_lookup(
                     ioc_handled = True
                     break
 
+                if not resp.get("found", False) and resp.get("note"):
+                    # A not-found carrying a note did not complete (the
+                    # observable search failed, say): the absence is
+                    # unconfirmed, so it is neither stamped nor counted.
+                    coverage["skipped"][value] = f"unconfirmed: {str(resp['note'])[:120]}"
+                    ioc_handled = True
+                    break
+
                 # Success — reset breaker; record enrichment.
                 consecutive_failures = 0
                 coverage["enriched"].append(value)
@@ -620,10 +627,10 @@ def stamp_documents(
     index_pattern: str,
     ioc_results: dict[str, dict],
     origins: dict[str, set[tuple[str, str]]],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Stamp indexed documents with threat_intel.* fields via update-by-query.
 
-    Returns (documents updated, version conflicts).
+    Returns (documents updated, version conflicts, stamp requests that failed).
 
     `origins` maps each looked-up value to the (field, value as stored) pairs
     extraction found it under. The documents are matched on those: the lookup
@@ -642,6 +649,7 @@ def stamp_documents(
     now = datetime.now(timezone.utc).isoformat()
     total_updated = 0
     conflicts = 0
+    failed = 0
 
     ranked = sorted(
         ioc_results.items(),
@@ -689,12 +697,45 @@ def stamp_documents(
             total_updated += result.get("updated", 0)
             conflicts += result.get("version_conflicts", 0)
         except Exception as e:
+            failed += 1
             print(
                 f"WARNING: Update failed for {ioc_value}: {e}",
                 file=sys.stderr,
             )
 
-    return total_updated, conflicts
+    return total_updated, conflicts, failed
+
+
+def _incomplete(
+    iocs: dict[str, dict], coverage: dict, conflicts: int, failed_stamps: int
+) -> str | None:
+    """Why the run is not complete, or None if it is: every extracted IOC has
+    a confirmed lookup and every stamp landed."""
+    enriched = set(coverage.get("enriched", []))
+    skipped = coverage.get("skipped", {})
+    extracted = [value for found in iocs.values() for value in found]
+    causes: dict[str, int] = {}
+    first = ""
+    for value in extracted:
+        if value in enriched:
+            continue
+        detail = skipped.get(value, "not looked up")
+        cause = detail.split(":", 1)[0].strip()
+        causes[cause] = causes.get(cause, 0) + 1
+        first = first or f"{value}: {detail}"
+    parts = []
+    if causes:
+        breakdown = ", ".join(f"{cause} {n}" for cause, n in sorted(causes.items()))
+        missing = sum(causes.values())
+        parts.append(
+            f"{missing} of {len(extracted)} IOCs have no confirmed lookup ({breakdown}; "
+            f"first: {first})"
+        )
+    if conflicts:
+        parts.append(f"{conflicts} documents skipped on a version conflict while stamping")
+    if failed_stamps:
+        parts.append(f"{failed_stamps} stamp requests failed")
+    return "; ".join(parts) or None
 
 
 def enrich_case(
@@ -739,6 +780,7 @@ def enrich_case(
     if on_progress:
         on_progress("looking_up", total=total_iocs)
     results = batch_lookup(iocs, on_progress=on_progress)
+    coverage = results.pop("_intel_coverage", {})
 
     malicious = sum(1 for r in results.values() if r.get("threat_intel.verdict") == "MALICIOUS")
     suspicious = sum(1 for r in results.values() if r.get("threat_intel.verdict") == "SUSPICIOUS")
@@ -746,7 +788,13 @@ def enrich_case(
     if on_progress:
         on_progress("stamping", matched=len(results))
     origins = {value: where for found in iocs.values() for value, where in found.items()}
-    updated, conflicts = stamp_documents(client, index_pattern, results, origins)
+    updated, conflicts, failed_stamps = stamp_documents(client, index_pattern, results, origins)
+
+    # Complete only when every IOC had a confirmed lookup and every stamp
+    # landed. A run that looked nothing up read "complete, 0 malicious".
+    reason = _incomplete(iocs, coverage, conflicts, failed_stamps)
+    if reason:
+        raise IntelEnrichmentHalted(reason)
 
     return {
         "status": "complete",

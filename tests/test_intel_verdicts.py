@@ -84,7 +84,9 @@ class TestTheOrderAndTheRefresh:
             {"updated": 1, "version_conflicts": 1},
         ]
         results = {v: RESULTS[v] for v in (MAL, NF, SUS)}  # worst order in
-        updated, conflicts = threat_intel.stamp_documents(client, "case-x-*", results, ORIGINS)
+        updated, conflicts, failed = threat_intel.stamp_documents(
+            client, "case-x-*", results, ORIGINS
+        )
 
         stamped = [
             c.kwargs["body"]["script"]["params"]["threat_intel_ioc_value"]
@@ -92,7 +94,7 @@ class TestTheOrderAndTheRefresh:
         ]
         assert stamped == [NF, SUS, MAL]
         assert all(c.kwargs["refresh"] is True for c in client.update_by_query.call_args_list)
-        assert (updated, conflicts) == (3, 3)
+        assert (updated, conflicts, failed) == (3, 3, 0)
 
 
 @pytest.fixture(scope="module")
@@ -128,10 +130,10 @@ class TestMultiIOCDocumentsKeepTheirVerdict:
         results = {value: RESULTS[value] for value in order}
         results.update({v: RESULTS[v] for v in (SYS_NF.lower(), SYS_MAL.lower())})
         with intel_case(os_client, DOCS, prefix="pytest-verdict") as case_id:
-            updated, conflicts = threat_intel.stamp_documents(
+            updated, conflicts, failed = threat_intel.stamp_documents(
                 os_client, f"case-{case_id}-*", results, ORIGINS
             )
-            assert conflicts == 0
+            assert (conflicts, failed) == (0, 0)
             assert _outcome(os_client, case_id) == EXPECTED
 
     def test_through_the_pipeline(self, os_client, monkeypatch, tmp_path):
