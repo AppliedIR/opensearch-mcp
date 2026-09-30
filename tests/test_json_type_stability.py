@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -445,6 +446,84 @@ class TestPatchFlattenedIndices:
         assert result["patched_indices"]["patched"] == ["old"]
 
 
+_ALL_COMPOSING = ["case-*-json-*", "case-*-delim-*", "case-*-zeek-*", "case-*-bodyfile-*"]
+
+
+@pytest.fixture
+def scratch_mappings(tmp_path, monkeypatch):
+    """A copy of the mapping files the installer reads, safe to corrupt."""
+    import opensearch_mcp.mappings as m
+
+    for path in _MAPPINGS_DIR.glob("*.json"):
+        shutil.copy(path, tmp_path / path.name)
+    monkeypatch.setattr(m, "_MAPPINGS_DIR", tmp_path)
+    return tmp_path
+
+
+class TestAnUnreadableTemplateFile:
+    """One template file that does not parse costs that template only: the
+    others install, it is reported as failed exactly as before the patch
+    existed, and the patch still runs for every pattern it can resolve."""
+
+    @staticmethod
+    def _install(client=None):
+        from opensearch_mcp.mappings import install_all_templates
+
+        client = client or MagicMock()
+        client.indices.get_mapping.return_value = _mapping_response(
+            {"old": APRIL_DYNAMIC_TEMPLATES}
+        )
+        return client, install_all_templates(client)
+
+    @staticmethod
+    def _read(client) -> list[str]:
+        return client.indices.get_mapping.call_args.kwargs["index"].split(",")
+
+    def test_a_template_that_composes_nothing(self, scratch_mappings):
+        (scratch_mappings / "csv_template.json").write_text("{ not json")
+        client, result = self._install()
+
+        assert len(result["installed"]) == 13
+        assert [f["template"] for f in result["failed"]] == ["vhir-csv"]
+        assert result["patched_indices"] == {"patched": ["old"], "failed": []}
+        assert sorted(self._read(client)) == sorted(_ALL_COMPOSING)
+
+    def test_a_composing_template(self, scratch_mappings):
+        (scratch_mappings / "json_template.json").write_text("{ not json")
+        client, result = self._install()
+
+        assert [f["template"] for f in result["failed"]] == ["vhir-json"]
+        assert result["patched_indices"]["patched"] == ["old"]
+        assert sorted(self._read(client)) == sorted(_ALL_COMPOSING[1:])
+
+    def test_a_composing_template_the_cluster_rejects_is_still_patched(self, scratch_mappings):
+        """The file was read; only its install failed. Old indices under its
+        pattern still carry the rules that reject objects."""
+        client = MagicMock()
+
+        def reject_json(name, body):
+            if name == "vhir-json":
+                raise RuntimeError("synthetic: bad mapping")
+
+        client.indices.put_index_template.side_effect = reject_json
+        client, result = self._install(client)
+
+        assert [f["template"] for f in result["failed"]] == ["vhir-json"]
+        assert sorted(self._read(client)) == sorted(_ALL_COMPOSING)
+
+    def test_the_component_itself(self, scratch_mappings):
+        (scratch_mappings / "json_type_stability.json").write_text("{ not json")
+        client, result = self._install()
+
+        assert [f["template"] for f in result["components"]["failed"]] == [
+            "vhir-json-type-stability"
+        ]
+        assert len(result["installed"]) == 14
+        assert result["patched_indices"]["patched"] == []
+        assert result["patched_indices"]["failed"][0]["index"] == ",".join(_ALL_COMPOSING)
+        assert not client.indices.put_mapping.called
+
+
 # ---------------------------------------------------------------------------
 # Cluster rows (auto-run when OpenSearch is reachable).
 #
@@ -603,11 +682,22 @@ class TestTypeStabilityClusterRoundtrip:
 
     # -- Row 4: a scalar of the wrong type keeps its row -----------------------
 
-    def test_a_number_then_a_string_keeps_the_row_and_marks_the_field(self, os_client, index):
-        assert self._write(os_client, index, [{"LogonType": 3}, {"LogonType": "S11"}]) == (2, 0)
-        ignored = {"query": {"term": {"_ignored": "LogonType"}}}
+    @pytest.mark.parametrize(
+        "field,first,second",
+        [
+            ("LogonType", 3, "S11"),
+            ("Score", 1.5, "high"),
+            ("Seen", "2024-01-01T10:00:00Z", "not a date"),
+        ],
+        ids=["number-then-string", "float-then-string", "date-then-invalid-string"],
+    )
+    def test_a_wrong_typed_scalar_keeps_the_row_and_marks_the_field(
+        self, os_client, index, field, first, second
+    ):
+        assert self._write(os_client, index, [{field: first}, {field: second}]) == (2, 0)
+        ignored = {"query": {"term": {"_ignored": field}}}
         assert os_client.count(index=index, body=ignored)["count"] == 1
-        assert self._hits(os_client, index, "LogonType", 3) == 1
+        assert self._hits(os_client, index, field, first) == 1
 
     # -- Expected loud: accepted residuals -------------------------------------
 

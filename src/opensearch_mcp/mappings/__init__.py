@@ -129,6 +129,7 @@ def install_all_templates(client) -> dict[str, Any]:
         "skipped": [],
         "components": comp_results,
     }
+    loaded: list[Any] = []
     for tpl_name, filename in _TEMPLATES_REGISTRY:
         path = _MAPPINGS_DIR / filename
         if not path.exists():
@@ -136,27 +137,27 @@ def install_all_templates(client) -> dict[str, Any]:
             continue
         try:
             body = _load_json(path)
+            loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
         except Exception as e:
             logger.warning("install_all_templates: %s failed: %s", tpl_name, e)
             results["failed"].append({"template": tpl_name, "error": str(e)})
-    results["patched_indices"] = patch_flattened_indices(client, _composing_index_patterns())
+    results["patched_indices"] = patch_flattened_indices(client, _composing_index_patterns(loaded))
     return results
 
 
-def _composing_index_patterns() -> list[str]:
-    """Index patterns of every registered template composing a component."""
+def _composing_index_patterns(bodies: list[Any]) -> list[str]:
+    """Index patterns of the loaded templates that compose a registered
+    component. Takes the bodies the install loop already read, so a file that
+    does not parse is reported once, as that template's failure."""
     components = {name for name, _ in _COMPONENT_TEMPLATES_REGISTRY}
-    patterns: list[str] = []
-    for _, filename in _TEMPLATES_REGISTRY:
-        path = _MAPPINGS_DIR / filename
-        if not path.exists():
-            continue
-        body = _load_json(path)
-        if components & set(body.get("composed_of", [])):
-            patterns.extend(body.get("index_patterns", []))
-    return patterns
+    return [
+        pattern
+        for body in bodies
+        if isinstance(body, dict) and components & set(body.get("composed_of", []))
+        for pattern in body.get("index_patterns", [])
+    ]
 
 
 def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]:
@@ -173,8 +174,13 @@ def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]
     results: dict[str, Any] = {"patched": [], "failed": []}
     if not index_patterns:
         return results
-    component = _load_json(_MAPPINGS_DIR / "json_type_stability.json")
-    replacement = component["template"]["mappings"]["dynamic_templates"]
+    try:
+        component = _load_json(_MAPPINGS_DIR / "json_type_stability.json")
+        replacement = component["template"]["mappings"]["dynamic_templates"]
+    except Exception as e:
+        logger.warning("patch_flattened_indices: component unreadable: %s", e)
+        results["failed"].append({"index": ",".join(index_patterns), "error": str(e)})
+        return results
     try:
         current = client.indices.get_mapping(
             index=",".join(index_patterns),
