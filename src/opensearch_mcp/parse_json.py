@@ -231,13 +231,13 @@ def ingest_json(
 
         actions.append({"_index": index_name, "_id": doc_id, "_source": record})
         if len(actions) >= batch_size:
-            flushed, failed = flush_bulk(client, actions)
+            flushed, failed = flush_bulk(client, actions, depth_limit=True)
             count += flushed
             bulk_failed += failed
             actions = []
 
     if actions:
-        flushed, failed = flush_bulk(client, actions)
+        flushed, failed = flush_bulk(client, actions, depth_limit=True)
         count += flushed
         bulk_failed += failed
 

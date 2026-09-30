@@ -27,7 +27,7 @@ def _collect(module_path):
     """Helper: returns (mock_bulk, collected_actions) for patching flush_bulk."""
     collected = []
 
-    def capture(client, actions):
+    def capture(client, actions, **kw):
         collected.extend(actions)
         return len(actions), 0
 

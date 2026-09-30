@@ -6,10 +6,11 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Mapping
 
 from opensearchpy import OpenSearch, helpers
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
-from opensearchpy.exceptions import ConnectionTimeout, TransportError
+from opensearchpy.exceptions import ConnectionTimeout, NotFoundError, TransportError
 
 _INITIAL_BACKOFF = 10
 _MAX_BACKOFF = 120
@@ -114,7 +115,9 @@ def _is_systemic_failure(success: int, total: int, errors: list | None) -> tuple
     return False, representative
 
 
-def flush_bulk(client: OpenSearch, actions: list[dict]) -> tuple[int, int]:
+def flush_bulk(
+    client: OpenSearch, actions: list[dict], depth_limit: bool = False
+) -> tuple[int, int]:
     """Bulk index actions with persistent retry on timeout.
 
     Returns (success_count, failed_count).
@@ -124,8 +127,135 @@ def flush_bulk(client: OpenSearch, actions: list[dict]) -> tuple[int, int]:
 
     Raises ShardCapacityExhausted if N consecutive batches fail for
     systemic reasons (e.g., cluster-wide shard limit).
+
+    `depth_limit=True` refuses, before sending, each record the cluster
+    would certainly reject for nesting deeper than its index's
+    `index.mapping.depth.limit`. Measured: OpenSearch expands a deep dotted
+    key itself before rejecting it — 3 s and an HTTP 500 at 1,000
+    segments — and the timeout is then retried as if transient. A refused
+    record is counted in `failed` and named in the last bulk reason by
+    `_id` and field path; the rest of the batch is sent.
     """
-    return _flush_with_retry(client, actions, attempt=0)
+    refused = 0
+    if depth_limit and actions:
+        actions, refused = _refuse_too_deep(client, actions)
+    success, failed = _flush_with_retry(client, actions, attempt=0)
+    return success, failed + refused
+
+
+_DEPTH_SETTING = "index.mapping.depth.limit"
+_DEFAULT_DEPTH_LIMIT = 20  # OpenSearch's default
+
+
+def _as_limit(value: object) -> int | None:
+    if isinstance(value, (int, str)) and str(value).isdigit():
+        return int(value)
+    return None
+
+
+def _index_depth_limit(client: OpenSearch, index: str) -> int:
+    """`index.mapping.depth.limit` for `index`: its own settings (defaults
+    included) when it exists, the template it would be created from when
+    it does not, else OpenSearch's default. For an alias over several
+    indices, the largest, so nothing is refused that one of them accepts.
+    """
+    try:
+        resp = client.indices.get_settings(
+            index=index, name=_DEPTH_SETTING, include_defaults=True, flat_settings=True
+        )
+        found = (
+            [
+                _as_limit(entry.get("settings", {}).get(_DEPTH_SETTING))
+                or _as_limit(entry.get("defaults", {}).get(_DEPTH_SETTING))
+                for entry in resp.values()
+                if isinstance(entry, dict)
+            ]
+            if isinstance(resp, dict)
+            else []
+        )
+        found = [limit for limit in found if limit]
+        return max(found) if found else _DEFAULT_DEPTH_LIMIT
+    except NotFoundError:
+        pass
+    except Exception:
+        return _DEFAULT_DEPTH_LIMIT
+    try:
+        sim = client.indices.simulate_index_template(name=index)
+        depth = sim["template"]["settings"]["index"]["mapping"]["depth"]["limit"]
+    except Exception:
+        return _DEFAULT_DEPTH_LIMIT
+    return _as_limit(depth) or _DEFAULT_DEPTH_LIMIT
+
+
+def _too_deep(source: Mapping, limit: int) -> str | None:
+    """The field path at which `source` nests past `limit`, or None.
+
+    The rule, measured on OpenSearch 3.5.0 for limits 20 and 5: every object
+    on a field's path counts, the root included, and must be at most
+    `limit`. A dotted key expands to one object per non-empty segment, so a
+    value under `a.b.c` in an object at depth d sits in the object at depth
+    d + 2; an object value is itself one level deeper, so an empty object
+    counts one more than a scalar. Arrays add nothing. A null under a
+    dotted key creates no objects and is accepted at any depth; every other
+    value, empty strings and lists included, does. Iterative, and it goes
+    no deeper than `limit` + 1, so a 5,000-segment key costs one split.
+    """
+    stack: list[tuple[Mapping, int, str]] = [(source, 1, "")]
+    while stack:
+        obj, depth, prefix = stack.pop()
+        if depth > limit:
+            return prefix
+        for key, value in obj.items():
+            key = str(key)
+            segments = sum(1 for part in key.split(".") if part)
+            path = f"{prefix}.{key}" if prefix else key
+            if value is None:
+                continue
+            if isinstance(value, Mapping):
+                stack.append((value, depth + segments, path))
+                continue
+            if depth + segments - 1 > limit:
+                return path
+            if isinstance(value, (list, tuple)):
+                pending = [value]
+                while pending:
+                    for item in pending.pop():
+                        if isinstance(item, Mapping):
+                            stack.append((item, depth + segments, path))
+                        elif isinstance(item, (list, tuple)):
+                            pending.append(item)
+    return None
+
+
+def _refuse_too_deep(client: OpenSearch, actions: list[dict]) -> tuple[list[dict], int]:
+    """`actions` without the records their index would reject for depth,
+    and how many were refused."""
+    limits: dict[str, int] = {}
+    kept: list[dict] = []
+    refused: list[tuple[dict, str, int]] = []
+    for action in actions:
+        index = action.get("_index", "")
+        if index not in limits:
+            limits[index] = _index_depth_limit(client, index)
+        source = action.get("_source")
+        path = _too_deep(source, limits[index]) if isinstance(source, Mapping) else None
+        if path is None:
+            kept.append(action)
+        else:
+            refused.append((action, path, limits[index]))
+    if refused:
+        action, path, limit = refused[0]
+        shown = path if len(path) <= 200 else f"{path[:200]}…"
+        reason = (
+            f"record {action.get('_id', '?')} field [{shown}] nests deeper than "
+            f"{_DEPTH_SETTING} [{limit}]; refused before sending"
+        )
+        print(
+            f"WARNING: {len(refused)}/{len(actions)} docs refused before sending — {reason}",
+            file=sys.stderr,
+        )
+        _tls.last_bulk_reason = reason[:500]
+    return kept, len(refused)
 
 
 def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> tuple[int, int]:

@@ -104,7 +104,7 @@ class TestParseJsonPerDocHostName:
 
         captured: list[dict] = []
 
-        def _stub(client, actions):
+        def _stub(client, actions, **kw):
             captured.extend(actions)
             return len(actions), 0
 
@@ -128,7 +128,7 @@ class TestParseJsonPerDocHostName:
 
         captured: list[dict] = []
 
-        def _stub(client, actions):
+        def _stub(client, actions, **kw):
             captured.extend(actions)
             return len(actions), 0
 

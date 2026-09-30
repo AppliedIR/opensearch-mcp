@@ -264,7 +264,7 @@ def ingest_delimited(
 
         actions.append({"_index": index_name, "_id": doc_id, "_source": record})
         if len(actions) >= batch_size:
-            flushed, failed = flush_bulk(client, actions)
+            flushed, failed = flush_bulk(client, actions, depth_limit=True)
             count += flushed
             bulk_failed += failed
             actions = []
@@ -273,7 +273,7 @@ def ingest_delimited(
                 on_progress(count)
 
     if actions:
-        flushed, failed = flush_bulk(client, actions)
+        flushed, failed = flush_bulk(client, actions, depth_limit=True)
         count += flushed
         bulk_failed += failed
 

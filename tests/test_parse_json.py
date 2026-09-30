@@ -186,7 +186,7 @@ class TestDetectJsonFormatSingleObject:
 
         captured = []
 
-        def fake_flush(client, actions):
+        def fake_flush(client, actions, **kw):
             captured.extend(actions)
             return len(actions), 0
 
