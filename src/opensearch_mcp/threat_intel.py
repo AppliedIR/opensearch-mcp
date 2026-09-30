@@ -130,19 +130,45 @@ def _load_coverage(path: Path) -> dict:
     return {"enriched": [], "skipped": {}}
 
 
-# Fields for aggregation and term queries.
-# Explicitly-mapped keyword/ip fields use bare names.
-# Dynamically-mapped text fields need .keyword suffix.
+# Fields read for each IOC type. A bare name is a `keyword` field as the json
+# and delimited templates map it; its `.keyword` form is the sub-field a
+# dynamically mapped `text` field gets (csv, vol3). A form an index does not
+# have aggregates to nothing. The newer names were measured on real cases
+# (2026-09-30): the evidence held its IOCs under them and nothing read them.
 _IP_FIELDS = [
     "source.ip",  # explicit ip type in evtx/accesslog/w3c templates
     "ForeignAddr.keyword",  # dynamic in vol3_template
     "LocalAddr.keyword",  # dynamic in vol3_template
+    "ForeignAddress",  # Kansa netstat
+    "ForeignAddress.keyword",
+    "winlog.event_data.IpAddress",  # Security logons
+    "winlog.event_data.IpAddress.keyword",
+    "winlog.event_data.SourceIp",  # Sysmon network connections
+    "winlog.event_data.SourceIp.keyword",
+    "winlog.event_data.DestinationIp",
+    "winlog.event_data.DestinationIp.keyword",
 ]
 
 _HASH_FIELDS = [
-    "SHA1.keyword",  # dynamic in csv_template
+    "SHA1.keyword",  # dynamic in csv_template (Amcache, EZ CSV)
     "SHA256.keyword",  # dynamic in csv_template
     "MD5.keyword",  # dynamic in csv_template
+    "Hash.MD5",  # Velociraptor Windows.System.Pslist
+    "Hash.MD5.keyword",
+    "Hash.SHA1",
+    "Hash.SHA1.keyword",
+    "Hash.SHA256",
+    "Hash.SHA256.keyword",
+    "Hash",  # Kansa ProcsWMI (upper-case MD5); a Prefetch path hash fails validation
+    "Hash.keyword",
+    "winlog.event_data.Hashes",  # Sysmon 1/6/7: "MD5=…,SHA256=…,IMPHASH=…", parsed
+    "winlog.event_data.Hashes.keyword",
+]
+
+# Bulk filesystem hashes — about 140,000 per host — are read only on request.
+_FILESYSTEM_HASH_FIELDS = [
+    "md5",  # bodyfile
+    "md5.keyword",
 ]
 
 _DOMAIN_FIELDS = [
@@ -150,15 +176,45 @@ _DOMAIN_FIELDS = [
     "query.keyword",  # dynamic in json/delimited
     "source_host.keyword",  # dynamic (B36 renamed field)
     "server_name.keyword",  # dynamic in delimited
+    "winlog.event_data.QueryName",  # Sysmon DNS queries
+    "winlog.event_data.QueryName.keyword",
 ]
+
+# Hash kinds kept from a Sysmon `Hashes` value. IMPHASH hashes a PE's import
+# table, not the file, so it is never looked up as a file hash.
+_SYSMON_HASH_KINDS = frozenset({"MD5", "SHA1", "SHA256"})
+
+
+def _sysmon_hashes(value: str) -> list[str]:
+    """The MD5 / SHA1 / SHA256 parts of a Sysmon `Hashes` value."""
+    parts = []
+    for part in value.split(","):
+        kind, _, digest = part.strip().partition("=")
+        if kind.strip().upper() in _SYSMON_HASH_KINDS:
+            parts.append(digest.strip())
+    return parts
+
+
+_PARSED_FIELDS = {
+    "winlog.event_data.Hashes": _sysmon_hashes,
+    "winlog.event_data.Hashes.keyword": _sysmon_hashes,
+}
+
+
+class IOCExtractionError(RuntimeError):
+    """A request extraction depends on failed; its values are unknown, which
+    must not read as "no IOCs"."""
 
 
 def _is_external(ip_str: str) -> bool:
     """Filter out RFC1918, loopback, link-local, multicast."""
     try:
-        return ipaddress.ip_address(ip_str).is_global
+        address = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    # `is_global` is True for multicast (224.0.0.251, 239.255.255.250,
+    # ff02::fb), which Sysmon DestinationIp and Kansa ARP carry.
+    return address.is_global and not address.is_multicast
 
 
 # Hash validation — covers every STIX file-hash type OpenCTI's
@@ -272,23 +328,40 @@ def _is_valid_domain(val: str) -> bool:
     return True
 
 
+def _lookup_form(ioc_type: str, value: str) -> str:
+    """The value as it is looked up and deduplicated: lower case where case
+    carries no meaning (hex hashes, IPs, domains). SSDEEP is base64 and TLSH
+    has a format prefix, so both are kept as they are."""
+    if ioc_type != "hash" or _HEX_RE.match(value):
+        return value.lower()
+    return value
+
+
 def extract_unique_iocs(
     client: OpenSearch,
     index_pattern: str,
     force: bool = False,
-) -> dict[str, set[str]]:
+    include_filesystem: bool = False,
+) -> dict[str, dict[str, set[tuple[str, str]]]]:
     """Extract unique IOCs from indexed data using aggregations.
 
+    Returns {ioc_type: {lookup value: {(field, value as stored)}}}: stamping
+    needs the stored form, which differs from the lookup value for an
+    upper-case hash and for every part of a Sysmon `Hashes` string.
+
     If force=False, skip docs already enriched (threat_intel.checked: true).
+    `include_filesystem` adds bulk filesystem hashes (bodyfile).
+
+    A failed request raises IOCExtractionError: its values are unknown, and
+    reading them as absent would report a case as having no IOCs.
     """
-    iocs: dict[str, set[str]] = {"ip": set(), "hash": set(), "domain": set()}
+    iocs: dict[str, dict[str, set[tuple[str, str]]]] = {"ip": {}, "hash": {}, "domain": {}}
     warnings: list[str] = []
     # Per-field rejection counts. Without field attribution, operators
     # can't tell WHICH field is feeding garbage values into the
     # extractor — and can't tune the field list. Aggregate rejects
     # per field and surface them as warnings at the end.
     rejected_by_field: dict[str, int] = {}
-    any_succeeded = False
 
     query: dict = {"match_all": {}}
     if not force:
@@ -313,9 +386,10 @@ def extract_unique_iocs(
         "domain": _is_valid_domain,
     }
 
+    hash_fields = _HASH_FIELDS + (_FILESYSTEM_HASH_FIELDS if include_filesystem else [])
     for ioc_type, fields in [
         ("ip", _IP_FIELDS),
-        ("hash", _HASH_FIELDS),
+        ("hash", hash_fields),
         ("domain", _DOMAIN_FIELDS),
     ]:
         validate = validators[ioc_type]
@@ -330,33 +404,28 @@ def extract_unique_iocs(
                     },
                     request_timeout=60,
                 )
-                any_succeeded = True
-                agg_vals = result["aggregations"]["values"]
-                other_count = agg_vals.get("sum_other_doc_count", 0)
-                if other_count > 0:
-                    warnings.append(
-                        f"{field}: {other_count} additional unique values "
-                        "not included (limit 10000)"
-                    )
-                field_rejects = 0
-                for bucket in agg_vals["buckets"]:
-                    val = str(bucket["key"])
+            except Exception as e:
+                raise IOCExtractionError(
+                    f"IOC extraction failed on {field}: {type(e).__name__}: {e}"
+                ) from e
+            agg_vals = result["aggregations"]["values"]
+            other_count = agg_vals.get("sum_other_doc_count", 0)
+            if other_count > 0:
+                warnings.append(
+                    f"{field}: {other_count} additional unique values not included (limit 10000)"
+                )
+            split = _PARSED_FIELDS.get(field)
+            field_rejects = 0
+            for bucket in agg_vals["buckets"]:
+                stored = str(bucket["key"])
+                for val in split(stored) if split else [stored]:
                     if validate(val):
-                        iocs[ioc_type].add(val)
+                        lookup = _lookup_form(ioc_type, val)
+                        iocs[ioc_type].setdefault(lookup, set()).add((field, stored))
                     else:
                         field_rejects += 1
-                if field_rejects:
-                    rejected_by_field[field] = rejected_by_field.get(field, 0) + field_rejects
-            except Exception as e:
-                if "AuthorizationException" in type(e).__name__:
-                    print(
-                        f"WARNING: OpenSearch auth error during IOC extraction: {e}",
-                        file=sys.stderr,
-                    )
-                continue
-
-    if not any_succeeded:
-        raise RuntimeError("IOC extraction failed -- all OpenSearch queries failed")
+            if field_rejects:
+                rejected_by_field[field] = rejected_by_field.get(field, 0) + field_rejects
 
     for w in warnings:
         print(f"WARNING: {w}", file=sys.stderr)
@@ -601,8 +670,11 @@ def enrich_case(
     case_id: str,
     force: bool = False,
     on_progress=None,
+    include_filesystem: bool = False,
 ) -> dict:
     """Full enrichment pipeline for a case.
+
+    `include_filesystem` also looks up bulk filesystem hashes (bodyfile).
 
     Returns summary dict.
     """
@@ -613,7 +685,9 @@ def enrich_case(
 
     if on_progress:
         on_progress("extracting", message="Extracting unique IOCs from indexed data")
-    iocs = extract_unique_iocs(client, index_pattern, force=force)
+    iocs = extract_unique_iocs(
+        client, index_pattern, force=force, include_filesystem=include_filesystem
+    )
 
     total_iocs = sum(len(v) for v in iocs.values())
     if on_progress:

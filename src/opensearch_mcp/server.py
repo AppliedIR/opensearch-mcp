@@ -2017,6 +2017,7 @@ def idx_enrich_intel(
     case_id: str = "",
     dry_run: bool = True,
     force: bool = False,
+    include_filesystem: bool = False,
 ) -> dict:
     """Enrich indexed evidence with OpenCTI threat intelligence.
 
@@ -2030,6 +2031,9 @@ def idx_enrich_intel(
         case_id: Case to enrich (default: active case).
         dry_run: Extract and count IOCs without lookup (default True).
         force: Re-enrich even if already enriched (default False).
+        include_filesystem: Also look up bulk filesystem hashes — bodyfile,
+            about 140,000 per host (default False). The default sources are
+            process and execution evidence.
 
     Execute mode (dry_run=False) runs asynchronously. The tool returns
     immediately with `{status: "started", pid, run_id, log_file}`; the
@@ -2052,7 +2056,9 @@ def idx_enrich_intel(
     if dry_run:
         client = _get_os()
         safe_case = sanitize_index_component(cid)
-        iocs = extract_unique_iocs(client, f"case-{safe_case}-*", force=force)
+        iocs = extract_unique_iocs(
+            client, f"case-{safe_case}-*", force=force, include_filesystem=include_filesystem
+        )
         return {
             "status": "preview",
             "case_id": cid,
@@ -2062,7 +2068,7 @@ def idx_enrich_intel(
             "total_iocs": sum(len(v) for v in iocs.values()),
         }
 
-    return _launch_enrich_background(cid, force=force)
+    return _launch_enrich_background(cid, force=force, include_filesystem=include_filesystem)
 
 
 @server.tool()
@@ -2384,7 +2390,9 @@ def _launch_background(
     return resp
 
 
-def _launch_enrich_background(case_id: str, force: bool = False) -> dict:
+def _launch_enrich_background(
+    case_id: str, force: bool = False, include_filesystem: bool = False
+) -> dict:
     """Launch idx_enrich_intel as a background subprocess.
 
     Mirrors `_launch_background` but shaped for enrichment: no path
@@ -2443,6 +2451,8 @@ def _launch_enrich_background(case_id: str, force: bool = False) -> dict:
     ]
     if force:
         cmd.append("--force")
+    if include_filesystem:
+        cmd.append("--include-filesystem")
 
     from opensearch_mcp.paths import vhir_dir
 

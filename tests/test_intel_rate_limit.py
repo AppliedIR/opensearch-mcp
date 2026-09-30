@@ -349,10 +349,13 @@ class TestEnrichWorkerResilience:
         monkeypatch.setattr(
             threat_intel,
             "extract_unique_iocs",
-            lambda client, pattern, force=False: {
-                "ip": {"1.2.3.4", "5.6.7.8"},
-                "hash": set(),
-                "domain": set(),
+            lambda client, pattern, force=False, include_filesystem=False: {
+                "ip": {
+                    "1.2.3.4": {("source.ip", "1.2.3.4")},
+                    "5.6.7.8": {("source.ip", "5.6.7.8")},
+                },
+                "hash": {},
+                "domain": {},
             },
         )
         monkeypatch.setattr(threat_intel, "stamp_documents", lambda *a, **kw: 2)

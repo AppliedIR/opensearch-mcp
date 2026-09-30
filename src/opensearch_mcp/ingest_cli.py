@@ -2066,6 +2066,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     """
     case_id = _resolve_case_id(getattr(args, "case", None))
     force = getattr(args, "force", False)
+    include_filesystem = getattr(args, "include_filesystem", False)
 
     from opensearch_mcp.paths import sanitize_index_component
     from opensearch_mcp.threat_intel import enrich_case, extract_unique_iocs
@@ -2074,7 +2075,9 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
 
     if getattr(args, "dry_run", False):
         safe_case = sanitize_index_component(case_id)
-        iocs = extract_unique_iocs(client, f"case-{safe_case}-*", force=force)
+        iocs = extract_unique_iocs(
+            client, f"case-{safe_case}-*", force=force, include_filesystem=include_filesystem
+        )
         print(f"Case: {case_id}")
         print(f"  External IPs: {len(iocs['ip'])}")
         print(f"  Hashes: {len(iocs['hash'])}")
@@ -2135,7 +2138,13 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
             print(f"Stamping {kw['matched']} matched IOCs to documents...")
 
     try:
-        result = enrich_case(client, case_id, force=force, on_progress=_progress)
+        result = enrich_case(
+            client,
+            case_id,
+            force=force,
+            on_progress=_progress,
+            include_filesystem=include_filesystem,
+        )
     except Exception as e:  # noqa: BLE001
         # Terminal failed write with the real exception text so
         # idx_ingest_status surfaces *why* enrichment failed without
@@ -2578,6 +2587,11 @@ def main() -> None:
     p_enrich.add_argument("--force", action="store_true", help="Re-enrich already-enriched docs")
     p_enrich.add_argument(
         "--dry-run", action="store_true", help="Show IOC counts without enriching"
+    )
+    p_enrich.add_argument(
+        "--include-filesystem",
+        action="store_true",
+        help="Also look up bulk filesystem hashes (bodyfile; about 140,000 per host)",
     )
     p_enrich.set_defaults(func=cmd_enrich_intel)
 

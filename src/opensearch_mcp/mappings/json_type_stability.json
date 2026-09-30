@@ -51,11 +51,14 @@
             "mapping": {"type": "keyword", "ignore_above": 2048}
           }
         }
-      ]
+      ],
+      "properties": {
+        "source": {"properties": {"ip": {"type": "ip", "ignore_malformed": true}}}
+      }
     }
   },
   "_meta": {
-    "description": "Composed into vhir-json and vhir-delimited. Objects, arrays of objects and dotted keys use OpenSearch's default object mapping, so nested fields keep their names and stay searchable and aggregatable. Numbers and dates get field-level ignore_malformed with the types dynamic mapping would choose, so a value of the wrong type is dropped from that field (marked in _ignored) and the record is kept. A field that is a scalar in one record and an object in another is rejected per record with the reason. There are no object templates: the earlier ones used `flattened`, which is not an OpenSearch type, and rejected every record containing an object or a dotted key.",
+    "description": "Composed into vhir-json and vhir-delimited. Objects, arrays of objects and dotted keys use OpenSearch's default object mapping, so nested fields keep their names and stay searchable and aggregatable. Numbers and dates get field-level ignore_malformed with the types dynamic mapping would choose, so a value of the wrong type is dropped from that field (marked in _ignored) and the record is kept. A field that is a scalar in one record and an object in another is rejected per record with the reason. There are no object templates: the earlier ones used `flattened`, which is not an OpenSearch type, and rejected every record containing an object or a dotted key. source.ip is mapped ip, as the evtx indices map it, with ignore_malformed: a CSV value that is not an address (`*`, `[::]`) is dropped from the field and the row kept, and one aggregation across json, delimited and evtx indices reads addresses instead of the raw bytes a keyword/ip mix returns.",
     "version": 1
   }
 }
