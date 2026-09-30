@@ -246,14 +246,13 @@ def _refuse_too_deep(client: OpenSearch, actions: list[dict]) -> tuple[list[dict
     if refused:
         action, path, limit = refused[0]
         shown = path if len(path) <= 200 else f"{path[:200]}…"
+        # Cause first: status readers clip the reason, and a field path can
+        # be long.
         reason = (
-            f"record {action.get('_id', '?')} field [{shown}] nests deeper than "
-            f"{_DEPTH_SETTING} [{limit}]; refused before sending"
+            f"refused before sending: nests deeper than {_DEPTH_SETTING} [{limit}] "
+            f"— record {action.get('_id', '?')} field [{shown}]"
         )
-        print(
-            f"WARNING: {len(refused)}/{len(actions)} docs refused before sending — {reason}",
-            file=sys.stderr,
-        )
+        print(f"WARNING: {len(refused)}/{len(actions)} docs {reason}", file=sys.stderr)
         _tls.last_bulk_reason = reason[:500]
     return kept, len(refused)
 

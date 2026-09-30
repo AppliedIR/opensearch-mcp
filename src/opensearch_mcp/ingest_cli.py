@@ -422,6 +422,8 @@ def _write_bg_status(
     files_done=0,
     files_total=0,
     error="",
+    bulk_failed=0,
+    bulk_failed_reason=None,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -437,6 +439,8 @@ def _write_bg_status(
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     art = {"name": artifact_name, "status": status, "indexed": indexed}
+    if error:
+        art["error"] = error
     if files_total:
         art["files_total"] = files_total
     if files_done:
@@ -458,8 +462,23 @@ def _write_bg_status(
         started=started,
         error=error,
         elapsed_seconds=elapsed,
-        bulk_failed_reason=get_last_bulk_reason(),
+        bulk_failed=bulk_failed,
+        bulk_failed_reason=(
+            get_last_bulk_reason() if bulk_failed_reason is None else bulk_failed_reason
+        ),
     )
+
+
+def _terminal_status(indexed: int, bulk_failed: int, reason: str) -> tuple[str, str]:
+    """(status, error) for a finished run: `failed`, naming the first
+    rejection, when OpenSearch rejected every record; else `complete`.
+    The status reader takes the text before the first colon as the reason
+    token, so the reason goes after it."""
+    from opensearch_mcp.ingest_status import ALL_RECORDS_REJECTED
+
+    if bulk_failed > 0 and indexed == 0:
+        return "failed", f"{ALL_RECORDS_REJECTED}: {reason or 'no reason recorded'}"
+    return "complete", ""
 
 
 _VHIR_CONFIG = vhir_dir() / "config.yaml"
@@ -1518,9 +1537,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         input_files=[str(input_path)],
     )
     if run_id:
-        final_status = "complete"
-        if total_bf > 0 and total == 0:
-            final_status = "failed"
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
+        final_status, final_error = _terminal_status(total, total_bf, get_last_bulk_reason())
         _write_bg_status(
             case_id,
             run_id,
@@ -1530,6 +1549,8 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             started_ts,
             time.monotonic() - start_mono,
             indexed=total,
+            error=final_error,
+            bulk_failed=total_bf,
         )
 
 
@@ -1610,6 +1631,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         from opensearch_mcp.bulk import ShardCapacityExhausted as _SCE
 
         _failed_subdirs: list[tuple[str, str]] = []  # (path, error[:200])
+        walk_indexed = walk_failed = 0
+        walk_reason = ""
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -1617,7 +1640,11 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             sub_args.recursive = False
             print(f"\n--- Host: {d.name} ---")
             try:
-                cmd_ingest_delimited(sub_args, examiner=examiner)
+                result = cmd_ingest_delimited(sub_args, examiner=examiner)
+                if result:
+                    walk_indexed += result[0]
+                    walk_failed += result[1]
+                    walk_reason = walk_reason or result[2]
             except _SCE:
                 # Cluster capacity exhausted: halt the entire recursive
                 # walk, not just the current subdir. Re-raise past the
@@ -1644,13 +1671,20 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # regression where an empty-subdirs walk exits without writing
         # any terminal status and the atexit guard mislabels it failed.
         if run_id:
+            # Each subdir's own final write lands in this same status file,
+            # so the last one would stand for the whole walk; write the sum.
+            final_status, final_error = _terminal_status(walk_indexed, walk_failed, walk_reason)
             _write_bg_status(
                 case_id,
                 run_id,
-                "complete",
+                final_status,
                 hostname or "(recursive)",
                 "delimited",
                 started_ts,
+                indexed=walk_indexed,
+                error=final_error,
+                bulk_failed=walk_failed,
+                bulk_failed_reason=walk_reason,
             )
         return
     time_field = getattr(args, "time_field", None)
@@ -1822,10 +1856,11 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         + (f", {len(_delim_failed_files)} files skipped" if _delim_failed_files else ""),
         input_files=[str(input_path)],
     )
+    from opensearch_mcp.bulk import get_last_bulk_reason
+
+    reason = get_last_bulk_reason()
     if run_id:
-        final_status = "complete"
-        if total_bf > 0 and total == 0:
-            final_status = "failed"
+        final_status, final_error = _terminal_status(total, total_bf, reason)
         _write_bg_status(
             case_id,
             run_id,
@@ -1835,7 +1870,11 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             started_ts,
             time.monotonic() - start_mono,
             indexed=total,
+            error=final_error,
+            bulk_failed=total_bf,
         )
+    # The recursive walk shares this run's status file and sums these.
+    return total, total_bf, reason
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,8 @@ def write_status(
 HALT_SHARD_CAPACITY = "shard_capacity_exhausted"
 HALT_CIRCUIT_BREAKER = "circuit_breaker_tripped"
 HALT_HAYABUSA_NO_RULES = "hayabusa_no_rules"
+# Not a halt: the run finished, and OpenSearch rejected every record it sent.
+ALL_RECORDS_REJECTED = "all_records_rejected"
 
 
 def read_active_ingests() -> list[dict]:
