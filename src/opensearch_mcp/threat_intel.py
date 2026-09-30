@@ -611,23 +611,43 @@ def batch_lookup(
     return results
 
 
+# Stamp order: a verdict of higher rank is written later, so it stands.
+_VERDICT_RANK = {"SUSPICIOUS": 1, "MALICIOUS": 2}
+
+
 def stamp_documents(
     client: OpenSearch,
     index_pattern: str,
     ioc_results: dict[str, dict],
     origins: dict[str, set[tuple[str, str]]],
-) -> int:
+) -> tuple[int, int]:
     """Stamp indexed documents with threat_intel.* fields via update-by-query.
+
+    Returns (documents updated, version conflicts).
 
     `origins` maps each looked-up value to the (field, value as stored) pairs
     extraction found it under. The documents are matched on those: the lookup
     value is lower-cased, and a Sysmon `Hashes` part is stored inside the
     whole string, so a term on the lookup value missed both.
+
+    A document carrying several IOCs is stamped once per IOC, and the last
+    stamp's fields stand. So the IOCs are stamped in ascending rank — not
+    found, then SUSPICIOUS, then MALICIOUS — and each request refreshes, so
+    the next one reads the document it just wrote. Without the refresh a
+    later request met a stale version and skipped the document: measured on
+    copies of real pslist, Sysmon and ProcsWMI documents, 123-289 of 1,124
+    lost their MALICIOUS verdict. A conflict that still happens is counted
+    and returned, never retried here.
     """
     now = datetime.now(timezone.utc).isoformat()
     total_updated = 0
+    conflicts = 0
 
-    for ioc_value, intel in ioc_results.items():
+    ranked = sorted(
+        ioc_results.items(),
+        key=lambda item: (_VERDICT_RANK.get(item[1].get("threat_intel.verdict"), 0), item[0]),
+    )
+    for ioc_value, intel in ranked:
         where = origins.get(ioc_value)
         if not where:
             continue
@@ -664,15 +684,17 @@ def stamp_documents(
                 request_timeout=120,
                 conflicts="proceed",
                 requests_per_second=1000,
+                refresh=True,
             )
             total_updated += result.get("updated", 0)
+            conflicts += result.get("version_conflicts", 0)
         except Exception as e:
             print(
                 f"WARNING: Update failed for {ioc_value}: {e}",
                 file=sys.stderr,
             )
 
-    return total_updated
+    return total_updated, conflicts
 
 
 def enrich_case(
@@ -724,7 +746,7 @@ def enrich_case(
     if on_progress:
         on_progress("stamping", matched=len(results))
     origins = {value: where for found in iocs.values() for value, where in found.items()}
-    updated = stamp_documents(client, index_pattern, results, origins)
+    updated, conflicts = stamp_documents(client, index_pattern, results, origins)
 
     return {
         "status": "complete",
@@ -733,4 +755,5 @@ def enrich_case(
         "malicious": malicious,
         "suspicious": suspicious,
         "documents_updated": updated,
+        "version_conflicts": conflicts,
     }
