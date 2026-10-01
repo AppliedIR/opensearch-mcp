@@ -112,6 +112,22 @@ class TestCatchallKeywordDroppedText:
         )
 
 
+class TestCatchallKeywordLength:
+    """A catch-all string longer than ignore_above is silently unsearchable:
+    OpenSearch drops it from the field without marking `_ignored`. 2048 lost a
+    real 2,103-unit command line."""
+
+    # ignore_above counts UTF-16 code units; Lucene's term limit is 32,766
+    # bytes. At 3 bytes per BMP character, 10,922 is the most that indexes —
+    # one more and the whole document is rejected.
+    BYTE_SAFE_CEILING = 10_922
+
+    def test_ignore_above_holds_long_values_and_stays_byte_safe(self, dyn_templates):
+        limit = _rules(dyn_templates)["catchall_strings_keyword"]["mapping"]["ignore_above"]
+        assert limit == 8191
+        assert limit <= self.BYTE_SAFE_CEILING
+
+
 class TestKeywordPaths:
     """*.id, *.name, *.hostname → keyword."""
 
