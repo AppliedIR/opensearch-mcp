@@ -147,6 +147,64 @@ class TestAHaltedRunThatStamped:
         assert (status["status"], status["total_indexed"]) == ("failed", 1)
 
 
+def _md5s(n: int, prefix: str = "capped") -> list[str]:
+    return sorted(hashlib.md5(f"{prefix} {i}".encode()).hexdigest() for i in range(n))
+
+
+@pytest.mark.integration
+class TestACappedExtraction:
+    """A field with more unique values than one run reads: the rest were
+    dropped with a warning, and the run read complete."""
+
+    def test_at_the_real_cap(self, os_client, quick, capsys):
+        from opensearchpy import helpers
+
+        values = _md5s(10_001)
+        with intel_case(os_client, {"json-pslist": []}, prefix="pytest-complete") as case_id:
+            index = f"case-{case_id}-json-pslist"
+            actions = [{"_index": index, "_source": {"Hash": {"MD5": v}}} for v in values]
+            helpers.bulk(os_client, actions, refresh=True)
+            capped: dict[str, int] = {}
+            iocs = threat_intel.extract_unique_iocs(os_client, f"case-{case_id}-*", capped=capped)
+        assert (capped, len(iocs["hash"])) == ({"Hash.MD5": 1}, 10_000)
+        assert (
+            "Hash.MD5: capped at 10,000 unique values; 1 more documents carry values not read"
+            in capsys.readouterr().err
+        )
+
+    def test_the_run_is_not_complete_and_a_rerun_reads_the_next_batch(
+        self, os_client, quick, tmp_path
+    ):
+        quick.setattr(threat_intel, "_EXTRACTION_CAP", 3)
+        quick.setattr(threat_intel, "_coverage_path_for_run", lambda run: tmp_path / f"{run}.json")
+        values = _md5s(4)
+        docs = {"json-pslist": [{"Hash": {"MD5": v}} for v in values]}
+        with intel_case(os_client, docs, prefix="pytest-complete") as case_id:
+            quick.setenv("VHIR_INGEST_RUN_ID", "run-1")
+            first = FakeGateway(not_found).install(quick)
+            with pytest.raises(threat_intel.IntelEnrichmentHalted) as halted:
+                threat_intel.enrich_case(os_client, case_id)
+            quick.setenv("VHIR_INGEST_RUN_ID", "run-2")
+            second = FakeGateway(not_found).install(quick)
+            summary = threat_intel.enrich_case(os_client, case_id)
+        assert (
+            "extraction was capped at 3 unique values per field (Hash.MD5); "
+            "a rerun without force continues with the next batch"
+        ) in str(halted.value)
+        assert sorted(first.asked) == values[:3]
+        assert (second.asked, summary["status"]) == ([values[3]], "complete")
+
+    def test_nothing_valid_was_read(self, os_client, quick):
+        """The window held only values that are not IOCs: not `no_iocs`."""
+        quick.setattr(threat_intel, "_EXTRACTION_CAP", 3)
+        garbage = [{"Hash": {"MD5": f"not a hash {i}"}} for i in range(3) for _ in range(2)]
+        docs = {"json-pslist": [*garbage, {"Hash": {"MD5": _md5s(1)[0]}}]}
+        FakeGateway(not_found).install(quick)
+        with intel_case(os_client, docs, prefix="pytest-complete") as case_id:
+            with pytest.raises(threat_intel.IntelEnrichmentHalted, match="capped at 3"):
+                threat_intel.enrich_case(os_client, case_id)
+
+
 @pytest.mark.integration
 class TestStampsThatDidNotLand:
     def _found_all(self, monkeypatch):

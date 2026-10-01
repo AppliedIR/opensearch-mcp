@@ -222,6 +222,12 @@ _PARSED_FIELDS = {
 }
 
 
+# Unique values read per field in one run. A field with more is capped: the
+# run is incomplete, and the next run without `force` reads the next batch,
+# since documents already stamped are left out.
+_EXTRACTION_CAP = 10_000
+
+
 class IOCExtractionError(RuntimeError):
     """A request extraction depends on failed; its values are unknown, which
     must not read as "no IOCs"."""
@@ -379,6 +385,7 @@ def extract_unique_iocs(
     index_pattern: str,
     force: bool = False,
     include_filesystem: bool = False,
+    capped: dict[str, int] | None = None,
 ) -> dict[str, dict[str, set[tuple[str, str]]]]:
     """Extract unique IOCs from indexed data using aggregations.
 
@@ -387,7 +394,9 @@ def extract_unique_iocs(
     upper-case hash and for every part of a Sysmon `Hashes` string.
 
     If force=False, skip docs already enriched (threat_intel.checked: true).
-    `include_filesystem` adds bulk filesystem hashes (bodyfile).
+    `include_filesystem` adds bulk filesystem hashes (bodyfile). A field with
+    more than `_EXTRACTION_CAP` unique values is recorded in `capped`, with
+    how many more documents carry its unread values.
 
     A failed request raises IOCExtractionError: its values are unknown, and
     reading them as absent would report a case as having no IOCs.
@@ -446,7 +455,7 @@ def extract_unique_iocs(
                     body={
                         "query": query,
                         "size": 0,
-                        "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
+                        "aggs": {"values": {"terms": {"field": field, "size": _EXTRACTION_CAP}}},
                     },
                     request_timeout=60,
                 )
@@ -458,8 +467,11 @@ def extract_unique_iocs(
             other_count = agg_vals.get("sum_other_doc_count", 0)
             if other_count > 0:
                 warnings.append(
-                    f"{field}: {other_count} additional unique values not included (limit 10000)"
+                    f"{field}: capped at {_EXTRACTION_CAP:,} unique values; "
+                    f"{other_count} more documents carry values not read"
                 )
+                if capped is not None:
+                    capped[field] = other_count
             split = _PARSED_FIELDS.get(field)
             field_rejects = 0
             for bucket in agg_vals["buckets"]:
@@ -762,10 +774,14 @@ def stamp_documents(
 
 
 def _incomplete(
-    iocs: dict[str, dict], coverage: dict, conflicts: int, failed_stamps: int
+    iocs: dict[str, dict],
+    coverage: dict,
+    conflicts: int,
+    failed_stamps: int,
+    capped: dict[str, int] | None = None,
 ) -> str | None:
-    """Why the run is not complete, or None if it is: every extracted IOC has
-    a confirmed lookup and every stamp landed."""
+    """Why the run is not complete, or None if it is: every value was read,
+    every extracted IOC has a confirmed lookup and every stamp landed."""
     enriched = set(coverage.get("enriched", []))
     skipped = coverage.get("skipped", {})
     extracted = [value for found in iocs.values() for value in found]
@@ -790,7 +806,16 @@ def _incomplete(
         parts.append(f"{conflicts} documents skipped on a version conflict while stamping")
     if failed_stamps:
         parts.append(f"{failed_stamps} stamp requests failed")
+    if capped:
+        parts.append(_capped_reason(capped))
     return "; ".join(parts) or None
+
+
+def _capped_reason(capped: dict[str, int]) -> str:
+    return (
+        f"extraction was capped at {_EXTRACTION_CAP:,} unique values per field "
+        f"({', '.join(sorted(capped))}); a rerun without force continues with the next batch"
+    )
 
 
 def enrich_case(
@@ -813,8 +838,9 @@ def enrich_case(
 
     if on_progress:
         on_progress("extracting", message="Extracting unique IOCs from indexed data")
+    capped: dict[str, int] = {}
     iocs = extract_unique_iocs(
-        client, index_pattern, force=force, include_filesystem=include_filesystem
+        client, index_pattern, force=force, include_filesystem=include_filesystem, capped=capped
     )
 
     total_iocs = sum(len(v) for v in iocs.values())
@@ -827,6 +853,8 @@ def enrich_case(
         )
 
     if total_iocs == 0:
+        if capped:
+            raise IntelEnrichmentHalted(_capped_reason(capped))
         return {
             "status": "no_iocs",
             "message": "No external IOCs found in indexed data",
@@ -855,7 +883,7 @@ def enrich_case(
     }
     # Complete only when every IOC had a confirmed lookup and every stamp
     # landed. A run that looked nothing up read "complete, 0 malicious".
-    reason = _incomplete(iocs, coverage, conflicts, failed_stamps)
+    reason = _incomplete(iocs, coverage, conflicts, failed_stamps, capped)
     if reason:
         raise IntelEnrichmentHalted(reason, summary={"status": "incomplete", **counts})
 

@@ -354,7 +354,7 @@ class TestEnrichWorkerResilience:
         monkeypatch.setattr(
             threat_intel,
             "extract_unique_iocs",
-            lambda client, pattern, force=False, include_filesystem=False: {
+            lambda client, pattern, force=False, include_filesystem=False, capped=None: {
                 "ip": {
                     "1.2.3.4": {("source.ip", "1.2.3.4")},
                     "5.6.7.8": {("source.ip", "5.6.7.8")},
