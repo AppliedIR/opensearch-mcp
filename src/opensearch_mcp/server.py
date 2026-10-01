@@ -2228,6 +2228,15 @@ def _spawn_ingest(cmd, env, stdout, run_id):
     import subprocess as _sp
     import time as _time
 
+    # The index templates install on the first verified connection, which no
+    # ingest call otherwise makes: without this, an ingest started first
+    # after a restart creates its indices under the previous templates. A
+    # cluster that's down is the ingest's own to report.
+    try:
+        _get_os()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Template install before ingest skipped: %s", e)
+
     # Ensure D-Bus address is available for systemd-run --user
     if "DBUS_SESSION_BUS_ADDRESS" not in env:
         import os
