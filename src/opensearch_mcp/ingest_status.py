@@ -69,6 +69,11 @@ def write_status(
         "bulk_failed_reason": bulk_failed_reason,
         "elapsed_seconds": round(elapsed_seconds, 1),
     }
+    if not log_file and run_id:
+        # The launcher writes the worker's log here; workers don't pass it.
+        launched = _STATUS_DIR.parent / "ingest-logs" / f"{run_id}.log"
+        if launched.is_file():
+            log_file = str(launched)
     if log_file:
         data["log_file"] = log_file
     fd, tmp = tempfile.mkstemp(dir=str(_STATUS_DIR), suffix=".tmp")

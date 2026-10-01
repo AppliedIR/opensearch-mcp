@@ -1599,6 +1599,7 @@ def idx_ingest(
         "run_id": run_id,
         "hosts": host_names,
         "case_id": case_id,
+        "log_file": str(_log_file),
         "message": (
             "Ingest started. IMPORTANT: Call idx_ingest_status() every 30 seconds "
             "to monitor progress and report it to the examiner as a checklist. "
@@ -2644,6 +2645,7 @@ def idx_ingest_memory(
         "pid": proc.pid,
         "tier": tier,
         "plugins": plugin_list,
+        "log_file": str(_lf),
         "message": (
             f"Memory analysis started ({len(plugin_list)} plugins). "
             "This may take several minutes. Use idx_ingest_status() to monitor."
