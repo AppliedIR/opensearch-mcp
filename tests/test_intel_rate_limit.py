@@ -532,7 +532,7 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
     SUSPICIOUS stamps."""
 
     def _mock_client(self, buckets_by_field: dict[str, list[str]]) -> MagicMock:
-        """Build a MagicMock OpenSearch client whose `msearch()` returns
+        """Build a MagicMock OpenSearch client whose `search()` returns
         a different agg-values bucket list based on the `field` aggs
         key in the query body, and whose `field_caps()` reports every
         field as an aggregatable keyword. The extractor's agg key is
@@ -546,7 +546,7 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
             },
         }
 
-        def _search(*, body, **kwargs):
+        def _search(*, index, body, **kwargs):
             field = body["aggs"]["values"]["terms"]["field"]
             vals = buckets_by_field.get(field, [])
             return {
@@ -558,9 +558,7 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
                 }
             }
 
-        client.msearch.side_effect = lambda *, body, **kw: {
-            "responses": [_search(body=b) for b in body[1::2]]
-        }
+        client.search.side_effect = _search
         return client
 
     def test_garbage_hash_fragment_rejected(self, capsys):

@@ -357,22 +357,20 @@ def _lookup_form(ioc_type: str, value: str) -> str:
     return value
 
 
-def _aggregatable_indices(caps: dict, field: str) -> list[str]:
-    """The indices where a terms aggregation on `field` can run.
+def _aggregatable(caps: dict, field: str) -> bool:
+    """Whether any index can run a terms aggregation on `field`.
 
     An index that maps the field as text (PECmd prefetch's `Hash`, by dynamic
-    mapping) fails the request when it is the only one, and fails its shards
-    in a 200 otherwise. `caps` is a `_field_caps` response; an entry lists its
-    indices only when the field has more than one type.
+    mapping) cannot. Where others can, the search returns their values and
+    that index's shards fail inside the 200; where none can, the search
+    fails, so the field is not searched. `caps` is a `_field_caps` response.
     """
-    found: set[str] = set()
-    for entry in caps.get("fields", {}).get(field, {}).values():
-        indices = set(entry.get("indices", caps.get("indices", [])))
-        if entry.get("aggregatable"):
-            found |= indices
-        elif "non_aggregatable_indices" in entry:
-            found |= indices - set(entry["non_aggregatable_indices"])
-    return sorted(found)
+    # `non_aggregatable_indices` is listed only when some indices of a type
+    # can aggregate the field and others cannot (a keyword without doc values).
+    return any(
+        entry.get("aggregatable") or entry.get("non_aggregatable_indices")
+        for entry in caps.get("fields", {}).get(field, {}).values()
+    )
 
 
 def extract_unique_iocs(
@@ -439,25 +437,18 @@ def extract_unique_iocs(
     for ioc_type, fields in field_sets:
         validate = validators[ioc_type]
         for field in fields:
-            indices = _aggregatable_indices(caps, field)
-            if not indices:
+            if not _aggregatable(caps, field):
                 continue
             try:
-                # The index list goes in the request body: in the URL, a
-                # case's index names pass the 4096-byte HTTP line limit.
-                (result,) = client.msearch(
-                    body=[
-                        {"index": indices},
-                        {
-                            "query": query,
-                            "size": 0,
-                            "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
-                        },
-                    ],
+                result = client.search(
+                    index=index_pattern,
+                    body={
+                        "query": query,
+                        "size": 0,
+                        "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
+                    },
                     request_timeout=60,
-                )["responses"]
-                if "error" in result:
-                    raise RuntimeError(json.dumps(result["error"])[:500])
+                )
             except Exception as e:
                 raise IOCExtractionError(
                     f"IOC extraction failed on {field}: {type(e).__name__}: {e}"
