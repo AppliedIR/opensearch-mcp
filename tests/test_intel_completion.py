@@ -18,7 +18,15 @@ import hashlib
 
 import pytest
 from _intel_case import intel_case
-from _intel_gateway import FakeGateway, errored, found, not_found, rate_limited, unconfirmed
+from _intel_gateway import (
+    FakeGateway,
+    errored,
+    found,
+    not_found,
+    rate_limited,
+    text_reply,
+    unconfirmed,
+)
 
 from opensearch_mcp import threat_intel
 
@@ -38,6 +46,7 @@ CAUSES = {
     "every call an error payload": (errored, "error 2"),
     "rate limit exhausted": (lambda ioc: rate_limited(), "rate_limit_exhausted 2"),
     "an unconfirmed not-found": (unconfirmed, "unconfirmed 2"),
+    "a plain-text reply": (text_reply, "unconfirmed 2"),
 }
 
 
@@ -133,6 +142,62 @@ class TestStampsThatDidNotLand:
             quick.setattr(os_client, "update_by_query", failing)
             with pytest.raises(threat_intel.IntelEnrichmentHalted, match="stamp requests failed"):
                 threat_intel.enrich_case(os_client, case_id)
+
+
+class TestWhatCountsAsConfirmed:
+    """Confirmed only when the reply has `found` and no note or error."""
+
+    @pytest.mark.parametrize(
+        "answer, confirmed",
+        [
+            (lambda ioc: found(ioc, 90), True),
+            (not_found, True),
+            (unconfirmed, False),
+            (errored, False),
+            (text_reply, False),
+            (lambda ioc: {"found": False, "ioc": ioc, "error": ""}, False),
+            (lambda ioc: "[]", False),  # JSON, but not an object
+        ],
+        ids=["found", "not found", "note", "error", "text", "empty error", "json list"],
+    )
+    def test_reply(self, quick, answer, confirmed):
+        FakeGateway(answer).install(quick)
+        results = threat_intel.batch_lookup({"hash": {MAL}})
+        coverage = results.pop("_intel_coverage")
+        assert (MAL in results, MAL in coverage["enriched"]) == (confirmed, confirmed)
+        assert (MAL in coverage["skipped"]) == (not confirmed)
+
+
+@pytest.mark.integration
+class TestAPlainTextReply:
+    def test_stamps_nothing_and_is_looked_up_again_next_run(self, os_client, quick, tmp_path):
+        """A reply with no `found` key was read as a confirmed not-found: the
+        run read complete, every document was stamped checked, and the next
+        run skipped them. Each run here has its own run id, as each launch
+        does."""
+        quick.setattr(threat_intel, "_coverage_path_for_run", lambda run: tmp_path / f"{run}.json")
+        with intel_case(os_client, DOCS, prefix="pytest-complete") as case_id:
+            quick.setenv("VHIR_INGEST_RUN_ID", "run-1")
+            FakeGateway(text_reply).install(quick)
+            with pytest.raises(threat_intel.IntelEnrichmentHalted, match="Input validation error"):
+                threat_intel.enrich_case(os_client, case_id)
+            os_client.indices.refresh(index=f"case-{case_id}-*")
+            stamped = {"exists": {"field": "threat_intel.checked"}}
+            assert (
+                os_client.count(index=f"case-{case_id}-*", body={"query": stamped})["count"] == 0
+            )
+
+            quick.setenv("VHIR_INGEST_RUN_ID", "run-2")
+            gateway = FakeGateway(
+                lambda ioc: found(ioc, 90) if ioc == MAL else not_found(ioc)
+            ).install(quick)
+            summary = threat_intel.enrich_case(os_client, case_id)
+        assert sorted(gateway.asked) == sorted([MAL, CLEAN])
+        assert (summary["status"], summary["iocs_looked_up"], summary["malicious"]) == (
+            "complete",
+            2,
+            1,
+        )
 
 
 @pytest.mark.integration

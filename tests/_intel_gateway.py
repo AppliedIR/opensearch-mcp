@@ -74,6 +74,13 @@ def errored(ioc: str) -> dict:
     return _wrap({"found": False, "ioc": ioc, "error": "Context unavailable: schema mismatch"})
 
 
+def text_reply(ioc: str) -> str:
+    """Tool output that is not JSON: the gateway passes it on as text, and
+    `call_tool` returns it as {"text": ...}. This is the gateway's measured
+    reply to a lookup_ioc call without `ioc`."""
+    return "Input validation error: 'ioc' is a required property"
+
+
 def rate_limited() -> dict:
     return _wrap(
         {
@@ -93,10 +100,10 @@ class _Response(io.BytesIO):
 
 
 class FakeGateway:
-    """`answer(ioc)` returns a lookup result, or an exception to raise as the
-    HTTP call's failure."""
+    """`answer(ioc)` returns a lookup result, a string the tool printed
+    instead of JSON, or an exception to raise as the HTTP call's failure."""
 
-    def __init__(self, answer: Callable[[str], dict | Exception]):
+    def __init__(self, answer: Callable[[str], dict | str | Exception]):
         self.answer = answer
         self.asked: list[str] = []
 
@@ -114,9 +121,10 @@ class FakeGateway:
         result = self.answer(ioc)
         if isinstance(result, Exception):
             raise result
+        text = result if isinstance(result, str) else json.dumps(result)
         body = {
             "tool": "lookup_ioc",
             "backend": "opencti-mcp",
-            "result": [{"type": "text", "text": json.dumps(result)}],
+            "result": [{"type": "text", "text": text}],
         }
         return _Response(json.dumps(body).encode())

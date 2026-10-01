@@ -542,6 +542,8 @@ def batch_lookup(
                     ioc_handled = True
                     break
                 last_call = time.monotonic()
+                if not isinstance(resp, dict):
+                    resp = {"text": json.dumps(resp)}
                 err = resp.get("error")
                 msg = resp.get("message", err or "") if err else ""
 
@@ -568,11 +570,14 @@ def batch_lookup(
                     ioc_handled = True
                     break
 
-                if not resp.get("found", False) and resp.get("note"):
-                    # A not-found carrying a note did not complete (the
-                    # observable search failed, say): the absence is
-                    # unconfirmed, so it is neither stamped nor counted.
-                    coverage["skipped"][value] = f"unconfirmed: {str(resp['note'])[:120]}"
+                if "found" not in resp or "note" in resp or "error" in resp:
+                    # Confirmed only when the answer says found or not found
+                    # and carries no note or error. A not-found with a note
+                    # did not complete (the observable search failed, say),
+                    # and a reply without `found` (a tool's plain-text
+                    # output) answered nothing: neither is stamped or counted.
+                    detail = resp.get("note") or resp.get("text") or json.dumps(resp)
+                    coverage["skipped"][value] = f"unconfirmed: {str(detail)[:120]}"
                     ioc_handled = True
                     break
 
