@@ -21,7 +21,7 @@ def status_dir(tmp_path, monkeypatch):
     return tmp_path / "status"
 
 
-def _memory_run(status_dir, pslist: int, run_id: str = "run-mem") -> dict:
+def _memory_run(status_dir, pslist: int, run_id: str = "run-mem", bulk_failed: int = 0) -> dict:
     counts = {
         "windows.info": 1,
         "windows.pslist": pslist,
@@ -37,6 +37,7 @@ def _memory_run(status_dir, pslist: int, run_id: str = "run-mem") -> dict:
         hosts=[{"hostname": "host-a", "artifacts": artifacts}],
         totals={"indexed": sum(counts.values()), "artifacts_total": 4, "artifacts_complete": 4},
         started="2026-10-01T00:00:00Z",
+        bulk_failed=bulk_failed,
     )
     (run,) = idx_ingest_status(case_id="CASE-1")["ingests"]
     return run
@@ -53,3 +54,11 @@ def test_a_pslist_with_processes_does_not(status_dir):
     """Other plugins at 0 (cmdline, modules) are not warned about."""
     run = _memory_run(status_dir, pslist=170)
     assert not [w for w in run.get("warnings", []) if "pslist" in w]
+
+
+def test_the_warning_is_added_beside_a_bulk_failure_warning(status_dir):
+    """Both warnings stand: neither replaces the other."""
+    run = _memory_run(status_dir, pslist=0, bulk_failed=12)
+    warnings = run.get("warnings", [])
+    assert any("12 events rejected by OpenSearch" in w for w in warnings), warnings
+    assert any("windows.pslist indexed no processes" in w for w in warnings), warnings
