@@ -12,15 +12,16 @@ from pathlib import Path
 import pytest
 from _helpers import make_windows_tree
 
-# Tests never use the real HOME: some write ingest status and audit entries
-# for real. ingest_status._STATUS_DIR is read from HOME when the module is
-# imported, so this runs when the root conftest is imported, before any test
-# module.
+# Tests run under a temporary HOME: some write ingest status and audit entries
+# for real. Only the cluster settings below are reached through the real one.
+# ingest_status._STATUS_DIR is read from HOME when the module is imported, so
+# this runs when the root conftest is imported, before any test module.
 _ORIGINAL_HOME = os.environ.get("HOME", "")
 _TEST_HOME = tempfile.mkdtemp(prefix="opensearch-mcp-tests-home-")
 atexit.register(shutil.rmtree, _TEST_HOME, ignore_errors=True)
 os.environ["HOME"] = _TEST_HOME
-for _var in ("VHIR_CASE_DIR", "VHIR_AUDIT_DIR"):
+# SUDO_USER too: under sudo, paths.vhir_home() takes that user's home, not HOME.
+for _var in ("VHIR_CASE_DIR", "VHIR_AUDIT_DIR", "SUDO_USER"):
     os.environ.pop(_var, None)
 # The cluster's connection settings, linked rather than copied, so cluster tests
 # still run.
