@@ -136,7 +136,9 @@ def _find_vol3() -> str:
 
     for candidate in ["vol3", "vol", "python3 -m volatility3"]:
         try:
-            cmd = candidate.split() + ["--version"]
+            # Run bare: Volatility 3 has no --version, and 2.28 rejects it
+            # before printing its banner. Bare, it prints the banner and exits 2.
+            cmd = candidate.split()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if "Volatility 3" in (result.stdout + result.stderr):
                 _VOL3_CMD = candidate
