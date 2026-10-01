@@ -41,6 +41,7 @@ SYSMON_SHA256 = _h("sha256", "sysmon").upper()
 IMPHASH = _h("md5", "imphash").upper()
 SYSMON_HASHES = f"MD5={SYSMON_MD5},SHA256={SYSMON_SHA256},IMPHASH={IMPHASH}"
 AMCACHE_SHA1 = _h("sha1", "amcache")
+VR_AMCACHE_SHA1 = _h("sha1", "velociraptor amcache")
 BODYFILE_MD5 = _h("md5", "bodyfile")
 PREFETCH_PATH_HASH = "1A2B3C4D"  # PECmd's hash of the executable's path
 # pslist hashes a process with no image path (System, Registry) as zero bytes.
@@ -54,6 +55,7 @@ DEFAULT_HASHES = {
     SYSMON_MD5.lower(),
     SYSMON_SHA256.lower(),
     AMCACHE_SHA1,
+    VR_AMCACHE_SHA1,
 }
 EXTERNAL_IPS = {"8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4", "208.67.222.222"}
 
@@ -175,6 +177,15 @@ class TestAFieldSomeIndicesCannotAggregate:
             iocs = extract_unique_iocs(os_client, f"case-{case_id}-*")
         assert {PSLIST_MD5, KANSA_MD5.lower()} <= set(iocs["hash"])
 
+    def test_a_csv_amcache_only_case(self, os_client):
+        """`SHA1` is text there, read through `SHA1.keyword`."""
+        sha1 = hashlib.sha1(b"csv amcache").hexdigest()
+        with intel_case(
+            os_client, {"other-amcache": [{"SHA1": sha1}]}, "pytest-extract"
+        ) as case_id:
+            iocs = extract_unique_iocs(os_client, f"case-{case_id}-*")
+        assert iocs["hash"] == {sha1: {("SHA1.keyword", sha1)}}
+
     def test_a_keyword_index_without_doc_values(self, os_client):
         """field_caps marks the keyword type not aggregatable as a whole and
         names the one index that cannot; the others are still read."""
@@ -255,6 +266,15 @@ def case(os_client):
             f"{tag}-delim-prefetch": [{"ExecutableName": "C.EXE", "Hash": PREFETCH_PATH_HASH}],
             f"{tag}-delim-bodyfile": [{"name": "/Windows/x.dll", "md5": BODYFILE_MD5}],
             f"{tag}-csv-amcache": [{"SHA1": AMCACHE_SHA1}],  # no template: text + .keyword
+            # Velociraptor Windows.Detection.Amcache: a top-level SHA1.
+            f"{tag}-json-vramcache": [
+                {
+                    "EntryType": "InventoryApplicationFile",
+                    "EntryName": "d.exe",
+                    "SHA1": VR_AMCACHE_SHA1,
+                    "Publisher": "None",
+                }
+            ],
             # Derived network evidence: Kansa netstat, Sysmon 3 and 22, a logon.
             f"{tag}-delim-netstat": [{"ForeignAddress": "8.8.8.8", "LocalAddress": "10.0.0.5"}],
             # Velociraptor Windows.Network.Netstat: remote address in Raddr.IP.
@@ -309,7 +329,7 @@ def case(os_client):
 @pytest.mark.integration
 class TestExtractionReadsTheEvidence:
     def test_every_default_source_hash_is_extracted(self, os_client, case):
-        """pslist, upper-case Kansa, the Sysmon parts and Amcache — and not
+        """pslist, upper-case Kansa, the Sysmon parts and both Amcache forms — and not
         IMPHASH, a Prefetch path hash or bodyfile, all lower case."""
         iocs = extract_unique_iocs(os_client, case, force=True)
         assert set(iocs["hash"]) == DEFAULT_HASHES
@@ -319,6 +339,7 @@ class TestExtractionReadsTheEvidence:
         assert iocs["hash"][KANSA_MD5.lower()] == {("Hash", KANSA_MD5)}
         assert iocs["hash"][SYSMON_MD5.lower()] == {("winlog.event_data.Hashes", SYSMON_HASHES)}
         assert iocs["hash"][PSLIST["SHA256"]] == {("Hash.SHA256", PSLIST["SHA256"])}
+        assert iocs["hash"][VR_AMCACHE_SHA1] == {("SHA1", VR_AMCACHE_SHA1)}
 
     def test_the_hashes_of_zero_bytes_are_never_extracted(self, os_client, case):
         """Threat intel lists them as indicators (confidence 70, measured),

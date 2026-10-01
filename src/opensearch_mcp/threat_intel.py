@@ -163,6 +163,7 @@ _IP_FIELDS = [
 ]
 
 _HASH_FIELDS = [
+    "SHA1",  # Velociraptor Windows.Detection.Amcache
     "SHA1.keyword",  # dynamic in csv_template (Amcache, EZ CSV)
     "SHA256.keyword",  # dynamic in csv_template
     "MD5.keyword",  # dynamic in csv_template
