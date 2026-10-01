@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 
 import pytest
 from _intel_case import intel_case
@@ -73,6 +74,9 @@ def quick(monkeypatch, tmp_path):
     monkeypatch.setenv("VHIR_INTEL_RATE_LIMIT_RETRIES", "1")
     monkeypatch.setattr(threat_intel.time, "sleep", lambda s: None)
     monkeypatch.setattr(threat_intel, "_coverage_path_for_run", lambda run: tmp_path / "c.json")
+    # Audit records go to this test's directory, never the active case's.
+    (tmp_path / "audit").mkdir()
+    monkeypatch.setenv("VHIR_AUDIT_DIR", str(tmp_path / "audit"))
     return monkeypatch
 
 
@@ -110,6 +114,37 @@ class TestEachCauseIsNotComplete:
         assert status["status"] == "failed", status
         assert status["halt_reason"] == "IntelEnrichmentHalted"
         assert CAUSES[cause][1] in status["message"]
+
+
+@pytest.mark.integration
+class TestAHaltedRunThatStamped:
+    def test_leaves_an_audit_record_and_its_count(self, os_client, quick, tmp_path):
+        """The halt was raised after the stamps landed, and the CLI wrote
+        `failed` with 0 indexed and re-raised before its audit record: the
+        evidence was modified with no record of it."""
+        from opensearch_mcp import ingest_cli, ingest_status
+        from opensearch_mcp.server import idx_ingest_status
+
+        FakeGateway(lambda ioc: found(ioc, 90) if ioc == MAL else unconfirmed(ioc)).install(quick)
+        quick.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+        quick.setenv("VHIR_INGEST_RUN_ID", "run-halted-after-stamping")
+        with intel_case(os_client, DOCS, prefix="pytest-complete") as case_id:
+            quick.setattr(ingest_cli, "_resolve_case_id", lambda _c: case_id)
+            args = argparse.Namespace(case=case_id, force=False, dry_run=False)
+            with pytest.raises(threat_intel.IntelEnrichmentHalted):
+                ingest_cli.cmd_enrich_intel(args)
+            (status,) = idx_ingest_status(case_id=case_id)["ingests"]
+        records = [
+            json.loads(line)
+            for log in (tmp_path / "audit").glob("*.jsonl")
+            for line in log.read_text().splitlines()
+        ]
+        (record,) = [r for r in records if r["tool"] == "enrich_intel"]
+        assert record["params"]["case_id"] == case_id
+        summary = record["result_summary"]["value"]
+        assert summary.startswith("1 docs updated, 1 malicious, 0 suspicious; incomplete:")
+        assert "unconfirmed 1" in summary
+        assert (status["status"], status["total_indexed"]) == ("failed", 1)
 
 
 @pytest.mark.integration

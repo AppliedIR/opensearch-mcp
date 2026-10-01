@@ -49,7 +49,14 @@ class IntelEnrichmentHalted(RuntimeError):
     extracted IOC has no confirmed lookup (gateway missing, lookups failing,
     rate limit exhausted, an unconfirmed not-found, the circuit breaker), or
     a stamp did not land. The verdicts that were confirmed are still
-    stamped; the message says what is missing and why."""
+    stamped; the message says what is missing and why.
+
+    `summary` holds the run's counts when the halt comes after stamping:
+    documents were modified, and the caller records them."""
+
+    def __init__(self, reason: str, summary: dict | None = None):
+        super().__init__(reason)
+        self.summary = summary
 
 
 def _parse_wait_hint(msg: str, default: float = 20.0) -> float:
@@ -831,14 +838,7 @@ def enrich_case(
     origins = {value: where for found in iocs.values() for value, where in found.items()}
     updated, conflicts, failed_stamps = stamp_documents(client, index_pattern, results, origins)
 
-    # Complete only when every IOC had a confirmed lookup and every stamp
-    # landed. A run that looked nothing up read "complete, 0 malicious".
-    reason = _incomplete(iocs, coverage, conflicts, failed_stamps)
-    if reason:
-        raise IntelEnrichmentHalted(reason)
-
-    return {
-        "status": "complete",
+    counts = {
         "iocs_extracted": total_iocs,
         "iocs_looked_up": len(results),
         "malicious": malicious,
@@ -846,3 +846,10 @@ def enrich_case(
         "documents_updated": updated,
         "version_conflicts": conflicts,
     }
+    # Complete only when every IOC had a confirmed lookup and every stamp
+    # landed. A run that looked nothing up read "complete, 0 malicious".
+    reason = _incomplete(iocs, coverage, conflicts, failed_stamps)
+    if reason:
+        raise IntelEnrichmentHalted(reason, summary={"status": "incomplete", **counts})
+
+    return {"status": "complete", **counts}

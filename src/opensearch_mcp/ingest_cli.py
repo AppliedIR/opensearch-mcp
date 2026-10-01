@@ -2069,7 +2069,11 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     include_filesystem = getattr(args, "include_filesystem", False)
 
     from opensearch_mcp.paths import sanitize_index_component
-    from opensearch_mcp.threat_intel import enrich_case, extract_unique_iocs
+    from opensearch_mcp.threat_intel import (
+        IntelEnrichmentHalted,
+        enrich_case,
+        extract_unique_iocs,
+    )
 
     client = get_client()
 
@@ -2153,10 +2157,16 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
         # misframes a caught exception as an uncaught crash.
         # Length-cap so a verbose stacktrace doesn't bloat the status
         # JSON beyond ~1KB.
+        # A run halted after stamping modified documents: its counts go
+        # to the status and the audit trail before the failure is raised.
+        halted = e.summary if isinstance(e, IntelEnrichmentHalted) else None
         _write_enrich_status(
             "failed",
+            indexed=halted["documents_updated"] if halted else 0,
             error=f"{type(e).__name__}: {e}"[:500],
         )
+        if halted:
+            _audit_enrichment(case_id, force, halted, incomplete=str(e))
         print(f"Enrichment failed: {e}", file=sys.stderr)
         raise
 
@@ -2176,14 +2186,22 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
         files_total=_progress_state["total"] or result.get("iocs_extracted", 0),
     )
 
+    _audit_enrichment(case_id, force, result)
+
+
+def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str = "") -> None:
+    """The audit record of an enrichment run that stamped documents."""
+    summary = (
+        f"{result['documents_updated']} docs updated, "
+        f"{result['malicious']} malicious, {result['suspicious']} suspicious"
+    )
+    if incomplete:
+        summary += f"; incomplete: {incomplete[:300]}"
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     audit.log(
         tool="enrich_intel",
         params={"case_id": case_id, "force": force},
-        result_summary=(
-            f"{result['documents_updated']} docs updated, "
-            f"{result['malicious']} malicious, {result['suspicious']} suspicious"
-        ),
+        result_summary=summary,
     )
 
 
