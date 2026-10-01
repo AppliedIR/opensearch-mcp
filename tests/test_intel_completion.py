@@ -189,7 +189,7 @@ class TestACappedExtraction:
             summary = threat_intel.enrich_case(os_client, case_id)
         assert (
             "extraction was capped at 3 unique values per field (Hash.MD5); "
-            "a rerun without force continues with the next batch"
+            "values beyond the cap were not checked"
         ) in str(halted.value)
         assert sorted(first.asked) == values[:3]
         assert (second.asked, summary["status"]) == ([values[3]], "complete")

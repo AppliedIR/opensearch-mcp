@@ -222,9 +222,10 @@ _PARSED_FIELDS = {
 }
 
 
-# Unique values read per field in one run. A field with more is capped: the
-# run is incomplete, and the next run without `force` reads the next batch,
-# since documents already stamped are left out.
+# Unique values read per field in one run. A field with more is capped and
+# the run is incomplete. Documents already stamped are left out of the next
+# run without `force`, but values that are never stamped (malformed values,
+# the zero-byte hashes, private addresses) keep their place in the window.
 _EXTRACTION_CAP = 10_000
 
 
@@ -814,7 +815,7 @@ def _incomplete(
 def _capped_reason(capped: dict[str, int]) -> str:
     return (
         f"extraction was capped at {_EXTRACTION_CAP:,} unique values per field "
-        f"({', '.join(sorted(capped))}); a rerun without force continues with the next batch"
+        f"({', '.join(sorted(capped))}); values beyond the cap were not checked"
     )
 
 
