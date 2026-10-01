@@ -527,13 +527,21 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
     SUSPICIOUS stamps."""
 
     def _mock_client(self, buckets_by_field: dict[str, list[str]]) -> MagicMock:
-        """Build a MagicMock OpenSearch client whose `search()` returns
+        """Build a MagicMock OpenSearch client whose `msearch()` returns
         a different agg-values bucket list based on the `field` aggs
-        key in the query body. The extractor's agg key is `values`
-        (see threat_intel.py:329)."""
+        key in the query body, and whose `field_caps()` reports every
+        field as an aggregatable keyword. The extractor's agg key is
+        `values`."""
         client = MagicMock()
+        client.field_caps.side_effect = lambda *, index, fields, **kw: {
+            "indices": ["case-test-a"],
+            "fields": {
+                f: {"keyword": {"type": "keyword", "aggregatable": True}}
+                for f in fields.split(",")
+            },
+        }
 
-        def _search(*, index, body, **kwargs):
+        def _search(*, body, **kwargs):
             field = body["aggs"]["values"]["terms"]["field"]
             vals = buckets_by_field.get(field, [])
             return {
@@ -545,7 +553,9 @@ class TestExtractorRejectsGarbageAndSurfacesFieldAttribution:
                 }
             }
 
-        client.search.side_effect = _search
+        client.msearch.side_effect = lambda *, body, **kw: {
+            "responses": [_search(body=b) for b in body[1::2]]
+        }
         return client
 
     def test_garbage_hash_fragment_rejected(self, capsys):

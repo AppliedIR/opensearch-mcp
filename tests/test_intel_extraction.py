@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from _intel_case import intel_case
 
 from opensearch_mcp import threat_intel
 from opensearch_mcp.threat_intel import extract_unique_iocs
@@ -114,15 +115,119 @@ class TestAFailedRequestRaises:
         """Skipped, it read as "no IOCs" for that field."""
         field = threat_intel._HASH_FIELDS[0]
 
-        def search(**kw):
-            if kw["body"]["aggs"]["values"]["terms"]["field"] == field:
+        def msearch(*, body, **kw):
+            if body[1]["aggs"]["values"]["terms"]["field"] == field:
                 raise RuntimeError("503 unavailable")
-            return {"aggregations": {"values": {"buckets": []}}}
+            return {"responses": [{"aggregations": {"values": {"buckets": []}}}]}
 
-        client = MagicMock()
-        client.search.side_effect = search
         with pytest.raises(threat_intel.IOCExtractionError, match=field):
+            extract_unique_iocs(_client_with(msearch), "case-x-*")
+
+    def test_an_error_answer_on_one_field(self):
+        """A multi-search answers a failed search inside a 200."""
+        field = threat_intel._HASH_FIELDS[0]
+
+        def msearch(*, body, **kw):
+            if body[1]["aggs"]["values"]["terms"]["field"] == field:
+                return {"responses": [{"error": {"type": "x"}, "status": 400}]}
+            return {"responses": [{"aggregations": {"values": {"buckets": []}}}]}
+
+        with pytest.raises(threat_intel.IOCExtractionError, match=field):
+            extract_unique_iocs(_client_with(msearch), "case-x-*")
+
+    def test_reading_the_field_mappings(self):
+        client = _client_with(None)
+        client.field_caps.side_effect = RuntimeError("503 unavailable")
+        with pytest.raises(threat_intel.IOCExtractionError, match="field mappings"):
             extract_unique_iocs(client, "case-x-*")
+
+
+def _client_with(msearch) -> MagicMock:
+    """A client whose field_caps reports every field aggregatable."""
+    client = MagicMock()
+    client.field_caps.side_effect = lambda *, index, fields, **kw: {
+        "indices": ["case-x-a"],
+        "fields": {
+            f: {"keyword": {"type": "keyword", "aggregatable": True}} for f in fields.split(",")
+        },
+    }
+    client.msearch.side_effect = msearch
+    return client
+
+
+PSLIST_MD5 = hashlib.md5(b"pslist").hexdigest()
+KANSA_MD5 = hashlib.md5(b"kansa").hexdigest().upper()  # Kansa stores upper case
+PREFETCH = {  # PECmd: `Hash` is the path hash; the template maps it as text
+    "ExecutableName": "A.EXE",
+    "Hash": "D9A8B1C2",
+    "RunCount": 3,
+    "SourceFilename": "A.EXE-D9A8B1C2.pf",
+}
+
+
+def _shard_failures(monkeypatch, client) -> list[int]:
+    """The failed-shard count of every search the extraction sends."""
+    seen: list[int] = []
+    for name in ("search", "msearch"):
+
+        def spy(*args, _real=getattr(client, name), **kwargs):
+            result = _real(*args, **kwargs)
+            for answer in result.get("responses", [result]):
+                seen.append(answer.get("_shards", {}).get("failed", 0))
+            return result
+
+        monkeypatch.setattr(client, name, spy)
+    return seen
+
+
+@pytest.mark.integration
+class TestAFieldSomeIndicesCannotAggregate:
+    """PECmd prefetch indices map `Hash` as text. Aggregated alone it fails
+    the request, so the case could never be enriched; mixed with other
+    indices it failed their shards inside a 200."""
+
+    def test_a_prefetch_only_case_enriches(self, os_client):
+        with intel_case(os_client, {"prefetch-host-a": [PREFETCH]}, "pytest-extract") as case_id:
+            summary = threat_intel.enrich_case(os_client, case_id)
+        assert summary["status"] == "no_iocs"
+
+    def test_prefetch_with_pslist_and_kansa(self, os_client, monkeypatch):
+        docs = {
+            "prefetch-host-a": [PREFETCH],
+            "json-pslist": [{"Pid": 1, "Hash": {"MD5": PSLIST_MD5}}],
+            "delim-kansa": [{"Hash": KANSA_MD5}],
+        }
+        with intel_case(os_client, docs, "pytest-extract") as case_id:
+            failed = _shard_failures(monkeypatch, os_client)
+            iocs = extract_unique_iocs(os_client, f"case-{case_id}-*")
+        assert {PSLIST_MD5, KANSA_MD5.lower()} <= set(iocs["hash"])
+        assert failed and sum(failed) == 0
+
+    def test_a_keyword_index_without_doc_values(self, os_client, monkeypatch):
+        """field_caps marks the keyword type not aggregatable as a whole and
+        names the one index that cannot; the others are still read."""
+        with intel_case(
+            os_client, {"delim-kansa": [{"Hash": KANSA_MD5}]}, "pytest-extract"
+        ) as case_id:
+            index = f"case-{case_id}-other-nodv"
+            mapping = {"properties": {"Hash": {"type": "keyword", "doc_values": False}}}
+            os_client.indices.create(index=index, body={"mappings": mapping})
+            os_client.index(index=index, body={"Hash": PSLIST_MD5}, refresh=True)
+            failed = _shard_failures(monkeypatch, os_client)
+            iocs = extract_unique_iocs(os_client, f"case-{case_id}-*")
+        assert KANSA_MD5.lower() in iocs["hash"]
+        assert failed and sum(failed) == 0
+
+    def test_index_names_longer_than_an_http_line(self, os_client, monkeypatch):
+        """Twenty indices with 220-character names: listed in a URL, they
+        pass the 4096-byte HTTP line limit."""
+        docs = {f"delim-kansa{i:02d}-{'x' * 180}": [{"Hash": KANSA_MD5}] for i in range(20)}
+        docs["prefetch-host-a"] = [PREFETCH]
+        with intel_case(os_client, docs, "pytest-extract") as case_id:
+            failed = _shard_failures(monkeypatch, os_client)
+            iocs = extract_unique_iocs(os_client, f"case-{case_id}-*")
+        assert KANSA_MD5.lower() in iocs["hash"]
+        assert failed and sum(failed) == 0
 
 
 class TestIsExternal:

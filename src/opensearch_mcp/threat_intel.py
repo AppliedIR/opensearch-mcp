@@ -350,6 +350,24 @@ def _lookup_form(ioc_type: str, value: str) -> str:
     return value
 
 
+def _aggregatable_indices(caps: dict, field: str) -> list[str]:
+    """The indices where a terms aggregation on `field` can run.
+
+    An index that maps the field as text (PECmd prefetch's `Hash`, by dynamic
+    mapping) fails the request when it is the only one, and fails its shards
+    in a 200 otherwise. `caps` is a `_field_caps` response; an entry lists its
+    indices only when the field has more than one type.
+    """
+    found: set[str] = set()
+    for entry in caps.get("fields", {}).get(field, {}).values():
+        indices = set(entry.get("indices", caps.get("indices", [])))
+        if entry.get("aggregatable"):
+            found |= indices
+        elif "non_aggregatable_indices" in entry:
+            found |= indices - set(entry["non_aggregatable_indices"])
+    return sorted(found)
+
+
 def extract_unique_iocs(
     client: OpenSearch,
     index_pattern: str,
@@ -400,23 +418,39 @@ def extract_unique_iocs(
     }
 
     hash_fields = _HASH_FIELDS + (_FILESYSTEM_HASH_FIELDS if include_filesystem else [])
-    for ioc_type, fields in [
-        ("ip", _IP_FIELDS),
-        ("hash", hash_fields),
-        ("domain", _DOMAIN_FIELDS),
-    ]:
+    field_sets = [("ip", _IP_FIELDS), ("hash", hash_fields), ("domain", _DOMAIN_FIELDS)]
+    try:
+        caps = client.field_caps(
+            index=index_pattern,
+            fields=",".join(field for _, fields in field_sets for field in fields),
+            request_timeout=60,
+        )
+    except Exception as e:
+        raise IOCExtractionError(
+            f"IOC extraction failed reading field mappings: {type(e).__name__}: {e}"
+        ) from e
+    for ioc_type, fields in field_sets:
         validate = validators[ioc_type]
         for field in fields:
+            indices = _aggregatable_indices(caps, field)
+            if not indices:
+                continue
             try:
-                result = client.search(
-                    index=index_pattern,
-                    body={
-                        "query": query,
-                        "size": 0,
-                        "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
-                    },
+                # The index list goes in the request body: in the URL, a
+                # case's index names pass the 4096-byte HTTP line limit.
+                (result,) = client.msearch(
+                    body=[
+                        {"index": indices},
+                        {
+                            "query": query,
+                            "size": 0,
+                            "aggs": {"values": {"terms": {"field": field, "size": 10000}}},
+                        },
+                    ],
                     request_timeout=60,
-                )
+                )["responses"]
+                if "error" in result:
+                    raise RuntimeError(json.dumps(result["error"])[:500])
             except Exception as e:
                 raise IOCExtractionError(
                     f"IOC extraction failed on {field}: {type(e).__name__}: {e}"
