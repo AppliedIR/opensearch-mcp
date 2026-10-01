@@ -1675,14 +1675,16 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 if a_status == "complete":
                     icon = "done"
                     detail = f"{indexed:,} docs submitted"
-                    # A running Windows image always has processes: an empty
-                    # pslist means the list couldn't be walked, not that none ran.
+                    # A running Windows image always has processes. 0 indexed has
+                    # more than one cause, and the status can't tell them apart.
                     if a.get("name") == "windows.pslist" and indexed == 0:
                         s.setdefault("warnings", []).append(
-                            f"{hostname}: windows.pslist returned no processes. The process "
-                            "list couldn't be walked (possible memory smear or unsupported "
-                            "layout). windows.psscan recovers processes: tier 2, or "
-                            'plugins=["windows.psscan"].'
+                            f"{hostname}: windows.pslist indexed no processes (a running "
+                            "Windows image always has some). Either the process list "
+                            "couldn't be walked (possible memory smear or unsupported "
+                            "layout), in which case windows.psscan can recover processes "
+                            '(tier 2, or plugins=["windows.psscan"]); or the results '
+                            "weren't indexed, in which case check the ingest log."
                         )
                 elif a_status == "running":
                     files_done = a.get("files_done", 0)

@@ -45,7 +45,8 @@ def _memory_run(status_dir, pslist: int, run_id: str = "run-mem") -> dict:
 def test_an_empty_pslist_carries_the_warning(status_dir):
     run = _memory_run(status_dir, pslist=0)
     (warning,) = [w for w in run.get("warnings", []) if "windows.pslist" in w]
-    assert "host-a" in warning and "windows.psscan" in warning
+    assert warning.startswith("host-a: windows.pslist indexed no processes")
+    assert "windows.psscan" in warning and "check the ingest log" in warning
 
 
 def test_a_pslist_with_processes_does_not(status_dir):
