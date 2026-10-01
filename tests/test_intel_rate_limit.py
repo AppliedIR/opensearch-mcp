@@ -108,7 +108,12 @@ class TestEnrichmentRateLimitFlow:
                     "error": "RateLimitError",
                     "message": "Rate limit exceeded. Wait 1s.",
                 }
-            return {"found": True, "confidence": 85}
+            return {
+                "found": True,
+                "entity_type": "indicator",
+                "name": params["ioc"],
+                "confidence": 85,
+            }
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", fake_call_tool)
         monkeypatch.setattr(threat_intel.time, "sleep", lambda s: sleep_calls.append(s))

@@ -30,14 +30,23 @@ def _wrap(result: dict) -> dict:
     return result
 
 
-def found(ioc: str, confidence: int, labels: list[str] | None = None) -> dict:
+def found(
+    ioc: str,
+    confidence: int,
+    labels: list[str] | None = None,
+    *,
+    name: str | None = None,
+    entity_type: str = "indicator",
+) -> dict:
+    """OpenCTI's top full-text hit for `ioc`: by default its own indicator;
+    `name` and `entity_type` describe a hit that is something else."""
     return _wrap(
         {
             "found": True,
             "ioc": ioc,
-            "entity_type": "indicator",
+            "entity_type": entity_type,
             "type": "stix",
-            "name": ioc,
+            "name": ioc if name is None else name,
             "description": "",
             "created": "2026-01-01T00:00:00Z",
             "confidence": confidence,

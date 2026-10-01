@@ -504,6 +504,21 @@ def extract_unique_iocs(
     return iocs
 
 
+def _is_this_ioc(resp: dict, ioc_type: str, value: str) -> bool:
+    """Whether a `found` answer is an indicator for exactly this IOC.
+
+    `lookup_ioc` searches OpenCTI's full text and answers with the top hit.
+    For a value with no indicator of its own that can be an unrelated
+    indicator sharing a word with it (an internal host's SRV record answered
+    by some other domain), or an observable, which records a value and
+    detects nothing. The name is compared in lookup form, so case counts only
+    where it carries meaning.
+    """
+    if resp.get("entity_type") != "indicator":
+        return False
+    return _lookup_form(ioc_type, str(resp.get("name", ""))) == value
+
+
 def batch_lookup(
     iocs: dict[str, set[str]],
     on_progress=None,
@@ -626,7 +641,7 @@ def batch_lookup(
                 consecutive_failures = 0
                 coverage["enriched"].append(value)
 
-                if not resp.get("found", False):
+                if not resp.get("found", False) or not _is_this_ioc(resp, ioc_type, value):
                     results[value] = {
                         "threat_intel.checked": True,
                         "threat_intel.ioc_type": ioc_type,
