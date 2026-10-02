@@ -16,6 +16,7 @@ from pathlib import Path
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.ingest_counts import stored_counts
 from opensearch_mcp.memory_tiers import TIER_1, TIER_2, TIER_3, TIERS  # noqa: F401
 
 # Natural keys per plugin (content-intrinsic, version-independent)
@@ -372,6 +373,8 @@ def ingest_memory(
             host_dict=host_dict,
         )
         results[plugin] = {"status": "complete", "indexed": count, "bulk_failed": bf}
+        counts = stored_counts(client, index_name, ingest_audit_id) if ingest_audit_id else {}
+        results[plugin].update(counts)
 
         # Per-plugin success audit — run_id + index_name required for
         # resolver parser_step chaining (manager.py:1057, :1075).
@@ -394,6 +397,6 @@ def ingest_memory(
             )
 
         if on_progress:
-            on_progress("plugin_done", plugin=plugin, indexed=count)
+            on_progress("plugin_done", plugin=plugin, indexed=count, **counts)
 
     return results

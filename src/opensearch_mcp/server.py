@@ -19,6 +19,7 @@ from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
 from opensearch_mcp.host_dictionary import detect_host_id_mapping_type
+from opensearch_mcp.ingest_counts import describe as _describe_counts
 
 logger = logging.getLogger(__name__)
 
@@ -1726,7 +1727,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":
                     icon = "done"
-                    detail = f"{indexed:,} docs submitted"
+                    detail = f"{indexed:,} docs submitted" + _describe_counts(a)
                     # A running Windows image always has processes. 0 indexed has
                     # more than one cause, and the status can't tell them apart.
                     if a.get("name") == "windows.pslist" and indexed == 0:

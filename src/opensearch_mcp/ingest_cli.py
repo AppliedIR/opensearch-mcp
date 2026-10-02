@@ -17,6 +17,7 @@ from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
+from opensearch_mcp.ingest_counts import describe, stored_counts
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.memory_tiers import TIERS
@@ -425,6 +426,7 @@ def _write_bg_status(
     error="",
     bulk_failed=0,
     bulk_failed_reason=None,
+    counts=None,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -439,7 +441,7 @@ def _write_bg_status(
     """
     from opensearch_mcp.bulk import get_last_bulk_reason
 
-    art = {"name": artifact_name, "status": status, "indexed": indexed}
+    art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
     if error:
         art["error"] = error
     if files_total:
@@ -1788,6 +1790,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
     total = total_sk = total_bf = 0
+    touched: set[str] = set()
     _delim_failed_files: list[tuple[str, str]] = []  # (path, error[:200])
     try:
         for idx, f in enumerate(files):
@@ -1835,6 +1838,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 total += cnt
                 total_sk += sk
                 total_bf += bf
+                touched.add(index_name)
                 if run_id:
                     _write_bg_status(
                         case_id,
@@ -1877,7 +1881,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
         raise
 
-    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    counts = stored_counts(client, ",".join(sorted(touched)), aid) if touched else {}
+    print(
+        f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed{describe(counts)}."
+    )
     if _delim_failed_files:
         print(f"*** {len(_delim_failed_files)} files failed to parse; continuing walk: ***")
         for path, err in _delim_failed_files[:10]:
@@ -1914,6 +1921,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             indexed=total,
             error=final_error,
             bulk_failed=total_bf,
+            counts=counts,
         )
     # The recursive walk shares this run's status file and sums these.
     return total, total_bf, reason
@@ -2378,9 +2386,10 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 if a["name"] == plugin:
                     a["status"] = "complete"
                     a["indexed"] = cnt
+                    a.update({k: kw[k] for k in ("stored", "ignored") if k in kw})
                     break
             if cnt:
-                print(f"{cnt:,} entries")
+                print(f"{cnt:,} entries" + describe(kw))
             else:
                 print("empty")
         elif event == "plugin_failed":
