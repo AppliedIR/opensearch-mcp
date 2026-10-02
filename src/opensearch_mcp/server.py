@@ -2216,14 +2216,14 @@ def _spawn_ingest(cmd, env, stdout, run_id):
 
         env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
 
-    scope_cmd = [
+    scope = [
         "systemd-run",
         "--user",
         "--scope",
         "--property=MemoryMax=8G",
         "--property=MemoryHigh=6G",
-        f"--unit=vhir-ingest-{run_id[:12]}",
-    ] + cmd
+    ]
+    scope_cmd = scope + [f"--unit=vhir-ingest-{run_id[:12]}"] + cmd
 
     # Workers never read the server's stdin: it's the MCP pipe, and a child
     # that reads it (7z prompting for a password) consumes requests.
@@ -2244,14 +2244,25 @@ def _spawn_ingest(cmd, env, stdout, run_id):
                 ["systemctl", "--user", "reset-failed", f"vhir-ingest-{run_id[:12]}"],
                 capture_output=True,
             )
-            proc = _sp.Popen(
-                cmd,
-                stdout=stdout,
-                stderr=_sp.STDOUT,
-                stdin=_sp.DEVNULL,
-                env=env,
-                start_new_session=True,
-            )
+            # With --scope the worker's own exit status comes back, so a
+            # worker that failed fast reads like systemd-run failing. Run it
+            # again outside the scope only if a scope can't start at all.
+            try:
+                probe = _sp.run(
+                    scope + ["--quiet", "true"], env=env, capture_output=True, timeout=10
+                )
+                scoped = probe.returncode == 0
+            except (OSError, _sp.SubprocessError):
+                scoped = False
+            if not scoped:
+                proc = _sp.Popen(
+                    cmd,
+                    stdout=stdout,
+                    stderr=_sp.STDOUT,
+                    stdin=_sp.DEVNULL,
+                    env=env,
+                    start_new_session=True,
+                )
     except (FileNotFoundError, OSError):
         proc = _sp.Popen(
             cmd,
