@@ -37,7 +37,17 @@ def _doc(client, case_id: str, pid: int) -> tuple:
     return source.get("threat_intel.verdict"), source.get("threat_intel.ioc_value")
 
 
-def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = False):  # noqa: F811
+def _stamp(client, case_id: str, pid: int) -> tuple:
+    hits = client.search(
+        index=f"case-{case_id}-json-pslist", body={"query": {"term": {"Pid": pid}}}
+    )["hits"]["hits"]
+    (source,) = [h["_source"] for h in hits]
+    return tuple(
+        source.get(f"threat_intel.{k}") for k in ("verdict", "ioc_value", "confidence", "labels")
+    )
+
+
+def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = False, read=_doc):  # noqa: F811
     """Run 1 on the first document; add a second carrying H and a new IOC;
     run 2. Returns (run 2 status, document 1 after, document 2 after)."""
     # Two runs, each with its own coverage: one map would resume the first.
@@ -55,7 +65,7 @@ def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = Fal
         gateway.answer = lambda ioc: second[ioc]
         quick.setenv("VHIR_INGEST_RUN_ID", "rerun-2")
         status = threat_intel.enrich_case(client, case_id, force=force)["status"]
-        return status, _doc(client, case_id, 1), _doc(client, case_id, 2)
+        return status, read(client, case_id, 1), read(client, case_id, 2)
 
 
 @pytest.mark.integration
@@ -105,3 +115,16 @@ class TestASecondRunKeepsTheHigherVerdict:
             force=True,
         )
         assert first[0] == "SUSPICIOUS"
+
+    def test_an_equal_grade_restamps(self, os_client, quick, tmp_path):  # noqa: F811
+        """Only a higher verdict is kept: at the same rank the newer lookup's
+        IOC, confidence and labels replace the older ones."""
+        _, first, _ = _rerun(
+            os_client,
+            quick,
+            tmp_path,
+            {R: found(R, 90, ["c2"]), H: SUSPICIOUS(H)},
+            {H: found(H, 95, ["apt"]), X: not_found(X)},
+            read=_stamp,
+        )
+        assert first == ("MALICIOUS", H, 95, ["apt"])
