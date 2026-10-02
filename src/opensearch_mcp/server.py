@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -540,6 +541,14 @@ def _validate_path(path: str) -> str | None:
     return None
 
 
+# A wildcard on an IPv4 address: 10.1.2.*, 172.16.5.1?
+_IP_WILDCARD = re.compile(r"\b\d{1,3}\.[\d.]*[*?]")
+_IP_WILDCARD_HINT = (
+    "IP-typed fields return nothing for wildcards: use CIDR, "
+    'source.ip:"10.1.2.0/24", ORed with the wildcard across older indices.'
+)
+
+
 @server.tool()
 def idx_search(
     query: str,
@@ -628,10 +637,12 @@ def idx_search(
         resp["hint"] = (
             "No results. If searching for filenames, include the extension "
             "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
-            "'*svchost*'. OpenSearch tokenizes on dots/hyphens. IP-typed "
-            "fields return nothing for wildcards: use CIDR, "
-            'source.ip:"10.1.2.0/24", ORed with the wildcard across older indices.'
+            "'*svchost*'. OpenSearch tokenizes on dots/hyphens. " + _IP_WILDCARD_HINT
         )
+    elif _IP_WILDCARD.search(query):
+        # Hits from indices that keep the address as text don't mean the
+        # IP-typed ones matched: there the wildcard silently matches nothing.
+        resp["hint"] = _IP_WILDCARD_HINT
     if compact:
         resp["note"] = (
             "Results are compact — bloat fields excluded, long values truncated. "

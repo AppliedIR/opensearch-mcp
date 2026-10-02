@@ -195,6 +195,32 @@ class TestIdxSearch:
         assert 'source.ip:"10.1.2.0/24"' in hint
         assert "IP-typed fields return nothing for wildcards" in hint
 
+    @staticmethod
+    def _hits(n: int) -> dict:
+        hits = [{"_id": str(i), "_index": "idx", "_source": {"n": i}} for i in range(n)]
+        return {"hits": {"total": {"value": n}, "hits": hits}}
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "source.ip:172.16.5.*",
+            "172.16.5.*",
+            "(source.ip:10.1.* OR host.name:x)",
+            "source.ip:*172.16.5.*",
+            "source.ip:172.16.5.1?",
+        ],
+    )
+    def test_an_ip_wildcard_with_hits_is_still_pointed_to_cidr(self, mock_client, query):
+        """On a case mixing text and IP-typed indices the wildcard finds the
+        text ones (20 of 49 hits measured) and silently misses the rest."""
+        mock_client.search.return_value = self._hits(20)
+        assert 'source.ip:"10.1.2.0/24"' in idx_search(query=query).get("hint", "")
+
+    @pytest.mark.parametrize("query", ["source.ip:*", "event.code:46*", "*.exe", "dc01.*"])
+    def test_other_wildcards_with_hits_get_no_ip_hint(self, mock_client, query):
+        mock_client.search.return_value = self._hits(20)
+        assert "IP-typed" not in idx_search(query=query).get("hint", "")
+
 
 # ---------------------------------------------------------------------------
 # idx_count
