@@ -243,3 +243,20 @@ def test_the_same_file_name_under_two_hosts_is_two_files(cluster_case, tmp_path,
     (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
     (note,) = [w for w in status.get("warnings", []) if "No time field" in w]
     assert "No time field detected in 2 file(s), e.g. host1/procs.csv" in note
+
+
+def test_an_epoch_written_as_digits_in_a_string_is_not_the_time(tmp_path):
+    """@timestamp would take "1675036674" as epoch milliseconds: 1970."""
+    docs = _json(
+        tmp_path, [{"Timestamp": "1675036674", "n": 1}, {"Timestamp": 1675036674, "n": 2}]
+    )
+    by_n = {d["n"]: d for d in docs}
+    assert "@timestamp" not in by_n[1] and by_n[1]["Timestamp"] == "1675036674"
+    assert by_n[2]["@timestamp"].startswith("2023-01-29T23:57:54")
+
+
+def test_an_integer_too_big_for_a_float_keeps_its_raw_value(tmp_path):
+    docs = _json(tmp_path, [{"Timestamp": 10**400, "n": 1}, {"Timestamp": 1675036674, "n": 2}])
+    by_n = {d["n"]: d for d in docs}
+    assert "@timestamp" not in by_n[1]
+    assert by_n[2]["@timestamp"].startswith("2023-01-29T23:57:54")

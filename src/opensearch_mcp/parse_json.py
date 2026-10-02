@@ -170,14 +170,16 @@ def ingest_json(
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
             if isinstance(val, (int, float)):
-                if val > 1e15:
-                    val = val / 1e6
-                elif val > 1e12:
-                    val = val / 1000.0
                 try:
+                    if val > 1e15:
+                        val = val / 1e6
+                    elif val > 1e12:
+                        val = val / 1000.0
                     record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
                 except (ValueError, OverflowError, OSError):
-                    pass  # not an epoch we can read (ns, say): the raw value stays
+                    pass  # not an epoch we can read (ns, 10**400): the raw value stays
+            elif isinstance(val, str) and val.isascii() and val.isdigit():
+                pass  # digits as text: @timestamp would read them as epoch millis (1970)
             else:
                 record["@timestamp"] = val
 
