@@ -101,5 +101,14 @@ def test_the_cluster_names_the_missing_registry_pattern():
 
 
 def test_a_registry_index_runs_persistence_as_before():
-    res = _enrich(["case-c1-registry-h"])["registry_persistence"]
-    assert res["status"] == "complete", res
+    """Its rules still run, and what they update is reported."""
+    calls = []
+
+    class _WithUpdates(_OpenSearch):
+        def update_by_query(self, index, body, **kw):
+            calls.append(index)
+            return {"updated": 1}
+
+    res = tr._enrich_registry_persistence(_WithUpdates(["case-c1-registry-h"]), "c1")
+    assert calls and set(calls) == {"case-c1-registry-*"}, calls
+    assert res == {"status": "complete", "enriched": len(calls)}, res
