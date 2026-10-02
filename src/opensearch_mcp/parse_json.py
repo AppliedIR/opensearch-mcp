@@ -13,6 +13,10 @@ from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _doc_id
 from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
 
+# Velociraptor's epoch-number time column. JSON only: in a CSV the same name
+# holds a string, which OpenSearch would read as epoch milliseconds (1970).
+_JSON_TIME_FIELDS = ("Timestamp",)
+
 _JSON_VOLATILE = {
     "host.name",
     "pipeline_version",
@@ -161,7 +165,7 @@ def ingest_json(
 
     for record in _iter_json_records(path, fmt):
         if ts_field is None and not time_field:
-            ts_field = auto_detect_time_field(record)
+            ts_field = auto_detect_time_field(record, extra=_JSON_TIME_FIELDS)
 
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
@@ -170,7 +174,10 @@ def ingest_json(
                     val = val / 1e6
                 elif val > 1e12:
                     val = val / 1000.0
-                record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+                try:
+                    record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+                except (ValueError, OverflowError, OSError):
+                    pass  # not an epoch we can read (ns, say): the raw value stays
             else:
                 record["@timestamp"] = val
 
@@ -243,6 +250,6 @@ def ingest_json(
         count += flushed
         bulk_failed += failed
 
-    if not ts_field and count:
+    if not ts_field and count and path.name not in NO_TIME_FIELD:
         NO_TIME_FIELD.append(path.name)
     return count, skipped, bulk_failed, host_renamed

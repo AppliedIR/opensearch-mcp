@@ -284,6 +284,6 @@ def ingest_delimited(
         count += flushed
         bulk_failed += failed
 
-    if not ts_field and count:
+    if not ts_field and count and path.name not in NO_TIME_FIELD:
         NO_TIME_FIELD.append(path.name)
     return count, skipped, bulk_failed, host_renamed

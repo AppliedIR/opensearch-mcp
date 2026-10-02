@@ -180,19 +180,30 @@ _TIMESTAMP_CANDIDATES = [
     "CreatedTime",
     "EventTime",
     "date",
-    "Timestamp",
 ]
 
-# Files whose records had no time field; reported in the ingest status.
+# Files whose records had no time field in this ingest run (reset per run;
+# each name once); reported on the console and in the ingest status.
 NO_TIME_FIELD: list[str] = []
 
 
-def auto_detect_time_field(sample: dict) -> str | None:
-    """Find the timestamp field from a sample record."""
-    for candidate in _TIMESTAMP_CANDIDATES:
+def auto_detect_time_field(sample: dict, extra: tuple[str, ...] = ()) -> str | None:
+    """Find the timestamp field from a sample record; `extra` are candidates
+    one parser alone may use."""
+    for candidate in (*_TIMESTAMP_CANDIDATES, *extra):
         if candidate in sample:
             return candidate
     return None
+
+
+def no_time_field_note() -> str:
+    """What to tell the examiner about NO_TIME_FIELD, or ""."""
+    if not NO_TIME_FIELD:
+        return ""
+    return (
+        f"No time field detected in {len(NO_TIME_FIELD)} file(s), e.g. {NO_TIME_FIELD[0]}: "
+        "no @timestamp, so idx_timeline won't show them. Re-ingest with time_field=<column>."
+    )
 
 
 def sanitize_index_component(value: str) -> str:

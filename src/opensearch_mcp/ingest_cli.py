@@ -22,7 +22,7 @@ from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.memory_tiers import TIERS
 from opensearch_mcp.parse_csv import ingest_csv
-from opensearch_mcp.paths import vhir_dir
+from opensearch_mcp.paths import NO_TIME_FIELD, no_time_field_note, vhir_dir
 from opensearch_mcp.tools import TOOLS
 
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
@@ -443,13 +443,8 @@ def _write_bg_status(
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
-    from opensearch_mcp.paths import NO_TIME_FIELD as missed
-
-    if missed and status != "running":
-        art["note"] = (
-            f"No time field detected in {len(missed)} file(s), e.g. {missed[0]}: no @timestamp, "
-            "so idx_timeline won't show them. Re-ingest with time_field=<column>."
-        )
+    if status != "running" and no_time_field_note():
+        art["note"] = no_time_field_note()
     if error:
         art["error"] = error
     if skipped_files:  # not ingested, and the status has to say so
@@ -1433,6 +1428,7 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 
 
 def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
+    NO_TIME_FIELD.clear()  # this run's files only
     """Ingest JSON/JSONL files."""
     from opensearch_mcp import __version__
     from opensearch_mcp.bulk import reset_circuit_breaker
@@ -1582,6 +1578,8 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    if no_time_field_note():
+        print(no_time_field_note())
     if _json_failed_files:
         print(f"*** {len(_json_failed_files)} files failed to parse; continuing walk: ***")
         for path, err in _json_failed_files[:10]:
@@ -1680,6 +1678,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         hosts_indexed = hosts_failed = 0
         hosts_reason = ""
         host_counts: list[tuple] = []
+        missed: list[str] = []  # each sub-run starts its own list
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
@@ -1688,6 +1687,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 sub_args.only_files = [f for f in flat if _filename_host(f) == h.lower()]
             print(f"\n--- Host: {h} ---")
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
+            missed.extend(NO_TIME_FIELD)
             if result:
                 hosts_indexed += result[0]
                 hosts_failed += result[1]
@@ -1696,6 +1696,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
+        NO_TIME_FIELD[:] = list(dict.fromkeys(missed))
         if run_id:
             final_status, final_error = _terminal_status(hosts_indexed, hosts_failed, hosts_reason)
             _write_bg_status(
@@ -1732,6 +1733,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_indexed = walk_failed = 0
         walk_reason = ""
         walk_counts: list[tuple] = []
+        walk_missed: list[str] = []  # each sub-run starts its own list
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -1740,6 +1742,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"\n--- Host: {d.name} ---")
             try:
                 result = cmd_ingest_delimited(sub_args, examiner=examiner)
+                walk_missed.extend(NO_TIME_FIELD)
                 if result:
                     walk_indexed += result[0]
                     walk_failed += result[1]
@@ -1770,6 +1773,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # non-empty). This is also the defense against UAT 2026-04-23's
         # regression where an empty-subdirs walk exits without writing
         # any terminal status and the atexit guard mislabels it failed.
+        NO_TIME_FIELD[:] = list(dict.fromkeys(walk_missed))
         if run_id:
             # Each subdir's own final write lands in this same status file,
             # so the last one would stand for the whole walk; write the sum.
@@ -1789,6 +1793,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             )
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
         return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts)
+    NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)
@@ -1946,6 +1951,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     print(
         f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed{describe(counts)}."
     )
+    if no_time_field_note():
+        print(no_time_field_note())
     if _delim_failed_files:
         print(f"*** {len(_delim_failed_files)} files failed to parse; continuing walk: ***")
         for path, err in _delim_failed_files[:10]:
