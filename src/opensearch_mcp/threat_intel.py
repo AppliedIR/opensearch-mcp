@@ -148,6 +148,7 @@ def _load_coverage(path: Path) -> dict:
 # (2026-09-30): the evidence held its IOCs under them and nothing read them.
 _IP_FIELDS = [
     "source.ip",  # explicit ip type in evtx/accesslog/w3c templates
+    "ForeignAddr",  # Volatility netscan CSV via idx_ingest_delimited (keyword)
     "ForeignAddr.keyword",  # dynamic in vol3_template
     "LocalAddr",  # keyword where a delimited or json index declares it
     "LocalAddr.keyword",  # dynamic in vol3_template
@@ -180,6 +181,10 @@ _HASH_FIELDS = [
     "Hash.keyword",
     "winlog.event_data.Hashes",  # Sysmon 1/6/7: "MD5=…,SHA256=…,IMPHASH=…", parsed
     "winlog.event_data.Hashes.keyword",
+    "SHA-256",  # Kansa Autorunsc, Velociraptor Windows.Sysinternals.Autoruns
+    "SHA-1",
+    "PathMD5Sum",  # Kansa SvcAll
+    "ServiceDLLMD5Sum",
 ]
 
 # Bulk filesystem hashes — about 140,000 per host — are read only on request.
