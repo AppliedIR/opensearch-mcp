@@ -2386,7 +2386,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 if a["name"] == plugin:
                     a["status"] = "complete"
                     a["indexed"] = cnt
-                    a.update({k: kw[k] for k in ("stored", "ignored") if k in kw})
+                    a.update({k: kw[k] for k in ("stored", "ignored_docs", "ignored") if k in kw})
                     break
             if cnt:
                 print(f"{cnt:,} entries" + describe(kw))

@@ -136,8 +136,28 @@ class TestTheStatusSaysWhatWasStored:
     def test_an_unparsed_time(self, case, tmp_path, monkeypatch):
         detail = _delimited(case, tmp_path, monkeypatch, "count-1")
         # The source column is a date in the mapping too, so it's ignored there as well.
-        assert detail.startswith("3 docs submitted, 3 stored; ignored: "), detail
-        assert "@timestamp ×1" in detail.split("; ignored: ")[1].split(", "), detail
+        assert detail.startswith("3 docs submitted, 3 stored; 1 doc with unparsed fields (e.g. ")
+        assert "@timestamp ×1" in detail, detail
+
+    def test_the_unparsed_total_is_exact_and_the_names_are_examples(
+        self, case, tmp_path, monkeypatch
+    ):
+        """The names come from a 20-document sample; one late document
+        ignores a field the sample may never see."""
+        rows = [f"not a time,a{i},2026-01-01T00:00:00Z" for i in range(30)]
+        rows.append("2026-01-01T00:00:00Z,z,not a time either")
+        data = tmp_path / "late.csv"
+        data.write_text("when,what,mtime\n" + "\n".join(rows) + "\n")
+        monkeypatch.setenv("VHIR_INGEST_RUN_ID", "count-late")
+        args = argparse.Namespace(path=str(data), case=case, hostname="h1", time_field="when")
+        cli.cmd_ingest_delimited(args)
+        detail = _detail(case, "delimited")
+        assert detail.startswith(
+            "31 docs submitted, 31 stored; 31 docs with unparsed fields (e.g. "
+        )
+        assert "@timestamp ×30" in detail, detail
+        (status,) = srv.idx_ingest_status(case_id=case)["ingests"]
+        assert "ignore_above" in status["counts_note"]
 
     def test_only_this_runs_documents_count(self, case, tmp_path, monkeypatch):
         """The index already holds 3 documents from an earlier run."""

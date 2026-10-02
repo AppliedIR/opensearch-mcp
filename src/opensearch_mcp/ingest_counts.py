@@ -24,26 +24,36 @@ def stored_counts(client, index: str, audit_id: str) -> dict:
         client.indices.refresh(index=index)
         stored = client.count(index=index, body={"query": run})["count"]
         ignored: dict[str, int] = {}
-        if client.count(index=index, body={"query": with_ignored})["count"]:
+        ignored_docs = client.count(index=index, body={"query": with_ignored})["count"]
+        if ignored_docs:
             body = {"query": with_ignored, "size": _SAMPLE, "_source": False}
             hits = client.search(index=index, body=body)["hits"]["hits"]
             for name in sorted({f for h in hits for f in h.get("_ignored", [])}):
                 field = {"bool": {"filter": [run, {"term": {"_ignored": name}}]}}
                 ignored[name] = client.count(index=index, body={"query": field})["count"]
-        if not all(isinstance(n, int) for n in (stored, *ignored.values())):
+        if not all(isinstance(n, int) for n in (stored, ignored_docs, *ignored.values())):
             raise TypeError(f"counts that aren't numbers: {stored!r}, {ignored!r}")
-        return {"stored": stored, "ignored": ignored}
+        return {"stored": stored, "ignored_docs": ignored_docs, "ignored": ignored}
     except Exception as e:  # noqa: BLE001
         print(f"WARNING: could not count what {index} stored: {e}", file=sys.stderr)
         return {}
 
 
+# _ignored records malformed values; a keyword over ignore_above isn't in it.
+NOTE = "Unparsed-field counts don't include values over ignore_above."
+
+
 def describe(artifact: dict) -> str:
-    """ ", 682 stored; ignored: @timestamp ×1" for a status line, or ""."""
+    """For a status line, e.g. ", 31 stored; 31 docs with unparsed fields
+    (e.g. @timestamp ×30)", or "". The field names come from a sample, so
+    they're examples; the document total is exact."""
     if "stored" not in artifact:
         return ""
     text = f", {artifact['stored']:,} stored"
-    ignored = artifact.get("ignored") or {}
-    if ignored:
-        text += "; ignored: " + ", ".join(f"{f} ×{n:,}" for f, n in ignored.items())
+    if artifact.get("ignored_docs"):
+        n = artifact["ignored_docs"]
+        text += f"; {n:,} doc{'' if n == 1 else 's'} with unparsed fields"
+        ignored = artifact.get("ignored") or {}
+        if ignored:
+            text += " (e.g. " + ", ".join(f"{f} ×{n:,}" for f, n in ignored.items()) + ")"
     return text

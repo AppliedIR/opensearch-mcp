@@ -19,6 +19,7 @@ from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
 from opensearch_mcp.host_dictionary import detect_host_id_mapping_type
+from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
 
 logger = logging.getLogger(__name__)
@@ -1762,6 +1763,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     }
                 )
         s["checklist"] = checklist
+        if any("stored" in a for h in ing.get("hosts", []) for a in h.get("artifacts", [])):
+            s["counts_note"] = _COUNTS_NOTE
 
         if status == "running":
             s["message"] = (
