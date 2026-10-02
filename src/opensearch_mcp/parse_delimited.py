@@ -223,7 +223,7 @@ def ingest_delimited(
                 try:
                     fmt_ = "%Y-%m-%d %H:%M:%S.%f %z"
                     val = datetime.strptime(val, fmt_).astimezone(timezone.utc).isoformat()
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, OverflowError):  # out of range in UTC
                     pass
                 record["@timestamp"] = val
 

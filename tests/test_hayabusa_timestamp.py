@@ -129,3 +129,25 @@ def test_other_time_strings_are_left_as_they_were(tmp_path):
         "2026-01-01T00:00:00Z",
         "not a time",
     ]
+
+
+def test_a_time_out_of_range_in_utc_keeps_its_raw_value(tmp_path):
+    """9999-12-31 23:59:59 at -01:00 is past the year 9999 in UTC: that row
+    keeps its text and the others are still converted, not the file aborted."""
+    data = tmp_path / "alerts.csv"
+    data.write_text(
+        "Timestamp,RuleTitle\n"
+        "2022-11-28 18:48:24.526 +00:00,a\n"
+        "9999-12-31 23:59:59.999 -01:00,b\n"
+        "2022-11-28 18:49:29.033 -05:00,c\n"
+    )
+    client = _Client()
+    parse_delimited.ingest_delimited(
+        data, client, "case-x-hayabusa-h", "h", time_field="Timestamp"
+    )
+    got = {doc["RuleTitle"]: doc["@timestamp"] for _, doc in client.sent}
+    assert got == {
+        "a": "2022-11-28T18:48:24.526000+00:00",
+        "b": "9999-12-31 23:59:59.999 -01:00",
+        "c": "2022-11-28T23:49:29.033000+00:00",
+    }
