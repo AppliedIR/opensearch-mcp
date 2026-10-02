@@ -93,6 +93,31 @@ def write_status(
         raise
 
 
+def finish_status(case_id: str, pid: int) -> None:
+    """Write a run's own last status again as `complete`: the terminal write
+    after a last phase that kept it `running`. Leaves any other state."""
+    try:
+        data = json.loads(_status_path_safe(case_id, pid).read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if data.get("status") != "running":
+        return
+    write_status(
+        case_id,
+        pid,
+        data.get("run_id", ""),
+        "complete",
+        data.get("hosts", []),
+        data.get("totals", {}),
+        data.get("started", ""),
+        error=data.get("error", ""),
+        bulk_failed=data.get("bulk_failed", 0),
+        bulk_failed_reason=data.get("bulk_failed_reason", ""),
+        elapsed_seconds=data.get("elapsed_seconds", 0.0),
+        log_file=data.get("log_file", ""),
+    )
+
+
 # Error-prefix convention (replaces removed halt-state taxonomy).
 # Refuse sites write status="failed" via write_status() with the
 # error field prefixed by one of these tokens so the portal can

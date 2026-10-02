@@ -184,6 +184,7 @@ def ingest(
     status_run_id: str = "",
     on_progress: object = None,
     host_dict=None,
+    final_status: str = "complete",
 ) -> IngestResult:
     """Ingest artifacts for discovered hosts.
 
@@ -193,6 +194,8 @@ def ingest(
     status_pid/status_run_id: if nonzero, write progress to status file.
     reduced_ids: if set, only ingest evtx events with these Event IDs.
     reduced_log_names: if set, only parse evtx files matching these names.
+    final_status: the status of the last write; "running" when the caller
+      has a later phase (hayabusa, triage) that writes the terminal one.
     """
     active_tools = get_active_tools(include=include, exclude=exclude, full=full)
     active_names = {t.cli_name for t in active_tools}
@@ -284,7 +287,7 @@ def ingest(
             case_id=case_id,
             pid=status_pid,
             run_id=status_run_id,
-            status="complete",
+            status=final_status,
             hosts=status_hosts,
             totals=totals,
             started=started_ts,
