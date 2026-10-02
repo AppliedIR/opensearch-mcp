@@ -149,6 +149,7 @@ def _load_coverage(path: Path) -> dict:
 _IP_FIELDS = [
     "source.ip",  # explicit ip type in evtx/accesslog/w3c templates
     "ForeignAddr.keyword",  # dynamic in vol3_template
+    "LocalAddr",  # keyword where a delimited or json index declares it
     "LocalAddr.keyword",  # dynamic in vol3_template
     "ForeignAddress",  # Kansa netstat
     "ForeignAddress.keyword",
@@ -165,7 +166,9 @@ _IP_FIELDS = [
 _HASH_FIELDS = [
     "SHA1",  # Velociraptor Windows.Detection.Amcache
     "SHA1.keyword",  # dynamic in csv_template (Amcache, EZ CSV)
+    "SHA256",  # keyword in delimited and json indices
     "SHA256.keyword",  # dynamic in csv_template
+    "MD5",
     "MD5.keyword",  # dynamic in csv_template
     "Hash.MD5",  # Velociraptor Windows.System.Pslist
     "Hash.MD5.keyword",
