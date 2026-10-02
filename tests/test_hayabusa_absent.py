@@ -67,12 +67,19 @@ def evtx_ingest(tmp_path, monkeypatch):
     return run
 
 
+def _hayabusa_errors(status: dict) -> list[str]:
+    """The status's errors for the detection step. Other artifacts in the
+    tree fail where their parsers aren't installed, as on CI."""
+    assert any(i["artifact"] == "hayabusa-detection" for i in status["checklist"]), status
+    return [e for e in status.get("errors", []) if e.startswith("hayabusa/")]
+
+
 class TestTheIngestStatus:
     def test_hayabusa_not_installed(self, evtx_ingest, monkeypatch):
         _hayabusa(monkeypatch, installed=False)
         status = evtx_ingest()
-        assert status["message"] == "Ingest complete with 1 error(s)."
-        (error,) = status["errors"]
+        assert status["message"].startswith("Ingest complete with "), status["message"]
+        (error,) = _hayabusa_errors(status)
         assert error.startswith("hayabusa/hayabusa-detection: detections skipped: hayabusa not")
         assert "Install hayabusa on the PATH" in error
 
@@ -81,15 +88,14 @@ class TestTheIngestStatus:
         _hayabusa(monkeypatch, installed=True)
         monkeypatch.setattr(ingest, "_resolve_hayabusa_rules_dir", lambda: None)
         status = evtx_ingest()
-        assert status["message"] == "Ingest complete with 1 error(s)."
-        assert status["errors"] == ["hayabusa/hayabusa-detection: host-a: rules_not_found"]
+        assert status["message"].startswith("Ingest complete with "), status["message"]
+        assert _hayabusa_errors(status) == ["hayabusa/hayabusa-detection: host-a: rules_not_found"]
 
     def test_hayabusa_ran(self, evtx_ingest, monkeypatch):
         _hayabusa(monkeypatch, installed=True)
         monkeypatch.setattr(ingest, "run_hayabusa_batch", lambda *a, **k: {"host-a": 5})
         status = evtx_ingest()
-        assert status["message"].startswith("Ingest complete. ")
-        assert "errors" not in status
+        assert _hayabusa_errors(status) == []
 
 
 @pytest.fixture
