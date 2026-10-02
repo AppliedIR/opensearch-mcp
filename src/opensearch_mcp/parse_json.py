@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
 # Velociraptor's epoch-number time column. JSON only: in a CSV the same name
 # holds a string, which OpenSearch would read as epoch milliseconds (1970).
 _JSON_TIME_FIELDS = ("Timestamp",)
+_EPOCH_TEXT = re.compile(r"-?[0-9]+")
 
 _JSON_VOLATILE = {
     "host.name",
@@ -169,6 +171,11 @@ def ingest_json(
 
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
+            if isinstance(val, str) and _EPOCH_TEXT.fullmatch(val):
+                try:  # an epoch written as text: read like the number (0 skipped, as 0 is)
+                    val = int(val) or None
+                except ValueError:  # more digits than int() reads: not a time
+                    val = None
             if isinstance(val, (int, float)):
                 try:
                     if val > 1e15:
@@ -178,9 +185,7 @@ def ingest_json(
                     record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
                 except (ValueError, OverflowError, OSError):
                     pass  # not an epoch we can read (ns, 10**400): the raw value stays
-            elif isinstance(val, str) and val.isascii() and val.isdigit():
-                pass  # digits as text: @timestamp would read them as epoch millis (1970)
-            else:
+            elif val is not None:
                 record["@timestamp"] = val
 
         if (time_from or time_to) and record.get("@timestamp"):

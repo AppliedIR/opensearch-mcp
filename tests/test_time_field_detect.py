@@ -245,13 +245,21 @@ def test_the_same_file_name_under_two_hosts_is_two_files(cluster_case, tmp_path,
     assert "No time field detected in 2 file(s), e.g. host1/procs.csv" in note
 
 
-def test_an_epoch_written_as_digits_in_a_string_is_not_the_time(tmp_path):
-    """@timestamp would take "1675036674" as epoch milliseconds: 1970."""
-    docs = _json(
-        tmp_path, [{"Timestamp": "1675036674", "n": 1}, {"Timestamp": 1675036674, "n": 2}]
-    )
+@pytest.mark.parametrize(
+    "text", ["1675036674", "1675036674324", "1675036674324257"], ids=["s", "ms", "us"]
+)
+def test_an_epoch_written_as_digits_in_a_string_reads_like_the_number(tmp_path, text):
+    """Read as is, @timestamp takes digit text as epoch milliseconds: seconds
+    became 1970. Now the text takes the number's path, whatever its unit."""
+    docs = _json(tmp_path, [{"Timestamp": text, "n": 1}, {"Timestamp": 1675036674, "n": 2}])
+    for d in docs:
+        assert d["@timestamp"].startswith("2023-01-29T23:57:54"), d
+
+
+def test_more_digits_than_int_reads_keeps_the_raw_value(tmp_path):
+    docs = _json(tmp_path, [{"Timestamp": "9" * 5000, "n": 1}, {"Timestamp": 1675036674, "n": 2}])
     by_n = {d["n"]: d for d in docs}
-    assert "@timestamp" not in by_n[1] and by_n[1]["Timestamp"] == "1675036674"
+    assert "@timestamp" not in by_n[1] and by_n[1]["Timestamp"] == "9" * 5000
     assert by_n[2]["@timestamp"].startswith("2023-01-29T23:57:54")
 
 
@@ -260,3 +268,13 @@ def test_an_integer_too_big_for_a_float_keeps_its_raw_value(tmp_path):
     by_n = {d["n"]: d for d in docs}
     assert "@timestamp" not in by_n[1]
     assert by_n[2]["@timestamp"].startswith("2023-01-29T23:57:54")
+
+
+def test_zero_as_text_is_skipped_like_the_number(tmp_path):
+    docs = _json(tmp_path, [{"Timestamp": "0", "n": 1}, {"Timestamp": 0, "n": 2}])
+    assert all("@timestamp" not in d for d in docs), docs
+
+
+def test_a_negative_epoch_as_text_reads_like_the_number(tmp_path):
+    docs = _json(tmp_path, [{"Timestamp": "-86400", "n": 1}, {"Timestamp": -86400, "n": 2}])
+    assert [d["@timestamp"][:10] for d in docs] == ["1969-12-31", "1969-12-31"]
