@@ -208,3 +208,60 @@ def test_an_ingest_without_counts_has_no_counts_note(tmp_path, monkeypatch):
     ingest_status.write_status("c-plain", 99999999, "r", "complete", hosts, {"indexed": 9}, "t0")
     (status,) = srv.idx_ingest_status(case_id="c-plain")["ingests"]
     assert "counts_note" not in status
+
+
+def _rows(path: Path, n: int, host: str) -> None:
+    lines = [f"2026-01-01T00:00:{i:02d}Z,{host}-{i}" for i in range(n)]
+    path.write_text("when,what\n" + "\n".join(lines) + "\n")
+
+
+def _wrapper(case_id, monkeypatch, run, **kw) -> str:
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", run)
+    args = argparse.Namespace(case=case_id, time_field="when", **kw)
+    cli.cmd_ingest_delimited(args)
+    return _detail(case_id, "delimited")
+
+
+class TestSubRunCountsAreSummed:
+    """auto-hosts and recursive runs write one final status for all their
+    sub-runs; it carries the sum of what each sub-run's index stored."""
+
+    def test_auto_hosts(self, case, tmp_path, monkeypatch):
+        flat = tmp_path / "Netstat"
+        flat.mkdir()
+        _rows(flat / "h1-Netstat.csv", 3, "h1")
+        _rows(flat / "h2-Netstat.csv", 2, "h2")
+        detail = _wrapper(
+            case, monkeypatch, "count-auto", path=str(flat), hostname="", auto_hosts="h1,h2"
+        )
+        # Each host's sub-run reads the whole flat directory (5 rows each);
+        # the final status sums both sub-runs' stored counts.
+        assert detail == "10 docs submitted, 10 stored", detail
+
+    def test_recursive(self, case, tmp_path, monkeypatch):
+        top = tmp_path / "Output"
+        for host, n in (("h1", 3), ("h2", 4)):
+            (top / host).mkdir(parents=True)
+            _rows(top / host / "Netstat.csv", n, host)
+        detail = _wrapper(
+            case, monkeypatch, "count-rec", path=str(top), hostname="", recursive=True
+        )
+        assert detail == "7 docs submitted, 7 stored", detail
+
+    def test_no_partial_total_when_a_sub_run_has_no_counts(self, case, tmp_path, monkeypatch):
+        top = tmp_path / "Output"
+        for host in ("h1", "h2"):
+            (top / host).mkdir(parents=True)
+            _rows(top / host / "Netstat.csv", 2, host)
+        real = cli.stored_counts
+        seen = []
+
+        def flaky(client, index, aid):  # the second sub-run's cluster count fails
+            seen.append(index)
+            return real(client, index, aid) if len(seen) == 1 else {}
+
+        monkeypatch.setattr(cli, "stored_counts", flaky)
+        detail = _wrapper(
+            case, monkeypatch, "count-mix", path=str(top), hostname="", recursive=True
+        )
+        assert detail == "4 docs submitted", detail

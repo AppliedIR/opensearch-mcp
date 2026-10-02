@@ -472,6 +472,20 @@ def _write_bg_status(
     )
 
 
+def _sum_counts(runs: list[tuple]) -> dict:
+    """The sub-runs' counts summed, or {} when one that indexed has none
+    (no partial totals)."""
+    total: dict = {"stored": 0, "ignored_docs": 0, "ignored": {}}
+    for indexed, counts in runs:
+        if indexed and not counts:
+            return {}
+        for k in ("stored", "ignored_docs"):
+            total[k] += counts.get(k, 0)
+        for f, n in counts.get("ignored", {}).items():
+            total["ignored"][f] = total["ignored"].get(f, 0) + n
+    return total if any(indexed for indexed, _ in runs) else {}
+
+
 def _terminal_status(indexed: int, bulk_failed: int, reason: str) -> tuple[str, str]:
     """(status, error) for a finished run: `failed` when no record was
     indexed and some failed, else `complete`. The token says which: records
@@ -1630,6 +1644,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         auto_hosts = [h.strip() for h in auto_hosts_str.split(",") if h.strip()]
         hosts_indexed = hosts_failed = 0
         hosts_reason = ""
+        host_counts: list[tuple] = []
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
@@ -1640,6 +1655,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 hosts_indexed += result[0]
                 hosts_failed += result[1]
                 hosts_reason = hosts_reason or result[2]
+                host_counts.append((result[0], result[3]))
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
@@ -1656,8 +1672,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 error=final_error,
                 bulk_failed=hosts_failed,
                 bulk_failed_reason=hosts_reason,
+                counts=_sum_counts(host_counts),
             )
-        return hosts_indexed, hosts_failed, hosts_reason
+        return hosts_indexed, hosts_failed, hosts_reason, _sum_counts(host_counts)
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -1676,6 +1693,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         _failed_subdirs: list[tuple[str, str]] = []  # (path, error[:200])
         walk_indexed = walk_failed = 0
         walk_reason = ""
+        walk_counts: list[tuple] = []
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -1688,6 +1706,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                     walk_indexed += result[0]
                     walk_failed += result[1]
                     walk_reason = walk_reason or result[2]
+                    walk_counts.append((result[0], result[3]))
             except _SCE:
                 # Cluster capacity exhausted: halt the entire recursive
                 # walk, not just the current subdir. Re-raise past the
@@ -1728,9 +1747,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 error=final_error,
                 bulk_failed=walk_failed,
                 bulk_failed_reason=walk_reason,
+                counts=_sum_counts(walk_counts),
             )
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
-        return walk_indexed, walk_failed, walk_reason
+        return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts)
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)
@@ -1924,7 +1944,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             counts=counts,
         )
     # The recursive walk shares this run's status file and sums these.
-    return total, total_bf, reason
+    return total, total_bf, reason, counts
 
 
 # ---------------------------------------------------------------------------
