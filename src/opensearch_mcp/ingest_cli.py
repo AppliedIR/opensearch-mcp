@@ -1115,6 +1115,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # itself, and the status then says detections were skipped.
             if any(h.evtx_dir for h in hosts):
                 # Layer 6: update status to show Hayabusa phase
+                from opensearch_mcp.bulk import get_last_bulk_reason
                 from opensearch_mcp.ingest import run_hayabusa_batch
 
                 hayabusa_started = datetime.now(timezone.utc).isoformat()
@@ -1127,6 +1128,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                                 "name": a.artifact,
                                 "status": "failed" if a.error else "complete",
                                 "indexed": a.indexed,
+                                **({"error": a.error} if a.error else {}),
                             }
                             for a in h.artifacts
                         ],
@@ -1237,6 +1239,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         - (1 if skipped or failed_hosts else 0),
                     },
                     hayabusa_started,
+                    bulk_failed=total_bulk_failed,
+                    bulk_failed_reason=get_last_bulk_reason(),
                     elapsed_seconds=result.elapsed_seconds,
                 )
 
