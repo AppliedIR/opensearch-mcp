@@ -197,3 +197,14 @@ def test_an_answer_that_isnt_a_count_never_fails_the_ingest(capsys):
     counts = stored_counts(mock.MagicMock(), "case-x-vol-svcscan-h1", "aid")
     assert counts == {} and describe(counts) == ""
     assert "could not count" in capsys.readouterr().err
+
+
+def test_an_ingest_without_counts_has_no_counts_note(tmp_path, monkeypatch):
+    """The note explains the counts; an ingest that has none gets none."""
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    hosts = [
+        {"hostname": "h1", "artifacts": [{"name": "evtx", "status": "complete", "indexed": 9}]}
+    ]
+    ingest_status.write_status("c-plain", 99999999, "r", "complete", hosts, {"indexed": 9}, "t0")
+    (status,) = srv.idx_ingest_status(case_id="c-plain")["ingests"]
+    assert "counts_note" not in status
