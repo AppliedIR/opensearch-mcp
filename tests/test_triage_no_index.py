@@ -11,8 +11,10 @@ as OpenSearch 3.x does: no `aggregations` key by default, and a 404
 from __future__ import annotations
 
 import fnmatch
+import uuid
 from unittest.mock import patch
 
+import pytest
 from opensearchpy.exceptions import NotFoundError
 
 from opensearch_mcp import triage_remote as tr
@@ -76,3 +78,28 @@ def test_an_existing_index_with_nothing_to_check_is_empty():
     ]
     res = _enrich(existing)
     assert {name: res[name]["status"] for name in GATEWAY} == dict.fromkeys(GATEWAY, "empty")
+
+
+def test_no_registry_index_skips_persistence_with_a_reason():
+    res = _enrich([])["registry_persistence"]
+    assert res["status"] == "skipped" and "index_not_found" in res["reason"], res
+
+
+@pytest.mark.integration
+def test_the_cluster_names_the_missing_registry_pattern():
+    try:
+        from opensearch_mcp.client import get_client
+
+        client = get_client()
+        client.cluster.health()
+    except Exception as e:
+        pytest.skip(f"OpenSearch not available: {e}")
+    case = f"pytest-noreg-{uuid.uuid4().hex[:8]}"
+    res = tr._enrich_registry_persistence(client, case)
+    assert res["status"] == "skipped", res
+    assert f"case-{case}-registry-*" in res["reason"], res
+
+
+def test_a_registry_index_runs_persistence_as_before():
+    res = _enrich(["case-c1-registry-h"])["registry_persistence"]
+    assert res["status"] == "complete", res

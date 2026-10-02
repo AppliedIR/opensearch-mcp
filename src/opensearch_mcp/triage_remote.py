@@ -791,6 +791,10 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
     """
     index = f"case-{safe_case}-registry-*"
     total_updated = 0
+    try:  # no registry index: say so, not "complete, 0"
+        client.search(index=index, body={"size": 0}, allow_no_indices=False)
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     rules = [
         # R1: IFEO Debugger (T1546.012)
