@@ -10,6 +10,7 @@ its log. These run real workers, in a scratch HOME; the cluster isn't used.
 
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 import sys
@@ -149,3 +150,60 @@ def test_an_archive_password_reaches_neither_the_log_nor_the_status(case, monkey
     assert any(
         "Failed to extract" in line and "7z exited 2" in line for line in status["log_tail"]
     )
+
+
+def _pieces(secret: str, n: int = 5) -> list[str]:
+    return [secret[i : i + n] for i in range(len(secret) - n + 1)]
+
+
+def test_no_piece_of_the_password_survives_the_cut(case, monkeypatch, tmp_path):
+    """7z's output is cut to its last 500 characters. Cut before replacing
+    the password, and a window starting inside it keeps a piece."""
+    secret = "s3cret-Pw-7f2a"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "7z").write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do case "$a" in -p*) pw="${a#-p}";; esac; done\n'
+        "printf 'ERROR %s' \"$pw\" >&2\n"
+        "head -c 495 /dev/zero | tr '\\0' y >&2\n"
+        "exit 2\n"
+    )
+    (bindir / "7z").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
+    (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    resp = srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
+    status = _final()
+    assert status["status"] == "failed", status
+    seen = json.dumps(status) + Path(resp["log_file"]).read_text()
+    assert [p for p in _pieces(secret) if p in seen] == []
+    assert any("7z exited 2" in line for line in status["log_tail"]), status
+
+
+def test_a_7z_timeout_doesnt_print_the_password(case, monkeypatch, capsys):
+    """A timeout's message quotes the command too."""
+    import subprocess
+
+    from opensearch_mcp import ingest_cli
+
+    secret = "s3cret-Pw-7f2a"
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
+    real_run = subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd and cmd[0] == "7z":
+            raise subprocess.TimeoutExpired(cmd, 600)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    args = argparse.Namespace(
+        path=str(case / "mem.zip"), case="c1", hostname="h1", tier=1, plugins=None, yes=True
+    )
+    with pytest.raises(SystemExit):
+        ingest_cli.cmd_ingest_memory(args)
+    out = capsys.readouterr()
+    printed = out.out + out.err
+    assert secret not in printed
+    assert "7z timed out after 600s" in printed

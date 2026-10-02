@@ -2276,9 +2276,10 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 why = f"7z timed out after {e.timeout:.0f}s"
             else:
                 why = f"7z exited {e.returncode}"
-            said = (e.stderr or b"").decode(errors="replace").strip()[-500:]
-            if password:
+            said = (e.stderr or b"").decode(errors="replace")
+            if password:  # before cutting it short, or a piece of it survives the cut
                 said = said.replace(password, "***")
+            said = said.strip()[-500:]
             print(f"Error: Failed to extract {image_path}: {why}. {said}", file=sys.stderr)
             sys.exit(1)
 
