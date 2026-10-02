@@ -25,6 +25,14 @@ def _escape_wildcard(value: str) -> str:
 _MAX_CONSECUTIVE_FAILURES = 3
 
 
+def _loop_result(consecutive_failures: int, **counts) -> dict:
+    """Not 'complete' when a gateway loop stopped on consecutive call failures."""
+    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        reason = "consecutive gateway call failures; windows-triage backend or gateway unavailable"
+        return {"status": "failed", "reason": reason, **counts}
+    return {"status": "complete", **counts}
+
+
 def enrich_remote(
     client: OpenSearch,
     case_id: str,
@@ -194,7 +202,7 @@ def _enrich_file_artifact(
             continue
 
     if not verdicts:
-        return {"status": "complete", "checked": len(buckets), "enriched": 0}
+        return _loop_result(consecutive_failures, checked=len(buckets), enriched=0)
 
     enriched = _batch_stamp_verdicts(client, index_pattern, path_field, verdicts)
 
@@ -206,7 +214,7 @@ def _enrich_file_artifact(
             enriched=enriched,
         )
 
-    return {"status": "complete", "checked": len(buckets), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(buckets), enriched=enriched)
 
 
 def _batch_stamp_verdicts(
@@ -386,7 +394,7 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
             checked=len(service_names),
             enriched=enriched,
         )
-    return {"status": "complete", "checked": len(service_names), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(service_names), enriched=enriched)
 
 
 def _enrich_service_artifact(
@@ -460,7 +468,7 @@ def _enrich_service_artifact(
             checked=len(buckets),
             enriched=enriched,
         )
-    return {"status": "complete", "checked": len(buckets), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(buckets), enriched=enriched)
 
 
 def _enrich_registry_services(client, safe_case, on_progress=None):
@@ -556,7 +564,7 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
             checked=len(services),
             enriched=enriched,
         )
-    return {"status": "complete", "checked": len(services), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(services), enriched=enriched)
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +661,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
             checked=len(buckets),
             enriched=enriched,
         )
-    return {"status": "complete", "checked": len(buckets), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(buckets), enriched=enriched)
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +750,7 @@ def _enrich_registry_check_file(
             checked=len(buckets),
             enriched=enriched,
         )
-    return {"status": "complete", "checked": len(buckets), "enriched": enriched}
+    return _loop_result(consecutive_failures, checked=len(buckets), enriched=enriched)
 
 
 # Registry persistence R1-R17 (no gateway — pure update_by_query)

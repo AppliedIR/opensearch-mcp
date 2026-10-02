@@ -2108,11 +2108,14 @@ def idx_enrich_triage(
         return results
 
     total_enriched = sum(r.get("enriched", 0) for r in results.values() if isinstance(r, dict))
+    failed = [k for k, r in results.items() if isinstance(r, dict) and r.get("status") == "failed"]
     resp = {
-        "status": "complete",
+        "status": "incomplete" if failed else "complete",
         "documents_enriched": total_enriched,
         "details": results,
     }
+    if failed:
+        resp["failed_artifacts"] = failed
     aid = audit.log(
         tool="idx_enrich_triage",
         params={"case_id": cid},
