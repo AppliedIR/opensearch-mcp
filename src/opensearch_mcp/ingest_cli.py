@@ -19,8 +19,8 @@ from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
+from opensearch_mcp.memory_tiers import TIERS
 from opensearch_mcp.parse_csv import ingest_csv
-from opensearch_mcp.parse_memory import TIERS
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.tools import TOOLS
 

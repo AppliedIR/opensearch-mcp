@@ -2520,7 +2520,7 @@ def idx_ingest_memory(
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
-    from opensearch_mcp.parse_memory import TIERS
+    from opensearch_mcp.memory_tiers import TIERS
 
     # The worker is always passed --tier, so a tier it refuses fails even
     # with plugins named.

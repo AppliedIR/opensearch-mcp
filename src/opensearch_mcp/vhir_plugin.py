@@ -42,7 +42,7 @@ def register(subparsers, registered: set) -> None:
         registered.add("ingest")
 
     if "ingest-memory" not in registered:
-        from opensearch_mcp.parse_memory import TIERS
+        from opensearch_mcp.memory_tiers import TIERS
 
         p = subparsers.add_parser("ingest-memory", help="Parse memory image with Volatility 3")
         p.add_argument("path", help="Path to memory image")

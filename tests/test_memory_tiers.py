@@ -9,6 +9,9 @@ command lines and the worker now read one set of tiers.
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -100,3 +103,23 @@ def test_the_vhir_command_refuses_the_same_tiers(capsys):
     assert (
         parser.parse_args(["ingest-memory", "m.img", "--hostname", "h", "--tier", "3"]).tier == 3
     )
+
+
+def test_registering_the_vhir_commands_doesnt_load_opensearch():
+    """vhir registers every plugin's commands on every run: reading the tiers
+    must not import the OpenSearch client (34 ms became 189 ms)."""
+    code = (
+        "import argparse, sys\n"
+        "from opensearch_mcp import vhir_plugin\n"
+        "vhir_plugin.register(argparse.ArgumentParser().add_subparsers(), set())\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'opensearchpy'))\n"
+    )
+    run = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "[]"
