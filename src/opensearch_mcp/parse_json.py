@@ -11,7 +11,7 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _doc_id
-from opensearch_mcp.paths import auto_detect_time_field
+from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
 
 _JSON_VOLATILE = {
     "host.name",
@@ -166,7 +166,9 @@ def ingest_json(
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
             if isinstance(val, (int, float)):
-                if val > 1e12:
+                if val > 1e15:
+                    val = val / 1e6
+                elif val > 1e12:
                     val = val / 1000.0
                 record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
             else:
@@ -241,4 +243,6 @@ def ingest_json(
         count += flushed
         bulk_failed += failed
 
+    if not ts_field and count:
+        NO_TIME_FIELD.append(path.name)
     return count, skipped, bulk_failed, host_renamed

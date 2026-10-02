@@ -180,7 +180,11 @@ _TIMESTAMP_CANDIDATES = [
     "CreatedTime",
     "EventTime",
     "date",
+    "Timestamp",
 ]
+
+# Files whose records had no time field; reported in the ingest status.
+NO_TIME_FIELD: list[str] = []
 
 
 def auto_detect_time_field(sample: dict) -> str | None:

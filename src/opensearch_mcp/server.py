@@ -1735,6 +1735,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
                         f"{len(skipped)} file(s) not ingested: their names give none of the "
                         f"detected hosts ({shown}). Ingest them with an explicit hostname."
                     )
+                if a.get("note"):
+                    s.setdefault("warnings", []).append(f"{hostname}: {a['note']}")
                 a_status = a.get("status", "pending")
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":

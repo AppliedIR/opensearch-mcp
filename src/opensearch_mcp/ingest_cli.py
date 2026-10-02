@@ -443,6 +443,13 @@ def _write_bg_status(
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
+    from opensearch_mcp.paths import NO_TIME_FIELD as missed
+
+    if missed and status != "running":
+        art["note"] = (
+            f"No time field detected in {len(missed)} file(s), e.g. {missed[0]}: no @timestamp, "
+            "so idx_timeline won't show them. Re-ingest with time_field=<column>."
+        )
     if error:
         art["error"] = error
     if skipped_files:  # not ingested, and the status has to say so
