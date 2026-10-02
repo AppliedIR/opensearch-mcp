@@ -229,14 +229,14 @@ class TestSubRunCountsAreSummed:
     def test_auto_hosts(self, case, tmp_path, monkeypatch):
         flat = tmp_path / "Netstat"
         flat.mkdir()
-        _rows(flat / "h1-Netstat.csv", 3, "h1")
-        _rows(flat / "h2-Netstat.csv", 2, "h2")
+        _rows(flat / "Netstat-h1.csv", 3, "h1")
+        _rows(flat / "Netstat-h2.csv", 2, "h2")
         detail = _wrapper(
             case, monkeypatch, "count-auto", path=str(flat), hostname="", auto_hosts="h1,h2"
         )
-        # Each host's sub-run reads the whole flat directory (5 rows each);
-        # the final status sums both sub-runs' stored counts.
-        assert detail == "10 docs submitted, 10 stored", detail
+        # Each host's sub-run reads its own file; the final status sums both
+        # sub-runs' stored counts.
+        assert detail == "5 docs submitted, 5 stored", detail
 
     def test_recursive(self, case, tmp_path, monkeypatch):
         top = tmp_path / "Output"

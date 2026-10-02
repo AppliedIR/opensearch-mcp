@@ -486,6 +486,14 @@ def _sum_counts(runs: list[tuple]) -> dict:
     return total if any(indexed for indexed, _ in runs) else {}
 
 
+def _filename_host(path: Path) -> str:
+    """The host a file's name gives, as server._detect_hostnames_from_filenames
+    reads it: the stem's last `-` segment (Tool-HOST.csv,
+    hayabusa-case-HOST.csv), lower-cased; "" when there is none."""
+    parts = path.stem.rsplit("-", 1)
+    return parts[1].lower() if len(parts) == 2 and len(parts[1]) >= 2 else ""
+
+
 def _terminal_status(indexed: int, bulk_failed: int, reason: str) -> tuple[str, str]:
     """(status, error) for a finished run: `failed` when no record was
     indexed and some failed, else `complete`. The token says which: records
@@ -1643,6 +1651,17 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         import copy
 
         auto_hosts = [h.strip() for h in auto_hosts_str.split(",") if h.strip()]
+        # Each host's sub-run reads only the files named for it; a file named
+        # for no listed host is left out, and said so.
+        exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+        flat = sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+        wanted = {h.lower() for h in auto_hosts}
+        unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
+        if unattributed:
+            print(
+                f"Skipped {len(unattributed)} file(s) whose name gives none of the hosts "
+                f"({', '.join(sorted(wanted))}): {', '.join(unattributed)}"
+            )
         hosts_indexed = hosts_failed = 0
         hosts_reason = ""
         host_counts: list[tuple] = []
@@ -1650,6 +1669,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             sub_args = copy.copy(args)
             sub_args.hostname = h
             sub_args.auto_hosts = ""
+            sub_args.only_files = [f for f in flat if _filename_host(f) == h.lower()]
             print(f"\n--- Host: {h} ---")
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
             if result:
@@ -1779,6 +1799,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         if input_path.is_file()
         else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
     )
+    only_files = getattr(args, "only_files", None)
+    if only_files is not None:  # an auto-hosts sub-run: this host's files only
+        files = [f for f in files if f in only_files]
 
     from opensearch_mcp.parse_delimited import _detect_delimited_format
 
