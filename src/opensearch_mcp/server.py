@@ -1668,6 +1668,14 @@ def _log_tail(path: str, limit: int = 2048) -> list[str]:
         return []
 
 
+# Evtx files an ingest dropped before parsing, by the status key it records.
+_DROPPED_EVTX = {
+    "not_in_log_set": "not in the forensic-logs set were not ingested; ingest with "
+    "all_logs=True to include them",
+    "under_one_chunk": "under one chunk (69,632 bytes) were skipped as empty",
+}
+
+
 @server.tool()
 def idx_ingest_status(case_id: str = "") -> dict:
     """Check status of running or recent ingest operations.
@@ -1737,6 +1745,13 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     )
                 if a.get("note"):
                     s.setdefault("warnings", []).append(f"{hostname}: {a['note']}")
+                for key, text in _DROPPED_EVTX.items():
+                    if a.get(key):
+                        names = a[key]
+                        shown = ", ".join(names[:10]) + (", …" if len(names) > 10 else "")
+                        s.setdefault("warnings", []).append(
+                            f"{hostname}: {len(names)} evtx file(s) {text} ({shown})"
+                        )
                 a_status = a.get("status", "pending")
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":
