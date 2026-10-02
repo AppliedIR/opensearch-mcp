@@ -12,6 +12,7 @@ import csv
 import time
 import uuid
 
+import _scratch_templates
 import pytest
 
 # Skip entire module if opensearchpy is not installed
@@ -21,17 +22,14 @@ opensearchpy = pytest.importorskip("opensearchpy")
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def os_client():
-    """Get an OpenSearch client or skip if not available.
+@pytest.fixture(scope="module")
+def scratch():
+    """An OpenSearch client and a run tag, or skip if no cluster is available.
 
-    Also ensures case-* templates are installed on the cluster — post
-    2026-04-22 setup-opensearch.sh no longer installs templates at
-    deployment time (that duty moved to ensure_winlog_pipeline, called
-    on MCP startup + ingest pre-flight). Integration tests create
-    indices directly without going through MCP, so they need to
-    trigger the installer themselves or new indices land with dynamic
-    mappings and fail assertions like host.name:keyword.
+    Integration tests create indices directly without going through MCP, so
+    they install the tree's templates themselves, under the tag: the real
+    installer would rewrite the live templates every case on the cluster uses.
+    Test indices are named `case-{tag}-...` so only these copies match them.
     """
     try:
         from opensearch_mcp.client import get_client
@@ -44,21 +42,29 @@ def os_client():
         pytest.skip("OpenSearch config not found (~/.vhir/opensearch.yaml)")
     except Exception:
         pytest.skip("OpenSearch not available")
-    # Idempotent template install — guarantees templates are present
-    # before integration tests create case-* indices.
+    tag = f"pytest-tpl-{uuid.uuid4().hex[:8]}"
+    created = _scratch_templates.install(client, tag)
     try:
-        from opensearch_mcp.mappings import ensure_winlog_pipeline
-
-        ensure_winlog_pipeline(client)
-    except Exception:
-        pass  # non-fatal — if install fails, tests fail with their own errors
-    return client
+        yield client, tag
+    finally:
+        client.indices.delete(index=f"case-{tag}-*", ignore=[404])
+        _scratch_templates.remove(client, created)
 
 
 @pytest.fixture
-def test_index(os_client):
+def os_client(scratch):
+    return scratch[0]
+
+
+@pytest.fixture
+def tag(scratch):
+    return scratch[1]
+
+
+@pytest.fixture
+def test_index(os_client, tag):
     """Create a unique test index and clean up after test."""
-    index_name = f"case-pytest-{uuid.uuid4().hex[:8]}-evtx-testhost"
+    index_name = f"case-{tag}-{uuid.uuid4().hex[:8]}-evtx-testhost"
     yield index_name
     # Cleanup
     try:
@@ -68,9 +74,9 @@ def test_index(os_client):
 
 
 @pytest.fixture
-def test_csv_index(os_client):
+def test_csv_index(os_client, tag):
     """Create a unique test index for CSV and clean up after."""
-    index_name = f"case-pytest-{uuid.uuid4().hex[:8]}-amcache-testhost"
+    index_name = f"case-{tag}-{uuid.uuid4().hex[:8]}-amcache-testhost"
     yield index_name
     try:
         os_client.indices.delete(index=index_name, ignore=[404])
@@ -351,11 +357,11 @@ class TestCsvIntegration:
         actual_count = _wait_for_count(os_client, test_csv_index, 2)
         assert actual_count == 2
 
-    def test_mft_natural_key_dedup(self, os_client, tmp_path):
+    def test_mft_natural_key_dedup(self, os_client, tag, tmp_path):
         """MFT natural key dedup: same E:S:F:P = same doc."""
         from opensearch_mcp.parse_csv import ingest_csv
 
-        index_name = f"case-pytest-{uuid.uuid4().hex[:8]}-mft-testhost"
+        index_name = f"case-{tag}-{uuid.uuid4().hex[:8]}-mft-testhost"
         try:
             csv_file = tmp_path / "mft.csv"
             rows = [
