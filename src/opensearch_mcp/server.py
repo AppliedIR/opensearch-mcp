@@ -1731,6 +1731,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 if a_status == "complete":
                     icon = "done"
                     detail = f"{indexed:,} docs submitted" + _describe_counts(a)
+                    if a.get("implausible_time"):
+                        n = a["implausible_time"]
+                        detail += f"; {n:,} with an implausible time, @timestamp not set"
                     # A running Windows image always has processes. 0 indexed has
                     # more than one cause, and the status can't tell them apart.
                     if a.get("name") == "windows.pslist" and indexed == 0:

@@ -11,6 +11,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from opensearchpy import OpenSearch
@@ -192,6 +193,22 @@ def _vol3_doc_id(index_name: str, plugin: str, record: dict, source_file: str) -
     return hashlib.sha256(f"{index_name}:{source_name}:{content}".encode()).hexdigest()[:20]
 
 
+# Before this, a memory record's time is garbage (vol3 reads 0027 and 9905 as
+# load times), and a timeline would show it as an event.
+_EARLIEST_TIME = datetime(1990, 1, 1, tzinfo=timezone.utc)
+
+
+def _plausible_time(value) -> bool:
+    """Between 1990 and a day from now. A value that doesn't parse isn't."""
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return _EARLIEST_TIME <= t <= datetime.now(timezone.utc) + timedelta(days=1)
+
+
 def _index_vol3_records(
     records: list[dict],
     client: OpenSearch,
@@ -202,10 +219,12 @@ def _index_vol3_records(
     ingest_audit_id: str,
     pipeline_version: str,
     host_dict=None,
-) -> tuple[int, int]:
-    """Index vol3 JSON records into OpenSearch."""
+) -> tuple[int, int, int]:
+    """Index vol3 JSON records into OpenSearch. Returns (indexed, bulk
+    failed, records whose time was implausible and set no @timestamp)."""
     count = 0
     bulk_failed = 0
+    implausible = 0
     actions: list[dict] = []
 
     flat = _flatten_records(records)
@@ -216,7 +235,10 @@ def _index_vol3_records(
     for record in flat:
         ts_field = _TIMESTAMP_FIELD.get(plugin)
         if ts_field and record.get(ts_field):
-            record["@timestamp"] = record[ts_field]
+            if _plausible_time(record[ts_field]):
+                record["@timestamp"] = record[ts_field]
+            else:
+                implausible += 1  # the raw field stays as vol3 gave it
 
         doc_id = _vol3_doc_id(index_name, plugin, record, source_file)
 
@@ -247,7 +269,7 @@ def _index_vol3_records(
         count += flushed
         bulk_failed += failed
 
-    return count, bulk_failed
+    return count, bulk_failed, implausible
 
 
 def _register_memory_evidence(image_path: Path, hostname: str) -> None:
@@ -361,7 +383,7 @@ def ingest_memory(
                 on_progress("plugin_done", plugin=plugin, indexed=0)
             continue
 
-        count, bf = _index_vol3_records(
+        count, bf, implausible = _index_vol3_records(
             records=records,
             client=client,
             index_name=index_name,
@@ -372,7 +394,12 @@ def ingest_memory(
             pipeline_version=pipeline_version,
             host_dict=host_dict,
         )
-        results[plugin] = {"status": "complete", "indexed": count, "bulk_failed": bf}
+        results[plugin] = {
+            "status": "complete",
+            "indexed": count,
+            "bulk_failed": bf,
+            "implausible_time": implausible,
+        }
         counts = stored_counts(client, index_name, ingest_audit_id) if ingest_audit_id else {}
         results[plugin].update(counts)
 
@@ -397,6 +424,12 @@ def ingest_memory(
             )
 
         if on_progress:
-            on_progress("plugin_done", plugin=plugin, indexed=count, **counts)
+            on_progress(
+                "plugin_done",
+                plugin=plugin,
+                indexed=count,
+                implausible_time=implausible,
+                **counts,
+            )
 
     return results

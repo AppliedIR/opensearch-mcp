@@ -2407,6 +2407,8 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                     a["status"] = "complete"
                     a["indexed"] = cnt
                     a.update({k: kw[k] for k in ("stored", "ignored_docs", "ignored") if k in kw})
+                    if kw.get("implausible_time"):
+                        a["implausible_time"] = kw["implausible_time"]
                     break
             if cnt:
                 print(f"{cnt:,} entries" + describe(kw))
