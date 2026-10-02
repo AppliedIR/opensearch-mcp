@@ -560,7 +560,10 @@ def idx_search(
 
     IMPORTANT: OpenSearch tokenizes on dots/hyphens. For filename searches,
     include the extension: 'ServiceUpdater.exe' not 'ServiceUpdater'.
-    Use wildcards for partial matches: '*ServiceUpdater*'.
+    Use wildcards for partial matches: '*ServiceUpdater*'. IP-typed fields
+    (source.ip on most indices) return nothing for wildcards: use CIDR,
+    source.ip:"10.1.2.0/24". Across a case with older indices, OR the two:
+    source.ip:10.1.2.* OR source.ip:"10.1.2.0/24".
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
@@ -625,7 +628,9 @@ def idx_search(
         resp["hint"] = (
             "No results. If searching for filenames, include the extension "
             "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
-            "'*svchost*'. OpenSearch tokenizes on dots/hyphens."
+            "'*svchost*'. OpenSearch tokenizes on dots/hyphens. IP-typed "
+            "fields return nothing for wildcards: use CIDR, "
+            'source.ip:"10.1.2.0/24", ORed with the wildcard across older indices.'
         )
     if compact:
         resp["note"] = (

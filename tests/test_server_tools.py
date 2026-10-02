@@ -185,6 +185,16 @@ class TestIdxSearch:
             resp = idx_search(query="*")
         assert resp["audit_id"] == "audit-123"
 
+    def test_an_empty_ip_wildcard_search_is_pointed_to_cidr(self, mock_client):
+        """On an IP-typed field a wildcard matches nothing and reports no
+        error, and the hint used to suggest wildcards."""
+        mock_client.search.return_value = {
+            "hits": {"total": {"value": 0}, "hits": []},
+        }
+        hint = idx_search(query="source.ip:10.1.2.*")["hint"]
+        assert 'source.ip:"10.1.2.0/24"' in hint
+        assert "IP-typed fields return nothing for wildcards" in hint
+
 
 # ---------------------------------------------------------------------------
 # idx_count
