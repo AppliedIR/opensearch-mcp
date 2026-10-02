@@ -278,3 +278,18 @@ def test_zero_as_text_is_skipped_like_the_number(tmp_path):
 def test_a_negative_epoch_as_text_reads_like_the_number(tmp_path):
     docs = _json(tmp_path, [{"Timestamp": "-86400", "n": 1}, {"Timestamp": -86400, "n": 2}])
     assert [d["@timestamp"][:10] for d in docs] == ["1969-12-31", "1969-12-31"]
+
+
+@pytest.mark.parametrize("text", ["1675036674.5", "1675036674324.5"], ids=["s", "ms"])
+def test_a_fractional_epoch_as_text_reads_like_the_number(tmp_path, text):
+    """Copied as is, @timestamp took "1675036674.5" as epoch millis: 1970-01-20."""
+    docs = _json(tmp_path, [{"Timestamp": text, "n": 1}, {"Timestamp": 1675036674, "n": 2}])
+    for d in docs:
+        assert d["@timestamp"].startswith("2023-01-29T23:57:54"), d
+    want = "54.5" if text == "1675036674.5" else "54.3245"  # the fraction is kept
+    assert docs[0]["@timestamp"].startswith(f"2023-01-29T23:57:{want}")
+
+
+def test_zero_with_a_fraction_as_text_is_skipped(tmp_path):
+    (doc,) = _json(tmp_path, [{"Timestamp": "0.0"}])
+    assert "@timestamp" not in doc

@@ -17,7 +17,7 @@ from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
 # Velociraptor's epoch-number time column. JSON only: in a CSV the same name
 # holds a string, which OpenSearch would read as epoch milliseconds (1970).
 _JSON_TIME_FIELDS = ("Timestamp",)
-_EPOCH_TEXT = re.compile(r"-?[0-9]+")
+_EPOCH_TEXT = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 _JSON_VOLATILE = {
     "host.name",
@@ -173,7 +173,7 @@ def ingest_json(
             val = record[ts_field]
             if isinstance(val, str) and _EPOCH_TEXT.fullmatch(val):
                 try:  # an epoch written as text: read like the number (0 skipped, as 0 is)
-                    val = int(val) or None
+                    val = (float(val) if "." in val else int(val)) or None
                 except ValueError:  # more digits than int() reads: not a time
                     val = None
             if isinstance(val, (int, float)):
