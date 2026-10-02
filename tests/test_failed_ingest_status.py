@@ -14,6 +14,7 @@ import json
 import shutil
 import sys
 import time
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -126,3 +127,25 @@ def test_a_starting_record_never_replaces_the_workers(case):
     (path,) = ingest_status._STATUS_DIR.glob("*.json")
     record = json.loads(path.read_text())
     assert (record["status"], record["totals"]) == ("running", {"indexed": 3})
+
+
+def test_an_archive_password_reaches_neither_the_log_nor_the_status(case, monkeypatch, tmp_path):
+    """A failed extraction printed the exception, which quotes the 7z
+    command and its -p<password>. This 7z echoes its arguments back too."""
+    secret = "s3cret-Pw-7f2a"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "7z").write_text('#!/bin/sh\necho "ERROR: Wrong password, args: $*" >&2\nexit 2\n')
+    (bindir / "7z").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
+    (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    resp = srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
+    assert resp["status"] == "started", resp
+    status = _final()
+    assert status["status"] == "failed", status
+    assert secret not in json.dumps(status)
+    assert secret not in Path(resp["log_file"]).read_text()
+    assert any(
+        "Failed to extract" in line and "7z exited 2" in line for line in status["log_tail"]
+    )

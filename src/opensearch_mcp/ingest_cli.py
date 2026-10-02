@@ -2269,9 +2269,17 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 sys.exit(1)
             image_path = extracted[0]
             print(f"Extracted: {image_path} ({image_path.stat().st_size / (1024**3):.1f} GB)")
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             shutil.rmtree(_mem_extract_dir, ignore_errors=True)
-            print(f"Error: Failed to extract {image_path}: {e}", file=sys.stderr)
+            # Not the exception's text: it quotes the command, password and all.
+            if isinstance(e, subprocess.TimeoutExpired):
+                why = f"7z timed out after {e.timeout:.0f}s"
+            else:
+                why = f"7z exited {e.returncode}"
+            said = (e.stderr or b"").decode(errors="replace").strip()[-500:]
+            if password:
+                said = said.replace(password, "***")
+            print(f"Error: Failed to extract {image_path}: {why}. {said}", file=sys.stderr)
             sys.exit(1)
 
     if not image_path.is_file():
