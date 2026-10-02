@@ -548,17 +548,18 @@ def _ingest_hosts(
             evtx_files = [f for f in evtx_files if f.stat().st_size >= _MIN_EVTX_SIZE]
 
             # The status names what these filters dropped (idx_ingest_status).
+            out_of_set = [
+                f.name
+                for f in all_evtx
+                if reduced_log_names is not None and f.stem.lower() not in reduced_log_names
+            ]
+            if out_of_set:
+                host_result.evtx_dropped["not_in_log_set"] = out_of_set
+            if small:
+                host_result.evtx_dropped["under_one_chunk"] = [f.name for f in small]
             dropped = _find_artifact_status(status_hosts, host_idx, "evtx")
             if dropped is not None:
-                out_of_set = [
-                    f.name
-                    for f in all_evtx
-                    if reduced_log_names is not None and f.stem.lower() not in reduced_log_names
-                ]
-                if out_of_set:
-                    dropped["not_in_log_set"] = out_of_set
-                if small:
-                    dropped["under_one_chunk"] = [f.name for f in small]
+                dropped.update(host_result.evtx_dropped)
 
             if evtx_files:
                 _cid = _sanitize_index_component(case_id)

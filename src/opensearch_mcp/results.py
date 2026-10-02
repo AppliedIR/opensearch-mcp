@@ -27,6 +27,9 @@ class HostResult:
     hostname: str
     volume_root: str = ""
     artifacts: list[ArtifactResult] = field(default_factory=list)
+    # Evtx files dropped before parsing, by status key (not_in_log_set,
+    # under_one_chunk), so every status written for the host can name them.
+    evtx_dropped: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total_indexed(self) -> int:

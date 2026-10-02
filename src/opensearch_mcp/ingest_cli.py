@@ -699,6 +699,27 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _rebuilt_status_host(h) -> dict:
+    """A host's status entry rebuilt from its result for the hayabusa phase,
+    keeping the evtx files it dropped before parsing."""
+    arts = [
+        {
+            "name": a.artifact,
+            "status": "failed" if a.error else "complete",
+            "indexed": a.indexed,
+            **({"error": a.error} if a.error else {}),
+        }
+        for a in h.artifacts
+    ]
+    if h.evtx_dropped:
+        evtx = next((a for a in arts if a["name"] == "evtx"), None)
+        if evtx is None:  # every evtx file was dropped: nothing to parse
+            evtx = {"name": "evtx", "status": "complete", "indexed": 0}
+            arts.insert(0, evtx)
+        evtx.update(h.evtx_dropped)
+    return {"hostname": h.hostname, "artifacts": arts}
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
     """Scan a directory for artifacts, run EZ tools, index."""
     from opensearch_mcp.containers import (
@@ -1154,21 +1175,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
                 hayabusa_started = datetime.now(timezone.utc).isoformat()
                 # BUG-4 fix: preserve full host/artifact checklist, append hayabusa
-                existing_hosts = [
-                    {
-                        "hostname": h.hostname,
-                        "artifacts": [
-                            {
-                                "name": a.artifact,
-                                "status": "failed" if a.error else "complete",
-                                "indexed": a.indexed,
-                                **({"error": a.error} if a.error else {}),
-                            }
-                            for a in h.artifacts
-                        ],
-                    }
-                    for h in result.hosts
-                ]
+                existing_hosts = [_rebuilt_status_host(h) for h in result.hosts]
                 existing_hosts.append(
                     {
                         "hostname": "hayabusa",
