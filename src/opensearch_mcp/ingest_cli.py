@@ -651,6 +651,15 @@ def _sum_hayabusa_alerts(hb_results) -> int:
 
 def _merge_config(args: argparse.Namespace, config: dict) -> None:
     """Merge config file values into args (CLI takes precedence)."""
+    # Before the no-config return: an MCP ingest passes no config file, and
+    # its password arrives only in the environment.
+    if not getattr(args, "password", None):
+        # Prefer env var (set by server.py to avoid process list exposure)
+        env_pw = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
+        if env_pw:
+            args.password = env_pw
+        elif config and config.get("password"):
+            args.password = config["password"]
     if not config:
         return
 
@@ -670,14 +679,6 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
         args.reduced_ids = True
     if not getattr(args, "all_logs", False) and evtx_config.get("all_logs"):
         args.all_logs = True
-
-    if not getattr(args, "password", None):
-        # Prefer env var (set by server.py to avoid process list exposure)
-        env_pw = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
-        if env_pw:
-            args.password = env_pw
-        elif config.get("password"):
-            args.password = config["password"]
 
 
 # ---------------------------------------------------------------------------

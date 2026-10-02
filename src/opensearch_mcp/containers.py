@@ -56,7 +56,7 @@ def _extract_7z(path: Path, dest: Path, password: str | None = None) -> None:
     cmd = ["7z", "x", str(path), f"-o{dest}", "-y"]
     if password:
         cmd.append(f"-p{password}")
-    result = subprocess.run(cmd, capture_output=True)
+    result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL)
     # 7z exit codes: 0=ok, 1=warning (timestamps), 2+=error
     if result.returncode > 1:
         # Sanitize command to strip password before including in error

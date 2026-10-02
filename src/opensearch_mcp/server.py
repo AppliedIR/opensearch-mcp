@@ -2225,11 +2225,14 @@ def _spawn_ingest(cmd, env, stdout, run_id):
         f"--unit=vhir-ingest-{run_id[:12]}",
     ] + cmd
 
+    # Workers never read the server's stdin: it's the MCP pipe, and a child
+    # that reads it (7z prompting for a password) consumes requests.
     try:
         proc = _sp.Popen(
             scope_cmd,
             stdout=stdout,
             stderr=_sp.STDOUT,
+            stdin=_sp.DEVNULL,
             env=env,
             start_new_session=True,
         )
@@ -2245,6 +2248,7 @@ def _spawn_ingest(cmd, env, stdout, run_id):
                 cmd,
                 stdout=stdout,
                 stderr=_sp.STDOUT,
+                stdin=_sp.DEVNULL,
                 env=env,
                 start_new_session=True,
             )
@@ -2253,6 +2257,7 @@ def _spawn_ingest(cmd, env, stdout, run_id):
             cmd,
             stdout=stdout,
             stderr=_sp.STDOUT,
+            stdin=_sp.DEVNULL,
             env=env,
             start_new_session=True,
         )
