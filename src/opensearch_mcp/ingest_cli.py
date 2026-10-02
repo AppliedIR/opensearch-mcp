@@ -427,6 +427,7 @@ def _write_bg_status(
     bulk_failed=0,
     bulk_failed_reason=None,
     counts=None,
+    skipped_files=None,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -444,6 +445,8 @@ def _write_bg_status(
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
     if error:
         art["error"] = error
+    if skipped_files:  # not ingested, and the status has to say so
+        art["skipped_files"] = list(skipped_files)
     if files_total:
         art["files_total"] = files_total
     if files_done:
@@ -1700,6 +1703,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed=hosts_failed,
                 bulk_failed_reason=hosts_reason,
                 counts=_sum_counts(host_counts),
+                skipped_files=unattributed,
             )
         return hosts_indexed, hosts_failed, hosts_reason, _sum_counts(host_counts)
 

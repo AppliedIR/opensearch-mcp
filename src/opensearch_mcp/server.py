@@ -1728,6 +1728,13 @@ def idx_ingest_status(case_id: str = "") -> dict:
         for h in ing.get("hosts", []):
             hostname = h.get("hostname", "?")
             for a in h.get("artifacts", []):
+                skipped = a.get("skipped_files") or []
+                if skipped:  # hostname='auto' could tie these to none of the hosts
+                    shown = ", ".join(skipped[:10]) + (", …" if len(skipped) > 10 else "")
+                    s.setdefault("warnings", []).append(
+                        f"{len(skipped)} file(s) not ingested: their names give none of the "
+                        f"detected hosts ({shown}). Ingest them with an explicit hostname."
+                    )
                 a_status = a.get("status", "pending")
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":

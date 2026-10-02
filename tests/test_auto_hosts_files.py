@@ -94,12 +94,24 @@ def ingest(tmp_path, monkeypatch):
             out[idx[len(base) + 1 :]] = sorted(h["_source"]["what"] for h in hits["hits"]["hits"])
         return out
 
+    run.case_id = case_id
     try:
         yield run
     finally:
         client.indices.delete(index=f"{base}-*", ignore=[404])
         client.indices.delete_index_template(name=f"{base}-delim", ignore=[404])
         client.cluster.delete_component_template(name=f"{base}-comp", ignore=[404])
+
+
+@pytest.fixture
+def case_status(ingest):
+    from opensearch_mcp import server as srv
+
+    def status() -> dict:
+        (st,) = srv.idx_ingest_status(case_id=ingest.case_id)["ingests"]
+        return st
+
+    return status
 
 
 @pytest.mark.integration
@@ -133,3 +145,22 @@ def test_one_name_segment_for_every_file_ingests_each_once(ingest):
     and all files go to it: each read once, as before (a separate issue)."""
     got = ingest({"rd01.x.com-Autorunsc.csv": 2, "rd02.x.com-Autorunsc.csv": 3})
     assert sum(len(v) for v in got.values()) == 5, got
+
+
+@pytest.mark.integration
+def test_a_minority_hosts_file_is_named_in_the_status(ingest, case_status):
+    """host3 has 1 of 5 files, under the detector's 30% bar, so it isn't a
+    detected host: its file is left out, and idx_ingest_status says which
+    and what to do, rather than only the worker log."""
+    files = {
+        "EvtxECmd-HOST1.csv": 1,
+        "Other-HOST1.csv": 1,
+        "EvtxECmd-HOST2.csv": 1,
+        "Other-HOST2.csv": 1,
+        "EvtxECmd-HOST3.csv": 1,
+    }
+    got = ingest(files)
+    assert not [i for i in got if "host3" in i], got
+    (warning,) = [w for w in case_status().get("warnings", []) if "not ingested" in w]
+    assert warning.startswith("1 file(s) not ingested")
+    assert "EvtxECmd-HOST3.csv" in warning and "explicit hostname" in warning
