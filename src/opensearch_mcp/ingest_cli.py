@@ -1111,9 +1111,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         # Post-ingest Hayabusa detection
         if not getattr(args, "no_hayabusa", False):
-            import shutil
-
-            if shutil.which("hayabusa") and any(h.evtx_dir for h in hosts):
+            # Not gated on hayabusa being installed: the batch reports that
+            # itself, and the status then says detections were skipped.
+            if any(h.evtx_dir for h in hosts):
                 # Layer 6: update status to show Hayabusa phase
                 from opensearch_mcp.ingest import run_hayabusa_batch
 
@@ -1201,9 +1201,27 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     print(line)
 
                 # Layer 6: update status after Hayabusa (preserve full checklist)
-                existing_hosts[-1]["artifacts"][0].update(
-                    {"status": "complete", "indexed": total_alerts}
-                )
+                skipped = hb_results.get("skipped") if isinstance(hb_results, dict) else None
+                if skipped or failed_hosts:
+                    why = (
+                        f"detections skipped: {skipped}. Install hayabusa on the PATH "
+                        "(https://github.com/Yamato-Security/hayabusa/releases) "
+                        "and re-run the ingest."
+                        if skipped
+                        else "; ".join(
+                            f"{host}: {v.get('error', 'failed')}"
+                            for host, v in hb_results.items()
+                            if isinstance(v, dict)
+                        )
+                    )
+                    existing_hosts[-1]["artifacts"][0].update(
+                        {"status": "failed", "indexed": total_alerts, "error": why}
+                    )
+                    print(f"Hayabusa: {why}")
+                else:
+                    existing_hosts[-1]["artifacts"][0].update(
+                        {"status": "complete", "indexed": total_alerts}
+                    )
                 write_status(
                     case_id,
                     os.getpid(),
@@ -1213,9 +1231,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     {
                         "indexed": result.total_indexed + total_alerts,
                         "artifacts_total": n_arts,
-                        "artifacts_complete": n_arts,
+                        "artifacts_complete": n_arts - (1 if skipped or failed_hosts else 0),
                         "hosts_total": len(existing_hosts),
-                        "hosts_complete": len(existing_hosts),
+                        "hosts_complete": len(existing_hosts)
+                        - (1 if skipped or failed_hosts else 0),
                     },
                     hayabusa_started,
                     elapsed_seconds=result.elapsed_seconds,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -2679,6 +2680,13 @@ def _get_active_case() -> str | None:
     return None
 
 
+# Zero Hayabusa alerts because the engine isn't there, not because nothing matched.
+_HAYABUSA_ABSENT = (
+    "Hayabusa not installed: evtx ingests ran no detections, so 0 alerts is not "
+    "a finding. Install hayabusa on the PATH and re-run the evtx ingest."
+)
+
+
 @server.tool()
 def idx_list_detections(
     severity: str = "",
@@ -2729,9 +2737,10 @@ def idx_list_detections(
                         "index='case-*-hayabusa-*')"
                     )
                 else:
-                    resp["suggestion"] = (
-                        "Sigma detectors unavailable on OpenSearch 3.5. "
-                        "Hayabusa runs during evtx ingest if installed."
+                    resp["suggestion"] = "Sigma detectors unavailable on OpenSearch 3.5. " + (
+                        _HAYABUSA_ABSENT
+                        if shutil.which("hayabusa") is None
+                        else "Hayabusa runs during evtx ingest if installed."
                     )
             except Exception:
                 resp["suggestion"] = (
@@ -2783,9 +2792,10 @@ def idx_list_detections(
                     "index='case-*-hayabusa-*')"
                 )
             else:
-                hayabusa_hint = (
-                    "No Sigma detections (disabled on OpenSearch 3.5). "
-                    "Hayabusa runs during evtx ingest if installed."
+                hayabusa_hint = "No Sigma detections (disabled on OpenSearch 3.5). " + (
+                    _HAYABUSA_ABSENT
+                    if shutil.which("hayabusa") is None
+                    else "Hayabusa runs during evtx ingest if installed."
                 )
         except Exception:
             hayabusa_hint = "No Sigma detections."
