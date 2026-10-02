@@ -265,14 +265,16 @@ class TestRejectionsReachTheStatus:
         records all rejected, the other's all indexed."""
         root = tmp_path / "flat"
         root.mkdir()
-        _write_csv(root / "flags.csv", ["flag", "n"], [["maybe", "1"], ["maybe", "2"]])
+        # One file per host, named for it, as hostname='auto' detects them.
+        for host in ("hosta", "hostb"):
+            _write_csv(root / f"flags-{host}.csv", ["flag", "n"], [["maybe", "1"]])
         os_client.indices.create(
-            index=ingest.name("delim-flags", host="hosta"),
+            index=ingest.name("delim-flags-hosta", host="hosta"),
             body={"mappings": {"properties": {"flag": {"type": "boolean"}}}},
         )
         ingest.delimited(root, auto_hosts="hosta,hostb")
         s = _status()
-        assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 2, 2)
+        assert (s["status"], s["total_indexed"], s["bulk_failed"]) == ("complete", 1, 1)
         assert "[flag]" in s["warnings"][0]
 
     def test_auto_hosts_with_recursive_reports_the_walk(self, ingest, tmp_path):

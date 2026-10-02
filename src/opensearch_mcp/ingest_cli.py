@@ -1652,9 +1652,14 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
         auto_hosts = [h.strip() for h in auto_hosts_str.split(",") if h.strip()]
         # Each host's sub-run reads only the files named for it; a file named
-        # for no listed host is left out, and said so.
+        # for no listed host is left out, and said so. (A recursive walk names
+        # its hosts from its subdirectories instead.)
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
-        flat = sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+        flat = (
+            []
+            if is_recursive
+            else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+        )
         wanted = {h.lower() for h in auto_hosts}
         unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
         if unattributed:
@@ -1669,7 +1674,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             sub_args = copy.copy(args)
             sub_args.hostname = h
             sub_args.auto_hosts = ""
-            sub_args.only_files = [f for f in flat if _filename_host(f) == h.lower()]
+            if not is_recursive:
+                sub_args.only_files = [f for f in flat if _filename_host(f) == h.lower()]
             print(f"\n--- Host: {h} ---")
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
             if result:
