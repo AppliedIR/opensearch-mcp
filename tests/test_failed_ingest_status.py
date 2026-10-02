@@ -84,9 +84,14 @@ def test_a_memory_worker_that_dies_at_argparse(case, monkeypatch):
 
 
 def test_an_image_that_cannot_be_mounted(case, monkeypatch, tmp_path):
-    """The mount step needs fdisk; the worker's PATH here has none."""
+    """The mount step needs fdisk; the worker's PATH here has none. A stand-in
+    sudo runs its command unprivileged, so the sudo check passes on a host
+    without passwordless sudo and the worker gets as far as fdisk."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    sudo = bindir / "sudo"
+    sudo.write_text('#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n')
+    sudo.chmod(0o755)
     path = f"{bindir}:/usr/bin:/bin"
     if shutil.which("fdisk", path=path):
         pytest.skip("fdisk is on /usr/bin or /bin here")
