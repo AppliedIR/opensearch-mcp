@@ -572,3 +572,21 @@ class TestEnrichIntelAsync:
             resp = idx_enrich_intel(dry_run=False)
         assert "error" in resp
         assert "Too many concurrent" in resp["error"]
+
+
+class TestPathRejectionNamesTheTarget:
+    """A symlink under an allowed location to evidence elsewhere was refused
+    with only the link's own path, which looks allowed."""
+
+    def test_a_link_to_an_outside_target_names_the_target(self, tmp_path):
+        link = tmp_path / "evidence-link"
+        link.symlink_to("/etc")
+        err = srv._validate_path(str(link))
+        assert "not in allowed locations" in err
+        assert "(resolved target: /etc)" in err and "mount or bind it" in err, err
+
+    def test_a_link_to_an_allowed_target_is_accepted(self, tmp_path):
+        target = tmp_path / "evidence"
+        target.mkdir()
+        (tmp_path / "link").symlink_to(target)
+        assert srv._validate_path(str(tmp_path / "link")) is None

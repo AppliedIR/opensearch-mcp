@@ -538,7 +538,9 @@ def _validate_path(path: str) -> str | None:
     if not any(p.is_relative_to(a) for a in allowed):
         return (
             f"Path not in allowed locations "
-            f"(~/, /mnt/, /media/, /evidence/, /cases/, /tmp/): {path}"
+            f"(~/, /mnt/, /media/, /evidence/, /cases/, /tmp/): {path} "
+            f"(resolved target: {p}). The target must be under one of these; copy it in, "
+            "or mount or bind it under /mnt, /media or /evidence."
         )
     return None
 
