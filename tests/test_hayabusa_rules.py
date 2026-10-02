@@ -36,7 +36,12 @@ class TestResolveHayabusaRulesDir:
         bad = tmp_path / "no-config"
         bad.mkdir()
         monkeypatch.setenv("HAYABUSA_RULES_DIR", str(bad))
-        with patch("opensearch_mcp.ingest._HAYABUSA_RULES_CANDIDATES", ()):
+        # Nothing else may answer: no fixed path, no /opt, no hayabusa on PATH.
+        with (
+            patch("opensearch_mcp.ingest._HAYABUSA_RULES_CANDIDATES", ()),
+            patch("pathlib.Path.glob", return_value=iter([])),
+            patch("opensearch_mcp.ingest.shutil.which", return_value=None),
+        ):
             assert _resolve_hayabusa_rules_dir() is None
 
     def test_none_when_nothing_found(self, tmp_path, monkeypatch):
@@ -47,8 +52,9 @@ class TestResolveHayabusaRulesDir:
                 ("/definitely/not/a/path",),
             ),
             patch("pathlib.Path.glob", return_value=iter([])),
+            patch("opensearch_mcp.ingest.shutil.which", return_value=None),
         ):
-            # Also prevent /opt fallback from finding anything
+            # Also prevent the /opt and PATH fallbacks from finding anything
             assert _resolve_hayabusa_rules_dir() is None
 
     def test_opt_glob_fallback(self, tmp_path, monkeypatch):
