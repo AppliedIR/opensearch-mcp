@@ -198,7 +198,7 @@ def test_a_walks_sub_runs_each_name_only_their_own_files(cluster_case, tmp_path,
     host2_final = [n for host, st, n in writes if host == "host2" and st != "running"]
     assert host2_final == [""], writes
     final_note = [n for host, st, n in writes if st != "running"][-1]
-    assert final_note.startswith("No time field detected in 1 file(s), e.g. procs.csv")
+    assert final_note.startswith("No time field detected in 1 file(s), e.g. host1/procs.csv")
 
 
 @pytest.mark.integration
@@ -227,4 +227,19 @@ def test_an_auto_hosts_run_names_a_file_once(cluster_case, tmp_path, monkeypatch
     cli.cmd_ingest_delimited(args)
     (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
     (note,) = [w for w in status.get("warnings", []) if "No time field" in w]
-    assert "No time field detected in 1 file(s), e.g. procs-host1.csv" in note
+    assert "No time field detected in 1 file(s), e.g. flat/procs-host1.csv" in note
+
+
+@pytest.mark.integration
+def test_the_same_file_name_under_two_hosts_is_two_files(cluster_case, tmp_path, monkeypatch):
+    """A recursive Kansa walk has the same module files under every host."""
+    top = tmp_path / "walk"
+    for host in ("host1", "host2"):
+        (top / host).mkdir(parents=True)
+        (top / host / "procs.csv").write_text("Name,Pid\nx,4\n")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "tf-same-name")
+    args = argparse.Namespace(path=str(top), case=cluster_case, hostname="", recursive=True)
+    cli.cmd_ingest_delimited(args)
+    (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
+    (note,) = [w for w in status.get("warnings", []) if "No time field" in w]
+    assert "No time field detected in 2 file(s), e.g. host1/procs.csv" in note

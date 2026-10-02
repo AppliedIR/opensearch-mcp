@@ -183,7 +183,8 @@ _TIMESTAMP_CANDIDATES = [
 ]
 
 # Files whose records had no time field in this ingest run (reset per run;
-# each name once); reported on the console and in the ingest status.
+# each file once, by full path: every host's procs.csv is its own file);
+# reported on the console and in the ingest status.
 NO_TIME_FIELD: list[str] = []
 
 
@@ -200,8 +201,10 @@ def no_time_field_note() -> str:
     """What to tell the examiner about NO_TIME_FIELD, or ""."""
     if not NO_TIME_FIELD:
         return ""
+    first = Path(NO_TIME_FIELD[0])
     return (
-        f"No time field detected in {len(NO_TIME_FIELD)} file(s), e.g. {NO_TIME_FIELD[0]}: "
+        f"No time field detected in {len(NO_TIME_FIELD)} file(s), "
+        f"e.g. {first.parent.name}/{first.name}: "
         "no @timestamp, so idx_timeline won't show them. Re-ingest with time_field=<column>."
     )
 
