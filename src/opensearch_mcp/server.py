@@ -412,6 +412,13 @@ def _resolve_index(index: str, case_id: str) -> str:
     return "case-*"
 
 
+def _hayabusa_index(case_id: str = "") -> str:
+    """The Hayabusa alert indices of case_id, or of the active case; every
+    case's only when there's neither."""
+    base = _resolve_index("", case_id)
+    return "case-*-hayabusa-*" if base == "case-*" else base[:-1] + "hayabusa-*"
+
+
 def _detect_preparsed_csvs(path: Path) -> str | None:
     """Check for pre-parsed CSV output and suggest the right ingest tool."""
     # Scan flat + one level of subdirs (avoid full tree walk on USB)
@@ -1774,7 +1781,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
             if "hayabusa" in artifacts_done or any("hayabusa" in a for a in artifacts_done):
                 next_steps.append(
                     "Query Hayabusa alerts: idx_search(query='Level:critical OR "
-                    "Level:high', index='case-*-hayabusa-*')"
+                    f"Level:high', index='{_hayabusa_index(ing.get('case_id') or '')}')"
                 )
             # Pick a concrete artifact_type example from what was ingested
             example_type = "event_logs_security"
@@ -2706,6 +2713,7 @@ def idx_list_detections(
     """
     limit = min(limit, 500)
     client = _get_os()
+    hb_index = _hayabusa_index()
 
     # Fetch more than requested when filtering by severity (API doesn't support it)
     fetch_size = limit * 3 if severity else limit
@@ -2729,12 +2737,12 @@ def idx_list_detections(
             resp = {"error": "Security Analytics plugin not available", "findings": []}
             # Still suggest Hayabusa when SA is unavailable
             try:
-                hb_count = client.count(index="case-*-hayabusa-*")["count"]
+                hb_count = client.count(index=hb_index)["count"]
                 if hb_count:
                     resp["suggestion"] = (
                         f"Sigma detectors unavailable. {hb_count:,} Hayabusa alerts available. "
                         "Query: idx_search(query='Level:critical OR Level:high', "
-                        "index='case-*-hayabusa-*')"
+                        f"index='{hb_index}')"
                     )
                 else:
                     resp["suggestion"] = "Sigma detectors unavailable on OpenSearch 3.5. " + (
@@ -2745,7 +2753,7 @@ def idx_list_detections(
             except Exception:
                 resp["suggestion"] = (
                     "Sigma detectors unavailable. Check Hayabusa: "
-                    "idx_search(query='Level:*', index='case-*-hayabusa-*')"
+                    f"idx_search(query='Level:*', index='{hb_index}')"
                 )
             return resp
         raise
@@ -2784,12 +2792,12 @@ def idx_list_detections(
     hayabusa_hint = ""
     if not findings:
         try:
-            hb_count = client.count(index="case-*-hayabusa-*")["count"]
+            hb_count = client.count(index=hb_index)["count"]
             if hb_count:
                 hayabusa_hint = (
                     f"No Sigma detections. {hb_count:,} Hayabusa alerts available. "
                     "Query: idx_search(query='Level:critical OR Level:high', "
-                    "index='case-*-hayabusa-*')"
+                    f"index='{hb_index}')"
                 )
             else:
                 hayabusa_hint = "No Sigma detections (disabled on OpenSearch 3.5). " + (
