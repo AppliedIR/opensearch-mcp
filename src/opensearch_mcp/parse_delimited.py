@@ -218,6 +218,13 @@ def ingest_delimited(
                     val = val / 1e3  # milliseconds
                 record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
             else:
+                # Hayabusa writes local time as "2022-11-28 18:48:24.526 +00:00",
+                # a form @timestamp rejects; as UTC ISO it's accepted.
+                try:
+                    fmt_ = "%Y-%m-%d %H:%M:%S.%f %z"
+                    val = datetime.strptime(val, fmt_).astimezone(timezone.utc).isoformat()
+                except (ValueError, TypeError):
+                    pass
                 record["@timestamp"] = val
 
         if (time_from or time_to) and record.get("@timestamp"):

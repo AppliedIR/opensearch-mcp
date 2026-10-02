@@ -447,6 +447,7 @@ def run_hayabusa_batch(
                 client,
                 index_name,
                 host.hostname,
+                time_field="Timestamp",
                 source_file=str(csv_output),
                 pipeline_version=_PIPELINE_VERSION,
                 host_dict=host_dict,
