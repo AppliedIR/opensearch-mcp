@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -312,6 +313,8 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
       2. Standard install paths (see _HAYABUSA_RULES_CANDIDATES)
       3. /opt/hayabusa*/rules (nested layout)
       4. /opt/hayabusa* (direct layout — rules dir at the top level)
+      5. rules/ beside the hayabusa binary on PATH, links resolved (SIFT
+         links ~/.local/bin/hayabusa into its own install directory)
 
     Returns None if nothing found. Only returns paths where the
     directory AND a 'config' subdirectory both exist — hayabusa
@@ -337,6 +340,11 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
         for sibling in sorted(opt.glob("hayabusa*")):
             if sibling.is_dir() and (sibling / "config").is_dir():
                 return sibling
+    binary = shutil.which("hayabusa")
+    if binary:
+        p = Path(binary).resolve().parent / "rules"
+        if p.is_dir() and (p / "config").is_dir():
+            return p
     return None
 
 
