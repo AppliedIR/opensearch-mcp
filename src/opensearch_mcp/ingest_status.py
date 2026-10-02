@@ -227,6 +227,8 @@ def _is_process_alive(pid: int, run_id: str) -> bool:
     if run_id:
         try:
             environ = Path(f"/proc/{pid}/environ").read_bytes()
+            if not environ:  # mid-execve: nothing to check yet, not a sign of death
+                return True
             expected = f"VHIR_INGEST_RUN_ID={run_id}".encode()
             return expected in environ
         except OSError:

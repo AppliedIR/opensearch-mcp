@@ -11,6 +11,7 @@ stand-in that reads the status while it "runs".
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -235,3 +236,48 @@ def test_a_launcher_record_keeps_the_run_id_check(tmp_path, monkeypatch):
     finally:
         other.kill()
         other.wait()
+
+
+# --- A worker caught mid-execve has an empty /proc/<pid>/environ -----------
+
+
+def _environ(monkeypatch, content: bytes):
+    """/proc/<pid>/environ reads as `content`; other reads are untouched."""
+    from pathlib import Path
+
+    real = Path.read_bytes
+
+    def read_bytes(self):
+        return content if self.name == "environ" else real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_an_empty_environ_is_alive(monkeypatch):
+    _environ(monkeypatch, b"")
+    assert _REAL_IS_ALIVE(os.getpid(), "run-e") is True
+
+
+def test_an_environ_without_the_run_id_is_not_alive(monkeypatch):
+    _environ(monkeypatch, b"PATH=/usr/bin\0HOME=/x\0")
+    assert _REAL_IS_ALIVE(os.getpid(), "run-e") is False
+
+
+def test_a_sweep_during_the_workers_exec_leaves_it_running(tmp_path, monkeypatch):
+    """The launcher's `starting` record exists before the worker's exec ends;
+    a poll in that window must not end the run as failed."""
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-e")  # an MCP-launched worker
+    t0 = "2026-10-02T00:00:00Z"
+    ingest_status.write_status("c1", os.getpid(), "run-e", "starting", [], {}, t0)
+    _environ(monkeypatch, b"")  # mid-execve
+    ingest_status.read_active_ingests()  # the sweep, from any status poll
+    monkeypatch.undo()
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-e")
+    hosts = [{"hostname": "h", "artifacts": [{"name": "evtx", "status": "complete"}]}]
+    ingest_status.write_status("c1", os.getpid(), "run-e", "running", hosts, {}, t0)
+    ingest_status.finish_status("c1", os.getpid())
+    (path,) = (tmp_path / "status").glob("*.json")
+    data = json.loads(path.read_text())
+    assert (data["status"], data["hosts"]) == ("complete", hosts), data
