@@ -71,6 +71,10 @@ def write_status(
         "bulk_failed_reason": bulk_failed_reason,
         "elapsed_seconds": round(elapsed_seconds, 1),
     }
+    if run_id and pid == os.getpid() and os.environ.get("VHIR_INGEST_RUN_ID") != run_id:
+        # A run id the worker made itself (a CLI run) isn't in its
+        # /proc/<pid>/environ, so the sweep can't confirm it there.
+        data["run_id_from_env"] = False
     if not log_file and run_id:
         # The launcher writes the worker's log here; workers don't pass it.
         launched = _STATUS_DIR.parent / "ingest-logs" / f"{run_id}.log"
@@ -162,7 +166,8 @@ def read_active_ingests() -> list[dict]:
             continue
         if data.get("status") in ("running", "starting"):
             pid = data.get("pid", 0)
-            run_id = data.get("run_id", "")
+            # A self-made run id gets the PID-only check (alive, not a zombie).
+            run_id = data.get("run_id", "") if data.get("run_id_from_env", True) else ""
             if pid and not _is_process_alive(pid, run_id):
                 data["status"] = "failed"
                 prev_error = data.get("error") or ""

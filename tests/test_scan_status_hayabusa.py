@@ -11,6 +11,7 @@ stand-in that reads the status while it "runs".
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from unittest.mock import MagicMock
@@ -22,6 +23,8 @@ from opensearch_mcp import ingest_cli as cli
 from opensearch_mcp import ingest_status
 from opensearch_mcp import server as srv
 from opensearch_mcp.discover import DiscoveredHost
+
+_REAL_IS_ALIVE = ingest_status._is_process_alive
 
 
 def _status() -> dict:
@@ -165,3 +168,70 @@ def test_finishing_leaves_a_failed_run_failed(tmp_path, monkeypatch):
     ingest_status.finish_status("c1", 7)
     (path,) = (tmp_path / "status").glob("*.json")
     assert '"status": "failed"' in path.read_text()
+
+
+# --- A CLI scan: its run id isn't in its environ, so the sweep misreads it -----
+
+
+def test_a_cli_scan_polled_mid_run_reads_running_and_ends_complete(scan, monkeypatch):
+    """No inherited VHIR_INGEST_RUN_ID: cmd_scan makes one, which isn't in its
+    /proc/<pid>/environ. The sweep (real here) checked it there and marked
+    the live scan failed on any poll; then the guard refused every later
+    `running` write, so hayabusa's row never landed."""
+    monkeypatch.delenv("VHIR_INGEST_RUN_ID")
+    monkeypatch.setattr(ingest_status, "_is_process_alive", _REAL_IS_ALIVE)
+    real_parse = ing.parse_and_index
+    polled = []
+
+    def parse(*a, **k):
+        polled.append(_status()["status"])  # an examiner's poll mid-ingest
+        return real_parse(*a, **k)
+
+    monkeypatch.setattr(ing, "parse_and_index", parse)
+    final = scan(lambda *a, **k: {}, enrich=lambda **kw: {})
+    assert polled == ["running"]
+    assert final["status"] == "complete", final
+    assert [c["status"] for c in _hayabusa_row(final)] == ["done"]
+
+
+def test_a_worker_with_an_inherited_run_id_that_died_is_failed(tmp_path, monkeypatch):
+    """The sweep's own job is unchanged for launched workers."""
+    import subprocess
+
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    ingest_status.write_status("c1", dead.pid, "run-x", "running", [], {}, "2026-10-02T00:00:00Z")
+    (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
+    assert status["status"] == "failed", status
+
+
+def test_a_live_pid_without_its_inherited_run_id_is_still_failed(tmp_path, monkeypatch):
+    """PID reuse: the pid is alive (this process), but it isn't the worker
+    whose inherited run id the status names."""
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-y")  # recorded as inherited
+    ingest_status.write_status(
+        "c1", os.getpid(), "run-y", "running", [], {}, "2026-10-02T00:00:00Z"
+    )
+    (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
+    assert status["status"] == "failed", status
+
+
+def test_a_launcher_record_keeps_the_run_id_check(tmp_path, monkeypatch):
+    """Written by another process (the launcher) for a live pid that isn't
+    the worker: the run id check still applies, so it's failed."""
+    import subprocess
+
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.delenv("VHIR_INGEST_RUN_ID", raising=False)
+    other = subprocess.Popen(["sleep", "30"], env={"PATH": "/usr/bin:/bin"})
+    try:
+        ingest_status.write_status(
+            "c1", other.pid, "run-z", "running", [], {}, "2026-10-02T00:00:00Z"
+        )
+        (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
+        assert status["status"] == "failed", status
+    finally:
+        other.kill()
+        other.wait()
