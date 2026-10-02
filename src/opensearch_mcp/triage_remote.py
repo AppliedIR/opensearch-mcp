@@ -154,6 +154,7 @@ def _enrich_file_artifact(
     try:
         agg_result = client.search(
             index=index_pattern,
+            allow_no_indices=False,
             body={
                 "query": {"query_string": {"query": query}},
                 "aggs": {"paths": {"terms": {"field": path_field, "size": 5000}}},
@@ -322,10 +323,11 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
         # dots as path separators and would miss it.
         result = client.search(
             index=index,
+            allow_no_indices=False,
             body={"query": {"term": {"event.code": 7045}}, "size": 5000},
         )
-    except Exception:
-        return {"status": "skipped"}
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     hits = result["hits"]["hits"]
     if not hits:
@@ -404,14 +406,15 @@ def _enrich_service_artifact(
     try:
         agg_result = client.search(
             index=index_pattern,
+            allow_no_indices=False,
             body={
                 "query": {"match_all": {}},
                 "aggs": {"names": {"terms": {"field": name_field, "size": 5000}}},
                 "size": 0,
             },
         )
-    except Exception:
-        return {"status": "skipped"}
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     buckets = agg_result.get("aggregations", {}).get("names", {}).get("buckets", [])
     if not buckets:
@@ -480,6 +483,7 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
     try:
         result = client.search(
             index=index,
+            allow_no_indices=False,
             body={
                 "query": {
                     "bool": {
@@ -492,8 +496,8 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
                 "size": 5000,
             },
         )
-    except Exception:
-        return {"status": "skipped"}
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     hits = result["hits"]["hits"]
     if not hits:
@@ -578,6 +582,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
     try:
         result = client.search(
             index=index,
+            allow_no_indices=False,
             body={
                 "query": {
                     "bool": {
@@ -593,8 +598,8 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
                 "aggs": {"values": {"terms": {"field": "ValueData.keyword", "size": 5000}}},
             },
         )
-    except Exception:
-        return {"status": "skipped"}
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     buckets = result.get("aggregations", {}).get("values", {}).get("buckets", [])
     if not buckets:
@@ -682,6 +687,7 @@ def _enrich_registry_check_file(
     try:
         result = client.search(
             index=index,
+            allow_no_indices=False,
             body={
                 "query": {
                     "bool": {
@@ -692,8 +698,8 @@ def _enrich_registry_check_file(
                 "aggs": {"values": {"terms": {"field": f"{value_field}.keyword", "size": 5000}}},
             },
         )
-    except Exception:
-        return {"status": "skipped"}
+    except Exception as e:
+        return {"status": "skipped", "reason": str(e)}
 
     buckets = result.get("aggregations", {}).get("values", {}).get("buckets", [])
     if not buckets:
