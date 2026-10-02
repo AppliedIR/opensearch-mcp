@@ -1118,6 +1118,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 from opensearch_mcp.bulk import get_last_bulk_reason
                 from opensearch_mcp.ingest import run_hayabusa_batch
 
+                # The ingest's own reason: hayabusa's bulk writes replace it.
+                ingest_bulk_reason = get_last_bulk_reason()
+
                 hayabusa_started = datetime.now(timezone.utc).isoformat()
                 # BUG-4 fix: preserve full host/artifact checklist, append hayabusa
                 existing_hosts = [
@@ -1240,7 +1243,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     },
                     hayabusa_started,
                     bulk_failed=total_bulk_failed,
-                    bulk_failed_reason=get_last_bulk_reason(),
+                    bulk_failed_reason=ingest_bulk_reason,
                     elapsed_seconds=result.elapsed_seconds,
                 )
 

@@ -62,7 +62,12 @@ def scan(tmp_path, monkeypatch):
 
         monkeypatch.setattr(shutil, "which", which)
         if installed:
-            monkeypatch.setattr(ingest, "run_hayabusa_batch", lambda *a, **k: {"host-a": 5})
+
+            def run_hayabusa_batch(*a, **k):  # its own bulk writes set their reason
+                bulk._tls.last_bulk_reason = "hayabusa: version_conflict_engine_exception"
+                return {"host-a": 5}
+
+            monkeypatch.setattr(ingest, "run_hayabusa_batch", run_hayabusa_batch)
         args = argparse.Namespace(
             path=str(root),
             case="c1",
@@ -86,4 +91,5 @@ def test_diagnostics_survive(scan, installed):
     assert status["bulk_failed"] == 25, status
     (warning,) = [w for w in status.get("warnings", []) if "rejected" in w]
     assert warning.startswith("25 events rejected"), warning
-    assert _REASON[:40] in warning, warning
+    assert _REASON[:40] in warning, warning  # the ingest's reason, not hayabusa's
+    assert "version_conflict" not in warning, warning
