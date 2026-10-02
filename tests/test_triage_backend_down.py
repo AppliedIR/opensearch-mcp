@@ -142,3 +142,39 @@ def test_a_backend_lost_mid_run_fails_after_stamping_what_it_got():
     for name in GW[:5]:  # file artifacts: one verdict stamped (2 updates)
         assert res[name]["status"] == "failed", (name, res[name])
         assert res[name]["enriched"] == 2, (name, res[name])
+
+
+def _tool_small(call_tool, n):
+    with (
+        patch.object(tr, "gateway_available", return_value=True),
+        patch.object(tr, "call_tool", side_effect=call_tool),
+        patch.object(srv, "_get_os", return_value=StubOS(n)),
+        patch.object(srv.audit, "log", return_value=None),
+    ):
+        return srv.idx_enrich_triage(case_id="c1")
+
+
+def test_an_artifact_shorter_than_the_stop_fails_when_every_call_failed():
+    """Two values never reach the three-in-a-row stop; both failing is still
+    a failure, not `complete, enriched 0`."""
+    res = _enrich(_down, n=2)
+    for name in GW:
+        assert res[name]["status"] == "failed", (name, res[name])
+        assert "windows-triage backend or gateway unavailable" in res[name]["reason"]
+    resp = _tool_small(_down, n=2)
+    assert resp["status"] == "incomplete" and "amcache" in resp["failed_artifacts"], resp
+
+
+def test_one_answer_then_one_failure_is_not_failed():
+    """The loop ends on a failure, so only the answer before it keeps the
+    artifact `complete`."""
+    calls = {"n": 0}
+
+    def every_other(name, args, timeout=60):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:  # each artifact's second call
+            raise TimeoutError("timed out")
+        return _ok(name, args)
+
+    res = _enrich(every_other, n=2)
+    assert {res[k]["status"] for k in GW} == {"complete"}, res
