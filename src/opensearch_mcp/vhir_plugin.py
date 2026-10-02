@@ -42,6 +42,8 @@ def register(subparsers, registered: set) -> None:
         registered.add("ingest")
 
     if "ingest-memory" not in registered:
+        from opensearch_mcp.parse_memory import TIERS
+
         p = subparsers.add_parser("ingest-memory", help="Parse memory image with Volatility 3")
         p.add_argument("path", help="Path to memory image")
         p.add_argument(
@@ -54,7 +56,7 @@ def register(subparsers, registered: set) -> None:
             "--tier",
             type=int,
             default=1,
-            choices=[1, 2, 3],
+            choices=sorted(TIERS),
             help="Analysis depth (1=fast, 2=default, 3=deep)",
         )
         p.add_argument("--plugins", help="Specific plugins (comma-separated)")

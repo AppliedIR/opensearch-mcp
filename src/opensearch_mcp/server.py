@@ -2520,16 +2520,13 @@ def idx_ingest_memory(
     path_err = _validate_path(path)
     if path_err:
         return {"error": path_err}
-    from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3
+    from opensearch_mcp.parse_memory import TIERS
 
-    if plugins:
-        plugin_list = plugins
-    elif tier >= 3:
-        plugin_list = TIER_3
-    elif tier >= 2:
-        plugin_list = TIER_2
-    else:
-        plugin_list = TIER_1
+    # The worker is always passed --tier, so a tier it refuses fails even
+    # with plugins named.
+    if tier not in TIERS:
+        return {"error": f"tier must be one of {sorted(TIERS)}, got {tier!r}"}
+    plugin_list = plugins or TIERS[tier]
 
     if dry_run:
         resp = {

@@ -20,6 +20,7 @@ from opensearch_mcp.ingest import discover, ingest
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_csv import ingest_csv
+from opensearch_mcp.parse_memory import TIERS
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.tools import TOOLS
 
@@ -2570,7 +2571,7 @@ def main() -> None:
     p_mem.add_argument("path", help="Path to memory image")
     p_mem.add_argument("--hostname", required=True, help="Source hostname")
     p_mem.add_argument("--case", help="Case ID")
-    p_mem.add_argument("--tier", type=int, default=1, choices=[1, 2, 3], help="Analysis depth")
+    p_mem.add_argument("--tier", type=int, default=1, choices=sorted(TIERS), help="Analysis depth")
     p_mem.add_argument("--plugins", help="Specific plugins (comma-separated)")
     p_mem.add_argument("--timeout", type=int, default=3600, help="Per-plugin timeout")
     p_mem.add_argument("--yes", action="store_true", help="Skip confirmation")

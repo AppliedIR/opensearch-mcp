@@ -61,6 +61,9 @@ TIER_3 = TIER_2 + [
 #   + handles that are already in the tier. Operators can run it on-
 #   demand via `vol -f <img> windows.vadinfo --pid <pid>`.
 
+# The tiers a memory ingest accepts: the tool, the CLI and the worker read this.
+TIERS = {1: TIER_1, 2: TIER_2, 3: TIER_3}
+
 # Natural keys per plugin (content-intrinsic, version-independent)
 _NATURAL_KEYS: dict[str, list[str]] = {
     "windows.pslist": ["PID", "CreateTime"],
