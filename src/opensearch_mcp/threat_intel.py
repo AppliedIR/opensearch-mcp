@@ -695,6 +695,7 @@ def stamp_documents(
     index_pattern: str,
     ioc_results: dict[str, dict],
     origins: dict[str, set[tuple[str, str]]],
+    force: bool = False,
 ) -> tuple[int, int, int]:
     """Stamp indexed documents with threat_intel.* fields via update-by-query.
 
@@ -735,11 +736,24 @@ def stamp_documents(
         intel_with_ts["threat_intel.checked"] = True
 
         set_clauses = []
-        params = {}
+        params: dict = {
+            "_rank": _VERDICT_RANK.get(intel.get("threat_intel.verdict"), 0),
+            "_ranks": _VERDICT_RANK,
+        }
         for k, v in intel_with_ts.items():
             safe_key = k.replace(".", "_")
             set_clauses.append(f"ctx._source['{k}'] = params.{safe_key}")
             params[safe_key] = v
+        # Without force, a stamp never replaces a higher verdict a previous
+        # run left on the document. Read from _source: the verdict isn't
+        # mapped as keyword in every index, so a query can't exclude it.
+        script = "; ".join(set_clauses)
+        if not force:
+            script = (
+                "def old = ctx._source['threat_intel.verdict'];"
+                " if (old != null && params._ranks.getOrDefault(old, 0) > params._rank)"
+                f" {{ ctx.op = 'noop' }} else {{ {script} }}"
+            )
 
         try:
             result = client.update_by_query(
@@ -752,7 +766,7 @@ def stamp_documents(
                         }
                     },
                     "script": {
-                        "source": "; ".join(set_clauses),
+                        "source": script,
                         "lang": "painless",
                         "params": params,
                     },
@@ -872,7 +886,9 @@ def enrich_case(
     if on_progress:
         on_progress("stamping", matched=len(results))
     origins = {value: where for found in iocs.values() for value, where in found.items()}
-    updated, conflicts, failed_stamps = stamp_documents(client, index_pattern, results, origins)
+    updated, conflicts, failed_stamps = stamp_documents(
+        client, index_pattern, results, origins, force=force
+    )
 
     counts = {
         "iocs_extracted": total_iocs,

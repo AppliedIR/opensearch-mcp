@@ -406,7 +406,8 @@ def ensure_winlog_pipeline(client) -> dict[str, Any]:
         # non-evtx template failed — otherwise an "ok" response masks
         # 13-of-14 broken templates behind a green light.
         success_status = "ok"
-        if other_templates_result.get("failed"):
+        patched = other_templates_result.get("patched_indices") or {}
+        if other_templates_result.get("failed") or patched.get("failed"):
             success_status = "partial"
         return {
             "status": success_status,

@@ -113,6 +113,44 @@ class TestEnsureWinlogPipeline:
         client.indices.get_mapping.return_value = {}
         return client
 
+    def _install_with_one_flattened_index(self, monkeypatch, rejected: bool) -> dict:
+        """idx_install_pipelines, with one index left on the flattened type
+        whose mapping patch the cluster accepts or rejects."""
+        from opensearch_mcp import server as srv
+
+        client = self._mock_client_ok()
+        flat = {
+            "case-x-json-a": {
+                "mappings": {
+                    "dynamic_templates": [
+                        {
+                            "objs": {
+                                "match_mapping_type": "object",
+                                "mapping": {"type": "flattened"},
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+        client.indices.get_mapping.side_effect = lambda **kw: flat if "filter_path" in kw else {}
+        if rejected:
+            client.indices.put_mapping.side_effect = RuntimeError("put_mapping rejected")
+        monkeypatch.setattr(srv, "_get_os", lambda: client)
+        monkeypatch.setattr(srv.audit, "log", lambda **kw: None)
+        return srv.idx_install_pipelines()
+
+    def test_a_failed_index_patch_is_reported(self, monkeypatch):
+        """The patch failure was logged, and the install still read ok."""
+        result = self._install_with_one_flattened_index(monkeypatch, rejected=True)
+        assert result["status"] == "partial"
+        assert "case-x-json-a" in json.dumps(result)
+
+    def test_a_patched_index_reads_ok(self, monkeypatch):
+        result = self._install_with_one_flattened_index(monkeypatch, rejected=False)
+        assert result["status"] == "ok"
+        assert result["other_templates"]["patched_indices"]["patched"] == ["case-x-json-a"]
+
     def test_happy_path_installs_pipeline_then_template(self):
         client = self._mock_client_ok()
         result = ensure_winlog_pipeline(client)
