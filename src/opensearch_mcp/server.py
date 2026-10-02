@@ -1605,6 +1605,23 @@ def idx_ingest(
     _log_fh.close()  # Safe: Popen dup2'd the fd, subprocess has its own copy
 
     host_names = [h.hostname for h in hosts] if hosts else ([hostname] if hostname else [])
+    # A record under the worker's pid, so a worker that dies before writing
+    # its own shows as failed rather than not at all.
+    from datetime import datetime as _dt_scan
+    from datetime import timezone as _tz_scan
+
+    from opensearch_mcp.ingest_status import write_status as _ws_scan
+
+    _ws_scan(
+        case_id=case_id,
+        pid=proc.pid,
+        run_id=run_id,
+        status="starting",
+        hosts=[{"hostname": h, "artifacts": []} for h in host_names],
+        totals={"indexed": 0},
+        started=_dt_scan.now(_tz_scan.utc).isoformat(),
+        log_file=str(_log_file),
+    )
     aid = audit.log(
         tool="idx_ingest",
         params={
@@ -1633,6 +1650,16 @@ def idx_ingest(
     if aid:
         resp["audit_id"] = aid
     return resp
+
+
+def _log_tail(path: str, limit: int = 2048) -> list[str]:
+    """The last lines of a worker's log, at most `limit` bytes of it."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - limit))
+            return f.read().decode(errors="replace").splitlines()[-10:]
+    except OSError:
+        return []
 
 
 @server.tool()
@@ -1771,6 +1798,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 s["message"] = f"Ingest failed ({_prefix}): {_err[:200]}"
             else:
                 s["message"] = f"Ingest failed: {_err[:200]}"
+            if _prefix == "process_died_unexpectedly" and s["log_file"]:
+                # The worker died without saying why: its log does.
+                s["log_tail"] = _log_tail(s["log_file"])
         elif status == "complete":
             invalidate_index_cache()  # new indices may exist
             errors = [
@@ -2663,6 +2693,17 @@ def idx_ingest_memory(
     _safe_case_m = active_case.replace("/", "_").replace("\\", "_").replace("..", "_")
     _pid0_m = _vd() / "ingest-status" / f"{_safe_case_m}-0.json"
     _pid0_m.unlink(missing_ok=True)
+    # The same record under the worker's pid, which the reader checks.
+    _ws_mem(
+        case_id=active_case,
+        pid=proc.pid,
+        run_id=run_id,
+        status="starting",
+        hosts=[{"hostname": hostname, "artifacts": [{"name": "memory", "status": "starting"}]}],
+        totals={"indexed": 0, "artifacts_total": len(plugin_list), "artifacts_complete": 0},
+        started=_started_ts,
+        log_file=str(_lf),
+    )
 
     resp = {
         "status": "started",

@@ -48,6 +48,8 @@ def write_status(
     # race between the read and the atomic replace still allows one
     # stale overwrite), but the window is orders of magnitude
     # narrower than the unguarded case and closes the observed bug.
+    if status == "starting" and path.exists():
+        return  # the launcher's record never replaces one the worker wrote
     if status in ("running", "starting") and path.exists():
         try:
             existing = json.loads(path.read_text())
