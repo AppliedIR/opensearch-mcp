@@ -732,6 +732,7 @@ def idx_aggregate(
             "query": {"query_string": {"query": query}},
             "aggs": {"agg": {"terms": {"field": field, "size": limit}}},
             "size": 0,
+            "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
         },
     )
 
@@ -842,6 +843,7 @@ def idx_timeline(
                 }
             },
             "size": 0,
+            "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
         },
     )
 
