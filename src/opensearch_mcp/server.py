@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1096,6 +1097,51 @@ def idx_install_pipelines() -> dict:
     return result
 
 
+def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[str]:
+    """One warning per (host, artifact) whose most recent ingest failed and left
+    an index: it may hold only part of the artifact. Read from the case audit
+    log, which outlives the ingest status files."""
+    from opensearch_mcp.ingest import _CUSTOM_ARTIFACTS, _PLASO_ARTIFACTS
+    from opensearch_mcp.paths import build_index_name
+    from opensearch_mcp.tools import TOOLS
+
+    suffix = {n: c.index_suffix for n, c in TOOLS.items()}
+    suffix.update({n: n for n in _PLASO_ARTIFACTS | _CUSTOM_ARTIFACTS})  # indexed by name
+    audit_dir = audit._get_audit_dir()  # where the ingest workers' entries go
+    own_dir = audit_dir is not None and audit_dir.parent.name == cid
+    last: dict[str, tuple[str, str, str, str]] = {}  # index -> (ts, result, tool, host)
+    for f in sorted(audit_dir.glob("opensearch-ingest-*.jsonl")) if audit_dir else []:
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            params = e.get("params") if isinstance(e, dict) else None
+            case = e.get("case_id") if isinstance(e, dict) else None
+            # an entry written with no active case has case_id "": it's this
+            # case's only when the log is in this case's own directory
+            if not isinstance(params, dict) or not (case == cid or (own_dir and case == "")):
+                continue
+            # the entry's own name, ingest_<tool>: not every success records params.tool
+            host, tool = params.get("hostname"), str(e.get("tool", "")).removeprefix("ingest_")
+            if not (host and tool in suffix):
+                continue
+            rs = e.get("result_summary")
+            rs = str(rs.get("value", "") if isinstance(rs, dict) else rs or "")
+            ts = str(e.get("ts", ""))
+            index = build_index_name(cid, suffix[tool], host)  # DEV01 and dev01 share one
+            if ts >= last.get(index, ("",))[0]:
+                last[index] = (ts, rs, tool, host)
+    warnings = []
+    for index, (_ts, rs, tool, host) in sorted(last.items()):
+        if rs.startswith("FAILED") and index in docs_by_index:
+            warnings.append(
+                f"{index} ({docs_by_index[index]:,} docs) may be incomplete: the most"
+                f" recent ingest of {tool} on {host} failed ({rs[:200]})"
+            )
+    return warnings
+
+
 @server.tool()
 def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """Get a complete overview of indexed evidence for a case.
@@ -1300,6 +1346,13 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     )
     if fields_per_type:
         resp["fields_per_type"] = fields_per_type
+    docs_by_index = {i["index"]: int(i.get("docs.count", 0)) for i in indices}
+    try:
+        partial = _failed_artifact_warnings(cid, docs_by_index)
+    except OSError as e:
+        partial = [f"Could not read the ingest audit log: {e}"]
+    if partial:
+        resp.setdefault("warnings", []).extend(partial)
     _add_investigation_hints(resp, artifacts, safe)
     aid = audit.log(
         tool="idx_case_summary",
@@ -1343,7 +1396,8 @@ def idx_ingest(
         path: Evidence path — directory or container file (VHDX, E01, 7z, raw).
         hostname: Source hostname. Auto-detected from directory structure
             if multi-host triage package. Required for flat directories.
-        include: Only these artifact types (e.g., ["mft", "usn"]).
+        include: These artifact types (e.g., ["mft", "usn"]), plus the tier-1
+            defaults and any event logs found.
         exclude: Skip these artifact types (e.g., ["jumplists"]).
         source_timezone: Evidence system's local timezone (e.g., "Eastern Standard Time").
         all_logs: Parse all evtx files (default: forensic logs only).

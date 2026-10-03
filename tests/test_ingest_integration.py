@@ -580,3 +580,102 @@ class TestMftHintClauses:
                 assert names == sorted(want), (path, clause, names)
         finally:
             os_client.indices.delete(index=f"{base}-*", ignore=[404])
+
+
+# ---------------------------------------------------------------------------
+# A failed artifact's partly written index is flagged
+# ---------------------------------------------------------------------------
+
+_RECMD_STUB = """#!{python}
+import os, sys
+out = sys.argv[sys.argv.index("--csv") + 1]
+with open(os.path.join(out, "20261003000000_RECmd_Batch_Output.csv"), "w") as f:
+    f.write("HivePath,KeyPath,ValueName,ValueData,LastWriteTimestamp\\n")
+    for i in range(1500):
+        big = os.environ["SR_BIG"] == "1" and i == 1200
+        vd = "x" * (11 * 1024 * 1024) if big else f"v{{i}}"  # past csv.field_size_limit
+        f.write(f"C:\\\\SYSTEM,ROOT\\\\Key{{i}},Val{{i}},{{vd}},2026-01-01 00:00:00\\n")
+"""
+
+
+class TestFailedArtifactWarning:
+    """The real scan path with RECmd stubbed: its CSV fails to parse after the
+    first 1,000 rows are flushed. Not a NUL: only Python 3.10 fails on that."""
+
+    @pytest.fixture
+    def scan(self, tmp_path, tag, monkeypatch):
+        import os
+        import shutil
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        cid = f"{tag}-partial"
+        case_dir = tmp_path / "cases" / cid
+        (case_dir / "audit").mkdir(parents=True)
+        (case_dir / "CASE.yaml").write_text(f"case_id: {cid}\n")
+        home = tmp_path / "home"
+        (home / ".vhir").mkdir(parents=True)
+        shutil.copy(Path.home() / ".vhir" / "opensearch.yaml", home / ".vhir")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "RECmd").write_text(_RECMD_STUB.format(python=sys.executable))
+        (bin_dir / "RECmd").chmod(0o755)
+        monkeypatch.delenv("VHIR_AUDIT_DIR", raising=False)
+        monkeypatch.setenv("VHIR_CASE_DIR", str(case_dir))  # what the summary reads
+
+        def run(host, fail):
+            config = tmp_path / host / "Windows" / "System32" / "config"
+            config.mkdir(parents=True, exist_ok=True)
+            for hive in ("SYSTEM", "SOFTWARE"):
+                (config / hive).write_bytes(b"regf" * 1024)
+            env = {
+                "HOME": str(home),
+                "PATH": f"{bin_dir}:{Path(sys.executable).parent}:/usr/bin:/bin",
+                "VHIR_CASE_DIR": str(case_dir),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "LANG": "C.UTF-8",
+                "SR_BIG": "1" if fail else "0",
+            }
+            p = subprocess.run(
+                [sys.executable, "-m", "opensearch_mcp.ingest_cli", "scan", str(tmp_path / host)]
+                + ["--hostname", host, "--case", cid, "--include", "registry"]
+                + ["--exclude", "shimcache,amcache,shellbags", "--yes", "--skip-triage"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            return p.stdout + p.stderr
+
+        return cid, run  # its indices go with the module fixture's case-{tag}-* delete
+
+    @staticmethod
+    def incomplete(cid):
+        from opensearch_mcp import server
+
+        resp = server.idx_case_summary(case_id=cid)
+        return [w for w in resp.get("warnings", []) if "may be incomplete" in w]
+
+    def test_a_partial_failure_is_flagged_with_the_index_count(self, os_client, scan):
+        cid, run = scan
+        out = run("dev01", fail=True)
+        index = f"case-{cid}-registry-dev01"
+        os_client.indices.refresh(index=index)
+        assert os_client.count(index=index)["count"] == 1000, out  # one flush, then the failure
+        assert self.incomplete(cid) == [
+            f"{index} (1,000 docs) may be incomplete: the most recent ingest of registry"
+            " on dev01 failed (FAILED: field larger than field limit (10485760))"
+        ], out
+
+    def test_only_the_failed_host_and_only_until_it_succeeds(self, os_client, scan):
+        cid, run = scan
+        run("dev01", fail=True)
+        out = run("dev02", fail=False)
+        os_client.indices.refresh(index=f"case-{cid}-*")
+        assert os_client.count(index=f"case-{cid}-registry-dev02")["count"] == 1500, out
+        (warning,) = self.incomplete(cid)
+        assert warning.startswith(f"case-{cid}-registry-dev01 (1,000 docs) may be incomplete")
+        out = run("dev01", fail=False)
+        os_client.indices.refresh(index=f"case-{cid}-*")
+        assert self.incomplete(cid) == [], out
