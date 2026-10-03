@@ -388,7 +388,7 @@ backends['opensearch-mcp'] = {
     'args': ['-m', 'opensearch_mcp'],
     'env': {'OPENSEARCH_CONFIG': '$VHIR_DIR/opensearch.yaml'},
 }
-p.write_text(yaml.dump(config, default_flow_style=False))
+p.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
 "
         echo "  Added opensearch-mcp to $GW_CONFIG"
     fi
