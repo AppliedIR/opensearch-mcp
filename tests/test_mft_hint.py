@@ -12,9 +12,9 @@ from opensearch_mcp import server
 
 
 def mft_hint(monkeypatch) -> str:
-    monkeypatch.setattr(server, "_hints_delivered", False)
+    monkeypatch.setattr(server, "_hints_delivered", set())
     resp: dict = {}
-    server._add_investigation_hints(resp, {"mft": {}})
+    server._add_investigation_hints(resp, {"mft": {}}, "case")
     return next(h for h in resp["investigation_hints"] if h.startswith("MFT indexed"))
 
 

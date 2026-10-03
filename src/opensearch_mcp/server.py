@@ -82,18 +82,12 @@ def _add_shimcache_reminder(resp: dict, index_pattern: str, docs: list) -> None:
 
 
 # --- Enrichment Token Budget: Layer 9 investigation hints decay ---
-_hints_delivered = False
+_hints_delivered: set[tuple[str, str]] = set()  # (case, hint) already returned
 
 
-def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
-    """Add investigation hints to idx_case_summary. Full on first call, pointer after."""
-    global _hints_delivered
-    if _hints_delivered:
-        resp["investigation_hints"] = [
-            "MFT/USN/evtx indexed — call suggest_tools for investigation patterns"
-        ]
-        return
-
+def _add_investigation_hints(resp: dict, artifacts: dict, case: str) -> None:
+    """Add investigation hints to idx_case_summary. Each hint is given once per
+    case, the first time its artifact type is there; the pointer after."""
     hints = []
     art_keys = set(artifacts.keys())
     has_mft = any("mft" in k for k in art_keys)
@@ -130,6 +124,12 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
 
     if not hints:
         return
+    hints = [h for h in hints if (case, h) not in _hints_delivered]
+    if not hints:
+        resp["investigation_hints"] = [
+            "MFT/USN/evtx indexed — call suggest_tools for investigation patterns"
+        ]
+        return
 
     # Budget: sort by doc count, keep top 3, cap at 500 chars
     def _doc_count(hint: str) -> int:
@@ -150,7 +150,7 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
             break
 
     resp["investigation_hints"] = kept
-    _hints_delivered = True
+    _hints_delivered.update((case, h) for h in kept)
 
 
 # --- Field name mismatch detection (cached per case) ---
@@ -239,9 +239,9 @@ def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
 
 def reset_enrichment_state() -> None:
     """Reset enrichment counters for test isolation."""
-    global _shimcache_reminder_count, _hints_delivered, _field_hint_delivered
+    global _shimcache_reminder_count, _field_hint_delivered
     _shimcache_reminder_count = 0
-    _hints_delivered = False
+    _hints_delivered.clear()
     _field_hint_delivered = False
     _case_index_cache.clear()
 
@@ -1299,7 +1299,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     )
     if fields_per_type:
         resp["fields_per_type"] = fields_per_type
-    _add_investigation_hints(resp, artifacts)
+    _add_investigation_hints(resp, artifacts, safe)
     aid = audit.log(
         tool="idx_case_summary",
         params={"case_id": cid},
