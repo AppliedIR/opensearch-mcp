@@ -734,6 +734,28 @@ def stamp_documents(
     conflicts = 0
     failed = 0
 
+    # A text-mapped domain field matches analyzed tokens (a term on
+    # evil.example.com matches not-evil.example.com), so each domain clause
+    # is limited to the indices that map that exact field as keyword, read
+    # now: a field can gain a text mapping while the lookups run.
+    domain_fields = sorted({f for w in origins.values() for f, _ in w if f in _DOMAIN_FIELDS})
+    keyword_indices: dict[str, list[str]] | None = {}
+    if domain_fields:
+        try:
+            caps = client.field_caps(
+                index=index_pattern,
+                fields=",".join(domain_fields),
+                include_unmapped=True,
+                request_timeout=60,
+            )
+            for f in domain_fields:
+                entry = caps.get("fields", {}).get(f, {}).get("keyword")
+                keyword_indices[f] = (
+                    (entry.get("indices") or caps.get("indices", [])) if entry else []
+                )
+        except Exception as e:
+            keyword_indices = None
+            print(f"WARNING: domain stamps skipped, mappings unreadable: {e}", file=sys.stderr)
     ranked = sorted(
         ioc_results.items(),
         key=lambda item: (_VERDICT_RANK.get(item[1].get("threat_intel.verdict"), 0), item[0]),
@@ -743,7 +765,19 @@ def stamp_documents(
         if not where:
             continue
 
-        should_clauses = [{"term": {field: stored}} for field, stored in sorted(where)]
+        should_clauses = []
+        for field, stored in sorted(where):
+            clause = {"term": {field: stored}}
+            if field in _DOMAIN_FIELDS:
+                if not (keyword_indices and keyword_indices.get(field)):
+                    continue
+                clause = {
+                    "bool": {"filter": [clause, {"terms": {"_index": keyword_indices[field]}}]}
+                }
+            should_clauses.append(clause)
+        if not should_clauses:
+            failed += 1
+            continue
 
         intel_with_ts = dict(intel)
         intel_with_ts["threat_intel.enriched_at"] = now
