@@ -2778,13 +2778,7 @@ def idx_ingest_memory(
     }
     aid = audit.log(
         tool="idx_ingest_memory",
-        params={
-            "path": path,
-            "hostname": hostname,
-            "tier": tier,
-            "pid": proc.pid,
-            "run_id": run_id,
-        },
+        params={"path": path, "tier": tier, "pid": proc.pid, "run_id": run_id},
         result_summary=f"started tier {tier} ({len(plugin_list)} plugins)",
         input_files=[path],
     )
