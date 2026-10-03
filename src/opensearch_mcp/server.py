@@ -1570,6 +1570,7 @@ def idx_ingest(
 
     cmd = [
         sys.executable,
+        "-I",
         "-m",
         "opensearch_mcp.ingest_cli",
         "scan",
@@ -2390,6 +2391,7 @@ def _launch_background(
 
     cmd = [
         _sys.executable,
+        "-I",
         "-m",
         "opensearch_mcp.ingest_cli",
         subcommand,
@@ -2521,6 +2523,7 @@ def _launch_enrich_background(
 
     cmd = [
         _sys.executable,
+        "-I",
         "-m",
         "opensearch_mcp.ingest_cli",
         "enrich-intel",
@@ -2707,6 +2710,7 @@ def idx_ingest_memory(
 
     cmd = [
         _sys.executable,
+        "-I",
         "-m",
         "opensearch_mcp.ingest_cli",
         "memory",
