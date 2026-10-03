@@ -430,6 +430,11 @@ def run_hayabusa_batch(
         if callable(on_progress):
             on_progress("hayabusa_start", hostname=host.hostname)
         try:
+            # Hayabusa won't overwrite an existing output (it says so and
+            # exits 0), so move the previous run's CSV aside: a run that
+            # writes nothing then fails the output check below.
+            if csv_output.exists():
+                csv_output.replace(output_dir / f"hayabusa-{_cid}-{_hn}.prev.csv")
             result = subprocess.run(cmd, capture_output=True, timeout=3600)
             if result.returncode != 0:
                 stderr = result.stderr.decode(errors="replace")[:200]
