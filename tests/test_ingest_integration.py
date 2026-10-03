@@ -543,6 +543,8 @@ class TestMftHintClauses:
             ("builder.js:Zone.Identifier", "True", zone),
             ("Installer.exe:SmartScreen", "True", ""),
             ("notes-exe:Zone.Identifier", "True", zone),
+            ("node.exe.Zone.Identifier", "False", ""),  # a file; "?" matched the "."
+            ("script.ps1_Zone.Identifier", "False", ""),  # and the "_"
         ]
         header = ["EntryNumber", "SequenceNumber", "InUse", "ParentEntryNumber"]
         header += ["FileName", "IsAds", "ZoneIdContents"]

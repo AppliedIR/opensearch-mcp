@@ -28,7 +28,9 @@ def test_the_mft_hint_uses_the_bare_field_names(monkeypatch):
     assert flag_clauses(hint) == ["SI<FN:True", "uSecZeros:True", "InUse:False", "HasAds:True"]
 
 
-ZONE = "FileName\\*:(*.exe?Zone.Identifier OR *.dll?Zone.Identifier OR *.ps1?Zone.Identifier)"
+ZONE = (
+    "FileName\\*:(*.exe\\:Zone.Identifier OR *.dll\\:Zone.Identifier OR *.ps1\\:Zone.Identifier)"
+)
 
 
 def zone_clause(hint: str) -> str:
