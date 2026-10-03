@@ -193,11 +193,17 @@ _FILESYSTEM_HASH_FIELDS = [
     "md5.keyword",
 ]
 
+# json and delimited indices map strings as keyword; an index whose name also
+# matches another template's pattern maps them as text with a .keyword
+# sub-field. Both forms are listed, as for hashes and IPs.
 _DOMAIN_FIELDS = [
-    "dns.query.keyword",  # dynamic in json_template
-    "query.keyword",  # dynamic in json/delimited
-    "source_host.keyword",  # dynamic (B36 renamed field)
-    "server_name.keyword",  # dynamic in delimited
+    "dns.query",  # json
+    "dns.query.keyword",
+    "query",  # json, delimited
+    "query.keyword",
+    "source_host.keyword",  # B36 renamed field; often the collecting host
+    "server_name",  # delimited (Zeek ssl.log)
+    "server_name.keyword",
     "winlog.event_data.QueryName",  # Sysmon DNS queries
     "winlog.event_data.QueryName.keyword",
 ]

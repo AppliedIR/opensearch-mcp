@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import MagicMock
 
+import pytest
+
 from opensearch_mcp.threat_intel import extract_unique_iocs
 
 
@@ -99,3 +101,45 @@ def test_amcache_alone_is_read_as_before():
     sha1, sha256 = _h("sha1", "csv"), _h("sha256", "csv")
     got = _iocs({"case-x-amcache-h": {"SHA1": ("text", sha1), "SHA256": ("text", sha256)}})["hash"]
     assert got == {sha1, sha256}
+
+
+# --- Domains -------------------------------------------------------------------
+# json and delimited indices map strings as keyword; a colliding index name maps
+# them as text with a .keyword sub-field. Both forms are read.
+
+DOMAIN = "evil.example.com"
+
+
+def _domains(indices: dict) -> dict:
+    return extract_unique_iocs(_client(indices), "case-x-*", force=True)["domain"]
+
+
+@pytest.mark.parametrize("field", ["dns.query", "query", "server_name"])
+def test_a_keyword_only_domain_field_is_read(field):
+    assert DOMAIN in _domains({"case-x-json-dns": {field: ("keyword", DOMAIN)}})
+
+
+@pytest.mark.parametrize("field", ["dns.query", "query", "server_name", "source_host"])
+def test_the_keyword_sub_field_of_a_text_domain_field_is_still_read(field):
+    assert DOMAIN in _domains({"case-x-zeek-ssh": {field: ("text", DOMAIN)}})
+
+
+def test_a_keyword_only_source_host_is_not_read():
+    # often the collecting host, not an indicator
+    assert DOMAIN not in _domains({"case-x-delim-log": {"source_host": ("keyword", DOMAIN)}})
+
+
+def test_anchor_sysmon_query_name_is_read_as_before():
+    index = {"case-x-winevt-sysmon": {"winlog.event_data.QueryName": ("keyword", DOMAIN)}}
+    assert set(_domains(index)) == {DOMAIN}
+
+
+def test_a_domain_in_both_forms_is_one_indicator():
+    found = _domains(
+        {
+            "case-x-zeek-ssh": {"query": ("text", DOMAIN)},
+            "case-x-json-dns": {"query": ("keyword", DOMAIN)},
+        }
+    )
+    assert list(found) == [DOMAIN]
+    assert {field for field, _ in found[DOMAIN]} == {"query", "query.keyword"}

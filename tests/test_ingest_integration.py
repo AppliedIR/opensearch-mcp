@@ -418,3 +418,50 @@ class TestIdxStatusIntegration:
         indices = os_client.cat.indices(format="json")
         case_indices = [i for i in indices if i["index"].startswith("case-")]
         assert any(i["index"] == test_index for i in case_indices)
+
+
+# ---------------------------------------------------------------------------
+# Domain enrichment on keyword-only json and Zeek fields
+# ---------------------------------------------------------------------------
+
+
+class TestDomainFieldsKeywordOnly:
+    """The real ingest path into names no other template's words match: the
+    fields must come out keyword with no sub-field, or the row proves nothing
+    (on a text + .keyword mapping the old field list already read them)."""
+
+    def test_bare_domain_fields_are_extracted(self, os_client, tag, tmp_path):
+        from opensearch_mcp.parse_delimited import ingest_delimited
+        from opensearch_mcp.parse_json import ingest_json
+        from opensearch_mcp.threat_intel import extract_unique_iocs
+
+        base = f"case-{tag}-xa"
+        dns = tmp_path / "dns.jsonl"
+        dns.write_text('{"query": "q.evil.example.com", "dns": {"query": "d.evil.example.com"}}\n')
+        ssl = tmp_path / "ssl.log"
+        ssl.write_text(
+            "#separator \\x09\n#fields\tts\tserver_name\n#types\ttime\tstring\n"
+            "1700000000.0\ts.evil.example.com\n"
+        )
+        try:
+            ingest_json(dns, os_client, f"{base}-json-dns-host1", "host1")
+            ingest_delimited(ssl, os_client, f"{base}-zeek-ssl-host1", "host1")
+            os_client.indices.refresh(index=f"{base}-*")
+            for index, field in (
+                (f"{base}-json-dns-host1", "query"),
+                (f"{base}-json-dns-host1", "dns.query"),
+                (f"{base}-zeek-ssl-host1", "server_name"),
+            ):
+                got = os_client.indices.get_field_mapping(index=index, fields=field)
+                leaf = got[index]["mappings"][field]["mapping"][field.split(".")[-1]]
+                assert leaf.get("type") == "keyword" and "fields" not in leaf, (
+                    f"precondition: {index} {field} is {leaf}, not keyword-only"
+                )
+            found = extract_unique_iocs(os_client, f"{base}-*", force=True)["domain"]
+            assert {
+                "q.evil.example.com",
+                "d.evil.example.com",
+                "s.evil.example.com",
+            } <= set(found)
+        finally:
+            os_client.indices.delete(index=f"{base}-*", ignore=[404])
