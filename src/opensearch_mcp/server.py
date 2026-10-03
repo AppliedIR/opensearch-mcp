@@ -99,7 +99,8 @@ def _add_investigation_hints(resp: dict, artifacts: dict, case: str) -> None:
             "MFT indexed. Timestomping: SI<FN:True OR "
             "uSecZeros:True (exclude WinSxS). "
             "Deleted: InUse:False. ADS: HasAds:True. "
-            "Zone.Identifier: ZoneIdContents:* AND FileName:(*.exe OR *.dll OR *.ps1)"
+            "Zone.Identifier: FileName\\*:(*.exe?Zone.Identifier OR "
+            "*.dll?Zone.Identifier OR *.ps1?Zone.Identifier)"
         )
     if has_usn:
         hints.append(

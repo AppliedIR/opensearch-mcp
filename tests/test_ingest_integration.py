@@ -519,3 +519,62 @@ class TestMftHintClauses:
                     assert names == ["evil.exe"], (path, clause, names)
         finally:
             os_client.indices.delete(index=f"{base}-*", ignore=[404])
+
+    def test_the_zone_clause_finds_only_exe_dll_ps1_zone_identifiers_on_both_paths(
+        self, os_client, tag, tmp_path, monkeypatch
+    ):
+        """The clause as the hint gives it, on both paths. A file and
+        its Zone.Identifier stream are separate rows; only the stream rows of
+        .exe/.dll/.ps1 files are wanted. The shipped clause matched the files."""
+        from test_mft_hint import mft_hint, zone_clause
+
+        from opensearch_mcp.parse_csv import ingest_csv
+        from opensearch_mcp.parse_delimited import ingest_delimited
+
+        zone = "[ZoneTransfer]\nZoneId=3\n"
+        want = [  # returned
+            "node.exe:Zone.Identifier",
+            "Tool64.exe:Zone.Identifier",  # a digit before the dot
+            "dbghelp.dll:Zone.Identifier",
+            "script.ps1:Zone.Identifier",
+        ]
+        not_wanted = [  # not returned
+            ("evil.exe", "False", ""),  # a file, not a stream; empty ZoneIdContents
+            ("builder.js:Zone.Identifier", "True", zone),
+            ("Installer.exe:SmartScreen", "True", ""),
+            ("notes-exe:Zone.Identifier", "True", zone),
+        ]
+        header = ["EntryNumber", "SequenceNumber", "InUse", "ParentEntryNumber"]
+        header += ["FileName", "IsAds", "ZoneIdContents"]
+        planted = [(n, "True", zone) for n in want] + not_wanted
+        rows = [
+            dict(zip(header, [str(200 + i), "1", "True", "5", n, ads, z]))
+            for i, (n, ads, z) in enumerate(planted)
+        ]
+        mft_csv = tmp_path / "mftout.csv"
+        _write_csv(mft_csv, rows)
+        base = f"case-{tag}-xc"
+        indices = {"csv": f"{base}-mft-host1", "delimited": f"{base}-delim-mftout-host1"}
+        try:
+            ingest_csv(
+                csv_path=mft_csv, client=os_client, index_name=indices["csv"], hostname="host1"
+            )
+            ingest_delimited(mft_csv, os_client, indices["delimited"], "host1")
+            os_client.indices.refresh(index=f"{base}-*")
+            for path, index in indices.items():
+                got = os_client.indices.get_field_mapping(index=index, fields="FileName")
+                leaf = got[index]["mappings"]["FileName"]["mapping"]["FileName"]
+                want_map = ("text", True) if path == "csv" else ("keyword", False)
+                assert (leaf.get("type"), "fields" in leaf) == want_map, (
+                    f"precondition: {index} FileName is {leaf}"
+                )
+                count = os_client.count(index=index)["count"]
+                assert count == len(planted), f"precondition: {index} holds {count}"
+            clause = zone_clause(mft_hint(monkeypatch))
+            for path, index in indices.items():
+                body = {"query": {"query_string": {"query": clause}}, "size": 50}  # as idx_search
+                hits = os_client.search(index=index, body=body)["hits"]["hits"]
+                names = sorted(h["_source"]["FileName"] for h in hits)
+                assert names == sorted(want), (path, clause, names)
+        finally:
+            os_client.indices.delete(index=f"{base}-*", ignore=[404])

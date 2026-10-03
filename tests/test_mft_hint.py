@@ -26,3 +26,23 @@ def test_the_mft_hint_uses_the_bare_field_names(monkeypatch):
     hint = mft_hint(monkeypatch)
     assert ".keyword" not in hint and '"SI<FN"' not in hint
     assert flag_clauses(hint) == ["SI<FN:True", "uSecZeros:True", "InUse:False", "HasAds:True"]
+
+
+ZONE = "FileName\\*:(*.exe?Zone.Identifier OR *.dll?Zone.Identifier OR *.ps1?Zone.Identifier)"
+
+
+def zone_clause(hint: str) -> str:
+    return hint[hint.index("Zone.Identifier: ") + len("Zone.Identifier: ") :]
+
+
+def test_only_the_zone_clause_changed(monkeypatch):
+    """The rest of the hint is as it was; the clause reads FileName\\*:, which
+    searches the csv path's .keyword too."""
+    hint = mft_hint(monkeypatch)
+    assert hint == (
+        "MFT indexed. Timestomping: SI<FN:True OR "
+        "uSecZeros:True (exclude WinSxS). "
+        "Deleted: InUse:False. ADS: HasAds:True. "
+        "Zone.Identifier: " + ZONE
+    )
+    assert zone_clause(hint) == ZONE
