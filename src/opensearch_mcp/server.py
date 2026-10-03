@@ -102,9 +102,9 @@ def _add_investigation_hints(resp: dict, artifacts: dict) -> None:
     has_prefetch = any("prefetch" in k or "pecmd" in k for k in art_keys)
     if has_mft:
         hints.append(
-            'MFT indexed. Timestomping: "SI<FN".keyword:True OR '
-            "uSecZeros.keyword:True (exclude WinSxS). "
-            "Deleted: InUse.keyword:False. ADS: HasAds.keyword:True. "
+            "MFT indexed. Timestomping: SI<FN:True OR "
+            "uSecZeros:True (exclude WinSxS). "
+            "Deleted: InUse:False. ADS: HasAds:True. "
             "Zone.Identifier: ZoneIdContents:* AND FileName:(*.exe OR *.dll OR *.ps1)"
         )
     if has_usn:

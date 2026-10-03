@@ -465,3 +465,57 @@ class TestDomainFieldsKeywordOnly:
             } <= set(found)
         finally:
             os_client.indices.delete(index=f"{base}-*", ignore=[404])
+
+
+# ---------------------------------------------------------------------------
+# The MFT hint's queries on both MFT ingest paths
+# ---------------------------------------------------------------------------
+
+
+class TestMftHintClauses:
+    """MFTECmd CSV through the csv path (text + .keyword) and the delimited
+    path (keyword only). Names carry no other template's word; each mapping is
+    asserted first, or the row proves nothing."""
+
+    def test_each_hint_clause_finds_the_flagged_entry_on_both_paths(
+        self, os_client, tag, tmp_path, monkeypatch
+    ):
+        from test_mft_hint import flag_clauses, mft_hint
+
+        from opensearch_mcp.parse_csv import ingest_csv
+        from opensearch_mcp.parse_delimited import ingest_delimited
+
+        header = ["EntryNumber", "SequenceNumber", "InUse", "ParentEntryNumber"]
+        header += ["FileName", "SI<FN", "uSecZeros", "HasAds"]
+        rows = [
+            dict(zip(header, ["100", "1", "False", "5", "evil.exe", "True", "True", "True"])),
+            dict(zip(header, ["101", "1", "True", "5", "good.exe", "False", "False", "False"])),
+        ]
+        mft_csv = tmp_path / "mftout.csv"
+        _write_csv(mft_csv, rows)
+        base = f"case-{tag}-xb"
+        indices = {"csv": f"{base}-mft-host1", "delimited": f"{base}-delim-mftout-host1"}
+        try:
+            ingest_csv(
+                csv_path=mft_csv, client=os_client, index_name=indices["csv"], hostname="host1"
+            )
+            ingest_delimited(mft_csv, os_client, indices["delimited"], "host1")
+            os_client.indices.refresh(index=f"{base}-*")
+            for path, index in indices.items():
+                for field in ("InUse", "SI<FN"):
+                    got = os_client.indices.get_field_mapping(index=index, fields=field)
+                    leaf = got[index]["mappings"][field]["mapping"][field]
+                    want = ("text", True) if path == "csv" else ("keyword", False)
+                    assert (leaf.get("type"), "fields" in leaf) == want, (
+                        f"precondition: {index} {field} is {leaf}"
+                    )
+            clauses = flag_clauses(mft_hint(monkeypatch))
+            assert len(clauses) == 4
+            for path, index in indices.items():
+                for clause in clauses:
+                    body = {"query": {"query_string": {"query": clause}}}  # as idx_search
+                    hits = os_client.search(index=index, body=body)["hits"]["hits"]
+                    names = [h["_source"]["FileName"] for h in hits]
+                    assert names == ["evil.exe"], (path, clause, names)
+        finally:
+            os_client.indices.delete(index=f"{base}-*", ignore=[404])
