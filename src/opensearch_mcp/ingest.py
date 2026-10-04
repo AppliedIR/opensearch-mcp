@@ -15,7 +15,7 @@ from opensearch_mcp import __version__
 from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
-from opensearch_mcp.parse_evtx import parse_and_index
+from opensearch_mcp.parse_evtx import evtx_truncation, parse_and_index
 from opensearch_mcp.paths import build_index_name as _build_idx
 from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 from opensearch_mcp.paths import vhir_dir
@@ -602,6 +602,12 @@ def _ingest_hosts(
                         from opensearch_mcp.paths import relative_evidence_path
 
                         rel_path = relative_evidence_path(evtx_file, host.volume_root)
+                        cut = "; ".join(evtx_truncation(evtx_file))
+                        if cut:  # its readable records are still indexed below
+                            truncated = host_result.evtx_dropped.setdefault("truncated", [])
+                            truncated.append(f"{evtx_file.name}: {cut}")
+                            if evtx_status:
+                                evtx_status["truncated"] = truncated
                         cnt, sk, bf = parse_and_index(
                             evtx_path=evtx_file,
                             client=client,
@@ -636,6 +642,7 @@ def _ingest_hosts(
                                 "bulk_failed": bf,
                             },
                             result_summary=f"{cnt} indexed, {sk} skipped"
+                            + (f", truncated: {cut}" if cut else "")
                             + (f", {bf} bulk failed" if bf else ""),
                             input_files=[str(evtx_file)],
                             input_sha256s=[file_hash],

@@ -15,6 +15,31 @@ from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.normalize import normalize_event
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
+_FILE_HEADER = 4096  # the evtx file header block
+_CHUNK = 65536
+
+
+def evtx_truncation(evtx_path: Path) -> list[str]:
+    """How a file with a valid evtx header is cut short; empty if it isn't.
+
+    The parser walks whole chunks by file size: it drops a partial last chunk
+    without a word and never reads the header's chunk count, which a live log
+    often leaves stale (lower than the chunks it holds). So both are checked.
+    A file without the signature is left to the parser, which fails it.
+    """
+    with open(evtx_path, "rb") as f:
+        head = f.read(44)
+    if len(head) < 44 or head[:8] != b"ElfFile\x00":
+        return []
+    declared = int.from_bytes(head[42:44], "little")  # number of chunks
+    size = evtx_path.stat().st_size
+    whole, partial = divmod(max(size - _FILE_HEADER, 0), _CHUNK)
+    cuts = []
+    if partial:
+        cuts.append(f"ends mid-chunk at byte {size:,}")
+    if whole < declared:
+        cuts.append(f"{whole} of {declared} declared chunks present")
+    return cuts
 
 
 def _resolve_cached(host_dict, raw: str) -> str | None:

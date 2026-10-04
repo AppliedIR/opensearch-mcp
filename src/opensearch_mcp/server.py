@@ -1724,11 +1724,13 @@ def _log_tail(path: str, limit: int = 2048) -> list[str]:
         return []
 
 
-# Evtx files an ingest dropped before parsing, by the status key it records.
+# Evtx files an ingest dropped before parsing, or found cut short, by the status key it records.
 _DROPPED_EVTX = {
     "not_in_log_set": "not in the forensic-logs set were not ingested; ingest with "
     "all_logs=True to include them",
     "under_one_chunk": "under one chunk (69,632 bytes) were skipped as empty",
+    "truncated": "are cut short: records past the cut, and any in a partial last chunk, "
+    "were not indexed",
 }
 
 
