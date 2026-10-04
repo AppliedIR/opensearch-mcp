@@ -180,14 +180,25 @@ class TestTheCheckIsLinear:
         peak = _peak_mib(lambda: bulk._too_deep(record, 20))
         assert peak < 5.0, f"{peak:.1f} MiB"
 
+    def test_a_wide_object_is_walked_one_child_at_a_time(self):
+        """The walk holds one frame per level, not one per child: 100,000
+        empty objects under one key peak near 0.003 MiB, where a frame for
+        every child at once peaks near 12 MiB."""
+        record = {"k": {f"c{i}": {} for i in range(100_000)}}
+        peak = _peak_mib(lambda: bulk._too_deep(record, 20))
+        assert peak < 1.0, f"{peak:.3f} MiB"
+
     @pytest.mark.parametrize("label,make,limit", COST_SWEEPS, ids=[x[0] for x in COST_SWEEPS])
-    def test_three_doublings_cost_at_most_2_5_times_each(self, label, make, limit):
+    def test_memory_per_doubling_and_time_per_quadrupling_stay_linear(self, label, make, limit):
         """Memory by tracemalloc, which is exact. Time is measured in rounds,
         the three sizes back to back, and the ratios within each round are
         compared by their median: on a hybrid CPU the scheduler moves the
         process between core types, and the same loop runs 2.2x slower on
         one (measured on the dev box), so a sweep timed size by size can
-        straddle a move and read as growth.
+        straddle a move and read as growth. Time is compared over the whole
+        4x sweep against 8: linear reads 4 and quadratic 16, so either can
+        be off by 2x; a single doubling against 2.5 left 1.25x, less than
+        one such move.
         """
         import statistics
 
@@ -204,9 +215,8 @@ class TestTheCheckIsLinear:
         rounds = [
             [_seconds(lambda r=r: bulk._too_deep(r, limit)) for r in records] for _ in range(7)
         ]
-        for step in (0, 1):
-            ratio = statistics.median(t[step + 1] / t[step] for t in rounds)
-            assert ratio <= 2.5, f"time ratio {ratio:.2f}; rounds {rounds}"
+        ratio = statistics.median(t[2] / t[0] for t in rounds)
+        assert ratio <= 8, f"time ratio {ratio:.2f}; rounds {rounds}"
 
     def test_the_refused_path_is_still_named_in_full(self):
         """Joined once, for the refused record only."""
