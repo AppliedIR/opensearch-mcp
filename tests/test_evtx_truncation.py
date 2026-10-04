@@ -127,3 +127,14 @@ def test_the_final_status_names_a_cut_file(host, monkeypatch, hayabusa):
         "HOST1: 1 evtx file(s) are cut short: records past the cut, and any in a partial "
         "last chunk, were not indexed (Security.evtx: 10 of 20 declared chunks present)"
     ]
+
+
+def test_every_cut_file_on_a_host_is_named(host):
+    _evtx(host.evtx_dir / "Security.evtx", 20, 1_000_000)
+    _evtx(host.evtx_dir / "System.evtx", 20, 4096 + 10 * CHUNK)
+    _, _, status, _ = _ingest(host)
+    assert [w for w in status.get("warnings", []) if "cut short" in w] == [
+        "HOST1: 2 evtx file(s) are cut short: records past the cut, and any in a partial "
+        "last chunk, were not indexed (Security.evtx: ends mid-chunk at byte 1,000,000; "
+        "15 of 20 declared chunks present, System.evtx: 10 of 20 declared chunks present)"
+    ]
