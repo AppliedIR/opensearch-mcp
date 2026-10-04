@@ -680,6 +680,8 @@ def _ingest_hosts(
                 if evtx_status:
                     evtx_status["status"] = "failed" if ar.error else "complete"
                     evtx_status["indexed"] = ar.indexed
+                    if ar.error:  # the status names what failed, not "unknown error"
+                        evtx_status["error"] = ar.error
                     _update_status()
                 _progress(
                     "evtx_done",
