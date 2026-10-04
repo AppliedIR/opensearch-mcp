@@ -833,10 +833,10 @@ def _ingest_hosts(
                     source_evidence=str(artifact_path),
                 )
                 if tool_status:
-                    tool_status["status"] = "complete"
-                    tool_status["indexed"] = cnt
+                    tool_status["status"] = "failed" if "error" in tool_status else "complete"
+                    tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
                     tool_status["skipped"] = sk
-                    tool_status["bulk_failed"] = bf
+                    tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
                     _update_status()
                 _progress(
                     "artifact_done",
@@ -1066,9 +1066,9 @@ def _ingest_custom_artifact(
             source_evidence=str(artifact_path),
         )
         if tool_status:
-            tool_status["status"] = "complete"
-            tool_status["indexed"] = cnt
-            tool_status["bulk_failed"] = bf
+            tool_status["status"] = "failed" if "error" in tool_status else "complete"
+            tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
+            tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
             _update_status()
         _progress(
             "artifact_done",
