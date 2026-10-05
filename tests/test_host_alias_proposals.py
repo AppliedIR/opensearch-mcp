@@ -30,9 +30,12 @@ def _propose(canonical: str, raw: str, domains: list[str] | None = None):
         ("lab1-pc01", "lab2-pc01"),  # the digits differ before the end
         ("host01.corp.example", "host02.corp.example"),
         ("dc01.corp.example", "dev01.corp.example"),
+        ("ws01.lab", "ws01lab"),  # a dot in either name, in either direction
+        ("ws01lab", "ws01.lab"),
+        ("workstation-1203", "workstation-1230"),  # the same digits, in another order
     ],
 )
-def test_a_different_host_one_edit_away_is_not_proposed(canonical, raw):
+def test_a_different_host_with_a_close_name_is_not_proposed(canonical, raw):
     assert _propose(canonical, raw) == (None, 0.0)
 
 
