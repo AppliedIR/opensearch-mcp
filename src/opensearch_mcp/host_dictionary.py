@@ -24,6 +24,7 @@ discovery phase.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -409,7 +410,8 @@ def propose_canonical(raw: str | None, host_dict: HostDictionary) -> tuple[str |
         return (canonical, 1.00). Exact-strip equality is algebraic
         identity; OD1 auto-accepts at this score.
       - Else, highest Levenshtein similarity ≥ 0.85 (SC-2) against any
-        existing canonical wins. Ties broken alphabetically (SC-3).
+        existing canonical wins. Ties broken alphabetically (SC-3). Never
+        between names with a dot, or whose digits differ.
       - Else (None, 0.0).
     """
     if not raw or not _normalize(raw):
@@ -423,7 +425,13 @@ def propose_canonical(raw: str | None, host_dict: HostDictionary) -> tuple[str |
     best_canonicals: list[str] = []
     best_score = 0.0
     for canonical in sorted(host_dict.hosts.keys()):
-        score = _similarity(stripped, _normalize(canonical))
+        norm_can = _normalize(canonical)
+        if "." in stripped or "." in norm_can:
+            continue  # FQDNs differ in the label, not the shared domain
+        # Names whose numbers differ are different hosts (wkstn01 / wkstn02).
+        if re.sub(r"\D", "", stripped) != re.sub(r"\D", "", norm_can):
+            continue
+        score = _similarity(stripped, norm_can)
         if score < 0.85:
             continue
         if score > best_score:
