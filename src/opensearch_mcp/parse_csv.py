@@ -15,6 +15,37 @@ from opensearch_mcp.bulk import flush_bulk
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
 
+# Stands in for NUL while Python 3.10's csv reads a line. A lone surrogate
+# never comes out of decoding a file with errors="replace".
+_NUL_STANDIN = "\udc00"
+
+
+def _dict_rows(f):
+    """csv.DictReader rows, keeping NUL in values on Python 3.10 as 3.11+
+    does (3.10's reader raises "line contains NUL" at the first one)."""
+    if sys.version_info >= (3, 11):
+        yield from csv.DictReader(f)
+        return
+    seen = []
+
+    def lines():
+        for line in f:
+            if "\x00" in line:
+                seen.append(1)
+                line = line.replace("\x00", _NUL_STANDIN)
+            yield line
+
+    def back(v):
+        return v.replace(_NUL_STANDIN, "\x00") if isinstance(v, str) else v
+
+    for row in csv.DictReader(lines()):
+        if seen:
+            row = {
+                back(k): [back(x) for x in v] if isinstance(v, list) else back(v)
+                for k, v in row.items()
+            }
+        yield row
+
 
 def _detect_encoding(path: Path) -> str:
     """Detect CSV encoding from BOM.
@@ -119,8 +150,7 @@ def ingest_csv(
     encoding = _detect_encoding(csv_path)
 
     with open(csv_path, encoding=encoding, errors="replace") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in _dict_rows(f):
             # Log if replacement chars detected
             if not replacements_logged and "\ufffd" in str(row):
                 print(
