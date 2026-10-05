@@ -1109,7 +1109,7 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
     suffix.update({n: n for n in _PLASO_ARTIFACTS | _CUSTOM_ARTIFACTS})  # indexed by name
     audit_dir = audit._get_audit_dir()  # where the ingest workers' entries go
     own_dir = audit_dir is not None and audit_dir.parent.name == cid
-    last: dict[str, tuple[str, str, str, str]] = {}  # index -> (ts, result, tool, host)
+    last: dict[str, tuple[str, str, str, str, str]] = {}  # index -> (ts, result, tool, host, run)
     for f in sorted(audit_dir.glob("opensearch-ingest-*.jsonl")) if audit_dir else []:
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
@@ -1130,10 +1130,14 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
             rs = str(rs.get("value", "") if isinstance(rs, dict) else rs or "")
             ts = str(e.get("ts", ""))
             index = build_index_name(cid, suffix[tool], host)  # DEV01 and dev01 share one
-            if ts >= last.get(index, ("",))[0]:
-                last[index] = (ts, rs, tool, host)
+            run = params.get("run_id") or ts  # an entry from before run ids is its own run
+            prev = last.get(index, ("", "", "", "", ""))
+            if prev[4] == run and prev[1].startswith("FAILED"):
+                continue  # one failed profile or directory fails its run
+            if ts >= prev[0]:
+                last[index] = (ts, rs, tool, host, run)
     warnings = []
-    for index, (_ts, rs, tool, host) in sorted(last.items()):
+    for index, (_ts, rs, tool, host, _run) in sorted(last.items()):
         if rs.startswith("FAILED") and index in docs_by_index:
             warnings.append(
                 f"{index} ({docs_by_index[index]:,} docs) may be incomplete: the most"
