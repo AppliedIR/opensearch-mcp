@@ -598,6 +598,11 @@ with open(os.path.join(out, "20261003000000_RECmd_Batch_Output.csv"), "w") as f:
 """
 
 
+# Where SIFT's tool .dlls and dotnet are installed, the tool's .dll is launched
+# with dotnet; this dotnet hands that call to the stub named after the .dll.
+_DOTNET_SHIM = '#!/bin/bash\nexec "$(dirname "$0")/$(basename "$1" .dll)" "${@:2}"\n'
+
+
 class TestFailedArtifactWarning:
     """The real scan path with RECmd stubbed: its CSV fails to parse after the
     first 1,000 rows are flushed. Not a NUL: only Python 3.10 fails on that."""
@@ -621,6 +626,8 @@ class TestFailedArtifactWarning:
         bin_dir.mkdir()
         (bin_dir / "RECmd").write_text(_RECMD_STUB.format(python=sys.executable))
         (bin_dir / "RECmd").chmod(0o755)
+        (bin_dir / "dotnet").write_text(_DOTNET_SHIM)
+        (bin_dir / "dotnet").chmod(0o755)
         monkeypatch.delenv("VHIR_AUDIT_DIR", raising=False)
         monkeypatch.setenv("VHIR_CASE_DIR", str(case_dir))  # what the summary reads
 

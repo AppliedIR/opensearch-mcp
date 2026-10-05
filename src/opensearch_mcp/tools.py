@@ -134,6 +134,18 @@ _RECMD_BATCH = "/opt/zimmermantools/RECmd/BatchExamples/Kroll_Batch.reb"
 
 _TOOL_TIMEOUT = 7200  # 2 hours — generous for MFT/large artifacts
 
+# SIFT's /usr/local/bin wrappers expand their arguments unquoted, which splits any
+# path containing a space. Run the tool's .dll with dotnet directly when it is there.
+_EZ_TOOLS_DIR = Path("/opt/zimmermantools")
+
+
+def _launcher(binary: str) -> list[str]:
+    dotnet = shutil.which("dotnet")
+    for dll in (_EZ_TOOLS_DIR / f"{binary}.dll", _EZ_TOOLS_DIR / binary / f"{binary}.dll"):
+        if dotnet and dll.is_file():
+            return [dotnet, str(dll)]
+    return [binary]
+
 
 def _run_tool(cmd: list[str], label: str) -> tuple[str, str]:
     """Run an EZ tool subprocess, raising on failure.
@@ -144,6 +156,7 @@ def _run_tool(cmd: list[str], label: str) -> tuple[str, str]:
     success, leaving operators no way to root-cause a silent-empty
     run).
     """
+    cmd = _launcher(cmd[0]) + cmd[1:]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TOOL_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(f"{label} failed (exit {result.returncode}): {result.stderr[:500]}")
