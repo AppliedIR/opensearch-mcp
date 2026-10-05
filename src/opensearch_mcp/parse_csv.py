@@ -26,12 +26,13 @@ def _dict_rows(f):
     if sys.version_info >= (3, 11):
         yield from csv.DictReader(f)
         return
-    seen = []
+    seen = False
 
     def lines():
+        nonlocal seen
         for line in f:
             if "\x00" in line:
-                seen.append(1)
+                seen = True
                 line = line.replace("\x00", _NUL_STANDIN)
             yield line
 

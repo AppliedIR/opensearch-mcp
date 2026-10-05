@@ -18,13 +18,15 @@ DATA = (
     'k1,"Disk Device\x00 Di",plain\r\n'
     'k2,ab\x00cd,"x\r\ny\x00z"\r\n'
     "k3,ok,ok\r\n"
-    "k4,a,b,ex\x00tra\r\n"
+    "k4,a,b,ex\x00tra,more\x00x\r\n"
+    "k5,two\x00nul\x00s,ok\r\n"
 )
 EXPECTED = [
     {"KeyName": "k1", "ValueData": "Disk Device\x00 Di", "ValueData2": "plain"},
     {"KeyName": "k2", "ValueData": "ab\x00cd", "ValueData2": "x\ny\x00z"},
     {"KeyName": "k3", "ValueData": "ok", "ValueData2": "ok"},
-    {"KeyName": "k4", "ValueData": "a", "ValueData2": "b", None: ["ex\x00tra"]},
+    {"KeyName": "k4", "ValueData": "a", "ValueData2": "b", None: ["ex\x00tra", "more\x00x"]},
+    {"KeyName": "k5", "ValueData": "two\x00nul\x00s", "ValueData2": "ok"},
 ]
 COLS = ("KeyName", "ValueData", "ValueData2")
 
@@ -48,7 +50,7 @@ def test_a_nul_inside_a_field_is_indexed_with_the_rest_of_the_row(tmp_path, enco
         count, _, _ = ingest_csv(
             csv_path=path, client=MagicMock(), index_name="case-t-registry-h", hostname="h"
         )
-    assert count == 4
+    assert count == 5
     assert [{k: s[k] for k in s if k in COLS or k is None} for s in sent] == EXPECTED
 
 
