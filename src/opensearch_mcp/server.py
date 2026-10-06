@@ -535,8 +535,10 @@ def _validate_path(path: str) -> str | None:
             return (
                 f"Refused: {path} (resolved target: {p}) is your home folder, or is in your "
                 "home folder's hidden configuration area, which can hold credentials, so it "
-                "isn't ingested. Copy or move the evidence into the case's evidence/ folder, "
-                "or another non-hidden folder, and ingest it from there."
+                "isn't ingested. Copy or move the evidence into a folder that isn't hidden, "
+                "such as the case's evidence/ folder, and ingest it from there; if your cases "
+                "folder is itself inside a hidden folder, move it to a folder that isn't "
+                "hidden first."
             )
     allowed = [
         home,

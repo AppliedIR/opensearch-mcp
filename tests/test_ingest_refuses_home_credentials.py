@@ -78,7 +78,11 @@ def test_a_credential_path_in_home_is_refused(home, tool, rel):
     resp = _tools()[tool](path)
     assert REFUSAL in resp.get("error", ""), resp
     assert resp["error"].startswith(f"Refused: {path} (resolved target: ")
-    assert "Copy or move the evidence into the case's evidence/ folder" in resp["error"]
+    assert resp["error"].endswith(
+        "so it isn't ingested. Copy or move the evidence into a folder that isn't hidden,"
+        " such as the case's evidence/ folder, and ingest it from there; if your cases"
+        " folder is itself inside a hidden folder, move it to a folder that isn't hidden first."
+    )
 
 
 @pytest.mark.parametrize("rel", ALLOWED)
