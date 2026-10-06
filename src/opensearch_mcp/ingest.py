@@ -786,11 +786,11 @@ def _ingest_hosts(
                 _update_status()
             _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
+            unread: list[str] = []
             try:
                 from opensearch_mcp.paths import relative_evidence_path
 
                 _rel_src = relative_evidence_path(artifact_path, host.volume_root)
-                unread: list[str] = []
                 cnt, sk, bf = run_and_ingest(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
@@ -853,17 +853,21 @@ def _ingest_hosts(
                 )
             except Exception as e:
                 ar.error = str(e)
+                ar.not_read = unread
                 audit.log(
                     tool=f"ingest_{tool_name}",
                     audit_id=aid,
                     params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
-                    result_summary=f"FAILED: {e}",
+                    result_summary=f"FAILED: {e}"
+                    + (f", {len(unread)} not read" if unread else ""),
                     input_files=[str(artifact_path)],
                     input_sha256s=[file_hash] if file_hash else [],
                 )
                 if tool_status:
                     tool_status["status"] = "failed"
                     tool_status["error"] = str(e)
+                    if unread:
+                        tool_status.setdefault("not_read", []).extend(unread)
                     _update_status()
                 _progress(
                     "artifact_failed",

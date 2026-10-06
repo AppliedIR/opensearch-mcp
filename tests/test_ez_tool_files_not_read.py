@@ -41,8 +41,8 @@ def status_dir(tmp_path, monkeypatch):
     return path
 
 
-def _console(folder: Path, rows: int, failed: list[tuple[str, str]]) -> str:
-    """Console output shaped like the tools' own."""
+def _console(folder: Path, rows: int, failed: list[tuple[str, str]], after=()) -> str:
+    """Console output shaped like the tools' own; `after` is printed past the list."""
     n = rows + len(failed)
     out = [f"Looking for files in {folder}", "", f"Found {n} files", ""]
     out.append(f"Processed {rows} out of {n} files in 0.0700 seconds")
@@ -51,6 +51,7 @@ def _console(folder: Path, rows: int, failed: list[tuple[str, str]]) -> str:
         for name, why in failed:
             p = f"{folder}/{name}"
             out.append(f"  {p} ==> ({why.format(p=p)})")
+    out += [line.format(folder=folder) for line in after]
     out += ["", "CSV output will be saved to /tmp/x.csv"]
     return "\n".join(out)
 
@@ -66,17 +67,19 @@ def _host(tmp_path, artifact, plan, name="HOST1"):
     return h
 
 
-def _ingest(hosts, plan, final_status="complete"):
+def _ingest(hosts, plan, final_status="complete", ingest_error=None):
     def run_tool(cmd, label):
         folder = Path(cmd[cmd.index("-d") + 1])
         user = folder.parts[folder.parts.index("Users") + 1]
-        rows, failed = plan[user]
+        rows, failed, *after = plan[user]
         if rows:
             out = Path(cmd[cmd.index("--csv") + 1])
             (out / "20260101000000_Output.csv").write_text("SourceFile\n" + "x\n" * rows)
-        return _console(folder, rows, failed), ""
+        return _console(folder, rows, failed, *after), ""
 
     def ingest_csv(csv_path, **kw):
+        if ingest_error:
+            raise ingest_error
         return len(csv_path.read_text().splitlines()) - 1, 0, 0
 
     audit = MagicMock()
@@ -143,9 +146,10 @@ def test_a_jump_list_the_tool_could_not_read_is_named(tmp_path, status_dir):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 folder")
-def test_an_unreadable_folder_is_named(tmp_path, status_dir):
+@pytest.mark.parametrize("artifact", ["lnk", "jumplists"])
+def test_an_unreadable_folder_is_named(tmp_path, status_dir, artifact):
     plan = {"alice": (0, [])}  # the tool reports an unreadable folder as empty
-    host = _host(tmp_path, "lnk", plan)
+    host = _host(tmp_path, artifact, plan)
     folder = host.artifacts[0][1]
     folder.chmod(0)
     try:
@@ -153,7 +157,36 @@ def test_an_unreadable_folder_is_named(tmp_path, status_dir):
     finally:
         folder.chmod(0o755)
     (w,) = _warnings(_status(), str(folder))
-    assert "1 file" in w
+    assert w.startswith(f"HOST1: {artifact}: 1 file(s) or folder(s)")
+
+
+def test_indented_lines_after_the_failed_files_list_are_not_named(tmp_path, status_dir):
+    after = ["", "Summary", "  {folder}/Later.lnk ==> (processed)"]
+    plan = {"alice": (3, [("Budget.lnk", DENIED)], after)}
+    _ingest([_host(tmp_path, "lnk", plan)], plan)
+    (w,) = _warnings(_status(), "Budget.lnk")
+    assert "Later.lnk" not in w
+    assert w.startswith("HOST1: lnk: 1 file(s) or folder(s)")
+
+
+def test_files_not_read_are_named_when_indexing_then_fails(tmp_path, status_dir):
+    plan = {"alice": (3, [("Budget.lnk", DENIED)])}
+    error = RuntimeError("circuit_breaking_exception")
+    result, audit = _ingest([_host(tmp_path, "lnk", plan)], plan, ingest_error=error)
+    status = _status()
+    (row,) = [c for c in status["checklist"] if c["artifact"] == "lnk"]
+    assert row["status"] == "failed"
+    (w,) = _warnings(status, "Budget.lnk")
+    assert w.startswith("HOST1: lnk: 1 file(s) or folder(s)")
+    (summary,) = [
+        c.kwargs["result_summary"]
+        for c in audit.log.call_args_list
+        if c.kwargs["tool"] == "ingest_lnk"
+    ]
+    assert summary == "FAILED: circuit_breaking_exception, 1 not read"
+    hosts = [_rebuilt_status_host(h) for h in result.hosts]
+    ingest_status.write_status("c1", os.getpid(), "run-unread", "complete", hosts, {}, "")
+    assert _warnings(_status(), "Budget.lnk")
 
 
 def test_an_empty_folder_does_not_warn(tmp_path, status_dir):
