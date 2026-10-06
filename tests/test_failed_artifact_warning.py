@@ -170,11 +170,15 @@ def test_another_cases_audit_entries_dont_count(case):
 def test_entries_without_a_case_id_count_only_in_the_cases_own_log(case, tmp_path, monkeypatch):
     log = case / "audit" / "opensearch-ingest-4294.jsonl"
     log.write_text(log.read_text().replace(f'"case_id": "{CID}"', '"case_id": ""'))
+    monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path / "cases"))
     assert incomplete() == [REGISTRY_WARNING]  # a CLI run with no active case
     other = tmp_path / "cases" / "other"
     shutil.copytree(case, other)
+    log.write_text("")  # another case's log says nothing about this one ...
     monkeypatch.setenv("VHIR_CASE_DIR", str(other))
-    assert incomplete() == []  # another case's log says nothing about this one
+    assert incomplete() == []
+    shutil.copy(other / "audit" / "opensearch-ingest-4294.jsonl", log)
+    assert incomplete() == [REGISTRY_WARNING]  # ... and its own log, read too, does
 
 
 def test_the_include_docstring_names_tier_1_and_event_logs():

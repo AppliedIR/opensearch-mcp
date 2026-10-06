@@ -1136,9 +1136,15 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
     suffix = {n: c.index_suffix for n, c in TOOLS.items()}
     suffix.update({n: n for n in _PLASO_ARTIFACTS | _CUSTOM_ARTIFACTS})  # indexed by name
     audit_dir = audit._get_audit_dir()  # where the ingest workers' entries go
-    own_dir = audit_dir is not None and audit_dir.parent.name == cid
+    dirs = [audit_dir] if audit_dir else []
+    # and the case's own audit dir when it isn't the active case's
+    if cid and not any(s in cid for s in ("..", "/", "\\")):
+        own = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases"))) / cid / "audit"
+        if own.is_dir() and not any(own.samefile(d) for d in dirs):
+            dirs.append(own)
     last: dict[str, tuple[str, str, str, str, str]] = {}  # index -> (ts, result, tool, host, run)
-    for f in sorted(audit_dir.glob("opensearch-ingest-*.jsonl")) if audit_dir else []:
+    for f in [f for d in dirs for f in sorted(d.glob("opensearch-ingest-*.jsonl"))]:
+        own_dir = f.parent.parent.name == cid
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 e = json.loads(line)
