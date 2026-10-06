@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import defusedxml.ElementTree as ET
@@ -11,6 +12,10 @@ from opensearchpy import OpenSearch
 from opensearch_mcp.bulk import flush_bulk
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+
+# Task Scheduler writes 7 fraction digits; Python 3.10's fromisoformat takes
+# only 3 or 6. 3.11+ takes any count and keeps 6, which this matches.
+_FRACTION = re.compile(r"(?<=:\d\d)\.(\d+)")
 
 _SYSTEM_PREFIXES = {"Microsoft", "MicrosoftEdge", "GoogleUpdate", "Adobe", "OneDrive", "CCleaner"}
 
@@ -127,8 +132,9 @@ def parse_tasks_dir(
                     try:
                         from datetime import datetime
 
-                        naive = datetime.fromisoformat(ts_str)
-                        aware = naive.replace(tzinfo=tz_info)
+                        six = _FRACTION.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), ts_str)
+                        naive = datetime.fromisoformat(six)
+                        aware = naive if naive.tzinfo else naive.replace(tzinfo=tz_info)
                         doc["@timestamp"] = (
                             aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
                         )
