@@ -492,15 +492,15 @@ def cleanup_orphaned_mounts() -> None:
     Skips cleanup if another ingest is currently running -- avoids
     disconnecting devices held by a concurrent process (B18).
 
-    NOTE: TOCTOU race exists between reading active ingests and
-    disconnecting nbd devices. A new ingest could start between the
-    check and the disconnect. Full fix requires file-level locking
-    around nbd operations. Current risk is low (cleanup only runs
-    at ingest start, not continuously).
+    A device is this user's orphan only when every mount of it is under
+    this user's own ingest temp dirs (<vhir>/cases/<case>/tmp/ingest-<ts>-<pid>/)
+    and that pid is no longer running. A device mounted anywhere else, not
+    mounted at all, or mounted by a live ingest is left alone.
     """
     import sys
 
-    from opensearch_mcp.ingest_status import read_active_ingests
+    from opensearch_mcp.ingest_status import _is_process_alive, read_active_ingests
+    from opensearch_mcp.paths import vhir_dir
 
     try:
         active = read_active_ingests()
@@ -508,6 +508,20 @@ def cleanup_orphaned_mounts() -> None:
             return
     except Exception:
         pass
+
+    own = re.compile(
+        re.escape(str((vhir_dir() / "cases").resolve()))
+        + r"/[^/]+/tmp/ingest-\d{8}T\d{6}-(\d+)/[^/]+"
+    )
+    try:
+        table = Path("/proc/self/mounts").read_text().splitlines()
+    except OSError:
+        return
+
+    def _unescape(field: str) -> str:  # the kernel writes " " as \040, etc.
+        return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+    mounts = [[_unescape(f) for f in line.split()[:2]] for line in table if len(line.split()) > 1]
 
     for i in range(8):
         size_path = Path(f"/sys/block/nbd{i}/size")
@@ -518,9 +532,16 @@ def cleanup_orphaned_mounts() -> None:
                 continue
             if size > 0:
                 dev = f"/dev/nbd{i}"
-                # Try to unmount any partitions first
-                for part in sorted(glob.glob(f"{dev}p*")):
-                    subprocess.run(["sudo", "umount", part], capture_output=True)
+                points = [mp for src, mp in mounts if re.fullmatch(rf"{dev}(p\d+)?", src)]
+                owners = [own.fullmatch(mp) for mp in points]
+                if (
+                    not points
+                    or not all(owners)
+                    or any(_is_process_alive(int(m.group(1)), "") for m in owners)
+                ):
+                    continue
+                for mp in points:
+                    subprocess.run(["sudo", "umount", mp], capture_output=True)
                 subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
                 print(f"  Cleaned orphaned nbd: {dev}", file=sys.stderr)
 

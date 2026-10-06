@@ -56,10 +56,15 @@ def _home(tmp_path: Path) -> Path:
 
 def _server(home: Path, *args: str, feed: bytes = b"", until=(), timeout: float = 20) -> str:
     """Run the server child, write `feed` into its stdin and keep it open,
-    and return its worker's log once it contains one of `until`."""
+    and return its worker's log once it contains one of `until`.
+    sudo is a stub that fails, so the worker never reaches the host's devices."""
+    stub = home.parent / "no-sudo"
+    stub.mkdir(exist_ok=True)
+    (stub / "sudo").write_text("#!/bin/sh\nexit 1\n")
+    (stub / "sudo").chmod(0o755)
     env = {
         "HOME": str(home),
-        "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+        "PATH": f"{stub}:{Path(sys.executable).parent}:/usr/bin:/bin",
         "PYTHONPATH": os.pathsep.join(sys.path),
     }
     proc = subprocess.Popen(
