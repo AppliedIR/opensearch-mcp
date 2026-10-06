@@ -496,6 +496,12 @@ def cleanup_orphaned_mounts() -> None:
     this user's own ingest temp dirs (<vhir>/cases/<case>/tmp/ingest-<ts>-<pid>/)
     and that pid is no longer running. A device mounted anywhere else, not
     mounted at all, or mounted by a live ingest is left alone.
+
+    NOTE: TOCTOU race between reading the mount table and disconnecting.
+    Two cleaners started together can act on the same snapshot of an
+    orphan, and a new ingest can take the device between the check and the
+    disconnect. A full fix needs file-level locking around nbd operations.
+    Current risk is low (cleanup only runs at ingest start).
     """
     import sys
 
