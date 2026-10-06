@@ -407,7 +407,8 @@ class TestIdxIngest:
         """dry_run=True returns preview with host/artifact discovery."""
         from _helpers import make_windows_tree
 
-        make_windows_tree(tmp_path)
+        evidence = tmp_path / "evidence"  # not the home folder itself, which is refused
+        make_windows_tree(evidence)
 
         # Create the active_case file under the fake home
         vhir_dir = tmp_path / ".vhir"
@@ -420,7 +421,7 @@ class TestIdxIngest:
 
         mock_client.count.side_effect = Exception("no index")
 
-        resp = idx_ingest(path=str(tmp_path), dry_run=True)
+        resp = idx_ingest(path=str(evidence), dry_run=True)
         assert resp.get("status") == "preview"
         assert len(resp.get("hosts", [])) >= 1
 

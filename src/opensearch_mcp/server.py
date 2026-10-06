@@ -528,6 +528,16 @@ def _validate_path(path: str) -> str | None:
 
     p = Path(path).resolve()
     home = vhir_home().resolve()
+    # HOME itself, and the hidden files and folders directly in it, hold credentials
+    if p.is_relative_to(home):
+        below = p.relative_to(home).parts
+        if not below or below[0].startswith("."):
+            return (
+                f"Refused: {path} (resolved target: {p}) is your home folder, or is in your "
+                "home folder's hidden configuration area, which can hold credentials, so it "
+                "isn't ingested. Copy or move the evidence into the case's evidence/ folder, "
+                "or another non-hidden folder, and ingest it from there."
+            )
     allowed = [
         home,
         Path("/mnt").resolve(),
