@@ -112,8 +112,6 @@ def parse_tasks_dir(
     for task_file in sorted(tasks_dir.rglob("*")):
         if not task_file.is_file():
             continue
-        if task_file.suffix.lower() not in ("", ".xml"):
-            continue
         doc = parse_task_xml(task_file)
         if doc is None:
             skipped += 1
