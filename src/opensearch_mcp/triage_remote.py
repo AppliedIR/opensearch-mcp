@@ -663,6 +663,10 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
 def _enrich_registry_run_keys(client, safe_case, on_progress=None):
     """Enrich registry Run key entries with check_file."""
     index = f"case-{safe_case}-registry-*"
+    run_keys = [
+        {"wildcard": {"KeyPath.keyword": "*\\\\Run\\\\*"}},
+        {"wildcard": {"KeyPath.keyword": "*\\\\Run"}},
+    ]
     try:
         result = client.search(
             index=index,
@@ -670,10 +674,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
             body={
                 "query": {
                     "bool": {
-                        "should": [
-                            {"wildcard": {"KeyPath.keyword": "*\\\\Run\\\\*"}},
-                            {"wildcard": {"KeyPath.keyword": "*\\\\Run"}},
-                        ],
+                        "should": run_keys,
                         "minimum_should_match": 1,
                         "filter": [{"exists": {"field": "ValueData"}}],
                     }
@@ -729,7 +730,13 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
                 resp = client.update_by_query(
                     index=index,
                     body={
-                        "query": {"term": {"ValueData.keyword": value_data}},
+                        "query": {
+                            "bool": {
+                                "should": run_keys,
+                                "minimum_should_match": 1,
+                                "filter": [{"term": {"ValueData.keyword": value_data}}],
+                            }
+                        },
                         "script": {
                             "source": "; ".join(script_lines),
                             "lang": "painless",
