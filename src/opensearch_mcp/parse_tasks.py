@@ -22,6 +22,8 @@ def parse_task_xml(file_path: Path) -> dict | None:
         root = tree.getroot()
     except ET.ParseError:
         return None
+    if root.tag.rsplit("}", 1)[-1] != "Task":
+        return None
 
     doc: dict = {}
 

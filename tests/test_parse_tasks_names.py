@@ -62,3 +62,13 @@ def test_file_that_is_not_a_task_is_counted_as_skipped(tmp_path):
     cnt, skipped, docs = _run(tasks)
     assert (cnt, skipped) == (1, 1)
     assert set(docs) == {"Updater"}
+
+
+def test_xml_file_that_is_not_a_task_is_counted_as_skipped(tmp_path):
+    tasks = tmp_path / "Tasks"
+    _write_task(tasks / "Updater", "x")
+    config = '<?xml version="1.0"?>\n<configuration><appSettings/></configuration>\n'
+    (tasks / "settings.config").write_text(config)
+    cnt, skipped, docs = _run(tasks)
+    assert (cnt, skipped) == (1, 1)
+    assert set(docs) == {"Updater"}
