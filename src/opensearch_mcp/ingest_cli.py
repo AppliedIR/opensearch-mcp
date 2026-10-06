@@ -1312,6 +1312,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         # Post-ingest triage enrichment
         if not getattr(args, "skip_triage", False):
+            triage_note = ""
             try:
                 print("\nRunning triage enrichment...")
                 from opensearch_mcp.triage_remote import enrich_remote
@@ -1344,13 +1345,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         f"Triage enrichment incomplete: {total_enriched} documents updated;"
                         f" not complete: {'; '.join(failed)}"
                     )
+                    triage_note = f"enrichment incomplete: {'; '.join(failed)}"
                 else:
                     print(f"Triage enrichment complete: {total_enriched} documents updated")
             except Exception as e:
                 print(f"  Triage enrichment failed: {e}")
             from opensearch_mcp.ingest_status import finish_status
 
-            finish_status(case_id, os.getpid())
+            finish_status(case_id, os.getpid(), note=triage_note)
 
     finally:
         mount_ctx.cleanup()

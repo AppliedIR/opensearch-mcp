@@ -163,6 +163,35 @@ def test_a_triage_phase_that_fails_still_ends_complete(scan):
     assert scan(lambda *a, **k: {}, enrich=enrich)["status"] == "complete"
 
 
+_UNCHECKED = "1 documents hold values past the first 5000 and were not checked"
+
+
+@pytest.mark.parametrize("no_hayabusa", [False, True], ids=["hayabusa", "no hayabusa"])
+def test_triage_that_did_not_finish_is_a_warning_in_the_status(scan, no_hayabusa):
+    """The worker prints its triage summary to its log, which an examiner
+    polling the status never sees. The status names what didn't finish; the
+    run stays complete and its checklist is unchanged."""
+
+    def enrich(**kw):
+        return {
+            "tasks": {"status": "failed", "reason": _UNCHECKED, "enriched": 5000},
+            "amcache": {"status": "complete", "enriched": 2},
+        }
+
+    final = scan(lambda *a, **k: {}, no_hayabusa=no_hayabusa, enrich=enrich)
+    assert final["status"] == "complete", final
+    want = f"triage: enrichment incomplete: tasks ({_UNCHECKED})"
+    assert want in final.get("warnings", []), final
+    assert [c for c in final["checklist"] if c["artifact"] == "triage"] == [], final
+    assert "errors" not in final, final
+
+
+def test_triage_that_finished_adds_no_warning(scan):
+    final = scan(lambda *a, **k: {}, enrich=lambda **kw: {"tasks": {"status": "complete"}})
+    assert final["status"] == "complete", final
+    assert [w for w in final.get("warnings", []) if "triage" in w] == [], final
+
+
 def test_finishing_leaves_a_failed_run_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     ingest_status.write_status("c1", 7, "r", "failed", [], {}, "2026-10-02T00:00:00Z", error="x")
