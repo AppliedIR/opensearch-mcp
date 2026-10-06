@@ -107,3 +107,45 @@ def test_values_past_the_aggregation_cap_are_counted_not_complete(name):
     res = _enrich(StubOS(other=7))
     assert res[name]["status"] != "complete", res[name]
     assert res[name]["unchecked_docs"] == 7, res[name]
+
+
+class ChunkedStub:
+    """1,200 distinct paths, stamped in chunks of 500; the chunks in `fail` can't be written."""
+
+    def __init__(self, other=0, fail=(2,)):
+        self.other = other
+        self.fail = fail
+        self.indices = MagicMock()
+        self.calls = 0
+
+    def search(self, index, body, **kw):
+        buckets = [{"key": f"C:\\x\\f{i}.dll", "doc_count": 1} for i in range(1200)]
+        agg = {"buckets": buckets, "sum_other_doc_count": self.other}
+        return {"hits": {"hits": []}, "aggregations": {"paths": agg}}
+
+    def update_by_query(self, index, body, **kw):
+        self.calls += 1
+        if self.calls in self.fail:
+            raise RuntimeError("cluster_block_exception")
+        return {"updated": len(body["query"]["terms"]["FullPath.keyword"])}
+
+
+def _amcache(stub):
+    with patch.object(tr, "call_tool", side_effect=_verdict):
+        return tr._enrich_file_artifact(
+            stub, "c1", "case-c1-amcache-*", "FullPath.keyword", "amcache"
+        )
+
+
+def test_only_the_chunks_that_could_not_be_written_are_counted():
+    res = _amcache(ChunkedStub(fail=(2,)))
+    assert res["status"] == "failed", res
+    assert res["write_failures"] == 500, res  # the second chunk's paths, not all 1,200
+    assert res["enriched"] == 700, res
+
+
+def test_write_failures_and_values_past_the_cap_are_both_reported():
+    res = _amcache(ChunkedStub(other=7, fail=(3,)))
+    assert res["status"] == "failed", res
+    assert res["write_failures"] == 200 and res["unchecked_docs"] == 7, res
+    assert "could not be written" in res["reason"] and "past the first 5000" in res["reason"]
