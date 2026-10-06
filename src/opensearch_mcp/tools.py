@@ -354,6 +354,7 @@ def run_and_ingest(
                 vss_id=vss_id,
                 parse_method=cfg.cli_name,
                 host_dict=host_dict,
+                row_host=tool_name != "jumplists",
             )
             total_count += count
             total_skipped += sk

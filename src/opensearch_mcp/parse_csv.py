@@ -132,6 +132,7 @@ def ingest_csv(
     vss_id: str = "",
     parse_method: str = "",
     host_dict=None,
+    row_host: bool = True,
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -186,7 +187,7 @@ def ingest_csv(
             from opensearch_mcp.hostname import extract_host_from_record
 
             per_row_host = extract_host_from_record(row)
-            raw_host = per_row_host or hostname
+            raw_host = (per_row_host if row_host else None) or hostname
             row["host.name"] = raw_host
             # host.id stamping (v1 host-identity). Resolve via dict;
             # on miss, stamp host.id = raw (parser resolve-miss policy).
@@ -209,7 +210,11 @@ def ingest_csv(
             # Provenance differs across re-ingests (different source_file),
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
-            _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            id_row = row
+            if not row_host and per_row_host:  # keep the _id the per-row host gave
+                id_id = _resolve_cached(host_dict, per_row_host) if host_dict is not None else None
+                id_row = {**row, "host.name": per_row_host, "host.id": id_id or per_row_host}
+            _id = _doc_id(index_name, id_row, natural_key, volatile_keys=_VOLATILE_KEYS)
 
             # Provenance fields (added after ID computation)
             if source_file:

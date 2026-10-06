@@ -1421,6 +1421,7 @@ def cmd_csv(args: argparse.Namespace) -> None:
         natural_key=cfg.natural_key,
         time_field=cfg.time_field,
         host_dict=case_host_dict,
+        row_host=tool_name != "jumplists",
     )
 
     audit.log(
