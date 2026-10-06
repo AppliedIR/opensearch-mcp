@@ -113,3 +113,19 @@ def test_a_host_with_no_detections_is_not_a_failure(hb):
     results, commands = hb("csv-timeline", mode="empty")
     assert results == {}
     assert commands == ["csv-timeline"]
+
+
+def test_a_probe_that_fails_to_run_falls_back_to_csv_timeline(hb, monkeypatch):
+    import subprocess
+
+    real = subprocess.run
+
+    def run(cmd, *a, **k):
+        if "--help" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 60)
+        return real(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    results, commands = hb("csv-timeline")
+    assert results == {"HOST1": 2}
+    assert commands == ["csv-timeline"]
