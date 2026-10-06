@@ -606,9 +606,10 @@ def _ingest_hosts(
                     _update_status()
 
                 for file_idx, evtx_file in enumerate(evtx_files):
-                    file_hash = sha256_file(evtx_file)
+                    file_hash = ""  # hashed in the try: an unreadable file fails only itself
                     aid = audit._next_audit_id()
                     try:
+                        file_hash = sha256_file(evtx_file)
                         from opensearch_mcp.paths import relative_evidence_path
 
                         rel_path = relative_evidence_path(evtx_file, host.volume_root)
@@ -684,7 +685,7 @@ def _ingest_hosts(
                             params={"file": str(evtx_file), "run_id": run_id},
                             result_summary=f"FAILED: {e}",
                             input_files=[str(evtx_file)],
-                            input_sha256s=[file_hash],
+                            input_sha256s=[file_hash] if file_hash else [],
                         )
 
                 if evtx_status:
@@ -774,7 +775,7 @@ def _ingest_hosts(
             _hn = _sanitize_index_component(host.hostname)
             index_name = _build_idx(case_id, cfg.index_suffix, host.hostname)
             existing = _safe_count(client, index_name)
-            file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
+            file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
             aid = audit._next_audit_id()
 
             # MFT natural key: add vss_id as 5th component when VSS is active
@@ -798,6 +799,7 @@ def _ingest_hosts(
 
             unread: list[str] = []
             try:
+                file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
                 from opensearch_mcp.paths import relative_evidence_path
 
                 _rel_src = relative_evidence_path(artifact_path, host.volume_root)
@@ -914,7 +916,7 @@ def _ingest_plaso_artifact(
     _hn = _sanitize_index_component(host.hostname)
     index_name = _build_idx(case_id, tool_name, host.hostname)
     existing = _safe_count(client, index_name)
-    plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
+    plaso_hash = ""  # hashed in the try: an unreadable file fails its artifact only
     aid = audit._next_audit_id()
 
     ar = ArtifactResult(
@@ -931,6 +933,7 @@ def _ingest_plaso_artifact(
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
+        plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         from opensearch_mcp.paths import relative_evidence_path as _rel
 
         _plaso_src = _rel(artifact_path, host.volume_root)
@@ -1050,7 +1053,7 @@ def _ingest_custom_artifact(
     _hn = _sanitize_index_component(host.hostname)
     index_name = _build_idx(case_id, tool_name, host.hostname)
     existing = _safe_count(client, index_name)
-    file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
+    file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
     aid = audit._next_audit_id()
 
     ar = ArtifactResult(
@@ -1067,6 +1070,7 @@ def _ingest_custom_artifact(
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
+        file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         cnt, sk, bf = _run_custom_parser(
             tool_name,
             artifact_path,
