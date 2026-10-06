@@ -25,14 +25,45 @@ def _escape_wildcard(value: str) -> str:
 _MAX_CONSECUTIVE_FAILURES = 3
 
 
-def _loop_result(consecutive_failures: int, succeeded: bool, **counts) -> dict:
+class _WriteFailed(Exception):
+    """A verdict write failed after a successful triage lookup."""
+
+
+def _ubq(client, **kw):
+    try:
+        return client.update_by_query(**kw)
+    except Exception as e:
+        print(f"  WARNING: update_by_query failed: {e}", file=sys.stderr)
+        raise _WriteFailed from e
+
+
+def _loop_result(
+    consecutive_failures: int,
+    succeeded: bool,
+    write_failures: int = 0,
+    unchecked_docs: int = 0,
+    **counts,
+) -> dict:
     """Not 'complete' when a gateway loop stopped on consecutive call failures,
-    or when every call it made failed (a loop shorter than the stop)."""
+    when every call it made failed, when verdict writes failed, or when the
+    aggregation left values unread."""
+    reasons = []
     if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES or (
         consecutive_failures and not succeeded
     ):
-        reason = "consecutive gateway call failures; windows-triage backend or gateway unavailable"
-        return {"status": "failed", "reason": reason, **counts}
+        reasons.append(
+            "consecutive gateway call failures; windows-triage backend or gateway unavailable"
+        )
+    if write_failures:
+        reasons.append(f"{write_failures} verdicts could not be written to the index")
+        counts["write_failures"] = write_failures
+    if unchecked_docs:
+        reasons.append(
+            f"{unchecked_docs} documents hold values past the first 5000 and were not checked"
+        )
+        counts["unchecked_docs"] = unchecked_docs
+    if reasons:
+        return {"status": "failed", "reason": "; ".join(reasons), **counts}
     return {"status": "complete", **counts}
 
 
@@ -175,7 +206,9 @@ def _enrich_file_artifact(
         )
         return {"status": "skipped", "reason": str(e)}
 
-    buckets = agg_result.get("aggregations", {}).get("paths", {}).get("buckets", [])
+    paths_agg = agg_result.get("aggregations", {}).get("paths", {})
+    buckets = paths_agg.get("buckets", [])
+    unchecked = paths_agg.get("sum_other_doc_count", 0)
     if not buckets:
         return {"status": "empty", "checked": 0}
 
@@ -208,9 +241,11 @@ def _enrich_file_artifact(
             continue
 
     if not verdicts:
-        return _loop_result(consecutive_failures, succeeded, checked=len(buckets), enriched=0)
+        return _loop_result(
+            consecutive_failures, succeeded, 0, unchecked, checked=len(buckets), enriched=0
+        )
 
-    enriched = _batch_stamp_verdicts(client, index_pattern, path_field, verdicts)
+    enriched, write_failures = _batch_stamp_verdicts(client, index_pattern, path_field, verdicts)
 
     if on_progress:
         on_progress(
@@ -220,7 +255,14 @@ def _enrich_file_artifact(
             enriched=enriched,
         )
 
-    return _loop_result(consecutive_failures, succeeded, checked=len(buckets), enriched=enriched)
+    return _loop_result(
+        consecutive_failures,
+        succeeded,
+        write_failures,
+        unchecked,
+        checked=len(buckets),
+        enriched=enriched,
+    )
 
 
 def _batch_stamp_verdicts(
@@ -250,6 +292,7 @@ def _batch_stamp_verdicts(
             groups[key]["reasons"].append("; ".join(reasons))
 
     total_updated = 0
+    failed_values = 0
     for (verdict_str, confidence, is_lolbin), group in groups.items():
         script_lines = [
             "ctx._source['triage.verdict'] = params.verdict",
@@ -306,12 +349,13 @@ def _batch_stamp_verdicts(
                 )
                 total_updated += resp.get("updated", 0)
             except Exception as e:
+                failed_values += len(chunk)
                 print(
                     f"  WARNING: batch update_by_query failed for {verdict_str}: {e}",
                     file=sys.stderr,
                 )
 
-    return total_updated
+    return total_updated, failed_values
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +392,7 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
         on_progress("triage_start", artifact="evtx_svc", unique_values=len(service_names))
 
     enriched = 0
+    write_failures = 0
     consecutive_failures = 0
     succeeded = False
     for name in service_names:
@@ -372,7 +417,8 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
-            resp = client.update_by_query(
+            resp = _ubq(
+                client,
                 index=index,
                 body={
                     "query": {
@@ -393,6 +439,8 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
                 requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
+        except _WriteFailed:
+            write_failures += 1
         except Exception:
             consecutive_failures += 1
 
@@ -404,7 +452,11 @@ def _enrich_evtx_services(client, safe_case, on_progress=None):
             enriched=enriched,
         )
     return _loop_result(
-        consecutive_failures, succeeded, checked=len(service_names), enriched=enriched
+        consecutive_failures,
+        succeeded,
+        write_failures,
+        checked=len(service_names),
+        enriched=enriched,
     )
 
 
@@ -425,7 +477,9 @@ def _enrich_service_artifact(
     except Exception as e:
         return {"status": "skipped", "reason": str(e)}
 
-    buckets = agg_result.get("aggregations", {}).get("names", {}).get("buckets", [])
+    names_agg = agg_result.get("aggregations", {}).get("names", {})
+    buckets = names_agg.get("buckets", [])
+    unchecked = names_agg.get("sum_other_doc_count", 0)
     if not buckets:
         return {"status": "empty", "checked": 0}
 
@@ -433,6 +487,7 @@ def _enrich_service_artifact(
         on_progress("triage_start", artifact=artifact_name, unique_values=len(buckets))
 
     enriched = 0
+    write_failures = 0
     consecutive_failures = 0
     succeeded = False
     for bucket in buckets:
@@ -458,7 +513,8 @@ def _enrich_service_artifact(
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
-            resp = client.update_by_query(
+            resp = _ubq(
+                client,
                 index=index_pattern,
                 body={
                     "query": {"term": {name_field: name}},
@@ -472,6 +528,8 @@ def _enrich_service_artifact(
                 requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
+        except _WriteFailed:
+            write_failures += 1
         except Exception:
             consecutive_failures += 1
 
@@ -482,7 +540,14 @@ def _enrich_service_artifact(
             checked=len(buckets),
             enriched=enriched,
         )
-    return _loop_result(consecutive_failures, succeeded, checked=len(buckets), enriched=enriched)
+    return _loop_result(
+        consecutive_failures,
+        succeeded,
+        write_failures,
+        unchecked,
+        checked=len(buckets),
+        enriched=enriched,
+    )
 
 
 def _enrich_registry_services(client, safe_case, on_progress=None):
@@ -529,6 +594,7 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
         on_progress("triage_start", artifact="registry_svcs", unique_values=len(services))
 
     enriched = 0
+    write_failures = 0
     consecutive_failures = 0
     succeeded = False
     for svc_name in services:
@@ -553,7 +619,8 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
-            resp = client.update_by_query(
+            resp = _ubq(
+                client,
                 index=index,
                 body={
                     "query": {
@@ -571,6 +638,8 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
                 requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
+        except _WriteFailed:
+            write_failures += 1
         except Exception:
             consecutive_failures += 1
 
@@ -581,7 +650,9 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
             checked=len(services),
             enriched=enriched,
         )
-    return _loop_result(consecutive_failures, succeeded, checked=len(services), enriched=enriched)
+    return _loop_result(
+        consecutive_failures, succeeded, write_failures, checked=len(services), enriched=enriched
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +685,9 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
     except Exception as e:
         return {"status": "skipped", "reason": str(e)}
 
-    buckets = result.get("aggregations", {}).get("values", {}).get("buckets", [])
+    values_agg = result.get("aggregations", {}).get("values", {})
+    buckets = values_agg.get("buckets", [])
+    unchecked = values_agg.get("sum_other_doc_count", 0)
     if not buckets:
         return {"status": "empty", "checked": 0}
 
@@ -622,6 +695,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
         on_progress("triage_start", artifact="registry_run", unique_values=len(buckets))
 
     enriched = 0
+    write_failures = 0
     consecutive_failures = 0
     succeeded = False
     for bucket in buckets:
@@ -667,6 +741,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
                 )
                 enriched += resp.get("updated", 0)
             except Exception as e:
+                write_failures += 1
                 print(
                     f"  WARNING: update_by_query failed for Run key: {e}",
                     file=sys.stderr,
@@ -681,7 +756,14 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
             checked=len(buckets),
             enriched=enriched,
         )
-    return _loop_result(consecutive_failures, succeeded, checked=len(buckets), enriched=enriched)
+    return _loop_result(
+        consecutive_failures,
+        succeeded,
+        write_failures,
+        unchecked,
+        checked=len(buckets),
+        enriched=enriched,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +798,9 @@ def _enrich_registry_check_file(
     except Exception as e:
         return {"status": "skipped", "reason": str(e)}
 
-    buckets = result.get("aggregations", {}).get("values", {}).get("buckets", [])
+    values_agg = result.get("aggregations", {}).get("values", {})
+    buckets = values_agg.get("buckets", [])
+    unchecked = values_agg.get("sum_other_doc_count", 0)
     if not buckets:
         return {"status": "empty", "checked": 0}
 
@@ -724,6 +808,7 @@ def _enrich_registry_check_file(
         on_progress("triage_start", artifact=artifact_name, unique_values=len(buckets))
 
     enriched = 0
+    write_failures = 0
     consecutive_failures = 0
     succeeded = False
     for bucket in buckets:
@@ -749,7 +834,8 @@ def _enrich_registry_check_file(
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
-            resp = client.update_by_query(
+            resp = _ubq(
+                client,
                 index=index,
                 body={
                     "query": {"term": {f"{value_field}.keyword": value}},
@@ -763,6 +849,8 @@ def _enrich_registry_check_file(
                 requests_per_second=1000,
             )
             enriched += resp.get("updated", 0)
+        except _WriteFailed:
+            write_failures += 1
         except Exception:
             consecutive_failures += 1
 
@@ -773,7 +861,14 @@ def _enrich_registry_check_file(
             checked=len(buckets),
             enriched=enriched,
         )
-    return _loop_result(consecutive_failures, succeeded, checked=len(buckets), enriched=enriched)
+    return _loop_result(
+        consecutive_failures,
+        succeeded,
+        write_failures,
+        unchecked,
+        checked=len(buckets),
+        enriched=enriched,
+    )
 
 
 # Registry persistence R1-R17 (no gateway — pure update_by_query)
@@ -791,6 +886,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
     """
     index = f"case-{safe_case}-registry-*"
     total_updated = 0
+    rules_failed = 0
     try:  # no registry index: say so, not "complete, 0"
         client.search(index=index, body={"size": 0}, allow_no_indices=False)
     except Exception as e:
@@ -927,7 +1023,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             )
             total_updated += resp.get("updated", 0)
         except Exception:
-            continue
+            rules_failed += 1
 
     # R8-R10: LSA packages — flag non-default entries
     _LSA_DEFAULTS = (
@@ -983,6 +1079,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             )
             total_updated += resp.get("updated", 0)
         except Exception as exc:
+            rules_failed += 1
             logger.debug("Registry rule failed: %s", exc)
 
     # R4: Winlogon Shell — conditional (not explorer.exe → SUSPICIOUS)
@@ -1023,6 +1120,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
         )
         total_updated += resp.get("updated", 0)
     except Exception as exc:
+        rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
 
     # R5: Winlogon Userinit — conditional (not userinit.exe → SUSPICIOUS)
@@ -1062,6 +1160,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
         )
         total_updated += resp.get("updated", 0)
     except Exception as exc:
+        rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
 
     # R7: BootExecute — conditional (not "autocheck autochk *" → SUSPICIOUS)
@@ -1099,6 +1198,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
         )
         total_updated += resp.get("updated", 0)
     except Exception as exc:
+        rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
 
     # R14: Screensaver — conditional (non-.scr or outside System32 → SUSPICIOUS)
@@ -1145,6 +1245,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
         )
         total_updated += resp.get("updated", 0)
     except Exception as exc:
+        rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
 
     if on_progress:
@@ -1154,4 +1255,12 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             checked=0,
             enriched=total_updated,
         )
+    if rules_failed:
+        reason = f"{rules_failed} persistence rules could not be applied"
+        return {
+            "status": "failed",
+            "reason": reason,
+            "rules_failed": rules_failed,
+            "enriched": total_updated,
+        }
     return {"status": "complete", "enriched": total_updated}

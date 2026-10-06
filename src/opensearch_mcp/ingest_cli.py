@@ -1330,7 +1330,18 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 total_enriched = sum(
                     r.get("enriched", 0) for r in triage_results.values() if isinstance(r, dict)
                 )
-                print(f"Triage enrichment complete: {total_enriched} documents updated")
+                failed = [
+                    f"{k} ({r.get('reason', '')})"
+                    for k, r in triage_results.items()
+                    if isinstance(r, dict) and r.get("status") == "failed"
+                ]
+                if failed:
+                    print(
+                        f"Triage enrichment incomplete: {total_enriched} documents updated;"
+                        f" not complete: {'; '.join(failed)}"
+                    )
+                else:
+                    print(f"Triage enrichment complete: {total_enriched} documents updated")
             except Exception as e:
                 print(f"  Triage enrichment failed: {e}")
             from opensearch_mcp.ingest_status import finish_status

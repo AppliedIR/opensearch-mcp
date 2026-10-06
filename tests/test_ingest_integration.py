@@ -686,3 +686,98 @@ class TestFailedArtifactWarning:
         out = run("dev01", fail=False)
         os_client.indices.refresh(index=f"case-{cid}-*")
         assert self.incomplete(cid) == [], out
+
+
+# ---------------------------------------------------------------------------
+# The post-ingest triage summary names what triage couldn't finish
+# ---------------------------------------------------------------------------
+
+_AMCACHE_STUB = """#!{python}
+import os, sys
+out = sys.argv[sys.argv.index("--csv") + 1]
+with open(os.path.join(out, "20261003000000_Amcache_UnassociatedFileEntries.csv"), "w") as f:
+    f.write("ApplicationName,ProgramId,FileKeyLastWriteTimestamp,SHA1,FullPath,Name\\n")
+    f.write("Unassociated,0000,2024-01-01 00:00:00,,C:\\\\x.exe,x.exe\\n")
+"""
+
+_RECMD_HEADER = (
+    "HivePath,HiveType,Description,Category,KeyPath,ValueName,ValueType,ValueData,"
+    "ValueData2,ValueData3,Comment,Recursive,Deleted,LastWriteTimestamp,PluginDetailFile"
+)
+_IFEO_ROW = (
+    "C:\\\\h\\\\SOFTWARE,SOFTWARE,x,Autoruns,ROOT\\\\Microsoft\\\\Windows NT\\\\CurrentVersion"
+    "\\\\Image File Execution Options\\\\sethc.exe,Debugger,RegSz,C:\\\\Users\\\\Public\\\\x.exe,"
+    ",,,False,False,2024-01-01 00:00:00.0000000,"
+)
+
+
+class TestTriageSummaryAfterIngest:
+    """The real scan with auto-triage, over a case whose registry index holds a
+    persistence hit. With the index write-blocked, triage can't stamp its
+    verdict, and the summary says so instead of "complete"."""
+
+    @pytest.mark.parametrize("blocked", [True, False], ids=["write-blocked", "writable"])
+    def test_the_summary_names_triage_that_did_not_finish(
+        self, os_client, tag, tmp_path, monkeypatch, blocked
+    ):
+        import os
+        import shutil
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        from opensearch_mcp.parse_csv import ingest_csv
+        from opensearch_mcp.paths import build_index_name
+
+        cid = f"{tag}-triage-{'blocked' if blocked else 'open'}"
+        case_dir = tmp_path / "cases" / cid
+        (case_dir / "audit").mkdir(parents=True)
+        (case_dir / "CASE.yaml").write_text(f"case_id: {cid}\n")
+        home = tmp_path / "home"
+        (home / ".vhir").mkdir(parents=True)
+        shutil.copy(Path.home() / ".vhir" / "opensearch.yaml", home / ".vhir")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "AmcacheParser").write_text(_AMCACHE_STUB.format(python=sys.executable))
+        (bin_dir / "dotnet").write_text(_DOTNET_SHIM)
+        for stub in ("AmcacheParser", "dotnet"):
+            (bin_dir / stub).chmod(0o755)
+        tree = tmp_path / "h1"
+        (tree / "Windows" / "System32" / "config").mkdir(parents=True)
+        (tree / "Windows" / "AppCompat" / "Programs").mkdir(parents=True)
+        (tree / "Windows" / "AppCompat" / "Programs" / "Amcache.hve").write_bytes(b"regf")
+
+        registry = build_index_name(cid, "registry", "h1")
+        rows = tmp_path / "registry.csv"
+        rows.write_text(_RECMD_HEADER + "\n" + _IFEO_ROW + "\n")
+        ingest_csv(rows, os_client, registry, "h1")
+        os_client.indices.refresh(index=registry)
+        if blocked:
+            os_client.indices.put_settings(index=registry, body={"index.blocks.write": True})
+        try:
+            p = subprocess.run(
+                [sys.executable, "-m", "opensearch_mcp.ingest_cli", "scan", str(tree)]
+                + ["--hostname", "h1", "--case", cid, "--include", "amcache"]
+                + ["--yes", "--no-hayabusa"],
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{bin_dir}:{Path(sys.executable).parent}:/usr/bin:/bin",
+                    "VHIR_CASE_DIR": str(case_dir),
+                    "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                    "LANG": "C.UTF-8",
+                },
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        finally:
+            os_client.indices.put_settings(index=registry, body={"index.blocks.write": None})
+        out = p.stdout + p.stderr
+        if blocked:
+            assert (
+                "Triage enrichment incomplete: 0 documents updated; not complete: "
+                "registry_persistence (1 persistence rules could not be applied)"
+            ) in out, out
+            assert "Triage enrichment complete" not in out, out
+        else:
+            assert "Triage enrichment complete: 1 documents updated" in out, out
