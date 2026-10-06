@@ -105,8 +105,12 @@ class MountContext:
         self._loop_devices.append(device)
 
     def cleanup(self) -> None:
-        """Unmount everything in reverse order."""
-        for mp in reversed(self._mounts):
+        """Unmount everything in reverse order.
+
+        Each entry leaves its list once released, so a second call (the atexit
+        hook after the scan's own) retries only what failed.
+        """
+        for mp in reversed(list(self._mounts)):
             result = subprocess.run(["sudo", "umount", str(mp)], capture_output=True)
             if result.returncode != 0:
                 logger.warning(
@@ -114,8 +118,10 @@ class MountContext:
                     mp,
                     result.stderr.decode(errors="replace").strip(),
                 )
-                subprocess.run(["sudo", "umount", "-l", str(mp)], capture_output=True)
-        for mp in reversed(self._fuse_mounts):
+                result = subprocess.run(["sudo", "umount", "-l", str(mp)], capture_output=True)
+            if result.returncode == 0:
+                self._mounts.remove(mp)
+        for mp in reversed(list(self._fuse_mounts)):
             result = subprocess.run(["fusermount", "-u", str(mp)], capture_output=True)
             if result.returncode != 0:
                 logger.warning(
@@ -123,13 +129,16 @@ class MountContext:
                     mp,
                     result.stderr.decode(errors="replace").strip(),
                 )
-        for dev in self._nbd_devices:
-            subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
-        for dev in self._loop_devices:
-            subprocess.run(["sudo", "losetup", "-d", dev], capture_output=True)
-        # Once only: the atexit hook calls this again after the scan's own call.
-        for items in (self._mounts, self._fuse_mounts, self._nbd_devices, self._loop_devices):
-            items.clear()
+            else:
+                self._fuse_mounts.remove(mp)
+        for dev in list(self._nbd_devices):
+            result = subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
+            if result.returncode == 0:
+                self._nbd_devices.remove(dev)
+        for dev in list(self._loop_devices):
+            result = subprocess.run(["sudo", "losetup", "-d", dev], capture_output=True)
+            if result.returncode == 0:
+                self._loop_devices.remove(dev)
 
 
 def check_sudo() -> None:
