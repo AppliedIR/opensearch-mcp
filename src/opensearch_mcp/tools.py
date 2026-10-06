@@ -233,6 +233,29 @@ def _failed_files(stdout: str, tool_name: str) -> list[str]:
     return out
 
 
+# Lines the EZ tools print on stdout, while still exiting 0, when an input could not be read.
+_TOOL_ERROR_LINES = (
+    "There was an error",  # AmcacheParser, AppCompatCacheParser, RECmd, SBECmd
+    "Data in byte array is not a Registry hive",  # RECmd
+    "Unknown file type!",  # MFTECmd
+)
+
+
+def _tool_errors(stdout: str, artifact_path: Path) -> list[str]:
+    """Inputs the tool said it could not read, as "path (message)"."""
+    out, current, cause = [], str(artifact_path), ""
+    for line in stdout.splitlines():
+        text = line.strip()
+        if text.startswith("Processing "):
+            current = text.removeprefix("Processing ").removeprefix("hive ").strip("'")
+            cause = ""
+        elif text.endswith("Aborting!!"):
+            cause = text  # SBECmd says why before its generic error line
+        elif text.startswith(_TOOL_ERROR_LINES):
+            out.append(f"{current} ({cause or text})")
+    return out
+
+
 def run_and_ingest(
     tool_name: str,
     artifact_path: Path,
@@ -274,6 +297,7 @@ def run_and_ingest(
         _stdout, _stderr = _run_tool(cmd, cfg.binary)
         if not_read is not None:
             not_read.extend(_failed_files(_stdout, tool_name))
+            not_read.extend(_tool_errors(_stdout, artifact_path))
             if tool_name in ("lnk", "jumplists"):
                 walk = os.walk(
                     artifact_path,
