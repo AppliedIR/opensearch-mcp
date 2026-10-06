@@ -67,7 +67,7 @@ def test_the_ingest_next_step_names_its_own_case(tmp_path, monkeypatch):
     (status,) = srv.idx_ingest_status(case_id="case-b")["ingests"]
     hint = [s for s in status["next_steps"] if "Hayabusa" in s]
     assert hint == [
-        "Query Hayabusa alerts: idx_search(query='Level:critical OR Level:high', "
+        "Query Hayabusa alerts: idx_search(query='Level:(emer OR crit OR critical OR high)', "
         "index='case-case-b-hayabusa-*')"
     ], status["next_steps"]
 

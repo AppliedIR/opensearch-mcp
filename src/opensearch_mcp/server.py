@@ -1932,8 +1932,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 )
             if "hayabusa" in artifacts_done or any("hayabusa" in a for a in artifacts_done):
                 next_steps.append(
-                    "Query Hayabusa alerts: idx_search(query='Level:critical OR "
-                    f"Level:high', index='{_hayabusa_index(ing.get('case_id') or '')}')"
+                    f"Query Hayabusa alerts: idx_search(query='{_HAYABUSA_TOP_QUERY}', "
+                    f"index='{_hayabusa_index(ing.get('case_id') or '')}')"
                 )
             # Pick a concrete artifact_type example from what was ingested
             example_type = "event_logs_security"
@@ -2875,6 +2875,10 @@ def _get_active_case() -> str | None:
     return None
 
 
+# Hayabusa's CSV abbreviates Level: crit, high, med, low, info, and emer on a
+# configured critical system. With -b (--disable-abbreviations) they're in full.
+_HAYABUSA_TOP_QUERY = "Level:(emer OR crit OR critical OR high)"
+
 # Zero Hayabusa alerts because the engine isn't there, not because nothing matched.
 _HAYABUSA_ABSENT = (
     "Hayabusa not installed: evtx ingests ran no detections, so 0 alerts is not "
@@ -2929,7 +2933,7 @@ def idx_list_detections(
                 if hb_count:
                     resp["suggestion"] = (
                         f"Sigma detectors unavailable. {hb_count:,} Hayabusa alerts available. "
-                        "Query: idx_search(query='Level:critical OR Level:high', "
+                        f"Query: idx_search(query='{_HAYABUSA_TOP_QUERY}', "
                         f"index='{hb_index}')"
                     )
                 else:
@@ -2984,7 +2988,7 @@ def idx_list_detections(
             if hb_count:
                 hayabusa_hint = (
                     f"No Sigma detections. {hb_count:,} Hayabusa alerts available. "
-                    "Query: idx_search(query='Level:critical OR Level:high', "
+                    f"Query: idx_search(query='{_HAYABUSA_TOP_QUERY}', "
                     f"index='{hb_index}')"
                 )
             else:
