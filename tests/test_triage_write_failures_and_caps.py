@@ -149,3 +149,9 @@ def test_write_failures_and_values_past_the_cap_are_both_reported():
     assert res["status"] == "failed", res
     assert res["write_failures"] == 200 and res["unchecked_docs"] == 7, res
     assert "could not be written" in res["reason"] and "past the first 5000" in res["reason"]
+
+
+def test_the_values_of_every_failed_chunk_add_up():
+    res = _amcache(ChunkedStub(fail=(1, 3)))
+    assert res["write_failures"] == 700, res  # 500 + 200
+    assert res["enriched"] == 500, res
