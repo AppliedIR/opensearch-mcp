@@ -94,6 +94,22 @@ def test_a_single_json_file_that_fails_is_named(bg, tmp_path):
     assert "1 file(s)" in w and str(f) in w, w
 
 
+def test_a_halt_keeps_the_json_files_already_not_read(bg, tmp_path, monkeypatch):
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+
+    def full(client, actions, **k):
+        raise ShardCapacityExhausted("shard limit reached")
+
+    monkeypatch.setattr("opensearch_mcp.parse_json.flush_bulk", full)
+    d = _files(tmp_path / "ev", {"a.jsonl": NOT_JSON, "b.jsonl": GOOD})
+    with pytest.raises(ShardCapacityExhausted):
+        bg.cmd_ingest_json(argparse.Namespace(path=str(d), case="c1", hostname="h1"))
+    st = _status()
+    assert st["status"] == "failed" and st["checklist"] == [], st
+    (w,) = _not_read(st)
+    assert w.startswith("h1: json: 1 file(s)") and str(d / "a.jsonl") in w, w
+
+
 def test_json_that_all_parses_carries_no_warning(bg, tmp_path):
     d = _files(tmp_path / "ev", {"good.jsonl": GOOD, "more.jsonl": GOOD})
     bg.cmd_ingest_json(argparse.Namespace(path=str(d), case="c1", hostname="h1"))
@@ -175,6 +191,43 @@ def test_auto_hosts_names_a_hosts_one_column_file(delim, tmp_path):
     (w,) = _not_read(st)
     assert "1 file(s)" in w and str(d / "hashes-h1.csv") in w, w
     assert st["total_indexed"] == 4, st
+
+
+def test_a_halt_keeps_the_delimited_files_already_not_read(delim, tmp_path, monkeypatch):
+    from opensearch_mcp import parse_delimited as pd
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+
+    stub = pd.ingest_delimited
+
+    def fake(path, *a, **k):
+        if "full" in path.name:
+            raise ShardCapacityExhausted("shard limit reached")
+        return stub(path, *a, **k)
+
+    monkeypatch.setattr(pd, "ingest_delimited", fake)
+    d = _files(tmp_path / "ev", {"a-broken.csv": TWO_COLS, "b-full.csv": TWO_COLS})
+    with pytest.raises(ShardCapacityExhausted):
+        delim.cmd_ingest_delimited(_delim_args(d))
+    st = _status()
+    assert st["status"] == "failed" and st["checklist"] == [], st
+    (w,) = _not_read(st)
+    assert w.startswith("h1: delimited: 1 file(s)"), w
+    assert f"{d / 'a-broken.csv'} (bad row at line 2)" in w, w
+
+
+def test_a_halt_with_nothing_not_read_carries_no_warning(delim, tmp_path, monkeypatch):
+    from opensearch_mcp import parse_delimited as pd
+    from opensearch_mcp.bulk import ShardCapacityExhausted
+
+    def full(path, *a, **k):
+        raise ShardCapacityExhausted("shard limit reached")
+
+    monkeypatch.setattr(pd, "ingest_delimited", full)
+    d = _files(tmp_path / "ev", {"logons.csv": TWO_COLS})
+    with pytest.raises(ShardCapacityExhausted):
+        delim.cmd_ingest_delimited(_delim_args(d))
+    st = _status()
+    assert st["status"] == "failed" and _not_read(st) == [] and st["checklist"] == [], st
 
 
 def test_delimited_files_that_all_parse_carry_no_warning(delim, tmp_path):
@@ -310,6 +363,16 @@ def test_the_status_names_the_images_an_archive_run_left_out(mem_status):
         assert f"{name} (not ingested: the archive holds 3 images; only {ingested} was" in w, w
     assert ingested + " (" not in w, w
     assert st["status"] == "complete" and st["total_indexed"] == 1, st
+    assert [c["artifact"] for c in st["checklist"]] == ["windows.info"], st
+
+
+def test_a_two_image_archive_names_the_other_only_in_the_warnings(mem_status):
+    st, ingested = mem_status("hostA.raw", "hostB.vmem")
+    other = ({"hostA.raw", "hostB.vmem"} - {ingested}).pop()
+    (w,) = _not_read(st)
+    assert w.startswith("hostA: archive: 1 file(s) or folder(s) were not ingested"), w
+    assert f"{other} (not ingested: the archive holds 2 images; only {ingested}" in w, w
+    assert [c["artifact"] for c in st["checklist"]] == ["windows.info"], st
 
 
 def test_a_one_image_archive_carries_no_warning(mem_status):

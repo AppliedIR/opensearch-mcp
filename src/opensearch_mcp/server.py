@@ -1821,6 +1821,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
                         s.setdefault("warnings", []).append(
                             f"{hostname}: {len(names)} evtx file(s) {text} ({shown})"
                         )
+                if a.get("warnings_only"):  # not an artifact: its warnings above say it all
+                    continue
                 a_status = a.get("status", "pending")
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":

@@ -412,6 +412,15 @@ def _preflight_shard_capacity(
         sys.exit(1)
 
 
+def _halt_hosts(hostname: str, artifact: str, failed_files: list) -> list:
+    """A halted run's status hosts: the files it couldn't read before the halt."""
+    if not failed_files:
+        return []
+    not_read = [f"{p} ({e})" for p, e in failed_files]
+    entry = {"name": artifact, "not_read": not_read, "warnings_only": True}
+    return [{"hostname": hostname, "artifacts": [entry]}]
+
+
 def _write_bg_status(
     case_id,
     run_id,
@@ -1591,7 +1600,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             pid=os.getpid(),
             run_id=run_id or "",
             status="failed",
-            hosts=[],
+            hosts=_halt_hosts(hostname, "json", _json_failed_files),
             totals={},
             started=datetime.now(timezone.utc).isoformat(),
             error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
@@ -1970,7 +1979,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             pid=os.getpid(),
             run_id=run_id or "",
             status="failed",
-            hosts=[],
+            hosts=_halt_hosts(hostname, "delimited", _delim_failed_files),
             totals={},
             started=datetime.now(timezone.utc).isoformat(),
             error=f"{HALT_CIRCUIT_BREAKER}: {_sce}",
@@ -2455,7 +2464,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         "artifacts": status_plugins,
     }
     if _mem_not_read:
-        archive = {"name": "archive", "status": "complete", "not_read": _mem_not_read}
+        archive = {"name": "archive", "not_read": _mem_not_read, "warnings_only": True}
         status_host["artifacts"] = status_plugins + [archive]
 
     def _write_mem_status(status: str, error: str = "") -> None:
