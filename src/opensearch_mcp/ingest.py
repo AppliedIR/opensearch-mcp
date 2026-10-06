@@ -790,6 +790,7 @@ def _ingest_hosts(
                 from opensearch_mcp.paths import relative_evidence_path
 
                 _rel_src = relative_evidence_path(artifact_path, host.volume_root)
+                unread: list[str] = []
                 cnt, sk, bf = run_and_ingest(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
@@ -804,8 +805,10 @@ def _ingest_hosts(
                     vss_id=host.vss_id,
                     natural_key_override=natural_key,
                     host_dict=host_dict,
+                    not_read=unread,
                 )
                 ar.indexed = cnt
+                ar.not_read = unread
                 ar.skipped = sk
                 ar.bulk_failed = bf
                 _write_ingest_manifest(
@@ -826,6 +829,7 @@ def _ingest_hosts(
                         "bulk_failed": bf,
                     },
                     result_summary=f"{cnt} indexed"
+                    + (f", {len(unread)} not read" if unread else "")
                     + (f", {sk} skipped" if sk else "")
                     + (f", {bf} bulk failed" if bf else ""),
                     input_files=[str(artifact_path)],
@@ -837,6 +841,8 @@ def _ingest_hosts(
                     tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
                     tool_status["skipped"] = sk
                     tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
+                    if unread:
+                        tool_status.setdefault("not_read", []).extend(unread)
                     _update_status()
                 _progress(
                     "artifact_done",

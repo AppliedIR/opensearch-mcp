@@ -708,6 +708,7 @@ def _rebuilt_status_host(h) -> dict:
             "status": "failed" if a.error else "complete",
             "indexed": a.indexed,
             **({"error": a.error} if a.error else {}),
+            **({"not_read": a.not_read} if a.not_read else {}),
         }
         for a in h.artifacts
     ]

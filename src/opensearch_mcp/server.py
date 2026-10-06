@@ -1807,6 +1807,13 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     )
                 if a.get("note"):
                     s.setdefault("warnings", []).append(f"{hostname}: {a['note']}")
+                if a.get("not_read"):
+                    unread = a["not_read"]
+                    shown = "; ".join(unread[:10]) + ("; …" if len(unread) > 10 else "")
+                    s.setdefault("warnings", []).append(
+                        f"{hostname}: {a['name']}: {len(unread)} file(s) or folder(s) were not "
+                        f"ingested, or only in part ({shown})"
+                    )
                 for key, text in _DROPPED_EVTX.items():
                     if a.get(key):
                         names = a[key]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -216,6 +217,22 @@ def _silent_failure_diagnostic(binary: str, artifact_path: Path, stderr: str) ->
     return f"{binary} completed but produced no CSV output: " + " ".join(parts)
 
 
+def _failed_files(stdout: str, tool_name: str) -> list[str]:
+    """The tool's own "Failed files" list: files it found and could not read."""
+    lines = stdout.splitlines()
+    if "Failed files" not in lines:
+        return []
+    out = []
+    for line in lines[lines.index("Failed files") + 1 :]:
+        if not line.startswith("  "):
+            break
+        path, _, why = line.strip().partition(" ==> ")
+        if tool_name == "lnk" and not path.lower().endswith(".lnk"):
+            continue  # --all also tries desktop.ini, .website and jump lists
+        out.append(f"{path} {why}".strip())
+    return out
+
+
 def run_and_ingest(
     tool_name: str,
     artifact_path: Path,
@@ -230,6 +247,7 @@ def run_and_ingest(
     vss_id: str = "",
     natural_key_override: str | None = None,
     host_dict=None,
+    not_read: list | None = None,
 ) -> tuple[int, int, int]:
     """Run an EZ tool against an artifact and ingest the CSV output.
 
@@ -254,6 +272,15 @@ def run_and_ingest(
         # Build command
         cmd = _build_command(cfg, tool_name, artifact_path, tmpdir)
         _stdout, _stderr = _run_tool(cmd, cfg.binary)
+        if not_read is not None:
+            not_read.extend(_failed_files(_stdout, tool_name))
+            if tool_name in ("lnk", "jumplists"):
+                walk = os.walk(
+                    artifact_path,
+                    onerror=lambda e: not_read.append(f"{e.filename} ({e.strerror})"),
+                )
+                for _ in walk:
+                    pass
 
         # Collect CSV output — warn with diagnostics if tool exited 0
         # but produced nothing (UAT 2026-04-23 BUG 6). Previously this

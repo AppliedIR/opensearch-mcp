@@ -18,6 +18,7 @@ class ArtifactResult:
     source_files: list[str] = field(default_factory=list)
     error: str = ""  # non-empty if the tool failed
     note: str = ""  # informational (e.g., "parsed with Plaso fallback")
+    not_read: list[str] = field(default_factory=list)  # inputs the tool couldn't read
 
 
 @dataclass
