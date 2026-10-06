@@ -428,6 +428,7 @@ def _write_bg_status(
     bulk_failed_reason=None,
     counts=None,
     skipped_files=None,
+    not_read=None,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -449,6 +450,8 @@ def _write_bg_status(
         art["error"] = error
     if skipped_files:  # not ingested, and the status has to say so
         art["skipped_files"] = list(skipped_files)
+    if not_read:  # files that failed, or were not recognized: "path (reason)"
+        art["not_read"] = list(not_read)
     if files_total:
         art["files_total"] = files_total
     if files_done:
@@ -1634,6 +1637,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             indexed=total,
             error=final_error,
             bulk_failed=total_bf,
+            not_read=[f"{p} ({e})" for p, e in _json_failed_files],
         )
 
 
@@ -1698,6 +1702,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         hosts_reason = ""
         host_counts: list[tuple] = []
         missed: list[str] = []  # each sub-run starts its own list
+        not_read: list[str] = []
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
@@ -1712,6 +1717,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 hosts_failed += result[1]
                 hosts_reason = hosts_reason or result[2]
                 host_counts.append((result[0], result[3]))
+                not_read.extend(result[4])
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
@@ -1731,8 +1737,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed_reason=hosts_reason,
                 counts=_sum_counts(host_counts),
                 skipped_files=unattributed,
+                not_read=not_read,
             )
-        return hosts_indexed, hosts_failed, hosts_reason, _sum_counts(host_counts)
+        return hosts_indexed, hosts_failed, hosts_reason, _sum_counts(host_counts), not_read
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -1753,6 +1760,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_reason = ""
         walk_counts: list[tuple] = []
         walk_missed: list[str] = []  # each sub-run starts its own list
+        not_read: list[str] = []
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -1767,6 +1775,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                     walk_failed += result[1]
                     walk_reason = walk_reason or result[2]
                     walk_counts.append((result[0], result[3]))
+                    not_read.extend(result[4])
             except _SCE:
                 # Cluster capacity exhausted: halt the entire recursive
                 # walk, not just the current subdir. Re-raise past the
@@ -1780,6 +1789,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 # non-recursive path) covers within-subdir crashes;
                 # this wrapper covers subdir-level catastrophic failure.
                 _failed_subdirs.append((str(d), str(e)[:200]))
+                not_read.append(f"{d} ({str(e)[:200]})")
                 print(f"  SUBDIR SKIPPED ({d.name}): {e}", file=sys.stderr)
         if _failed_subdirs:
             print(f"\n*** {len(_failed_subdirs)} subdirs failed; walk continued: ***")
@@ -1809,9 +1819,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed=walk_failed,
                 bulk_failed_reason=walk_reason,
                 counts=_sum_counts(walk_counts),
+                not_read=not_read,
             )
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
-        return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts)
+        return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts), not_read
     NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
@@ -1898,6 +1909,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
             if detected == "unknown":
                 print("skipped (unrecognized format)")
+                _delim_failed_files.append((str(f), "unrecognized format"))
                 continue
             try:
                 cnt, sk, bf, hr = ingest_delimited(
@@ -1995,6 +2007,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     reason = get_last_bulk_reason()
+    not_read = [f"{p} ({e})" for p, e in _delim_failed_files]
     if run_id:
         final_status, final_error = _terminal_status(total, total_bf, reason)
         _write_bg_status(
@@ -2009,9 +2022,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             error=final_error,
             bulk_failed=total_bf,
             counts=counts,
+            not_read=not_read,
         )
     # The recursive walk shares this run's status file and sums these.
-    return total, total_bf, reason, counts
+    return total, total_bf, reason, counts, not_read
 
 
 # ---------------------------------------------------------------------------
@@ -2342,14 +2356,17 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
 
     image_path = Path(args.path)
     _mem_extract_dir = None  # Track for cleanup
+    _mem_not_read: list[str] = []  # other images in the archive
 
     # Extract from archive if needed
     if image_path.suffix.lower() in (".7z", ".zip"):
+        import atexit
         import shutil
         import subprocess
         import tempfile
 
         _mem_extract_dir = Path(tempfile.mkdtemp(prefix="vhir-mem-"))
+        atexit.register(shutil.rmtree, _mem_extract_dir, True)  # every exit, not only success
         try:
             password = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
             cmd = ["7z", "x", f"-o{_mem_extract_dir}", str(image_path)]
@@ -2364,6 +2381,13 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 sys.exit(1)
             image_path = extracted[0]
             print(f"Extracted: {image_path} ({image_path.stat().st_size / (1024**3):.1f} GB)")
+            if len(extracted) > 1:  # one hostname per run: name the images left out
+                _mem_not_read = [
+                    f"{f.name} (not ingested: the archive holds {len(extracted)} images; "
+                    f"only {image_path.name} was ingested)"
+                    for f in extracted[1:]
+                ]
+                print(f"Warning: {'; '.join(_mem_not_read)}", file=sys.stderr)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             shutil.rmtree(_mem_extract_dir, ignore_errors=True)
             # Not the exception's text: it quotes the command, password and all.
@@ -2430,6 +2454,9 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         "hostname": hostname,
         "artifacts": status_plugins,
     }
+    if _mem_not_read:
+        archive = {"name": "archive", "status": "complete", "not_read": _mem_not_read}
+        status_host["artifacts"] = status_plugins + [archive]
 
     def _write_mem_status(status: str, error: str = "") -> None:
         from opensearch_mcp.bulk import get_last_bulk_reason

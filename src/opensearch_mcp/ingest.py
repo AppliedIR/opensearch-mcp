@@ -949,6 +949,19 @@ def _ingest_plaso_artifact(
                 source_file=_plaso_src,
                 host_dict=host_dict,
             )
+        # Nothing read from inputs that are there is a failure, not an empty
+        # artifact: Plaso exits 0 on a damaged file, and its errors return 0.
+        if not cnt and not bf:
+            if artifact_path.is_dir():
+                n = sum(1 for f in artifact_path.iterdir() if f.suffix.lower() == ".pf")
+                what = f"{n} .pf file(s)"
+            else:
+                n, what = 1, artifact_path.name
+            if n:
+                raise RuntimeError(
+                    f"no records read from {what}: damaged or unreadable, or the parser "
+                    "failed (see the ingest log); nothing from them was indexed"
+                )
         ar.indexed = cnt
         ar.bulk_failed = bf
         if _note:
