@@ -375,6 +375,14 @@ def run_hayabusa_batch(
     output_dir = vhir_dir() / "hayabusa-output"
     output_dir.mkdir(parents=True, exist_ok=True)
     results = {}
+    # Hayabusa 4.0.0 replaced csv-timeline with dfir-timeline (CSV by default).
+    try:
+        probe = subprocess.run(
+            [hayabusa, "dfir-timeline", "--help"], capture_output=True, timeout=60
+        )
+        timeline = "dfir-timeline" if probe.returncode == 0 else "csv-timeline"
+    except Exception:
+        timeline = "csv-timeline"
 
     for host in hosts:
         if not host.evtx_dir:
@@ -414,7 +422,7 @@ def run_hayabusa_batch(
         csv_output = output_dir / f"hayabusa-{_cid}-{_hn}.csv"
         cmd = [
             hayabusa,
-            "csv-timeline",
+            timeline,
             "-r",
             str(rules_dir),
             "-c",
@@ -438,11 +446,13 @@ def run_hayabusa_batch(
             result = subprocess.run(cmd, capture_output=True, timeout=3600)
             if result.returncode != 0:
                 stderr = result.stderr.decode(errors="replace")[:200]
+                error = f"exit {result.returncode}: {stderr}"
+                results[host.hostname] = {"status": "failed", "error": error}
                 if callable(on_progress):
                     on_progress(
                         "hayabusa_failed",
                         hostname=host.hostname,
-                        error=f"exit {result.returncode}: {stderr}",
+                        error=error,
                     )
                 continue
         except Exception as e:
