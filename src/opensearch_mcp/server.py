@@ -547,6 +547,16 @@ def _validate_path(path: str) -> str | None:
     return None
 
 
+def _no_index_matched(result: dict, index: str) -> dict | None:
+    """An error when the pattern matched no open index, so nothing was searched."""
+    if result.get("_shards", {}).get("total") == 0:
+        return {
+            "error": f"No open index matches {index!r}: nothing was searched. "
+            "Check the case id or index pattern."
+        }
+    return None
+
+
 # A wildcard on an IPv4 address: 10.1.2.*, 172.16.5.1?
 _IP_WILDCARD = re.compile(r"\b\d{1,3}\.[\d.]*[*?]")
 _IP_WILDCARD_HINT = (
@@ -627,6 +637,8 @@ def idx_search(
         index=index,
         body=search_body,
     )
+    if err := _no_index_matched(result, index):
+        return err
 
     total = result["hits"]["total"]["value"]
     total_capped = result["hits"]["total"].get("relation") == "gte"
@@ -694,6 +706,8 @@ def idx_count(
         index=index,
         body={"query": {"query_string": {"query": query}}},
     )
+    if err := _no_index_matched(result, index):
+        return err
     resp = {"count": result["count"]}
     aid = audit.log(
         tool="idx_count",
