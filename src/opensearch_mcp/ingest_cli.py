@@ -1008,6 +1008,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if vss_host.artifacts or vss_host.evtx_dir:
                     hosts.append(vss_host)
 
+        if exclude and "evtx" in exclude:  # event logs (and hayabusa) skipped
+            for h in hosts:
+                h.evtx_dir = None
+
         if not hosts:
             if not hostname:
                 print(

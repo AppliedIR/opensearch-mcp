@@ -127,6 +127,9 @@ class MountContext:
             subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
         for dev in self._loop_devices:
             subprocess.run(["sudo", "losetup", "-d", dev], capture_output=True)
+        # Once only: the atexit hook calls this again after the scan's own call.
+        for items in (self._mounts, self._fuse_mounts, self._nbd_devices, self._loop_devices):
+            items.clear()
 
 
 def check_sudo() -> None:
