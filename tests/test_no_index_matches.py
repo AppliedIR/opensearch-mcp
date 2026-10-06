@@ -44,18 +44,28 @@ def scratch():
         _scratch_templates.remove(client, created)
 
 
+AUDITED = []
+
+
 @pytest.fixture
 def tools(scratch, monkeypatch):
     client, tag = scratch
     monkeypatch.setattr(srv, "_get_os", lambda: client)
-    monkeypatch.setattr(srv.audit, "log", lambda **kw: "aid")
+    AUDITED.clear()
+
+    def log(**kw):
+        AUDITED.append(kw)
+        return f"aid-{len(AUDITED)}"
+
+    monkeypatch.setattr(srv.audit, "log", log)
     return tag
 
 
 def _no_index(result, pattern):
     return result == {
         "error": f"No open index matches {pattern!r}: nothing was searched. "
-        "Check the case id or index pattern."
+        "Check the case id or index pattern.",
+        "audit_id": "aid-1",
     }
 
 
@@ -75,6 +85,9 @@ def test_a_pattern_matching_no_open_index_is_an_error(tools, where, tool):
     result = getattr(srv, tool)(query="event.code:4624", **kw)
     pattern = kw.get("index") or f"case-{kw['case_id']}-*"
     assert _no_index(result, pattern), result
+    (entry,) = AUDITED
+    assert entry["tool"] == tool and entry["params"]["index"] == pattern
+    assert entry["result_summary"] == "no open index matched"
 
 
 @pytest.mark.parametrize("tool", ["idx_search", "idx_count"])

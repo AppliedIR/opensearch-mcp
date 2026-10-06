@@ -638,6 +638,13 @@ def idx_search(
         body=search_body,
     )
     if err := _no_index_matched(result, index):
+        aid = audit.log(
+            tool="idx_search",
+            params={"query": query, "index": index, "limit": limit},
+            result_summary="no open index matched",
+        )
+        if aid:
+            err["audit_id"] = aid
         return err
 
     total = result["hits"]["total"]["value"]
@@ -707,6 +714,13 @@ def idx_count(
         body={"query": {"query_string": {"query": query}}},
     )
     if err := _no_index_matched(result, index):
+        aid = audit.log(
+            tool="idx_count",
+            params={"query": query, "index": index},
+            result_summary="no open index matched",
+        )
+        if aid:
+            err["audit_id"] = aid
         return err
     resp = {"count": result["count"]}
     aid = audit.log(
