@@ -514,7 +514,7 @@ def cleanup_orphaned_mounts() -> None:
         + r"/[^/]+/tmp/ingest-\d{8}T\d{6}-(\d+)/[^/]+"
     )
     try:
-        table = Path("/proc/self/mounts").read_text().splitlines()
+        table = Path("/proc/self/mounts").read_text(errors="surrogateescape").splitlines()
     except OSError:
         return
 

@@ -43,9 +43,15 @@ def _own(home: Path, pid: int, case: str = "c1", part: str = "nbd0p1") -> str:
 
 
 class Host:
-    def __init__(self, tmp_path: Path, monkeypatch, home_symlink: bool = False):
+    def __init__(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        home_symlink: bool = False,
+        home_name: bytes = b"realhome",
+    ):
         self.root = tmp_path / "host"
-        real_home = tmp_path / "realhome"
+        real_home = Path(os.fsdecode(os.fsencode(tmp_path) + b"/" + home_name))
         (real_home / ".vhir/cases").mkdir(parents=True)
         self.home = real_home
         if home_symlink:
@@ -72,16 +78,23 @@ class Host:
         monkeypatch.setattr(containers.subprocess, "run", record)
         monkeypatch.setattr(containers.glob, "glob", lambda pat: sorted(self.parts.get(pat, [])))
 
-    def state(self, sizes: dict, mounts: list, parts: dict | None = None, status=None):
+    def state(
+        self, sizes: dict, mounts: list, parts: dict | None = None, status=None, raw: bytes = b""
+    ):
         for i in range(8):
             d = self.root / f"sys/block/nbd{i}"
             d.mkdir(parents=True, exist_ok=True)
             (d / "size").write_text(f"{sizes.get(i, 0)}\n")
         table = self.root / "proc/self/mounts"
         table.parent.mkdir(parents=True, exist_ok=True)
-        table.write_text(
-            "".join(f"{_esc(src)} {_esc(mp)} fuseblk ro,nosuid,nodev 0 0\n" for src, mp in mounts)
-            + "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n"
+        table.write_bytes(
+            os.fsencode(
+                "".join(
+                    f"{_esc(src)} {_esc(mp)} fuseblk ro,nosuid,nodev 0 0\n" for src, mp in mounts
+                )
+            )
+            + raw
+            + b"/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n"
         )
         for dev, ps in (parts or {"/dev/nbd0": ["/dev/nbd0p1"]}).items():
             self.parts[f"{dev}p*"] = ps
@@ -201,3 +214,27 @@ def test_an_orphan_under_a_symlinked_home_is_cleaned(tmp_path, monkeypatch):
     host = Host(tmp_path, monkeypatch, home_symlink=True)
     host.state({0: 2048}, [("/dev/nbd0p1", _own(host.home, DEAD))])
     assert _cleaned(host.clean(), "/dev/nbd0")
+
+
+def test_a_mount_path_that_is_not_utf8_does_not_stop_the_cleanup(host):
+    # e.g. a Latin-1 volume label mounted elsewhere on the host
+    host.state(
+        {0: 2048},
+        [("/dev/nbd0p1", _own(host.home, DEAD))],
+        raw=b"/dev/sdb1 /media/user/Donn\xe9es vfat rw,nosuid,nodev 0 0\n",
+    )
+    assert _cleaned(host.clean(), "/dev/nbd0")
+
+
+def test_an_orphan_under_a_home_that_is_not_utf8_is_unmounted_by_its_own_bytes(
+    tmp_path, monkeypatch
+):
+    host = Host(tmp_path, monkeypatch, home_name=b"home-\xe9t\xe9")
+    mountpoint = _own(host.home, DEAD)
+    host.state({0: 2048}, [("/dev/nbd0p1", mountpoint)])
+    calls = host.clean()
+    assert _cleaned(calls, "/dev/nbd0")
+    (umount,) = calls[:-1]
+    assert umount[:2] == ["sudo", "umount"]
+    assert os.fsencode(umount[2]) in (os.fsencode(mountpoint), b"/dev/nbd0p1")
+    assert b"\xe9t\xe9" in os.fsencode(mountpoint)
