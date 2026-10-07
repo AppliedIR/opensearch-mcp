@@ -255,6 +255,24 @@ def test_anchor_a_provider_no_longer_configured_leaves_no_stale_block(
         assert first["threat_intel.checked"] is True
 
 
+def test_an_answer_from_a_provider_no_longer_configured_goes(os_client, quick):  # noqa: F811
+    """MISP answered, then was removed: its MATCH can't keep the entry MATCH."""
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _run(
+            os_client,
+            case_id,
+            quick,
+            lambda i: reply(i, {"opencti": block("NO_MATCH"), "misp": _misp("MATCH", i)}),
+        )
+        _later_doc(os_client, case_id)  # so a non-force run looks it up again
+        _run(os_client, case_id, quick, lambda i: reply(i, {"opencti": block("NO_MATCH")}))
+        first = _doc(os_client, case_id, "json-first")
+        entry = _entry(first)
+        assert "misp" not in entry
+        assert entry["outcome"] == "NO_MATCH"
+        assert first["threat_intel.checked"] is True
+
+
 def test_an_internal_address_reply_keeps_the_earlier_blocks(
     os_client,  # noqa: F811
     quick,

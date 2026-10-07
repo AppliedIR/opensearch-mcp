@@ -799,8 +799,10 @@ _LEGACY_KEYS = (
 # One IOC's entry in `threat_intel.iocs`, keyed on its exact lookup form and
 # type, merged per provider: a provider's new answer (MATCH or NO_MATCH)
 # replaces its earlier block, and an earlier answer is kept when the new block
-# isn't one (an outage never erases what a platform said). A new entry with no
-# block at all (an error, a reply about another IOC) keeps every earlier block. The outcome is
+# isn't one (an outage never erases what a platform said); a provider the
+# reply has no block for is no longer configured, and its earlier block goes.
+# A new entry with no block at all (an error, a reply about another IOC)
+# keeps every earlier block. The outcome is
 # then recomputed from the merged blocks (a reply has one per configured
 # provider). The document is `checked` only when every entry on it has an
 # answer in each of its blocks, so a later run asks again for the rest.
@@ -833,8 +835,11 @@ if (at >= 0 && entries.get(at) instanceof Map) {
   for (def k : old.keySet()) {
     def ob = old.get(k);
     // No block at all (an error, another IOC's reply): every earlier one stays
+    // Otherwise an earlier answer stays only for a provider the reply still
+    // has a block for (one no longer configured has none)
     if (blockless ? isBlock(ob)
-        : answered(ob, params.answered) && !answered(merged.get(k), params.answered)) {
+        : answered(ob, params.answered) && isBlock(merged.get(k))
+          && !answered(merged.get(k), params.answered)) {
       merged.put(k, ob);
     }
   }
