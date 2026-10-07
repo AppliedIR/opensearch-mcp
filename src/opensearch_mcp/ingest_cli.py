@@ -1267,7 +1267,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
             )
             image_notes = [(off, n) for off, n in image_notes if off not in parsed_offsets]
         else:
-            hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
+            skipped: list[str] = []
+            hosts = discover(
+                scan_root, hostname=hostname, force_hostname=force_hn, skipped=skipped
+            )
+            if skipped:
+                note = (
+                    f"{', '.join(skipped)}: no Windows, Linux or macOS root found; "
+                    "nothing in them was parsed"
+                )
+                print(f"warning: {note}", file=sys.stderr)
+                status_notes.append(("discovery", note))
 
         # --- Pre-preflight peek fallback ---
         # When registry detect missed AND discover() produced hosts with

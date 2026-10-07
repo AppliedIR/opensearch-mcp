@@ -289,12 +289,13 @@ def discover_artifacts(host: DiscoveredHost) -> None:
             host.artifacts.append(("ssh", ssh_dir))
 
 
-def scan_triage_directory(root: Path) -> list[DiscoveredHost]:
+def scan_triage_directory(root: Path, skipped: list[str] | None = None) -> list[DiscoveredHost]:
     """Scan a triage directory for host subdirectories with Windows artifacts.
 
     Returns a list of DiscoveredHost, one per detected host. If root itself
     is a volume root (no host subdirs), returns a single host with hostname
-    derived from root.name.
+    derived from root.name. `skipped`, when given, gets the name of each
+    host subdirectory left out for having no recognised root.
     """
     hosts: list[DiscoveredHost] = []
 
@@ -315,6 +316,8 @@ def scan_triage_directory(root: Path) -> list[DiscoveredHost]:
 
         vr = find_volume_root(subdir)
         if vr is None:
+            if skipped is not None:
+                skipped.append(subdir.name)
             continue
 
         host = make_host(subdir.name, vr)

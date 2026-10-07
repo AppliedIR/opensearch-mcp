@@ -143,10 +143,14 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
 
 
 def discover(
-    path: Path, hostname: str | None = None, force_hostname: bool = False
+    path: Path,
+    hostname: str | None = None,
+    force_hostname: bool = False,
+    skipped: list[str] | None = None,
 ) -> list[DiscoveredHost]:
-    """Discover hosts and artifacts in a directory."""
-    hosts = scan_triage_directory(path)
+    """Discover hosts and artifacts in a directory. `skipped` gets the
+    subdirectories left out for having no recognised root."""
+    hosts = scan_triage_directory(path, skipped)
 
     # --hostname override
     if hosts and hostname:
