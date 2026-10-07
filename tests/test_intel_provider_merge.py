@@ -360,3 +360,55 @@ def test_the_warning_reaches_the_status_the_audit_and_the_console(
     (record,) = logged
     assert MISP_GONE in record["result_summary"]
     assert f"WARNING: {MISP_GONE}" in capsys.readouterr().err
+
+
+class _Cluster:
+    """field_caps names MISP's block; count answers as given."""
+
+    def __init__(self, count):
+        self._count = count
+
+    def field_caps(self, **kw):
+        return {
+            "fields": {
+                "threat_intel.iocs.misp.outcome": {},
+                "threat_intel.iocs.opencti.outcome": {},
+            }
+        }
+
+    def count(self, **kw):
+        if isinstance(self._count, Exception):
+            raise self._count
+        return self._count
+
+
+@pytest.mark.parametrize(
+    "count",
+    [
+        ConnectionError("cluster unreachable"),
+        {"count": 3, "_shards": {"total": 2, "failed": 1}},
+        {"count": 3, "timed_out": True},
+    ],
+    ids=["count error", "failed shards", "timed out"],
+)
+def test_a_check_that_couldn_t_finish_says_so(count):
+    removed, unchecked = threat_intel._removed_providers(_Cluster(count), "case-x-*", {"opencti"})
+    warnings = threat_intel._removed_warnings(removed, unchecked)
+    assert warnings[-1] == threat_intel._UNCHECKED_REMOVED
+
+
+def test_a_removed_provider_with_no_documents_gives_no_warning():
+    removed, unchecked = threat_intel._removed_providers(
+        _Cluster({"count": 0, "_shards": {"total": 1, "failed": 0}}), "case-x-*", {"opencti"}
+    )
+    assert threat_intel._removed_warnings(removed, unchecked) == []
+
+
+def test_no_warning_when_no_reply_carried_any_provider(os_client, quick):  # noqa: F811
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _misp_then_opencti_only(os_client, case_id, quick)
+        FakeGateway(lambda i: ConnectionError("gateway down")).install(quick)
+        quick.setenv("VHIR_INGEST_RUN_ID", "merge-no-blocks")
+        with pytest.raises(threat_intel.IntelEnrichmentHalted) as halted:
+            threat_intel.enrich_case(os_client, case_id)
+        assert halted.value.summary["warnings"] == []

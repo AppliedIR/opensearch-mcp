@@ -1055,16 +1055,27 @@ def _not_answered(results: dict[str, dict]) -> dict[str, int]:
     return counts
 
 
-def _removed_providers(client, index_pattern: str, configured: set[str]) -> dict[str, int]:
+_UNCHECKED_REMOVED = (
+    "couldn't check for stored answers from providers that are no longer configured; "
+    "this run may drop them"
+)
+
+
+def _removed_providers(
+    client, index_pattern: str, configured: set[str]
+) -> tuple[dict[str, int], bool]:
     """Providers whose answers are stored on the case's documents but that no
     reply this run carries (every reply about an IOC has a block per
-    configured provider), with how many documents hold one."""
+    configured provider), with how many documents hold one; and whether that
+    couldn't be checked in full (a request failed, or answered for only part
+    of the indices)."""
     try:
         caps = client.field_caps(
             index=index_pattern, fields="threat_intel.iocs.*.outcome", request_timeout=60
         )
     except Exception:
-        return {}
+        return {}, True
+    unchecked = bool(caps.get("failures"))
     stored = {
         f.split(".")[2]
         for f in caps.get("fields", {})
@@ -1073,24 +1084,29 @@ def _removed_providers(client, index_pattern: str, configured: set[str]) -> dict
     removed = {}
     for name in sorted(stored - configured):
         try:
-            n = client.count(
+            resp = client.count(
                 index=index_pattern,
                 body={"query": {"exists": {"field": f"threat_intel.iocs.{name}.outcome"}}},
-            )["count"]
+            )
         except Exception:
+            unchecked = True
             continue
-        if n:
-            removed[name] = n
-    return removed
+        shards = resp.get("_shards") or {}
+        if shards.get("failed") or resp.get("timed_out"):
+            unchecked = True
+        if resp.get("count"):
+            removed[name] = resp["count"]
+    return removed, unchecked
 
 
-def _removed_warnings(removed: dict[str, int]) -> list[str]:
-    return [
+def _removed_warnings(removed: dict[str, int], unchecked: bool = False) -> list[str]:
+    warnings = [
         f"{_PROVIDER_LABELS.get(name, name)} is no longer configured: its earlier answers "
         f"on {n} documents are dropped from each document this run stamps; re-add it and "
         "run with force to restore them."
         for name, n in sorted(removed.items())
     ]
+    return warnings + ([_UNCHECKED_REMOVED] if unchecked else [])
 
 
 def _not_answered_reason(counts: dict[str, int]) -> str:
@@ -1177,7 +1193,7 @@ def enrich_case(
     # document this run stamps: say so before it happens
     configured = {n for r in results.values() for n in _blocks(r["entry"])}
     warnings = (
-        _removed_warnings(_removed_providers(client, index_pattern, configured))
+        _removed_warnings(*_removed_providers(client, index_pattern, configured))
         if configured
         else []
     )
