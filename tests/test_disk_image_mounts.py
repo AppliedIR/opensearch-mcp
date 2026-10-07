@@ -7,6 +7,7 @@ fdisk with real util-linux output and accepts every other call.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -311,7 +312,7 @@ def test_the_registry_name_comes_from_the_one_windows_volume(tmp_path, registry)
 
     volumes = [_volume(tmp_path, "vol0", False), _volume(tmp_path, "vol1", True)]
     notes: list = []
-    assert ingest_cli._hostname_from_volumes(volumes, notes) == "WIN10A"
+    assert ingest_cli._hostname_from_volumes(volumes, notes, "disk") == "WIN10A"
     assert registry == ["vol1"] and notes == []
 
 
@@ -322,10 +323,13 @@ def test_two_windows_installs_force_no_name_and_are_listed(tmp_path, registry, c
         _volume(tmp_path, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))
     ]
     notes: list = []
-    assert ingest_cli._hostname_from_volumes(volumes, notes) is None
+    assert ingest_cli._hostname_from_volumes(volumes, notes, "dual boot") is None
     ((label, note),) = notes
     assert label == "hostname"
-    assert note.startswith("2 Windows installs on this image (vol1: WIN10A, vol2: WIN11B)")
+    assert note.startswith(
+        "2 Windows installs on this image (vol1: WIN10A, vol2: WIN11B); each is ingested "
+        "as its own host (dual-boot-vol1, dual-boot-vol2). Pass --hostname only if"
+    )
     assert note in capsys.readouterr().err
 
 
@@ -335,8 +339,60 @@ def test_each_windows_install_on_an_image_is_its_own_host(tmp_path):
     volumes = [
         _volume(tmp_path, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))
     ]
-    hosts = ingest_cli._discover_volumes(volumes, None, True)
+    hosts = ingest_cli._discover_volumes(volumes, None, True, "disk")
     assert [(h.hostname, h.volume_root.name) for h in hosts] == [
-        ("vol1", "vol1"),
-        ("vol2", "vol2"),
+        ("disk-vol1", "vol1"),
+        ("disk-vol2", "vol2"),
     ]
+
+
+def _dual_boot(root: Path) -> list[Path]:
+    root.mkdir()
+    return [_volume(root, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))]
+
+
+def test_two_dual_boot_images_in_one_case_keep_four_hosts_and_indices(tmp_path):
+    from opensearch_mcp import ingest_cli
+    from opensearch_mcp.paths import build_index_name
+
+    a = ingest_cli._discover_volumes(_dual_boot(tmp_path / "a"), None, True, "lab-pc")
+    b = ingest_cli._discover_volumes(_dual_boot(tmp_path / "b"), None, True, "kiosk 7")
+    names = [h.hostname for h in a + b]
+    assert names == ["lab-pc-vol1", "lab-pc-vol2", "kiosk-7-vol1", "kiosk-7-vol2"]
+    assert len({build_index_name("c1", "evtx", n) for n in names}) == 4
+
+
+def test_a_one_install_image_with_a_registry_name_keeps_it(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    volumes = [_volume(tmp_path, "vol0", False), _volume(tmp_path, "vol1", True)]
+    hosts = ingest_cli._discover_volumes(volumes, "WIN10A", True, "disk")
+    assert [(h.hostname, h.volume_root.name) for h in hosts] == [("WIN10A", "vol1")]
+
+
+def test_a_host_folder_on_a_volume_keeps_its_own_name(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    data = tmp_path / "vol3"
+    data.mkdir()
+    _volume(data, "HOSTA", True)  # a triage copy of another machine on a data partition
+    hosts = ingest_cli._discover_volumes([data], None, True, "disk")
+    assert [h.hostname for h in hosts] == ["HOSTA"]
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root can search a mode-000 folder, so it can't stand in for lost+found",
+)
+def test_a_folder_that_cannot_be_searched_does_not_stop_discovery(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    win = _volume(tmp_path, "vol1", True)
+    ext4 = tmp_path / "vol3"
+    (ext4 / "lost+found").mkdir(parents=True)
+    os.chmod(ext4 / "lost+found", 0o000)  # as root's lost+found looks to the examiner
+    try:
+        hosts = ingest_cli._discover_volumes([win, ext4], None, True, "disk")
+    finally:
+        os.chmod(ext4 / "lost+found", 0o700)
+    assert [(h.hostname, h.volume_root.name) for h in hosts] == [("disk-vol1", "vol1")]

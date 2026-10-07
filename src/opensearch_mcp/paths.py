@@ -42,7 +42,11 @@ def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:
     for part in Path(rel_path).parts:
         # Try exact match first (fast path)
         candidate = current / part
-        if candidate.exists():
+        try:
+            exists = candidate.exists()
+        except OSError:  # a folder we can't search (e.g. lost+found) can't hold it
+            return None
+        if exists:
             current = candidate
             continue
         # Case-insensitive scan
