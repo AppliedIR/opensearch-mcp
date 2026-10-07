@@ -201,10 +201,10 @@ def auto_detect_time_field(sample: dict, extra: tuple[str, ...] = ()) -> str | N
     return None
 
 
-# (file, count) of this run's time values that are digits of a width no epoch
-# has (20230129, 202301292357): left without @timestamp, which OpenSearch
-# would read as epoch milliseconds (1970, 1976)
-TIME_NOT_UNDERSTOOD: list[tuple[str, int]] = []
+# (file, time field, count) of this run's time values that are digits of a
+# width no epoch has (20230129, 202301292357): not used as @timestamp, which
+# OpenSearch would read as epoch milliseconds (1970, 1976)
+TIME_NOT_UNDERSTOOD: list[tuple[str, str, int]] = []
 
 
 def no_time_field_note() -> str:
@@ -217,9 +217,11 @@ def no_time_field_note() -> str:
             f"e.g. {first.parent.name}/{first.name}: "
             "no @timestamp, so idx_timeline won't show them. Re-ingest with time_field=<column>."
         )
-    not_understood = sum(n for _, n in TIME_NOT_UNDERSTOOD)
-    if not_understood:
-        notes.append(f"{not_understood} time values not understood; left without a timestamp")
+    by_field: dict[str, int] = {}
+    for _, field, n in TIME_NOT_UNDERSTOOD:
+        by_field[field] = by_field.get(field, 0) + n
+    for field, n in by_field.items():
+        notes.append(f"{n} values in {field} not understood; not used as the timestamp")
     return "; ".join(notes)
 
 

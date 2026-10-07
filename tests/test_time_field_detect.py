@@ -308,10 +308,40 @@ def test_a_digit_date_is_counted_in_the_status_and_not_found_in_1970(
     cli.cmd_ingest_delimited(args)
     (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
     (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
-    assert "2 time values not understood; left without a timestamp" in note
+    assert "2 values in date not understood; not used as the timestamp" in note
     client = cli.get_client()
     index = f"case-{cluster_case}-delim-*"
     client.indices.refresh(index=index)
     early = {"range": {"@timestamp": {"gte": "1970-01-01", "lt": "1977-01-01"}}}
     assert client.count(index=index, body={"query": early})["count"] == 0
     assert client.count(index=index)["count"] == 3
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("walk", ["recursive", "auto-hosts"])
+def test_both_walks_carry_the_digit_date_count(cluster_case, tmp_path, monkeypatch, walk):
+    """Each host's sub-run counts its own file; the walk's final status sums them."""
+    top = tmp_path / "walk"
+    if walk == "recursive":
+        for host, value in (("host1", "20230129"), ("host2", "202301292357")):
+            (top / host).mkdir(parents=True)
+            (top / host / "events.csv").write_text(f"date,what\n{value},a\n")
+        args = argparse.Namespace(
+            path=str(top), case=cluster_case, hostname="", recursive=True, time_field="date"
+        )
+    else:
+        top.mkdir()
+        (top / "events-host1.csv").write_text("date,what\n20230129,a\n")
+        (top / "events-host2.csv").write_text("date,what\n202301292357,b\n")
+        args = argparse.Namespace(
+            path=str(top),
+            case=cluster_case,
+            hostname="",
+            auto_hosts="host1,host2",
+            time_field="date",
+        )
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", f"digit-{walk}")
+    cli.cmd_ingest_delimited(args)
+    (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
+    (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
+    assert "2 values in date not understood; not used as the timestamp" in note

@@ -316,5 +316,5 @@ def ingest_delimited(
     if not ts_field and count and str(path.absolute()) not in NO_TIME_FIELD:
         NO_TIME_FIELD.append(str(path.absolute()))
     if not_understood:
-        TIME_NOT_UNDERSTOOD.append((str(path.absolute()), not_understood))
+        TIME_NOT_UNDERSTOOD.append((str(path.absolute()), ts_field, not_understood))
     return count, skipped, bulk_failed, host_renamed

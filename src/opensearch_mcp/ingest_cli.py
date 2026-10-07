@@ -1986,7 +1986,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         hosts_reason = ""
         host_counts: list[tuple] = []
         missed: list[str] = []  # each sub-run starts its own list
-        not_understood: list[tuple[str, int]] = []
+        not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
         for h in auto_hosts:
             sub_args = copy.copy(args)
@@ -2047,7 +2047,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_reason = ""
         walk_counts: list[tuple] = []
         walk_missed: list[str] = []  # each sub-run starts its own list
-        walk_not_understood: list[tuple[str, int]] = []
+        walk_not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
         for d in subdirs:
             sub_args = copy.copy(args)

@@ -84,8 +84,10 @@ def test_digits_of_no_epoch_width_get_no_timestamp_and_are_counted(
     tmp_path, monkeypatch, column, value
 ):
     assert _stamp(tmp_path, monkeypatch, column, value) is None
-    assert TIME_NOT_UNDERSTOOD == [(str((tmp_path / "events.csv").absolute()), 1)]
-    assert no_time_field_note() == "1 time values not understood; left without a timestamp"
+    assert TIME_NOT_UNDERSTOOD == [(str((tmp_path / "events.csv").absolute()), column, 1)]
+    assert (
+        no_time_field_note() == f"1 values in {column} not understood; not used as the timestamp"
+    )
 
 
 def test_anchor_an_iso_time_reaches_opensearch_as_before(tmp_path, monkeypatch):
