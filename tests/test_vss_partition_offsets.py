@@ -9,6 +9,7 @@ vshadowmount and sudo are stand-ins here; the image is synthetic.
 from __future__ import annotations
 
 import argparse
+import atexit
 import inspect
 import os
 from pathlib import Path
@@ -46,6 +47,26 @@ exit 0
 """,
     "fusermount": '#!/bin/sh\necho "fusermount $*" >> "$VSS_LOG"\n',  # nothing really mounted
 }
+
+
+@pytest.fixture(autouse=True)
+def no_real_sudo(tmp_path, monkeypatch):
+    """No row reaches the host's sudo. A logging `sudo` that fails is first on
+    PATH (a row's own stand-ins go before it), and the scan's atexit cleanup
+    is run here, with the stand-ins still on PATH, never at interpreter exit,
+    when PATH is the host's again."""
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    log = guard / "sudo.log"
+    (guard / "sudo").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit 1\n')
+    (guard / "sudo").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{guard}:{os.environ['PATH']}")
+    at_exit = []
+    monkeypatch.setattr(atexit, "register", lambda f, *a, **k: at_exit.append((f, a, k)))
+    yield
+    for f, a, k in at_exit:
+        f(*a, **k)
+    assert not log.exists(), f"a row reached sudo outside its stand-ins: {log.read_text()}"
 
 
 @pytest.fixture
@@ -310,9 +331,10 @@ def test_a_shadow_copy_with_no_live_host_has_a_unit_that_outlasts_the_run(
 def test_shadow_copies_whose_stores_all_fail_to_mount_are_not_called_none(
     vss, tmp_path, monkeypatch, capsys
 ):
-    # vshadowmount runs; each store's loop mount fails
+    # vshadowmount runs, each store's loop mount fails, and cleanup's unmounts succeed
     (tmp_path / "bin" / "sudo").write_text(
-        '#!/bin/sh\n[ "$1" = vshadowmount ] && exec "$@"\nexit 32\n'
+        '#!/bin/sh\necho "sudo $*" >> "$VSS_LOG"\n'
+        '[ "$1" = vshadowmount ] && exec "$@"\n[ "$1" = mount ] && exit 32\nexit 0\n'
     )
     hosts, out = _scan_shadow_copies(tmp_path, monkeypatch, capsys, live=())
     assert hosts == []  # nothing to ingest
