@@ -1170,8 +1170,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     print(f"  Mounted {len(volumes)} volume(s)")
 
                     if vss_flag and volumes:
+                        # An E01's volumes are read from its raw stream, as mount_image does
+                        ewf = img.suffix.lower() in (".e01", ".ex01")
                         vss_volumes = mount_vss(
-                            img, tmpdir, mount_ctx, _volume_offsets(mount_ctx), status_notes
+                            tmpdir / "_ewf" / "ewf1" if ewf else img,
+                            tmpdir,
+                            mount_ctx,
+                            _volume_offsets(mount_ctx),
+                            status_notes,
                         )
                         if vss_volumes:
                             print(f"  Found {len(vss_volumes)} volume shadow copies")
@@ -1352,7 +1358,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             )
 
         # For disk images with VSS, create additional hosts per shadow copy
-        if vss_flag and container_type in ("ewf", "raw", "nbd") and tmpdir and vss_volumes:
+        if vss_flag and tmpdir and vss_volumes:  # a disk image, or one from an archive
             from opensearch_mcp.discover import (
                 DiscoveredHost,
                 discover_artifacts,
