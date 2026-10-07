@@ -33,6 +33,7 @@ IMPLEMENTATION CONTRACT (regipy leading-backslash):
 
 from __future__ import annotations
 
+import functools
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,30 +56,66 @@ _HOST_FIELD_PRIORITY: tuple[str, ...] = (
     "Hostname",  # Velociraptor default
     "ClientInfo.Hostname",  # Velociraptor nested (dotted)
     "host.name",  # pre-stamped by upstream, preserved verbatim
+    "DeviceName",  # Microsoft Defender for Endpoint advanced-hunting exports
+    "PSComputerName",  # PowerShell remoting output (Kansa collects it)
 )
 
 
+def _get_any_case(doc: dict, key: str) -> object | None:
+    """`doc[key]`, or else the value of the first key equal to it ignoring case."""
+    if key in doc:
+        return doc[key]
+    lower = key.lower()
+    for k, v in doc.items():
+        if isinstance(k, str) and k.lower() == lower:
+            return v
+    return None
+
+
 def _dotted_get(doc: dict, dotted: str) -> object | None:
-    """Traverse `doc` by dotted key path. Returns None on any gap."""
+    """Traverse `doc` by dotted key path, each key matched ignoring case.
+    Returns None on any gap."""
     cur: object = doc
     for part in dotted.split("."):
         if not isinstance(cur, dict):
             return None
-        cur = cur.get(part)
+        cur = _get_any_case(cur, part)
         if cur is None:
             return None
     return cur
 
 
+@functools.lru_cache(maxsize=512)
+def _host_keys(keys: tuple) -> tuple[tuple[str, str], ...]:
+    """For one set of record keys (a CSV's header, so one call per file), the
+    key each priority field reads, ignoring case (an exact match first), and
+    any dotted rest of the field. Fields the record lacks are left out."""
+    exact = set(keys)
+    lowered: dict[str, str] = {}
+    for k in keys:
+        if isinstance(k, str):
+            lowered.setdefault(k.lower(), k)
+    plan = []
+    for field in _HOST_FIELD_PRIORITY:
+        head, _, rest = field.partition(".")
+        actual = head if head in exact else lowered.get(head.lower())
+        if actual is not None:
+            plan.append((actual, rest))
+    return tuple(plan)
+
+
 def extract_host_from_record(doc: dict) -> str | None:
     """Walk `_HOST_FIELD_PRIORITY` on a parsed CSV row / JSON doc.
 
-    First non-empty string hit wins. Returns the raw value unchanged —
-    normalization is HostDictionary's job. None if no priority field
-    resolves.
+    Keys are matched ignoring case, in priority order, so `computername` and
+    `HOSTNAME` are read as `ComputerName` and `Hostname` are. First non-empty
+    string hit wins. Returns the raw value unchanged — normalization is
+    HostDictionary's job. None if no priority field resolves.
     """
-    for field in _HOST_FIELD_PRIORITY:
-        val = _dotted_get(doc, field) if "." in field else doc.get(field)
+    for key, rest in _host_keys(tuple(doc)):
+        val = doc[key]
+        if rest:
+            val = _dotted_get(val, rest) if isinstance(val, dict) else None
         if isinstance(val, str) and val.strip():
             return val.strip()
     return None
