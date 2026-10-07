@@ -1234,12 +1234,13 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     vss_raw = ewf_raw
                 else:
                     vss_raw = input_path
+                unread_before = len(mount_ctx.failures)
                 vss_volumes = mount_vss(
                     vss_raw, tmpdir, mount_ctx, _volume_offsets(mount_ctx), status_notes
                 )
                 if vss_volumes:
                     print(f"  Found {len(vss_volumes)} volume shadow copies")
-                else:
+                elif len(mount_ctx.failures) == unread_before:  # read, and none there
                     print("  No volume shadow copies found")
 
             scan_root = tmpdir
@@ -1375,16 +1376,25 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     (h for h in live if source and _under(h.volume_root, tmpdir / source)),
                     None,
                 )
-                if base is None:
-                    windows = [h for h in live if h.os == "windows"]
-                    base = (windows or live or [None])[0]
-                base_hostname = base.hostname if base else (hostname or "unknown")
+                if base is not None:
+                    name, unit, origin = base.hostname, base.unit_locator, base.name_origin
+                else:  # no live host on its volume: that volume's own name and unit
+                    from sift_common.host_identity import unit_locator
+
+                    volume = tmpdir / (source or v_id)
+                    name = examiner_hostname or _volume_host_name(image_id or "image", volume)
+                    unit = unit_locator(
+                        input_path,
+                        _case_dir_for(case_id),
+                        offset=_volume_offsets(mount_ctx).get(source or ""),
+                    )
+                    origin = "argument" if examiner_hostname else "folder"
                 vss_host = DiscoveredHost(
-                    hostname=base_hostname,
+                    hostname=name,
                     volume_root=vr,
                     vss_id=v_id,
-                    unit_locator=base.unit_locator if base else "",
-                    name_origin=base.name_origin if base else "folder",
+                    unit_locator=unit,
+                    name_origin=origin,
                 )
                 discover_artifacts(vss_host)
                 if vss_host.artifacts or vss_host.evtx_dir:

@@ -39,6 +39,7 @@ for last; do :; done
 touch "$last/vss1" "$last/vss2"
 """,
     "sudo": "#!/bin/sh\nexit 0\n",
+    "fusermount": "#!/bin/sh\nexit 0\n",  # the scan's cleanup: nothing was really mounted
 }
 
 
@@ -217,3 +218,108 @@ def test_each_shadow_copy_is_attributed_to_its_own_volumes_host(tmp_path, monkey
         shadow = by_vss[f"{name}-vss1"]
         assert shadow.hostname == live[name].hostname
         assert shadow.unit_locator == live[name].unit_locator
+
+
+def _scan_shadow_copies(tmp_path, monkeypatch, capsys, wiped=(), hostname=None, live=("vol0",)):
+    """cmd_scan of a two-volume image whose shadow copies are on vol1: each
+    volume in `live` holds Windows, a `wiped` one holds nothing. The real
+    mount_vss runs, with the stand-in tools; returns the hosts and stdout."""
+    from _helpers import make_windows_tree
+
+    image = tmp_path / "disk.raw"
+    with open(image, "r+b") as f:
+        f.seek(GPT_DATA + 3)
+        f.write(b"NTFS    ")
+    monkeypatch.setenv("VSS_AT", str(GPT_DATA))
+    offsets = {"vol0": 1048576, "vol1": GPT_DATA}
+
+    def mount_image(path, dest, ctx):
+        for name, off in offsets.items():
+            if name in live:
+                make_windows_tree(dest / name)
+            else:
+                (dest / name).mkdir()
+            ctx.offsets[dest / name] = off
+        return [dest / name for name in offsets]
+
+    seen = {"hosts": []}
+
+    def ingest(hosts, **kw):
+        seen["hosts"] = list(hosts)
+        raise SystemExit(0)
+
+    def stores(raw, dest, ctx, *a, **k):  # vssN files become trees, as mounted
+        found = mount_vss(raw, dest, ctx, *a, **k)
+        for _, mp in found:
+            make_windows_tree(mp)
+        return found
+
+    monkeypatch.setattr(containers, "mount_image", mount_image)
+    monkeypatch.setattr(containers, "mount_vss", stores)
+    monkeypatch.setattr(containers, "check_sudo", lambda: None)
+    monkeypatch.setattr(cli, "ingest", ingest)
+    monkeypatch.setattr(cli, "_image_hosts", lambda *a, **k: ([], set(), []))
+    for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
+        monkeypatch.setattr(cli, name, MagicMock())
+    monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
+    args = argparse.Namespace(
+        path=str(image), case="c1", yes=True, hostname=hostname, all_logs=False,
+        no_hayabusa=True, skip_triage=True, vss=True,
+    )  # fmt: skip
+    with pytest.raises(SystemExit):
+        cli.cmd_scan(args)
+    return seen["hosts"], capsys.readouterr()
+
+
+def test_a_shadow_copy_of_a_wiped_volume_keeps_that_volumes_unit(
+    vss, tmp_path, monkeypatch, capsys
+):
+    hosts, _ = _scan_shadow_copies(tmp_path, monkeypatch, capsys)
+    (shadow,) = [h for h in hosts if h.vss_id == "vss1"]
+    (live,) = [h for h in hosts if h.vss_id == "live"]  # vol0's
+    assert shadow.unit_locator.endswith(f"disk.raw@{GPT_DATA}")
+    assert shadow.unit_locator != live.unit_locator
+    assert shadow.hostname.endswith("-vol1") and shadow.hostname != live.hostname
+    assert shadow.name_origin == "folder"
+
+
+def test_a_shadow_copy_of_a_wiped_volume_takes_the_examiners_name(
+    vss, tmp_path, monkeypatch, capsys
+):
+    hosts, _ = _scan_shadow_copies(tmp_path, monkeypatch, capsys, hostname="WKS50")
+    (shadow,) = [h for h in hosts if h.vss_id == "vss1"]
+    assert (shadow.hostname, shadow.name_origin) == ("WKS50", "argument")
+    assert shadow.unit_locator.endswith(f"disk.raw@{GPT_DATA}")
+
+
+def test_a_shadow_copy_with_no_live_host_has_a_unit_that_outlasts_the_run(
+    vss, tmp_path, monkeypatch, capsys
+):
+    hosts, _ = _scan_shadow_copies(tmp_path, monkeypatch, capsys, live=())
+    assert sorted(h.vss_id for h in hosts) == ["vss1", "vss2"]
+    (unit,) = {h.unit_locator for h in hosts}  # both stores: vol1's unit
+    assert unit.endswith(f"disk.raw@{GPT_DATA}")
+    assert "ingest-" not in unit  # never the run's temporary mount
+
+
+def test_shadow_copies_whose_stores_all_fail_to_mount_are_not_called_none(
+    vss, tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "bin" / "sudo").write_text("#!/bin/sh\nexit 32\n")
+    hosts, out = _scan_shadow_copies(tmp_path, monkeypatch, capsys, live=())
+    assert hosts == []  # nothing to ingest
+    assert "No volume shadow copies found" not in out.out
+    assert f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: " in out.err
+    assert "none of its 2 stores mounted" in out.err
+
+
+def test_shadow_copies_with_no_reader_installed_are_not_called_none(
+    vss, tmp_path, monkeypatch, capsys
+):
+    (tmp_path / "bin" / "vshadowinfo").unlink()
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))  # the stand-ins, and no vshadowinfo
+    hosts, out = _scan_shadow_copies(tmp_path, monkeypatch, capsys)
+    assert len(hosts) == 1  # vol0, and no shadow copy
+    assert "No volume shadow copies found" not in out.out
+    assert f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: " in out.err
+    assert "vshadowinfo didn't run" in out.err
