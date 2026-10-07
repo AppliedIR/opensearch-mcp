@@ -1,11 +1,19 @@
 """Centralized OpenSearch client factory."""
 
+import http.client
 from pathlib import Path
 
 import yaml
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.paths import vhir_dir
+
+# OpenSearch sends one response header per scroll batch of a by-query request.
+# Python refuses a response with more than 100 headers, and opensearch-py then
+# silently sends the whole request again: an update_by_query over about 100,000
+# documents ran up to four times and reported the last run's counts. Raised for
+# every process that talks to OpenSearch, since they all get their client here.
+http.client._MAXHEADERS = max(http.client._MAXHEADERS, 100_000)
 
 
 def get_client(config_path: Path | None = None) -> OpenSearch:
