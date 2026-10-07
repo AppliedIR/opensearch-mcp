@@ -1538,7 +1538,7 @@ def idx_ingest(
                 "error": ("No raw Windows artifacts found (no registry hives, evtx files, etc.)."),
                 "suggestion": csv_hint,
             }
-        return {"error": f"No Windows artifacts found in {path}"}
+        return {"error": f"No Windows, Linux or macOS artifacts found in {path}"}
 
     # dry_run: return discovery summary
     if dry_run:

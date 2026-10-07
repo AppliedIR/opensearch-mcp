@@ -55,6 +55,15 @@ TOOLS: dict[str, ToolConfig] = {
         natural_key=None,
         multi_csv=True,
     ),
+    "registry_user": ToolConfig(  # each profile's NTUSER.DAT and UsrClass.dat
+        cli_name="registry_user",
+        binary="RECmd",
+        tier=1,
+        index_suffix="registry",
+        time_field="LastWriteTimestamp",
+        natural_key=None,
+        multi_csv=True,
+    ),
     "shellbags": ToolConfig(
         cli_name="shellbags",
         binary="SBECmd",
@@ -339,6 +348,7 @@ def run_and_ingest(
                 else:
                     table_name = stem
             count, sk, bf = ingest_csv(
+                hive=(source_file or str(artifact_path)) if tool_name == "registry_user" else "",
                 csv_path=csv_file,
                 client=client,
                 index_name=index_name,
@@ -404,6 +414,10 @@ def _build_command(cfg: ToolConfig, tool_name: str, artifact_path: Path, tmpdir:
             _RECMD_BATCH,
         ]
 
+    if tool_name == "registry_user":
+        # One hive per run (-f): -d on a profile would walk it and parse app hives too.
+        return [binary, "-f", str(artifact_path), "--csv", tmpdir, "--nl", "--bn", _RECMD_BATCH]
+
     if tool_name == "shellbags":
         return [binary, "-d", str(artifact_path), "--csv", tmpdir]
 
@@ -458,6 +472,8 @@ def get_active_tools(
             continue
         # Tier 1-2 unless explicitly excluded
         if exclude and name in exclude:
+            continue
+        if exclude and name == "registry_user" and "registry" in exclude:
             continue
         # If --include specified, only run those + tier 1
         if include and name not in include and cfg.tier != 1:

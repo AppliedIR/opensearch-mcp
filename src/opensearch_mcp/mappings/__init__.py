@@ -52,6 +52,7 @@ _TEMPLATE_PRIORITY = 100
 _TEMPLATES_REGISTRY: list[tuple[str, str]] = [
     ("vhir-csv", "csv_template.json"),
     ("vhir-prefetch", "prefetch_template.json"),
+    ("vhir-plaso", "plaso_template.json"),
     ("vhir-srum", "srum_template.json"),
     ("vhir-transcripts", "transcripts_template.json"),
     ("vhir-w3c", "w3c_template.json"),

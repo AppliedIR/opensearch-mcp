@@ -88,7 +88,7 @@ def _write_ingest_manifest(
 
 
 # Artifacts handled by Plaso/wintools (not EZ tools on Linux)
-_PLASO_ARTIFACTS = {"prefetch", "srum"}
+_PLASO_ARTIFACTS = {"prefetch", "srum", "plaso"}
 
 # Artifacts with custom parsers (not EZ tools, not Plaso)
 _CUSTOM_ARTIFACTS = {
@@ -112,6 +112,7 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
         "registry_software": "registry",
         "registry_sam": "registry",
         "registry_security": "registry",
+        "registry_user": "registry_user",
         "mft": "mft",
         "usn": "usn",
         "recyclebin": "recyclebin",
@@ -121,6 +122,7 @@ def _artifact_to_tool(artifact_name: str) -> str | None:
         "timeline": "timeline",
         "prefetch": "prefetch",
         "srum": "srum",
+        "plaso": "plaso",
         "transcripts": "transcripts",
         "defender": "defender",
         "iis": "iis",
@@ -148,12 +150,11 @@ def discover(
             hosts[0].hostname = hostname
 
     if not hosts and hostname:
-        from opensearch_mcp.discover import discover_artifacts, find_volume_root
+        from opensearch_mcp.discover import find_volume_root, make_host
 
         vr = find_volume_root(path)
         if vr is not None:
-            host = DiscoveredHost(hostname=hostname, volume_root=vr)
-            discover_artifacts(host)
+            host = make_host(hostname, vr)
             if host.artifacts or host.evtx_dir:
                 hosts = [host]
 
@@ -716,6 +717,21 @@ def _ingest_hosts(
             if tool_name in _PLASO_ARTIFACTS:
                 if tool_name not in active_plaso:
                     continue
+                if tool_name == "plaso":
+                    _ingest_plaso_volume(
+                        client=client,
+                        audit=audit,
+                        case_id=case_id,
+                        host=host,
+                        host_idx=host_idx,
+                        host_result=host_result,
+                        status_hosts=status_hosts,
+                        _progress=_progress,
+                        _update_status=_update_status,
+                        run_id=run_id,
+                        host_dict=host_dict,
+                    )
+                    continue
                 _ingest_plaso_artifact(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
@@ -891,6 +907,123 @@ def _ingest_hosts(
             host_result.artifacts.append(ar)
 
         result.hosts.append(host_result)
+
+
+def _ingest_plaso_volume(
+    client: OpenSearch,
+    audit: AuditWriter,
+    case_id: str,
+    host: DiscoveredHost,
+    host_idx: int,
+    host_result: HostResult,
+    status_hosts: list[dict],
+    _progress,
+    _update_status,
+    run_id: str = "",
+    host_dict=None,
+) -> None:
+    """A host's Plaso runs (the OS preset on Linux and macOS, the narrow set
+    on Windows) into case-<id>-plaso-<host>. Each run's work folder is under
+    the case's tmp and removed after indexing. A failed run fails the
+    artifact and indexes nothing; the others' events are kept."""
+    import shutil
+    import tempfile
+
+    from opensearch_mcp.discover import _valid_zone
+    from opensearch_mcp.parse_plaso import (
+        _ingest_jsonl,
+        can_sudo,
+        plaso_runs,
+        plaso_status,
+        run_plaso_volume,
+    )
+    from opensearch_mcp.paths import vhir_dir
+
+    index_name = _build_idx(case_id, "plaso", host.hostname)
+    ar = ArtifactResult(
+        artifact="plaso",
+        index=index_name,
+        existing_before=_safe_count(client, index_name),
+        source_files=[str(host.volume_root)],
+    )
+    tool_status = _find_artifact_status(status_hosts, host_idx, "plaso")
+    if tool_status:
+        tool_status["status"] = "running"
+        _update_status()
+    _progress("artifact_start", hostname=host.hostname, artifact="plaso")
+    aid = audit._next_audit_id()
+    runs, run_note = plaso_runs(host)
+    zone = _valid_zone(host.system_timezone)
+    # Linux and macOS: root's read capability when sudo is there, so files
+    # only root can read (auth.log, /root) are parsed; else the examiner.
+    read_as_root = host.os != "windows" and can_sudo()
+    notes = [run_note] if run_note else []
+    if not read_as_root and host.os != "windows":
+        notes.append("read as the examiner: files it can't read are listed as not read")
+    errors: list[str] = []
+    base = vhir_dir() / "cases" / case_id / "tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    for parsers, source in runs:
+        workdir = Path(tempfile.mkdtemp(prefix=f"plaso-{host.hostname}-", dir=base))
+        try:
+            jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone)
+            cnt, bf = _ingest_jsonl(
+                jsonl,
+                client,
+                index_name,
+                host.hostname,
+                ingest_audit_id=aid,
+                pipeline_version=_PIPELINE_VERSION,
+                vss_id=host.vss_id,
+                host_dict=host_dict,
+                volume_root=host.volume_root,
+            )
+            ar.indexed += cnt
+            ar.bulk_failed += bf
+            unread, note = plaso_status(
+                pinfo, host.volume_root, host.os, zone, host.timezone_source
+            )
+            ar.not_read += unread
+            notes.append(note)
+        except Exception as e:
+            errors.append(f"{parsers} over {source}: {e}")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+    ar.note = "; ".join(dict.fromkeys(notes))
+    ar.error = "\n".join(errors)
+    audit.log(
+        tool="ingest_plaso",
+        audit_id=aid,
+        params={"hostname": host.hostname, "tool": "plaso", "run_id": run_id, "runs": runs},
+        result_summary=(f"FAILED: {ar.error}; " if errors else "")
+        + f"{ar.indexed} indexed"
+        + (f", {len(ar.not_read)} not read" if ar.not_read else "")
+        + (f", {ar.bulk_failed} bulk failed" if ar.bulk_failed else ""),
+        input_files=[str(source) for _, source in runs],
+        source_evidence=str(host.volume_root),
+    )
+    if tool_status:
+        tool_status["status"] = "failed" if errors else "complete"
+        tool_status["indexed"] = ar.indexed
+        tool_status["bulk_failed"] = ar.bulk_failed
+        if ar.note:
+            tool_status["note"] = ar.note
+        if ar.not_read:
+            tool_status["not_read"] = ar.not_read
+        if errors:
+            tool_status["error"] = ar.error
+        _update_status()
+    if errors:
+        _progress("artifact_failed", hostname=host.hostname, artifact="plaso", error=ar.error)
+    else:
+        _progress(
+            "artifact_done",
+            hostname=host.hostname,
+            artifact="plaso",
+            indexed=ar.indexed,
+            skipped=0,
+        )
+    host_result.artifacts.append(ar)
 
 
 def _ingest_plaso_artifact(

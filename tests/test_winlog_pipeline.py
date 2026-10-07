@@ -441,10 +441,11 @@ class TestInstallAllTemplates:
         """Registry must match scripts/setup-opensearch.sh names so
         we don't create orphan templates alongside setup's installs."""
         names = [n for n, _ in _TEMPLATES_REGISTRY]
-        # All 14 non-evtx templates that setup-opensearch.sh registers.
+        # All 15 non-evtx templates.
         expected = {
             "vhir-csv",
             "vhir-prefetch",
+            "vhir-plaso",
             "vhir-srum",
             "vhir-transcripts",
             "vhir-w3c",
@@ -470,12 +471,12 @@ class TestInstallAllTemplates:
     def test_happy_path_puts_every_template(self):
         client = MagicMock()
         result = install_all_templates(client)
-        # All 14 installed, none skipped, none failed.
-        assert len(result["installed"]) == 14
+        # All 15 installed, none skipped, none failed.
+        assert len(result["installed"]) == 15
         assert result["skipped"] == []
         assert result["failed"] == []
         # put_index_template was called exactly 14 times.
-        assert client.indices.put_index_template.call_count == 14
+        assert client.indices.put_index_template.call_count == 15
         # Each call used a registered template name.
         call_names = [c.kwargs["name"] for c in client.indices.put_index_template.call_args_list]
         assert set(call_names) == {n for n, _ in _TEMPLATES_REGISTRY}
@@ -494,7 +495,7 @@ class TestInstallAllTemplates:
         result = install_all_templates(client)
         assert "vhir-bogus" in result["skipped"]
         # The real 14 still install.
-        assert len(result["installed"]) == 14
+        assert len(result["installed"]) == 15
 
     def test_per_template_failure_does_not_abort_the_set(self):
         """If OpenSearch rejects one template (e.g., malformed body),
@@ -508,7 +509,7 @@ class TestInstallAllTemplates:
 
         client.indices.put_index_template.side_effect = _selective_reject
         result = install_all_templates(client)
-        assert len(result["installed"]) == 13
+        assert len(result["installed"]) == 14
         assert len(result["failed"]) == 1
         assert result["failed"][0]["template"] == "vhir-delimited"
         assert "synthetic" in result["failed"][0]["error"]
@@ -592,7 +593,7 @@ class TestInstallAllTemplates:
         assert "priority" in result["error"].lower()
         # Non-evtx templates installed despite the evtx refuse.
         assert "other_templates" in result
-        assert len(result["other_templates"]["installed"]) == 14
+        assert len(result["other_templates"]["installed"]) == 15
 
     def test_ensure_winlog_pipeline_default_pipeline_conflict_still_installs_non_evtx(self):
         """Same invariant as priority collision: early-return on
@@ -609,7 +610,7 @@ class TestInstallAllTemplates:
         assert result["status"] == "error"
         assert "default_pipeline" in result["error"].lower()
         assert "other_templates" in result
-        assert len(result["other_templates"]["installed"]) == 14
+        assert len(result["other_templates"]["installed"]) == 15
 
     def test_ensure_winlog_pipeline_simulate_failure_still_installs_non_evtx(self):
         """Simulate-validation failure in the evtx path must still
@@ -626,7 +627,7 @@ class TestInstallAllTemplates:
         assert result["status"] == "error"
         assert "data_raw" in result["error"].lower()
         assert "other_templates" in result
-        assert len(result["other_templates"]["installed"]) == 14
+        assert len(result["other_templates"]["installed"]) == 15
 
     def test_ensure_winlog_pipeline_installs_other_templates_too(self):
         """The end-to-end fix: calling ensure_winlog_pipeline must
@@ -649,9 +650,9 @@ class TestInstallAllTemplates:
         assert result["status"] == "ok"
         # Response surfaces the non-evtx install result.
         assert "other_templates" in result
-        assert len(result["other_templates"]["installed"]) == 14
+        assert len(result["other_templates"]["installed"]) == 15
         # Total put_index_template calls: 14 non-evtx + 1 evtx = 15.
-        assert client.indices.put_index_template.call_count == 15
+        assert client.indices.put_index_template.call_count == 16
 
 
 def test_python_simulator_matches_painless_behavior():

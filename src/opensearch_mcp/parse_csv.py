@@ -133,8 +133,12 @@ def ingest_csv(
     parse_method: str = "",
     host_dict=None,
     row_host: bool = True,
+    hive: str = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
+
+    hive: a user hive's volume-relative path, stored as vhir.hive and part of
+    the _id (HivePath isn't), so identical rows from two users stay two docs.
 
     Returns (count_indexed, count_skipped, count_bulk_failed).
     count_skipped = rows dropped by time range filter.
@@ -199,6 +203,8 @@ def ingest_csv(
                     row["host.id"] = raw_host
             if table_name:
                 row["vhir.table"] = table_name
+            if hive:
+                row["vhir.hive"] = hive
 
             # VSS: for natural key tools (MFT), inject vss_id BEFORE _doc_id
             # so it becomes part of the natural key. For content-hash tools,

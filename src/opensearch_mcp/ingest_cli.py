@@ -771,26 +771,34 @@ def _volume_host_name(image_id: str, volume: Path) -> str:
 def _hostname_from_volumes(
     volumes: list[Path], notes: list[tuple[str, str]], image_id: str
 ) -> str | None:
-    """The registry hostname, taken only when exactly one volume holds a Windows
-    install. With two or more (a dual boot), no name is forced: each install is
-    ingested as its own host, named for the image and its volume, and a warning
-    lists them."""
-    from opensearch_mcp.discover import _WINDOWS_SENTINEL
+    """The registry hostname, taken only when exactly one volume holds an OS
+    install and it is Windows. With two or more installs of any OS (a dual
+    boot), no name is forced: each is ingested as its own host, named for the
+    image and its volume, and a warning lists them. A Linux or macOS install
+    is named for the image and its volume."""
+    from opensearch_mcp.discover import os_of_root
     from opensearch_mcp.hostname import detect_hostname_from_volume
-    from opensearch_mcp.paths import resolve_case_insensitive
 
-    installs = [v for v in volumes if resolve_case_insensitive(v, _WINDOWS_SENTINEL)]
+    installs = [(v, kind) for v in volumes if (kind := os_of_root(v))]
+
+    def native(v: Path, kind: str) -> str:
+        return (detect_hostname_from_volume(v) if kind == "windows" else None) or "?"
+
     if len(installs) > 1:
-        found = ", ".join(f"{v.name}: {detect_hostname_from_volume(v) or '?'}" for v in installs)
-        names = ", ".join(_volume_host_name(image_id, v) for v in installs)
+        found = ", ".join(f"{v.name}: {kind} {native(v, kind)}" for v, kind in installs)
+        names = ", ".join(_volume_host_name(image_id, v) for v, _ in installs)
         note = (
-            f"{len(installs)} Windows installs on this image ({found}); each is ingested "
+            f"{len(installs)} OS installs on this image ({found}); each is ingested "
             f"as its own host ({names}). Pass --hostname only if they are one machine"
         )
         notes.append(("hostname", note))
         print(f"  WARNING: {note}", file=sys.stderr)
         return None
-    detected = detect_hostname_from_volume(installs[0]) if installs else None
+    if installs and installs[0][1] != "windows":
+        v, kind = installs[0]
+        print(f"  {kind} install on {v.name}: host {_volume_host_name(image_id, v)}")
+        return None
+    detected = detect_hostname_from_volume(installs[0][0]) if installs else None
     if detected:
         print(f"  Hostname from volume registry: {detected}")
     else:
@@ -803,17 +811,31 @@ def _hostname_from_volumes(
     return detected
 
 
-def _discover_volumes(volumes: list[Path], hostname, force_hostname: bool, image_id: str) -> list:
+def _discover_volumes(
+    volumes: list[Path],
+    hostname,
+    force_hostname: bool,
+    image_id: str,
+    notes: list[tuple[str, str]] | None = None,
+) -> list:
     """Hosts on each mounted volume of a disk image, so every install is found
     (a scan of their shared parent finds only the first). With no hostname for
-    the image, a host named after its volume (vol1) is named for the image too."""
+    the image, a host named after its volume (vol1) is named for the image too.
+    A volume with no host on it is noted: nothing on it is parsed."""
     hosts = []
     for v in volumes:
         found = discover(v, hostname=hostname, force_hostname=force_hostname)
-        if not hostname:
-            for h in found:
-                if h.hostname == v.name:
-                    h.hostname = _volume_host_name(image_id, v)
+        if not found and notes is not None:
+            note = (
+                f"{v.name} mounted; no Windows, Linux or macOS root found; "
+                "nothing on it was parsed"
+            )
+            notes.append(("volume", note))
+            print(f"  WARNING: {note}", file=sys.stderr)
+        for h in found:
+            h.from_image = True
+            if not hostname and h.hostname == v.name:
+                h.hostname = _volume_host_name(image_id, v)
         hosts += found
     return hosts
 
@@ -1001,7 +1023,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             container_type == "archive" and hostname
         )
         if volumes:  # a disk image: each mounted volume is scanned on its own
-            hosts = _discover_volumes(volumes, hostname, force_hn, image_id)
+            hosts = _discover_volumes(volumes, hostname, force_hn, image_id, status_notes)
         else:
             hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 
@@ -1088,7 +1110,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(1)
-            print(f"Error: No Windows artifacts found in {scan_root}", file=sys.stderr)
+            print(
+                f"Error: No Windows, Linux or macOS artifacts found in {scan_root}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         # Show summary
@@ -1100,13 +1125,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 evtx_note = f"{evtx_count} evtx, "
             arts = ", ".join(artifact_names)
             vss_tag = f" [{host.vss_id}]" if host.vss_id else ""
-            print(f"  {host.hostname}{vss_tag}: {evtx_note}{arts}")
+            os_tag = f" ({host.os})" if host.os != "windows" else ""
+            print(f"  {host.hostname}{os_tag}{vss_tag}: {evtx_note}{arts}")
 
         # Apply --source-timezone override to all hosts (priority 1)
         if tz_override:
             print(f"  Source timezone: {tz_override}")
             for h in hosts:
-                h.system_timezone = tz_override
+                h.system_timezone, h.timezone_source = tz_override, "examiner"
 
         if not getattr(args, "yes", False):
             try:

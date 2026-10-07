@@ -329,8 +329,8 @@ def test_two_windows_installs_force_no_name_and_are_listed(tmp_path, registry, c
     ((label, note),) = notes
     assert label == "hostname"
     assert note.startswith(
-        "2 Windows installs on this image (vol1: WIN10A, vol2: WIN11B); each is ingested "
-        "as its own host (dual-boot-0a1b2c3d-vol1, dual-boot-0a1b2c3d-vol2). "
+        "2 OS installs on this image (vol1: windows WIN10A, vol2: windows WIN11B); "
+        "each is ingested as its own host (dual-boot-0a1b2c3d-vol1, dual-boot-0a1b2c3d-vol2). "
         "Pass --hostname only if"
     )
     assert note in capsys.readouterr().err

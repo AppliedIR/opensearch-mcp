@@ -499,7 +499,7 @@ class TestAnUnreadableTemplateFile:
         (scratch_mappings / "csv_template.json").write_text("{ not json")
         client, result = self._install()
 
-        assert len(result["installed"]) == 13
+        assert len(result["installed"]) == 14
         assert [f["template"] for f in result["failed"]] == ["vhir-csv"]
         assert result["patched_indices"] == {"patched": ["old"], "failed": []}
         assert sorted(self._read(client)) == sorted(_ALL_COMPOSING)
@@ -542,7 +542,7 @@ class TestAnUnreadableTemplateFile:
         path.write_text(json.dumps({**json.loads(path.read_text()), field: None}))
         _, result = self._install()
 
-        assert len(result["installed"]) == 14
+        assert len(result["installed"]) == 15
         assert result["failed"] == []
         assert result["patched_indices"]["patched"] == []
         assert "NoneType" in result["patched_indices"]["failed"][0]["error"]
@@ -554,7 +554,7 @@ class TestAnUnreadableTemplateFile:
         assert [f["template"] for f in result["components"]["failed"]] == [
             "vhir-json-type-stability"
         ]
-        assert len(result["installed"]) == 14
+        assert len(result["installed"]) == 15
         assert result["patched_indices"]["patched"] == []
         assert result["patched_indices"]["failed"][0]["index"] == ",".join(_ALL_COMPOSING)
         assert not client.indices.put_mapping.called

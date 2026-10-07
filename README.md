@@ -24,12 +24,12 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 
 ### Ingest
 
-15 parsers cover the forensic evidence spectrum:
+16 parsers cover the forensic evidence spectrum:
 
 | Parser | Artifacts | Source |
 |--------|-----------|--------|
 | evtx | Windows Event Logs | pyevtx-rs (ECS-normalized) |
-| EZ Tools (10) | Shimcache, Amcache, MFT, USN, Registry, Shellbags, Jumplists, LNK, Recyclebin, Timeline | Eric Zimmerman tools via wintools-mcp |
+| EZ Tools (10) | Shimcache, Amcache, MFT, USN, Registry (system hives, and each user's NTUSER.DAT and UsrClass.dat), Shellbags, Jumplists, LNK, Recyclebin, Timeline | Eric Zimmerman tools via wintools-mcp |
 | Volatility 3 | Memory forensics (26 plugins, 3 tiers) | vol3 subprocess |
 | JSON/JSONL | Suricata EVE, tshark, Velociraptor, any JSON | Auto-detect format |
 | Delimited | CSV, TSV, Zeek TSV, bodyfile, L2T supertimelines | Auto-detect delimiter |
@@ -41,6 +41,7 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 | SSH | OpenSSH auth logs | Regex with timezone handling |
 | Transcripts | PowerShell transcripts | Header + command extraction |
 | Prefetch/SRUM | Execution + network usage | Plaso or wintools |
+| Plaso | Linux and macOS volumes (the OS preset); on Windows, Chromium history, WebCache and SetupAPI | Plaso, into `case-*-plaso-*` (see [Plaso: known gaps](#plaso-fallback-known-gaps)) |
 
 Every parser produces:
 - Deterministic content-based document IDs (re-ingest = zero duplicates)
@@ -235,7 +236,7 @@ any ingest subprocess.
 
 ## Template Priorities
 
-15 index templates with non-overlapping priorities:
+16 index templates with non-overlapping priorities:
 
 | Priority | Template | Pattern |
 |----------|----------|---------|
@@ -244,7 +245,6 @@ any ingest subprocess.
 | 12 | JSON | `case-*-json-*` |
 | 15 | Vol3 memory | `case-*-vol-*` |
 | 18 | Hayabusa alerts | `case-*-hayabusa-*` |
-| 19 | EVTX | `case-*-evtx-*` |
 | 20 | Prefetch | `case-*-prefetch-*` |
 | 21 | SRUM | `case-*-srum-*` |
 | 22 | Transcripts | `case-*-transcripts-*` |
@@ -254,6 +254,29 @@ any ingest subprocess.
 | 26 | WER | `case-*-wer-*` |
 | 27 | SSH | `case-*-ssh-*` |
 | 28 | Access log | `case-*-accesslog-*` |
+| 29 | Plaso | `case-*-plaso-*` |
+| 100 | EVTX | `case-*-evtx-*` |
+
+## Plaso fallback: known gaps
+
+Linux and macOS hosts (a folder holding a root, or a disk-image volume) are parsed by Plaso with the OS preset; Windows hosts get Plaso's Chromium history, WebCache and SetupAPI parsers over `Users` and `Windows/inf`. Each host's `plaso` status entry lists the events per parser, the time zone used and where it came from (the registry, `etc/localtime` or `etc/timezone`, the examiner's `--source-timezone`, or unknown), and every file Plaso warned about. Plaso 20240308 also loses some input without any warning:
+
+| File | OS | Expected parser | Gap |
+|------|----|-----------------|-----|
+| `var/log/dpkg.log*` | Linux | `text/dpkg` | no events under the `linux` preset (the parser alone reads it) |
+| `root/.bash_history`, `home/*/.bash_history`, `Users/*/.bash_history` | Linux, macOS | `text/bash_history` | lines without `#epoch` timestamps give no events |
+| `Library/Receipts/InstallHistory.plist` | macOS | `plist/macos_install_history` | a top-level array isn't parsed |
+| `Library/LaunchDaemons/*.plist`, `Library/LaunchAgents/*.plist`, `Users/*/Library/LaunchAgents/*.plist` | macOS | `plist/launchd_plist` | a plist missing any of the five keys it needs gives no event |
+
+Also:
+- Junk or truncated files are dropped without a warning.
+- Syslog lines carry no year. Plaso takes it from the file's own time, so a copied folder without its original times gets the copy's year.
+- utmp records with an empty host field show `localhost`.
+- The per-event `hostname` field is Plaso's: the remote host for utmp, `_HOSTNAME` for the journal. The host the evidence came from is `host.name`.
+- filestat gives 3 times per file from a folder (no creation time) and 4 from a disk image. On a folder the times may reflect the copy, not the original system, and the status says so.
+- psort removes duplicate events, so the indexed count can be lower than the count Plaso reports (6,134 → 6,122 on one Windows host).
+- A dirty `NTUSER.DAT`'s transaction logs (`ntuser.dat.LOG1`) aren't found by RECmd on a case-sensitive file system, which looks for `NTUSER.DAT.LOG1`.
+- These were measured with Plaso 20240308; later releases may fix some.
 
 ## Requirements
 

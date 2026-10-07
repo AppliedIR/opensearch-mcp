@@ -137,6 +137,7 @@ def _artifact(root: Path, tool_name: str, user: str = "John Smith") -> tuple[Pat
         "amcache": vol / "Windows/AppCompat/Programs/Amcache.hve",
         "shimcache": vol / "Windows/System32/config/SYSTEM",
         "registry": vol / "Windows/System32/config/SYSTEM",
+        "registry_user": profile / "NTUSER.DAT",
         "mft": vol / "$MFT",
         "usn": vol / "$Extend/$J",
         "timeline": profile / "AppData/Local/ConnectedDevicesPlatform/L.user/ActivitiesCache.db",

@@ -27,6 +27,7 @@ class TestToolsDict:
             "amcache",
             "shimcache",
             "registry",
+            "registry_user",
             "shellbags",
             "jumplists",
             "lnk",
@@ -110,11 +111,11 @@ class TestToolConfig:
 
 class TestGetActiveTools:
     def test_no_flags_returns_tier_1_and_2(self):
-        """Default (no flags) returns tier 1 + tier 2 tools (7 total)."""
+        """Default (no flags) returns tier 1 + tier 2 tools (8 total)."""
         active = get_active_tools()
         names = {t.cli_name for t in active}
-        # 4 tier-1 + 3 tier-2 = 7
-        assert len(active) == 7
+        # 5 tier-1 + 3 tier-2 = 8
+        assert len(active) == 8
         # All tier 1 present
         assert {"amcache", "shimcache", "registry", "shellbags"}.issubset(names)
         # All tier 2 present
@@ -128,8 +129,8 @@ class TestGetActiveTools:
         """--include mft returns tier 1 tools + mft only."""
         active = get_active_tools(include={"mft"})
         names = {t.cli_name for t in active}
-        # tier 1 (always) + mft = 5
-        assert len(active) == 5
+        # tier 1 (always) + mft = 6
+        assert len(active) == 6
         assert "mft" in names
         assert "amcache" in names
         # tier 2 NOT included (not in include set)

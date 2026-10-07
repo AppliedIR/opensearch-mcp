@@ -1,0 +1,31 @@
+{
+  "index_patterns": ["case-*-plaso-*"],
+  "template": {
+    "settings": {
+      "index.number_of_replicas": 0
+    },
+    "mappings": {
+      "properties": {
+        "timestamp": { "type": "long" },
+        "@timestamp": { "type": "date" },
+        "host.name": { "type": "keyword" },
+        "host.id": { "type": "keyword" },
+        "vhir.source_file": { "type": "keyword" },
+        "vhir.ingest_audit_id": { "type": "keyword" },
+        "vhir.vss_id": { "type": "keyword" },
+        "pipeline_version": { "type": "keyword" },
+        "vhir.parse_method": { "type": "keyword" },
+        "message": { "type": "text" },
+        "threat_intel.verdict": { "type": "keyword" },
+        "threat_intel.confidence": { "type": "integer" },
+        "threat_intel.labels": { "type": "keyword" },
+        "threat_intel.source": { "type": "keyword" },
+        "threat_intel.ioc_type": { "type": "keyword" },
+        "threat_intel.ioc_value": { "type": "keyword" },
+        "threat_intel.enriched_at": { "type": "date" },
+        "threat_intel.checked": { "type": "boolean" }
+      }
+    }
+  },
+  "priority": 29
+}
