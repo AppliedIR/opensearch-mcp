@@ -108,10 +108,7 @@ def finish_status(case_id: str, pid: int, notes: list[tuple[str, str]] | None = 
         return
     if data.get("status") != "running":
         return
-    hosts = data.get("hosts", [])
-    for label, note in notes or []:
-        entry = {"name": label, "note": note, "warnings_only": True}
-        hosts = hosts + [{"hostname": label, "artifacts": [entry]}]
+    hosts = data.get("hosts", []) + _note_hosts(notes)
     write_status(
         case_id,
         pid,
@@ -126,6 +123,42 @@ def finish_status(case_id: str, pid: int, notes: list[tuple[str, str]] | None = 
         elapsed_seconds=data.get("elapsed_seconds", 0.0),
         log_file=data.get("log_file", ""),
     )
+
+
+def _note_hosts(notes: list[tuple[str, str]] | None) -> list[dict]:
+    """Status entries that show each `(label, note)` as a warning."""
+    return [
+        {"hostname": label, "artifacts": [{"name": label, "note": note, "warnings_only": True}]}
+        for label, note in notes or []
+    ]
+
+
+def add_notes(case_id: str, pid: int, notes: list[tuple[str, str]]) -> None:
+    """Add `notes` as warnings to a run's status that hasn't ended: a run that
+    stops before its terminal write (an early exit or an exception) keeps
+    them, and the terminal-status guard that then marks it failed leaves them.
+    A run that has ended is left as it is."""
+    if not notes:
+        return
+    path = _status_path_safe(case_id, pid)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if data.get("status") not in ("starting", "running"):
+        return
+    data["hosts"] = data.get("hosts", []) + _note_hosts(notes)
+    data["updated"] = datetime.now(timezone.utc).isoformat()
+    fd, tmp = tempfile.mkstemp(dir=str(_STATUS_DIR), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, str(path))
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 # Error-prefix convention (replaces removed halt-state taxonomy).

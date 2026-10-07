@@ -1125,6 +1125,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     import atexit
 
     atexit.register(mount_ctx.cleanup)
+    finished = False  # the run's terminal status write, with its notes
 
     try:
         if container_type == "archive":
@@ -1765,8 +1766,16 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         status_notes += [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
         finish_status(case_id, os.getpid(), notes=status_notes)
+        finished = True
 
     finally:
+        if not finished:  # stopped early: the status keeps what the run had to say
+            import os as _os  # `os` is bound later in this function
+
+            from opensearch_mcp.ingest_status import add_notes
+
+            mounts = [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
+            add_notes(case_id, _os.getpid(), status_notes + mounts)
         mount_ctx.cleanup()
         if tmpdir:
             cleanup_tmpdir(tmpdir)
