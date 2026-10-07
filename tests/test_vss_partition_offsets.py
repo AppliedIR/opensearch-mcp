@@ -323,3 +323,19 @@ def test_shadow_copies_with_no_reader_installed_are_not_called_none(
     assert "No volume shadow copies found" not in out.out
     assert f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: " in out.err
     assert "vshadowinfo didn't run" in out.err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+def test_a_volume_whose_boot_sector_cannot_be_read_is_not_called_none(vss, tmp_path):
+    image = tmp_path / "disk.raw"
+    image.chmod(0)
+    ctx, notes = MountContext(), []
+    try:
+        found = mount_vss(image, tmp_path, ctx, {"vol1": GPT_DATA}, notes)
+    finally:
+        image.chmod(0o600)
+    assert found == [] and notes == []  # never "no shadow copies found"
+    assert ctx.failures == [
+        f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: "
+        "its boot sector couldn't be read (Permission denied)"
+    ]

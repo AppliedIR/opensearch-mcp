@@ -418,13 +418,11 @@ def _find_free_nbd() -> str:
 
 
 def _is_ntfs(raw_path: Path, offset: int) -> bool:
-    """Whether an NTFS boot sector starts `offset` bytes into the image."""
-    try:
-        with open(raw_path, "rb") as f:
-            f.seek(offset + 3)
-            return f.read(8) == b"NTFS    "
-    except OSError:
-        return False
+    """Whether an NTFS boot sector starts `offset` bytes into the image.
+    Raises OSError when it can't be read: that's never "not NTFS"."""
+    with open(raw_path, "rb") as f:
+        f.seek(offset + 3)
+        return f.read(8) == b"NTFS    "
 
 
 def mount_vss(
@@ -444,7 +442,18 @@ def mount_vss(
     if offsets is None:
         volumes = {"": 0}
     else:
-        volumes = {name: off for name, off in offsets.items() if _is_ntfs(raw_path, off)}
+        volumes = {}
+        for name, off in offsets.items():
+            try:
+                if _is_ntfs(raw_path, off):
+                    volumes[name] = off
+            except OSError as e:  # unread: unprocessed, never "none found"
+                failure = (
+                    f"shadow copies on {name} (offset {off}) couldn't be read: "
+                    f"its boot sector couldn't be read ({e.strerror or e})"
+                )
+                ctx.failures.append(failure)
+                print(f"  WARNING: {failure}", file=sys.stderr)
     results = []
     for name, offset in sorted(volumes.items(), key=lambda v: v[1]):
         found, unread = _mount_vss_at(
