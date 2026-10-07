@@ -630,3 +630,16 @@ def test_a_case_whose_indices_cant_be_listed_still_excludes_every_longer_case_id
 
     expr = legacy_expression(scope_of(case.name), client=Down())
     assert expr == f"case-{case.name}-*,-case-{case.name}-2-*"
+
+
+def test_a_second_run_of_a_host_reports_only_its_own_removals():
+    case, _ = new_case()
+    for run in ("r1", "r2"):  # the same evidence, read again
+        forged = {"vhir": {"host_key": "forged-a", "unit": "forged-b"}}
+        client = _Sent()
+        ctx = wc.open_unit(case, "evidence/again.json", "WKS12", source="test", run_id=run)
+        with wc.writing(ctx):
+            _send(client, [{"_index": wc.index_name("json-x"), "_id": "r1", "_source": forged}])
+    assert wc.removed_note("WKS12", "json-x", ctx.c12) == (
+        "2 reserved identity fields removed from evidence"
+    )

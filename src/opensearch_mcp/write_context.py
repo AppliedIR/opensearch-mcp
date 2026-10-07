@@ -130,6 +130,8 @@ def open_unit(
             {"kind": "name", "unit": unit, "raw": raw, "evidence": source, "origin": origin},
         ],
     )
+    for key in [k for k in REMOVED if k[:2] == (c12, raw)]:
+        del REMOVED[key]  # a run reports its own removals, not an earlier run's
     return WriteContext(
         case_dir=root, c12=c12, unit=unit, unit_raw=raw, origin=origin, run_id=run_id
     )
