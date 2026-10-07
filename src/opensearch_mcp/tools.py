@@ -13,6 +13,7 @@ import yaml
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.parse_csv import ingest_csv
+from opensearch_mcp.paths import resolve_case_insensitive
 
 
 @dataclass
@@ -292,6 +293,28 @@ def _tool_errors(stdout: str, artifact_path: Path) -> list[str]:
     return out
 
 
+def _recased_ntuser(profile: Path, view: Path) -> tuple[Path, Path] | None:
+    """Copy a dirty NTUSER.DAT whose logs Windows named in another case (ntuser.dat.LOG1),
+    and link the logs under the hive's own name, the only one SBECmd looks for on Linux."""
+    try:
+        hive = resolve_case_insensitive(profile, "NTUSER.DAT")
+        if hive is None or not hive.is_file():
+            return None
+        want = [hive.name + ".LOG1", hive.name + ".LOG2"]
+        logs = [p for p in hive.parent.iterdir() if p.name.upper() in [w.upper() for w in want]]
+        with hive.open("rb") as fh:
+            head = fh.read(12)
+        if not logs or any(p.name in want for p in logs) or head[4:8] == head[8:12]:
+            return None
+        view.mkdir()
+        shutil.copyfile(hive, view / hive.name)
+        for p in logs:
+            (view / (hive.name + p.name[len(hive.name) :].upper())).symlink_to(p.absolute())
+        return hive, view
+    except OSError:
+        return None  # SBECmd's own run already reported what it couldn't read
+
+
 def run_and_ingest(
     tool_name: str,
     artifact_path: Path,
@@ -350,9 +373,22 @@ def run_and_ingest(
                     for ln in _stdout.splitlines()
                     if ln.startswith("Processing hive ")
                 )
+        fixed = (
+            _recased_ntuser(artifact_path, Path(tmpdir) / "hive")
+            if tool_name == "shellbags"
+            else None
+        )
+        if fixed:
+            hive, view = fixed
+            cmd = [cfg.binary, "-d", str(view), "--csv", tmpdir]
+            more = _run_tool(cmd, cfg.binary)[0].replace(str(view / hive.name), str(hive))
         if not_read is not None:
             not_read.extend(_failed_files(_stdout, tool_name))
-            not_read.extend(_tool_errors(_stdout, artifact_path))
+            errors = _tool_errors(_stdout, artifact_path)
+            if fixed:
+                errors = [e for e in errors if not e.startswith(f"{hive} (")]
+                errors += _tool_errors(more, hive)
+            not_read.extend(errors)
             if tool_name in ("lnk", "jumplists"):
                 walk = os.walk(
                     artifact_path,
