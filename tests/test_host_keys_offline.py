@@ -479,6 +479,23 @@ def test_a_record_carrying_another_units_keys_is_restamped(tmp_path):
     assert src["vhir.rid"] == "r1" and action["_id"] == wc.doc_id(src["vhir.host_key"], "r1")
 
 
+def test_machine_fields_given_as_a_list_are_removed_before_the_stamp():
+    case, _ = new_case()
+    client = _Sent()
+    forged = {
+        "vhir": [{"host_key": "forged", "unit": "u", "rid": "r", "prev_ids": ["p"]}, {"note": 1}],
+        "host": [{"id": "DC09"}],
+    }
+    ctx = wc.open_unit(case, "evidence/x.json", "WKS10", source="test")
+    with wc.writing(ctx):
+        _send(client, [{"_index": wc.index_name("json-x"), "_id": "r1", "_source": forged}])
+    (action,) = client.actions
+    src = action["_source"]
+    assert src["vhir"] == [{"note": 1}] and "host" not in src
+    assert src["vhir.host_key"] != "forged" and src["host.id"] != "DC09"
+    assert action["_id"] == wc.doc_id(src["vhir.host_key"], "r1")
+
+
 def test_a_batch_sent_again_keeps_its_ids():
     case, _ = new_case()
     client = _Sent()
@@ -530,3 +547,19 @@ def test_the_second_copy_notice_is_per_case():
             assert wc.second_copy_note("WKS14", "evtx") == wc.SECOND_COPY_NOTE
     finally:
         wc.SECOND_COPY.clear()
+
+
+def test_a_case_whose_indices_cant_be_listed_still_excludes_every_longer_case_id():
+    from opensearch_mcp.case_scope import legacy_expression, scope_of
+
+    case = wc.case_dir_for(f"lst-{uuid.uuid4().hex[:6]}")
+    wc.case_dir_for(f"{case.name}-2")  # a longer id beside it
+
+    class Down:
+        class indices:  # noqa: N801
+            @staticmethod
+            def get(**kw):
+                raise OSError("cluster unreachable")
+
+    expr = legacy_expression(scope_of(case.name), client=Down())
+    assert expr == f"case-{case.name}-*,-case-{case.name}-2-*"

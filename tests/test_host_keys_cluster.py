@@ -132,7 +132,17 @@ def test_a_pre_0_7_case_reads_its_old_indices_also_ones_made_later(client, cases
     assert _count(client, case) == 3  # computed per read, nothing stored
 
 
-def test_a_longer_case_ids_old_indices_stay_out_after_its_folder_is_renamed(client, cases):
+def _own_cases_dir(cases, monkeypatch, tmp_path, *names):
+    """Cases under a folder of their own: no other row's cases sit beside them."""
+    monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
+    for name in names:
+        (tmp_path / f"{name}-{cases.tag}").mkdir()
+
+
+def test_a_longer_case_ids_old_indices_stay_out_after_its_folder_is_renamed(
+    client, cases, monkeypatch, tmp_path
+):
+    _own_cases_dir(cases, monkeypatch, tmp_path, "acme")
     case, _ = cases("acme", v1=True)
     other = case.parent / f"{case.name}-2"
     other.mkdir()
@@ -141,6 +151,37 @@ def test_a_longer_case_ids_old_indices_stay_out_after_its_folder_is_renamed(clie
     v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
     v1_index(client, f"case-{case.name}-2-evtx-wks90", [{"host.name": "WKS90"}] * 4)
     assert _count(client, case) == 1
+
+
+def test_a_longer_case_id_known_only_by_its_folder_name_stays_out(
+    client, cases, monkeypatch, tmp_path
+):
+    _own_cases_dir(cases, monkeypatch, tmp_path, "bolt")
+    case, _ = cases("bolt", v1=True)
+    other = case.parent / f"{case.name}-2"
+    other.mkdir()
+    (other / "CASE.yaml").write_text("name: no id recorded\n")
+    v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
+    v1_index(client, f"case-{case.name}-2-evtx-wks90", [{"host.name": "WKS90"}] * 4)
+    assert _count(client, case) == 1
+
+
+def test_a_pre_0_7_case_beside_a_0_7_case_with_a_longer_id_reads_with_strict_requests(
+    client, cases, monkeypatch, tmp_path
+):
+    from opensearch_mcp.triage_remote import _CaseIndices, _index
+
+    _own_cases_dir(cases, monkeypatch, tmp_path, "cove")
+    case, _ = cases("cove", v1=True)
+    newer = case.parent / f"{case.name}-2"  # made by 0.7: no pre-0.7 indices
+    newer.mkdir()
+    (newer / "CASE.yaml").write_text(
+        f"case_id: {case.name}-2\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"
+    )
+    v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
+    index = _index(_CaseIndices(case.name, client), "evtx")  # what enrichment reads
+    r = client.search(index=index, body={"size": 0}, allow_no_indices=False)
+    assert r["hits"]["total"]["value"] == 1
 
 
 def test_an_old_index_read_before_its_case_appears_is_not_read_after(client, cases):
@@ -214,6 +255,19 @@ def test_indices_no_case_can_claim_are_listed(client, cases, monkeypatch):
 
 
 # -- B: storage
+
+
+def test_machine_fields_given_as_a_list_by_the_evidence_are_not_indexed(client, cases):
+    case, _ = cases("forge")
+    forged = {"vhir": [{"host_key": "forged", "note": "kept"}], "host": [{"id": "FORGED"}]}
+    ctx = write(client, case, "evidence/x.json", "WKS10", {"r1": forged}, artifact="json-x")
+    index = f"case-{ctx.c12}-json-x-*"
+    for field, value in (("vhir.host_key", "forged"), ("host.id", "FORGED")):
+        r = client.count(index=index, body={"query": {"term": {field: value}}})
+        assert r["count"] == 0, field
+    assert (
+        client.count(index=index, body={"query": {"term": {"vhir.unit": ctx.unit}}})["count"] == 1
+    )
 
 
 def test_two_machines_sharing_a_name_path_and_record_ids_are_both_stored(client, cases):

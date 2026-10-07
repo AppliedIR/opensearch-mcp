@@ -77,17 +77,34 @@ def scope_of(case_id: str = "") -> CaseScope:
     )
 
 
-def legacy_expression(scope: CaseScope, artifact_type: str = "") -> str:
+def legacy_expression(scope: CaseScope, artifact_type: str = "", client=None) -> str:
     """The case's pre-0.7 indices (of one type), as an expression: "" when it
-    has none to read."""
+    has none to read.
+
+    With a client, the indices are listed in this call, and a longer case id
+    is excluded only when it has pre-0.7 indices: an exclusion that matches
+    nothing fails a request made with allow_no_indices=False. When they
+    can't be listed, every longer case id is excluded.
+    """
     if scope.naming_version != 1 or not scope.legacy_id:
         return ""
     if _case_yaml(scope.case_dir).get("legacy_alias") == "none":
         return ""
     token = f"{sanitize_index_component(artifact_type)}-" if artifact_type else ""
-    parts = [f"{scope.legacy_prefix}{token}*"]
-    parts += [f"-{p}*" for p in sorted(_longer_prefixes(scope))]
-    return ",".join(parts)
+    include = f"{scope.legacy_prefix}{token}*"
+    longer = sorted(_longer_prefixes(scope))
+    names = _index_names(client, include) if client is not None else None
+    if names is not None:
+        longer = [p for p in longer if any(n.startswith(p) for n in names)]
+    return ",".join([include, *(f"-{p}*" for p in longer)])
+
+
+def _index_names(client, pattern: str) -> list[str] | None:
+    """Open indices matching `pattern`; None when they can't be listed."""
+    try:
+        return list(client.indices.get(index=pattern, expand_wildcards="open"))
+    except Exception:
+        return None
 
 
 def case_read_scope(case_id: str = "", client=None, artifact_type: str = "") -> str:
@@ -96,7 +113,7 @@ def case_read_scope(case_id: str = "", client=None, artifact_type: str = "") -> 
     scope = scope_of(case_id)
     token = f"{sanitize_index_component(artifact_type)}-" if artifact_type else ""
     new = f"{scope.prefix}{token}*" if scope.c12 else ""
-    old = legacy_expression(scope, artifact_type)
+    old = legacy_expression(scope, artifact_type, client)
     # A wildcard that matches nothing fails a request made with
     # allow_no_indices=False: name each part only when it matches something,
     # and the case's own when neither does.

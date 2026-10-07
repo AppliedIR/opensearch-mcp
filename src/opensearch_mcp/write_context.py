@@ -389,12 +389,18 @@ def _stamped_here(action: dict, src: dict) -> bool:
 
 
 def _drop_owned(src: dict) -> None:
+    """Remove the stamp's own fields in every shape evidence can give them:
+    dotted, nested, and a list of objects (which OpenSearch indexes as the
+    same field)."""
     for name in _OWNED:
         src.pop(name, None)
     for parent, children in (("vhir", ("host_key", "unit", "rid", "prev_ids")), ("host", ("id",))):
         node = src.get(parent)
-        if isinstance(node, dict):
-            for child in children:
-                node.pop(child, None)
-            if not node:
-                del src[parent]
+        for item in node if isinstance(node, list) else [node]:
+            if isinstance(item, dict):
+                for child in children:
+                    item.pop(child, None)
+        if isinstance(node, list):
+            node[:] = [item for item in node if item != {}]
+        if isinstance(node, (dict, list)) and not node:
+            del src[parent]

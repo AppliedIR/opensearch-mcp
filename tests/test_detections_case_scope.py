@@ -9,6 +9,7 @@ pattern over a fixed set of indices.
 from __future__ import annotations
 
 import fnmatch
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -89,3 +90,54 @@ def test_a_named_case_and_no_case(monkeypatch):
     assert srv._hayabusa_index() == f"case-{active}-hayabusa-*"
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
     assert srv._hayabusa_index() == ""  # no case: nothing, never every case's
+
+
+def _resolve(pattern: str, names) -> dict:
+    """What the cluster resolves an expression with exclusions to."""
+    parts = [p.strip() for p in pattern.split(",")]
+    keep = {n for n in names for p in parts if not p.startswith("-") and fnmatch.fnmatchcase(n, p)}
+    drop = {n for n in names for p in parts if p.startswith("-") and fnmatch.fnmatchcase(n, p[1:])}
+    return {n: {} for n in sorted(keep - drop)}
+
+
+@pytest.fixture
+def old_case_beside_a_longer_one(monkeypatch, tmp_path):
+    """A case from before 0.7 beside a case whose id is its id plus
+    "-hayabusa…": that case's indices fall under its alert expression, which
+    then carries an exclusion."""
+    old = f"old{uuid.uuid4().hex[:6]}"
+    wc.case_dir_for(old), wc.case_dir_for(f"{old}-hayabusa-review")  # pre-0.7: no case_uuid
+    names = {f"case-{old}-hayabusa-wks10": 7, f"case-{old}-hayabusa-review-evtx-wks90": 50}
+    client = MagicMock()
+    client.indices.get.side_effect = lambda index, **kw: _resolve(index, names)
+    client.count.side_effect = lambda index, **kw: {
+        "count": sum(names[n] for n in _resolve(index, names))
+    }
+    client.transport.perform_request.return_value = {"total_findings": 0, "findings": []}
+    monkeypatch.setattr(srv, "_get_os", lambda: client)
+    monkeypatch.setattr(srv.audit, "log", lambda **kw: None)
+    monkeypatch.setattr(srv, "_get_active_case", lambda: old)
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setattr(srv, "invalidate_index_cache", lambda: None, raising=False)
+    return old
+
+
+def _hinted_index(text: str) -> str:
+    return text.split("index='", 1)[1].split("'", 1)[0]
+
+
+def test_a_hint_with_an_exclusion_names_indices_idx_search_accepts(old_case_beside_a_longer_one):
+    old = old_case_beside_a_longer_one
+    assert "-case-" in srv._hayabusa_index()  # the expression does exclude
+    suggestion = srv.idx_list_detections()["suggestion"]
+    assert "7 Hayabusa alerts" in suggestion, suggestion
+    index = _hinted_index(suggestion)
+    assert srv._validate_index(index) is None
+    assert index == f"case-{old}-hayabusa-wks10"
+
+    hosts = [{"hostname": "hayabusa", "artifacts": [{"name": "hayabusa", "status": "complete"}]}]
+    ingest_status.write_status(old, 99999998, "r", "complete", hosts, {"indexed": 7}, "t0")
+    (status,) = srv.idx_ingest_status(case_id=old)["ingests"]
+    (hint,) = [s for s in status["next_steps"] if "Hayabusa" in s]
+    assert srv._validate_index(_hinted_index(hint)) is None
+    assert _hinted_index(hint) == f"case-{old}-hayabusa-wks10"
