@@ -417,6 +417,32 @@ def _resolve_index(index: str, case_id: str) -> str:
     return "case-*"
 
 
+def _search_index(index: str, case_id: str) -> tuple[str, dict | None]:
+    """The pattern a search tool queries, or a refusal when there is no case.
+    The active case is read once, so the check and the pattern agree."""
+    if not (index or case_id):
+        case_id = _get_active_case() or ""
+        if not case_id:
+            refusal = "No active case. Run 'vhir case activate' first, or pass case_id or index."
+            return "", {"error": refusal}
+    return _resolve_index(index, case_id), None
+
+
+def _mixed_type_refusal(client, index: str, field: str) -> dict | None:
+    """An error when field is ip in some target indices and keyword in others."""
+    caps = _os_call(client.field_caps, index=index, fields=field)
+    types = caps.get("fields", {}).get(field, {})
+    if "ip" in types and "keyword" in types:
+        ip_idx = types["ip"].get("indices", [])
+        kw_idx = types["keyword"].get("indices", [])
+        return {
+            "error": f"{field} is mapped as ip in {ip_idx} and as keyword in {kw_idx}: "
+            "one aggregation can't combine them. Aggregate each set with index=<those names>, "
+            "or narrow the pattern."
+        }
+    return None
+
+
 def _hayabusa_index(case_id: str = "") -> str:
     """The Hayabusa alert indices of case_id, or of the active case; every
     case's only when there's neither."""
@@ -606,14 +632,17 @@ def idx_search(
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
             Quote values with special chars: source.ip:"::1" (IPv6 needs quotes).
         index: Index pattern. Overrides case_id if provided.
-        case_id: Case ID — auto-constructs case-{id}-* pattern.
+        case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
+            active case; with no index, case_id or active case, it refuses.
         limit: Max results (default 50, max 200).
         offset: Skip first N results for pagination (default 0).
         sort: Sort field:order (default @timestamp:desc).
         time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
         time_to: End time (ISO 8601).
     """
-    index = _resolve_index(index, case_id)
+    index, refused = _search_index(index, case_id)
+    if refused:
+        return refused
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -713,9 +742,12 @@ def idx_count(
     Args:
         query: OpenSearch query_string (default: all).
         index: Index pattern. Overrides case_id if provided.
-        case_id: Case ID — auto-constructs case-{id}-* pattern.
+        case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
+            active case; with no index, case_id or active case, it refuses.
     """
-    index = _resolve_index(index, case_id)
+    index, refused = _search_index(index, case_id)
+    if refused:
+        return refused
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -759,15 +791,20 @@ def idx_aggregate(
         field: Field to aggregate on (e.g., 'host.name', 'event.code').
         query: OpenSearch query_string filter (default: all).
         index: Index pattern. Overrides case_id if provided.
-        case_id: Case ID — auto-constructs case-{id}-* pattern.
+        case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
+            active case; with no index, case_id or active case, it refuses.
         limit: Max buckets (default 50, max 500).
     """
-    index = _resolve_index(index, case_id)
+    index, refused = _search_index(index, case_id)
+    if refused:
+        return refused
     err = _validate_index(index)
     if err:
         return {"error": err}
     client = _get_os()
     limit = min(limit, 500)
+    if refusal := _mixed_type_refusal(client, index, field):
+        return refusal
 
     result = _os_call(
         client.search,
@@ -845,7 +882,8 @@ def idx_timeline(
     Args:
         query: OpenSearch query_string filter.
         index: Index pattern. Overrides case_id if provided.
-        case_id: Case ID — auto-constructs case-{id}-* pattern.
+        case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
+            active case; with no index, case_id or active case, it refuses.
         interval: Histogram bucket size (e.g., '1m', '1h', '1d').
         time_field: Timestamp field (default @timestamp).
         time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
@@ -855,7 +893,9 @@ def idx_timeline(
 
     if not _re_mod.match(r"^\d+[smhd]$", interval):
         return {"error": f"Invalid interval '{interval}'. Use Ns/Nm/Nh/Nd (e.g., 1h, 30m)."}
-    index = _resolve_index(index, case_id)
+    index, refused = _search_index(index, case_id)
+    if refused:
+        return refused
     err = _validate_index(index)
     if err:
         return {"error": err}
@@ -925,15 +965,20 @@ def idx_field_values(
         field: Field to enumerate (e.g., 'winlog.provider_name').
         query: OpenSearch query_string filter.
         index: Index pattern. Overrides case_id if provided.
-        case_id: Case ID — auto-constructs case-{id}-* pattern.
+        case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
+            active case; with no index, case_id or active case, it refuses.
         limit: Max values (default 50, max 500).
     """
-    index = _resolve_index(index, case_id)
+    index, refused = _search_index(index, case_id)
+    if refused:
+        return refused
     err = _validate_index(index)
     if err:
         return {"error": err}
     client = _get_os()
     limit = min(limit, 500)
+    if refusal := _mixed_type_refusal(client, index, field):
+        return refusal
 
     result = _os_call(
         client.search,
@@ -1226,7 +1271,12 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         return {"case_id": cid, "error": f"OpenSearch error: {type(e).__name__}"}
 
     if not indices:
-        return {"case_id": cid, "hosts": [], "artifacts": {}, "total_docs": 0}
+        err = {
+            "case_id": cid,
+            "error": f"No index matches {pattern!r}: nothing was summarized. "
+            "Check the case id, or ingest evidence into this case first.",
+        }
+        return err
 
     # Get hosts from document field (reliable — index name parsing
     # breaks on hostnames with dashes)
@@ -1241,6 +1291,12 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         )
         for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
             hosts.add(bucket["key"])
+        cut = host_agg["aggregations"]["hosts"].get("sum_other_doc_count", 0)
+        if cut:
+            resp.setdefault("warnings", []).append(
+                f"Host list cut at 500 host.name values: {cut} documents carry host names "
+                "not listed, and their indices may be listed under their own artifact keys."
+            )
     except Exception as e:
         resp.setdefault("warnings", []).append(f"Host detection query failed: {e}")
 

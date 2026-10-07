@@ -35,6 +35,12 @@ def _reset_server_state():
     srv._client_verified = old_verified
 
 
+@pytest.fixture(autouse=True)
+def _active_case(monkeypatch):
+    """The search tools refuse without a case, so these run with one active."""
+    monkeypatch.setattr(srv, "_get_active_case", lambda: "testcase")
+
+
 @pytest.fixture
 def mock_client():
     """Provide a mock OpenSearch client and inject it into server module."""
