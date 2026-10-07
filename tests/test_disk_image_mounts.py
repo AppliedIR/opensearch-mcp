@@ -100,3 +100,25 @@ def test_an_e01_is_mounted_by_root_for_the_examiner_and_unmounted_with_sudo(call
     umounts = [c[2] for c in calls if c[:2] == ["sudo", "umount"]]
     assert umounts == [str(tmp_path / "vol1"), str(tmp_path / "vol0"), str(ewf)]
     assert not [c for c in calls if c[0] == "fusermount"]
+
+
+PCIX = """\
+Disk /evidence/pcix.raw: 64 MiB, 67108864 bytes, 131072 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: dos
+Disk identifier: 0x9a7ddf52
+
+Device              Boot Start   End Sectors Size Id Type
+/evidence/pcix.raw1       2048 22527   20480  10M 75 PC/IX
+/evidence/pcix.raw2      22528 43007   20480  10M  7 HPFS/NTFS/exFAT
+"""
+
+
+def test_an_mbr_id_that_only_starts_with_7_is_not_mounted(calls, tmp_path):
+    calls.fdisk_text = PCIX
+    containers._mount_raw_partitions(
+        Path("/evidence/pcix.raw"), tmp_path, containers.MountContext()
+    )
+    assert _mount_offsets(calls) == [f"offset={22528 * 512}"]  # not the 75 at 2048
