@@ -279,6 +279,7 @@ Also:
 - The per-event `hostname` field is Plaso's: the remote host for utmp, `_HOSTNAME` for the journal. The host the evidence came from is `host.name`.
 - filestat gives 3 times per file from a folder (no creation time) and 4 from a disk image. On a folder the times may reflect the copy, not the original system, and the status says so.
 - psort removes duplicate events, so the indexed count can be lower than the count Plaso reports (6,134 → 6,122 on one Windows host).
+- An APFS container is one Plaso run, with one zone: the zone of the volume that holds it applies to every volume in the container, including one with no zone file; the status names the volume.
 - On an image, when `/etc/localtime` is a copy rather than a link, Plaso may use UTC or a fixed-offset abbreviation (an hour or more off); the status says so.
 - A dirty `NTUSER.DAT`'s transaction logs (`ntuser.dat.LOG1`) aren't found by RECmd on a case-sensitive file system, which looks for `NTUSER.DAT.LOG1`.
 - These were measured with Plaso 20240308; later releases may fix some.

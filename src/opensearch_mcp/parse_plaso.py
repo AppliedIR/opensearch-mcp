@@ -581,7 +581,11 @@ def plan_image_runs(leaves: list[dict]) -> tuple[list[dict], list[tuple[int, str
             continue
         args = (["--partitions", str(n)] if part else []) + ["--volumes", "all"]
         os_leaf = next((g for g in group if g.get("os") == "macos"), group[0])
-        runs.append(_run(f"{part}:apfs" if part else "apfs", args, {**os_leaf, "os": "macos"}))
+        run = _run(f"{part}:apfs" if part else "apfs", args, {**os_leaf, "os": "macos"})
+        run["zone_volume"] = os_leaf.get("selector", {}).get(
+            "volumes", ""
+        )  # one zone, all volumes
+        runs.append(run)
     return runs, notes
 
 

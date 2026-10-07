@@ -654,3 +654,29 @@ def test_image_hosts_reach_the_host_dictionary_from_a_relative_path(tmp_path, mo
     assert given == [folder / "dual.raw"] and given[0].is_absolute()
     image_id = ingest_cli._image_id("dual", folder / "dual.raw")
     assert seen["hosts"] == [(f"{image_id}-p2-lvm1", "linux")]
+
+
+def test_a_link_to_a_zone_plaso_cannot_use_is_not_a_detected_zone(inventory, tmp_path):
+    from opensearch_mcp.discover import EXAMINER_ZONE
+
+    leaf = {**DUAL[1], "zone": "posix/America/New_York"}  # .../zoneinfo/posix/America/New_York
+    inventory([leaf])
+    (host,), _, _ = ingest_cli._image_hosts(tmp_path / "d.raw", "d", None)
+    assert host.timezone_source == "" and host.system_timezone is None
+    assert "names a zone that can't be used (posix/America/New_York)" in host.zone_note
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    assert (host.system_timezone, host.timezone_source) == ("Europe/Berlin", EXAMINER_ZONE)
+
+
+def test_an_apfs_containers_zone_names_the_volume_it_came_from(inventory, tmp_path):
+    leaves = [
+        {"selector": {"partitions": "p1", "volumes": "apfs1"}, "offset": 20480,
+         "kind": "filesystem", "fs": "APFS", "os": "macos", "localtime": "link",
+         "zone": "Europe/Paris"},
+        {"selector": {"partitions": "p1", "volumes": "apfs2"}, "offset": 20480,
+         "kind": "filesystem", "fs": "APFS"},
+    ]  # fmt: skip
+    inventory(leaves)
+    (host,), _, _ = ingest_cli._image_hosts(tmp_path / "mac.dmg", "mac", None)
+    assert host.system_timezone == "Europe/Paris"
+    assert host.zone_note.endswith("; zone from apfs1; applies to the whole container run")

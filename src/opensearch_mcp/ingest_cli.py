@@ -822,7 +822,7 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
     pairs for the volumes no run covers. A host is named from the examiner's
     --hostname or else for the image and its volume, never from a registry.
     """
-    from opensearch_mcp.discover import DiscoveredHost
+    from opensearch_mcp.discover import DiscoveredHost, _valid_zone
     from opensearch_mcp.parse_plaso import plan_image_runs, volume_inventory
 
     leaves, error = volume_inventory(image)
@@ -837,10 +837,15 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
         host.os, host.image_path, host.image_args = run["os"], image, run["args"]
         host.volume_label = run["label"]
         host.artifacts.append(("plaso", image))
-        if run["localtime"] == "link" and run["zone"]:
+        if run["localtime"] == "link" and _valid_zone(run["zone"]):
             host.system_timezone, host.timezone_source = run["zone"], "etc/localtime"
             host.zone_note = (
                 f"time zone {run['zone']} (the volume's etc/localtime, as Plaso read it)"
+            )
+        elif run["localtime"] == "link" and run["zone"]:  # Plaso can't use it either
+            host.zone_note = (
+                f"the volume's etc/localtime names a zone that can't be used ({run['zone']}): "
+                "local-time events stored as recorded"
             )
         elif run["localtime"] == "file":
             host.zone_note = (
@@ -849,6 +854,10 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
             )
         else:
             host.zone_note = "time zone unknown: local-time events stored as recorded"
+        if run.get("zone_volume") and host.timezone_source == "etc/localtime":
+            host.zone_note += (
+                f"; zone from {run['zone_volume']}; applies to the whole container run"
+            )
         hosts.append(host)
         print(f"  {name} ({run['os']}): {run['label']} read straight off the image")
     return hosts, {run["offset"]: h.hostname for run, h in zip(runs, hosts)}, notes
