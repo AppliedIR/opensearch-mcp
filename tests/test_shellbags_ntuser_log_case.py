@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,7 +34,7 @@ def _hive(dirty: bool, bags: int) -> bytes:
     return b"regf" + struct.pack("<II", 7, 6 if dirty else 7) + b"\0" * 20 + b"BAG" * bags
 
 
-def _sbecmd(cmd: list[str], calls: list[list[str]]) -> tuple[str, str]:
+def _sbecmd(cmd: list[str], calls: list[list[str]], writes_logs=False) -> tuple[str, str]:
     """SBECmd's measured behaviour: hives by name at any depth, symlinked files skipped,
     logs only as "<hive name>.LOG1/2" in that exact case; a log holding b"BAD" fails replay."""
     calls.append(cmd)
@@ -58,6 +59,9 @@ def _sbecmd(cmd: list[str], calls: list[list[str]]) -> tuple[str, str]:
                 continue
             if any(b"BAD" in p.read_bytes() for p in found):
                 raise OSError("bad log")
+            for p in found if writes_logs else ():  # a replay that writes to its logs
+                with p.open("ab") as fh:
+                    fh.write(b" replayed")
         except OSError:
             lines.append(f"\tThere was an error processing {f}. {NULL}")
             continue
@@ -92,8 +96,15 @@ def _digest(root: Path) -> dict[str, str]:
     }
 
 
-def _scan(profile: Path) -> tuple[dict, list[list[str]]]:
+def _scan(profile: Path, replay=None, writes_logs=False) -> tuple[dict, list[list[str]]]:
+    """replay: what the second SBECmd run raises."""
     calls: list[list[str]] = []
+
+    def run(cmd, label):
+        if replay is not None and calls:
+            calls.append(cmd)
+            raise replay
+        return _sbecmd(cmd, calls, writes_logs)
 
     def ingest_csv(csv_path, **kw):
         return len(csv_path.read_text().splitlines()) - 1, 0, 0
@@ -106,7 +117,7 @@ def _scan(profile: Path) -> tuple[dict, list[list[str]]]:
     client.count.side_effect = Exception("no index")
     with (
         patch("opensearch_mcp.ingest.sha256_file", return_value="h"),
-        patch("opensearch_mcp.tools._run_tool", side_effect=lambda c, label: _sbecmd(c, calls)),
+        patch("opensearch_mcp.tools._run_tool", side_effect=run),
         patch("opensearch_mcp.tools.ingest_csv", side_effect=ingest_csv),
     ):
         ingest(
@@ -194,3 +205,31 @@ def test_an_unreadable_ntuser_keeps_the_other_hives_rows(tmp_path, status_dir):
     assert _detail(status).startswith("5 docs submitted")
     (w,) = status["warnings"]
     assert f"{profile}/NTUSER.DAT (There was an error processing " in w
+
+
+@pytest.mark.parametrize(
+    "replay",
+    [
+        RuntimeError("SBECmd failed (exit 1): Unhandled exception"),
+        subprocess.TimeoutExpired(["SBECmd"], 7200),
+    ],
+    ids=["non-zero-exit", "timeout"],
+)
+def test_a_replay_that_exits_with_an_error_keeps_the_first_run_s_rows(
+    tmp_path, status_dir, replay
+):
+    profile = _profile(tmp_path)
+    status, calls = _scan(profile, replay=replay)
+    assert len(calls) == 2
+    assert _detail(status).startswith("5 docs submitted")  # UsrClass's rows
+    (w,) = status["warnings"]
+    assert f"{profile}/NTUSER.DAT (its transaction logs couldn't be replayed: " in w
+    assert "vhir-shellbags-" not in w
+
+
+def test_a_replay_that_writes_to_its_logs_leaves_the_evidence_unchanged(tmp_path, status_dir):
+    profile = _profile(tmp_path, logs=("ntuser.dat.LOG1", "ntuser.dat.LOG2"))
+    before = _digest(profile)
+    status, _ = _scan(profile, writes_logs=True)
+    assert _detail(status).startswith("8 docs submitted")
+    assert _digest(profile) == before

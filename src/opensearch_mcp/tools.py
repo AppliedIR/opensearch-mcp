@@ -295,7 +295,8 @@ def _tool_errors(stdout: str, artifact_path: Path) -> list[str]:
 
 def _recased_ntuser(profile: Path, view: Path) -> tuple[Path, Path] | None:
     """Copy a dirty NTUSER.DAT whose logs Windows named in another case (ntuser.dat.LOG1),
-    and link the logs under the hive's own name, the only one SBECmd looks for on Linux."""
+    with its logs under the hive's own name, the only one SBECmd looks for on Linux. The
+    logs are copied too, so a replay never opens a file in the evidence."""
     try:
         hive = resolve_case_insensitive(profile, "NTUSER.DAT")
         if hive is None or not hive.is_file():
@@ -309,7 +310,7 @@ def _recased_ntuser(profile: Path, view: Path) -> tuple[Path, Path] | None:
         view.mkdir()
         shutil.copyfile(hive, view / hive.name)
         for p in logs:
-            (view / (hive.name + p.name[len(hive.name) :].upper())).symlink_to(p.absolute())
+            shutil.copyfile(p, view / (hive.name + p.name[len(hive.name) :].upper()))
         return hive, view
     except OSError:
         return None  # SBECmd's own run already reported what it couldn't read
@@ -378,16 +379,27 @@ def run_and_ingest(
             if tool_name == "shellbags"
             else None
         )
+        replay_failed = ""
         if fixed:
             hive, view = fixed
-            cmd = [cfg.binary, "-d", str(view), "--csv", tmpdir]
-            more = _run_tool(cmd, cfg.binary)[0].replace(str(view / hive.name), str(hive))
+            replay = Path(tmpdir) / "replay"
+            replay.mkdir()
+            cmd = [cfg.binary, "-d", str(view), "--csv", str(replay)]
+            try:
+                more = _run_tool(cmd, cfg.binary)[0].replace(str(view / hive.name), str(hive))
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+                # The first run's rows (UsrClass) are still ingested; NTUSER is named
+                why = str(e).replace(str(view / hive.name), str(hive)).replace(tmpdir, "…")
+                replay_failed = f"{hive} (its transaction logs couldn't be replayed: {why})"
+            else:  # only a replay that finished adds its rows
+                for csv_file in replay.glob("*.csv"):
+                    csv_file.rename(Path(tmpdir) / csv_file.name)
         if not_read is not None:
             not_read.extend(_failed_files(_stdout, tool_name))
             errors = _tool_errors(_stdout, artifact_path)
             if fixed:
                 errors = [e for e in errors if not e.startswith(f"{hive} (")]
-                errors += _tool_errors(more, hive)
+                errors += [replay_failed] if replay_failed else _tool_errors(more, hive)
             not_read.extend(errors)
             if tool_name in ("lnk", "jumplists"):
                 walk = os.walk(
