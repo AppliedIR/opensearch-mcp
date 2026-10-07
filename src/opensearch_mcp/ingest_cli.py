@@ -1184,7 +1184,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         elif container_type in ("ewf", "raw", "nbd"):
             tmpdir = make_ingest_tmpdir(case_id)
-            print(f"Mounting {input_path.name}...")
+            print(f"Mounting {input_path.name}...", flush=True)
             image_id = _image_id(input_path.stem, input_path, _case_dir_for(case_id))
             volumes = mount_image(input_path, tmpdir, mount_ctx)
             image_hosts, image_covered, image_notes = _image_hosts(

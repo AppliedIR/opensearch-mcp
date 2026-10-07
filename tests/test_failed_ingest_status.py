@@ -100,9 +100,12 @@ def test_an_image_that_cannot_be_mounted(case, monkeypatch, tmp_path):
     assert resp["status"] == "started", resp
     status = _final()
     assert status["status"] == "failed", status
-    tail = status["log_tail"]
-    assert "Mounting disk.raw..." in tail, status
-    assert any("'fdisk'" in line for line in tail), status
+    assert status["log_tail"], status
+    # The whole log: a short tail can start after the mount line
+    log = Path(status["log_file"]).read_text().splitlines()
+    assert "Mounting disk.raw..." in log, status
+    mounting = log.index("Mounting disk.raw...")
+    assert any("'fdisk'" in line for line in log[mounting:]), status  # the mount said why
 
 
 def test_a_worker_that_runs_still_goes_running_then_complete(case, monkeypatch, tmp_path):
