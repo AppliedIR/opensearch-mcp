@@ -19,6 +19,17 @@ from opensearch_mcp.parse_csv import _doc_id
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
+
+def _strip_root(value: str, prefix: str) -> str:
+    """value with the volume root removed where it leads: at the start, or
+    right after Plaso's "OS:". The root's text anywhere else is left alone."""
+    if value.startswith(prefix):
+        return value[len(prefix) :]
+    if value.startswith("OS:" + prefix):
+        return "OS:" + value[3 + len(prefix) :]
+    return value
+
+
 # Plaso internal metadata fields — excluded from content hash for dedup stability.
 _PLASO_VOLATILE_KEYS = {
     "__container_type__",
@@ -124,11 +135,11 @@ def _ingest_jsonl(
             except json.JSONDecodeError:
                 continue
 
-            if prefix:  # message too: filestat's names the file by its full path
+            if prefix:  # message too: filestat's starts with OS:<the file's full path>
                 for key in ("filename", "display_name", "message"):
                     value = record.get(key)
-                    if isinstance(value, str) and prefix in value:
-                        record[key] = value.replace(prefix, "")
+                    if isinstance(value, str):
+                        record[key] = _strip_root(value, prefix)
             if volume is not None:
                 record["vhir.volume"] = volume
             record["host.name"] = hostname

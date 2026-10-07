@@ -958,7 +958,7 @@ def _ingest_plaso_volume(
     # gave --source-timezone, which wins for every host.
     override = host.timezone_source == EXAMINER_ZONE
     zone = None if image and not override else _valid_zone(host.system_timezone)
-    zone_note = "" if override else host.zone_note
+    zone_note = "" if override and not image else host.zone_note
     # Linux and macOS: root's read capability when sudo is there, so files
     # only root can read (auth.log, /root) are parsed; else the examiner.
     read_as_root = not image and host.os != "windows" and can_sudo()

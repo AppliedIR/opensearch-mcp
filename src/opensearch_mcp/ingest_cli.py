@@ -854,6 +854,31 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
     return hosts, {run["offset"]: h.hostname for run, h in zip(runs, hosts)}, notes
 
 
+def _apply_zone_override(hosts: list, zone: str) -> None:
+    """The examiner's --source-timezone, for every host it can reach. Plaso
+    applies a zone it finds on an image volume (an etc/localtime link) ahead
+    of --timezone, so there the override isn't passed, and the status says
+    which zone was used."""
+    from opensearch_mcp.discover import EXAMINER_ZONE
+
+    for h in hosts:
+        if h.image_path is not None and h.timezone_source == "etc/localtime":
+            h.zone_note = (
+                "examiner time-zone override not applied: Plaso used this volume's own "
+                f"zone ({h.system_timezone}, from etc/localtime)"
+            )
+            continue
+        if h.image_path is not None:  # passed to Plaso; a copied etc/localtime may still win
+            copy = h.zone_note.startswith("etc/localtime is not a link")
+            h.zone_note = f"time zone {zone} (examiner override)" + (
+                "; this volume's etc/localtime is a copy, and a zone Plaso reads from it "
+                "would be used instead"
+                if copy
+                else ""
+            )
+        h.system_timezone, h.timezone_source = zone, EXAMINER_ZONE
+
+
 def _covered_names(mount_ctx, covered: dict) -> dict:
     """{mounted volume: the image host that reads it instead}."""
     return {v: covered[off] for v, off in mount_ctx.offsets.items() if off in covered}
@@ -1248,11 +1273,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         # Apply --source-timezone override to all hosts (priority 1)
         if tz_override:
-            from opensearch_mcp.discover import EXAMINER_ZONE
-
             print(f"  Source timezone: {tz_override}")
-            for h in hosts:
-                h.system_timezone, h.timezone_source = tz_override, EXAMINER_ZONE
+            _apply_zone_override(hosts, tz_override)
 
         if not getattr(args, "yes", False):
             try:

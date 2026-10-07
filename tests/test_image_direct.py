@@ -445,7 +445,7 @@ def test_the_folder_timeline_message_is_relative_so_ids_survive_a_move(tmp_path,
         root.mkdir(parents=True)
         full = f"{root.resolve()}/etc/passwd"
         record = {"data_type": "fs:stat", "parser": "filestat", "filename": full,
-                  "display_name": f"OS:{full}", "message": f"{full} Type: file",
+                  "display_name": f"OS:{full}", "message": f"OS:{full} Type: file",
                   "timestamp": 1791280801000000}  # fmt: skip
         jsonl = tmp_path / f"{len(ids)}.jsonl"
         jsonl.write_text(json.dumps(record) + "\n")
@@ -453,27 +453,38 @@ def test_the_folder_timeline_message_is_relative_so_ids_survive_a_move(tmp_path,
         _ingest_jsonl(jsonl, None, "case-c1-plaso-h", "h", volume_root=root)
         ids += [d["_id"] for d in sent[start:]]
     assert ids[0] == ids[1]
-    assert sent[0]["_source"]["message"] == "etc/passwd Type: file"
+    assert sent[0]["_source"]["message"] == "OS:etc/passwd Type: file"
 
 
-def test_an_examiner_zone_wins_over_the_volumes_own(tmp_path, monkeypatch):
-    from opensearch_mcp import ingest
-    from opensearch_mcp.discover import EXAMINER_ZONE
-    from opensearch_mcp.results import HostResult
-
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+def _image_host(tmp_path, zone=None, localtime=""):
     image = tmp_path / "dual.raw"
     host = DiscoveredHost(hostname="img-p2-lvm1", volume_root=image)
     host.os, host.image_path, host.volume_label = "linux", image, "p2:lvm1"
     host.image_args = ["--partitions", "2", "--volumes", "1", "--vss_stores", "none"]
-    host.zone_note = "the volume's own zone"
-    host.system_timezone, host.timezone_source = "Europe/Berlin", EXAMINER_ZONE
+    if zone:
+        host.system_timezone, host.timezone_source = zone, "etc/localtime"
+        host.zone_note = f"time zone {zone} (the volume's etc/localtime, as Plaso read it)"
+    elif localtime == "file":
+        host.zone_note = (
+            "etc/localtime is not a link: Plaso may have used UTC or a fixed-offset abbreviation"
+        )
+    else:
+        host.zone_note = "time zone unknown: local-time events stored as recorded"
+    return host
+
+
+def _plaso_status_of(tmp_path, monkeypatch, host, jsonl_text=""):
+    """Run the plaso artifact for host with Plaso replaced; return (zone passed, entry)."""
+    from opensearch_mcp import ingest
+    from opensearch_mcp.results import HostResult
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     seen = []
 
     def run(parsers, source, workdir, read_as_root, zone, extra=()):
         seen.append(zone)
         jsonl = workdir / "out.jsonl"
-        jsonl.write_text("")
+        jsonl.write_text(jsonl_text)
         return jsonl, {}
 
     monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
@@ -491,10 +502,96 @@ def test_an_examiner_zone_wins_over_the_volumes_own(tmp_path, monkeypatch):
         None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,
         lambda: None,
     )  # fmt: skip
-    assert seen == ["Europe/Berlin"]
     (entry,) = status[0]["artifacts"]
+    return seen[0], entry
+
+
+def test_an_override_never_claims_a_volume_whose_zone_plaso_uses(tmp_path, monkeypatch):
+    host = _image_host(tmp_path, zone="America/New_York")
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    zone, entry = _plaso_status_of(tmp_path, monkeypatch, host)
+    assert zone is None
+    assert (
+        "examiner time-zone override not applied: Plaso used this volume's own zone "
+        "(America/New_York, from etc/localtime)"
+    ) in entry["note"]
+    assert "(examiner override)" not in entry["note"]
+
+
+@pytest.mark.parametrize(
+    "localtime, extra",
+    [("", ""), ("file", "this volume's etc/localtime is a copy")],
+    ids=["no zone file", "a copied zone file"],
+)
+def test_an_override_reaches_a_volume_with_no_zone_plaso_finds(
+    tmp_path, monkeypatch, localtime, extra
+):
+    host = _image_host(tmp_path, localtime=localtime)
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    zone, entry = _plaso_status_of(tmp_path, monkeypatch, host)
+    assert zone == "Europe/Berlin"
     assert "time zone Europe/Berlin (examiner override)" in entry["note"]
-    assert "the volume's own zone" not in entry["note"]
+    assert extra in entry["note"]
+
+
+def test_an_override_reaches_a_folder(tmp_path):
+    from opensearch_mcp.discover import EXAMINER_ZONE
+
+    host = DiscoveredHost(hostname="srv01", volume_root=_linux_root(tmp_path / "srv01"))
+    host.os, host.system_timezone, host.timezone_source = "linux", "Asia/Tokyo", "etc/localtime"
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    assert (host.system_timezone, host.timezone_source) == ("Europe/Berlin", EXAMINER_ZONE)
+
+
+def test_the_roots_text_elsewhere_in_a_path_is_left_alone(tmp_path, sent):
+    root = tmp_path / "srv01"
+    root.mkdir()
+    r = str(root.resolve())
+    inner = f"home/u/backup{r}/notes.txt"  # the root's text again, inside the volume
+    record = {"data_type": "fs:stat", "parser": "filestat", "filename": f"{r}/{inner}",
+              "display_name": f"OS:{r}/{inner}", "message": f"OS:{r}/{inner} Type: file",
+              "timestamp": 1791280801000000}  # fmt: skip
+    jsonl = tmp_path / "x.jsonl"
+    jsonl.write_text(json.dumps(record) + "\n")
+    _ingest_jsonl(jsonl, None, "case-c1-plaso-h", "h", volume_root=root)
+    src = sent[0]["_source"]
+    assert src["filename"] == inner and src["vhir.source_file"] == inner
+    assert src["display_name"] == f"OS:{inner}"
+    assert src["message"] == f"OS:{inner} Type: file"
+
+
+@needs_plaso
+def test_a_new_york_volume_keeps_its_zone_under_a_berlin_override(tmp_path, monkeypatch, sent):
+    image = _image("tz_ny_rel.ext4")
+    (host,), _, _ = ingest_cli._image_hosts(image, "ny", None)
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    from opensearch_mcp import ingest
+    from opensearch_mcp.results import HostResult
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
+
+    class Audit:
+        def _next_audit_id(self):
+            return "aid-1"
+
+        def log(self, **kw):
+            pass
+
+    ingest._ingest_plaso_volume(
+        None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,
+        lambda: None,
+    )  # fmt: skip
+    (entry,) = status[0]["artifacts"]
+    assert "override not applied" in entry["note"] and "America/New_York" in entry["note"]
+    first = [
+        d["_source"]
+        for d in sent
+        if d["_source"].get("vhir.source_file") == "var/log/auth.log"
+        and d["_source"].get("parser") == "text/syslog_traditional"
+    ]
+    assert min(d["@timestamp"] for d in first) == "2026-10-06T14:00:01+00:00"  # 10:00:01 EDT
 
 
 def test_a_plaso_note_survives_the_rebuilt_status():
