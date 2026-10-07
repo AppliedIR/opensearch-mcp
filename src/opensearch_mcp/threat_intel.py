@@ -564,7 +564,8 @@ def _unconfirmed_why(resp: dict, value: str) -> str:
 
 def _rate_limited(resp: dict) -> str:
     """The rate-limit message in a reply, or "": a query-limit error, or an
-    UNAVAILABLE whose providers were rate-limited (and none failed otherwise)."""
+    UNAVAILABLE with a rate-limited provider (waited out and retried even
+    when another provider is down)."""
     if resp.get("error"):
         msg = str(resp.get("message") or resp["error"])
         return msg if _is_rate_limit(msg) else ""
@@ -572,12 +573,17 @@ def _rate_limited(resp: dict) -> str:
         return ""
     reasons = [
         str(block.get("reason") or "")
-        for block in (resp.get("providers") or {}).values()
+        for block in _providers(resp).values()
         if isinstance(block, dict) and block.get("outcome") == UNAVAILABLE
     ]
-    if reasons and all(_is_rate_limit(r) for r in reasons):
-        return "; ".join(reasons)
-    return ""
+    return "; ".join(r for r in reasons if _is_rate_limit(r))
+
+
+def _providers(resp: dict) -> dict:
+    """The reply's per-provider answers; {} when it has none or they aren't
+    an object (that reply is then malformed, see batch_lookup)."""
+    providers = resp.get("providers")
+    return providers if isinstance(providers, dict) else {}
 
 
 def batch_lookup(
@@ -691,7 +697,7 @@ def batch_lookup(
 
                 # Each provider's own run of failures (a provider that
                 # answered resets its count, whatever another one did)
-                for name, block in (resp.get("providers") or {}).items():
+                for name, block in _providers(resp).items():
                     if isinstance(block, dict):
                         if block.get("outcome") == UNAVAILABLE:
                             provider_failures[name] = provider_failures.get(name, 0) + 1
@@ -699,12 +705,17 @@ def batch_lookup(
                             provider_failures[name] = 0
 
                 outcome = resp.get("outcome")
-                confirmed = (
+                malformed = "providers" in resp and not isinstance(resp["providers"], dict)
+                confirmed = not malformed and (
                     not resp.get("error") and outcome in _CONFIRMED and resp.get("ioc") == value
                 )
                 if not confirmed:
-                    why = _unconfirmed_why(resp, value)
-                    if outcome != UNAVAILABLE or resp.get("error"):
+                    why = (
+                        "malformed reply: its providers aren't an object"
+                        if malformed
+                        else _unconfirmed_why(resp, value)
+                    )
+                    if malformed or outcome != UNAVAILABLE or resp.get("error"):
                         backend_failures += 1
                     else:
                         backend_failures = 0  # the backend answered
@@ -794,24 +805,33 @@ ctx._source[key] = entries;
 """
 
 
-def clear_legacy_stamps(client: OpenSearch, index_pattern: str) -> int:
+def clear_legacy_stamps(client: OpenSearch, index_pattern: str) -> tuple[int, int]:
     """Remove an older release's one-IOC-per-document stamp keys (only those
-    keys), in one request; returns the documents changed."""
-    result = client.update_by_query(
-        index=index_pattern,
-        body={
-            "query": {"exists": {"field": "threat_intel.ioc_value"}},
-            "script": {
-                "source": "for (k in params.keys) { ctx._source.remove(k) }",
-                "lang": "painless",
-                "params": {"keys": list(_LEGACY_KEYS)},
+    keys); returns (documents cleared, documents left on a version conflict
+    after one retry)."""
+
+    def clear() -> dict:
+        return client.update_by_query(
+            index=index_pattern,
+            body={
+                "query": {"exists": {"field": "threat_intel.ioc_value"}},
+                "script": {
+                    "source": "for (k in params.keys) { ctx._source.remove(k) }",
+                    "lang": "painless",
+                    "params": {"keys": list(_LEGACY_KEYS)},
+                },
             },
-        },
-        request_timeout=300,
-        conflicts="proceed",
-        refresh=True,
-    )
-    return result.get("updated", 0)
+            request_timeout=300,
+            conflicts="proceed",
+            refresh=True,
+        )
+
+    result = clear()
+    cleared = result.get("updated", 0)
+    if result.get("version_conflicts", 0):
+        result = clear()  # the documents still carrying a stamp, once more
+        cleared += result.get("updated", 0)
+    return cleared, result.get("version_conflicts", 0)
 
 
 def stamp_documents(
@@ -987,6 +1007,14 @@ def enrich_case(
         client, index_pattern, force=force, include_filesystem=include_filesystem, capped=capped
     )
 
+    # Under force, an older release's one-IOC stamps are cleared first (even
+    # when no IOC is left to look up): the run then gives those documents
+    # per-IOC entries
+    legacy_cleared, legacy_left = clear_legacy_stamps(client, index_pattern) if force else (0, 0)
+    legacy_reason = (
+        f"{legacy_left} legacy stamps not cleared (version conflicts)" if legacy_left else ""
+    )
+
     total_iocs = sum(len(v) for v in iocs.values())
     if on_progress:
         on_progress(
@@ -997,11 +1025,16 @@ def enrich_case(
         )
 
     if total_iocs == 0:
-        if capped:
-            raise IntelEnrichmentHalted(_capped_reason(capped))
+        if capped or legacy_reason:
+            raise IntelEnrichmentHalted(
+                "; ".join(
+                    r for r in (_capped_reason(capped) if capped else "", legacy_reason) if r
+                )
+            )
         return {
             "status": "no_iocs",
             "message": "No external IOCs found in indexed data",
+            "legacy_stamps_cleared": legacy_cleared,
         }
 
     if on_progress:
@@ -1013,10 +1046,6 @@ def enrich_case(
     matched = outcomes.count(MATCH)
     not_found = outcomes.count(NO_MATCH)
     unavailable = outcomes.count(UNAVAILABLE)
-
-    # Under force, an older release's one-IOC stamps are cleared first: the
-    # run then gives those documents per-IOC entries
-    legacy_cleared = clear_legacy_stamps(client, index_pattern) if force else 0
 
     if on_progress:
         on_progress("stamping", matched=matched)
@@ -1037,7 +1066,11 @@ def enrich_case(
     }
     # Complete only when every IOC had a confirmed lookup and every stamp
     # landed. A run that looked nothing up read "complete, 0 malicious".
-    reason = _incomplete(iocs, coverage, conflicts, failed_stamps, capped)
+    reason = "; ".join(
+        r
+        for r in (_incomplete(iocs, coverage, conflicts, failed_stamps, capped), legacy_reason)
+        if r
+    )
     if reason:
         raise IntelEnrichmentHalted(reason, summary={"status": "incomplete", **counts})
 

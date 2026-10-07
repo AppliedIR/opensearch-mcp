@@ -360,3 +360,77 @@ def test_a_document_never_answered_stays_unchecked_and_is_asked_again(os_client,
     assert gateway.asked == [REVOKED] * 3  # extracted again each run
     assert "threat_intel.checked" not in source
     assert [e["outcome"] for e in source["threat_intel.iocs"]] == ["UNAVAILABLE"]
+
+
+class TestFixRound:
+    def test_a_rate_limited_provider_is_retried_while_another_is_down(self, quick):
+        quick.setenv("VHIR_INTEL_BREAKER_THRESHOLD", "3")
+        asked: list[str] = []
+
+        def call_tool(tool, params, timeout=15):
+            ioc = params["ioc"]
+            asked.append(ioc)
+            down = block("UNAVAILABLE", reason="can't reach OpenCTI")
+            if asked.count(ioc) == 1:  # MISP rate-limits the first try
+                limited = "MISP rate-limited the lookup: Too Many Requests (HTTP 429)"
+                return reply(ioc, {"opencti": down, "misp": block("UNAVAILABLE", reason=limited)})
+            return reply(ioc, {"opencti": down, "misp": block("MATCH", [{"value": ioc}])})
+
+        quick.setattr("opensearch_mcp.gateway.gateway_available", lambda: True)
+        quick.setattr("opensearch_mcp.gateway.call_tool", call_tool)
+        values = {f"{i}.0.113.1" for i in range(11, 21)}
+        results = threat_intel.batch_lookup({"ip": values})
+        coverage = results.pop("_intel_coverage")
+        assert "circuit_breaker_halt" not in coverage["skipped"].values()
+        assert len(asked) == 20  # each IOC retried once for MISP
+        assert {r["entry"]["outcome"] for r in results.values()} == {"MATCH"}
+
+    def test_a_reply_whose_providers_arent_an_object_is_that_iocs_only(self, quick):
+        def call_tool(tool, params, timeout=15):
+            ioc = params["ioc"]
+            if ioc == "11.0.113.11":
+                return {"ioc": ioc, "outcome": "MATCH", "providers": ["not", "a", "map"]}
+            return not_found(ioc)
+
+        quick.setattr("opensearch_mcp.gateway.gateway_available", lambda: True)
+        quick.setattr("opensearch_mcp.gateway.call_tool", call_tool)
+        results = threat_intel.batch_lookup({"ip": {"11.0.113.11", "11.0.113.12"}})
+        coverage = results.pop("_intel_coverage")
+        bad = results["11.0.113.11"]
+        assert bad["confirmed"] is False and bad["entry"]["outcome"] == "UNAVAILABLE"
+        assert "malformed" in coverage["skipped"]["11.0.113.11"]
+        assert results["11.0.113.12"]["entry"]["outcome"] == "NO_MATCH"
+
+    def test_the_forced_clear_retries_once_on_a_conflict(self):
+        from unittest.mock import MagicMock
+
+        client = MagicMock()
+        client.update_by_query.side_effect = [
+            {"updated": 3, "version_conflicts": 2},
+            {"updated": 1, "version_conflicts": 1},
+        ]
+        assert threat_intel.clear_legacy_stamps(client, "case-x-*") == (4, 1)
+        assert client.update_by_query.call_count == 2
+
+    def test_stamps_left_by_a_conflict_keep_the_run_incomplete(self, quick):
+        quick.setattr(threat_intel, "clear_legacy_stamps", lambda client, pattern: (4, 2))
+        quick.setattr(
+            threat_intel,
+            "extract_unique_iocs",
+            lambda *a, **k: {"ip": {}, "hash": {}, "domain": {}},
+        )
+        with pytest.raises(
+            threat_intel.IntelEnrichmentHalted, match="2 legacy stamps not cleared"
+        ):
+            threat_intel.enrich_case(object(), "C-1", force=True)
+
+
+@pytest.mark.integration
+def test_a_forced_run_with_no_iocs_left_still_clears_older_stamps(os_client, quick):
+    docs = {"json-old": [{**LEGACY, "Note": "its IOC field is gone"}]}
+    FakeGateway(not_found).install(quick)
+    with intel_case(os_client, docs, prefix="pytest-noiocs") as case_id:
+        summary = threat_intel.enrich_case(os_client, case_id, force=True)
+        (source,) = _sources(os_client, case_id)
+    assert summary["status"] == "no_iocs" and summary["legacy_stamps_cleared"] == 1
+    assert not [k for k in LEGACY if k in source]
