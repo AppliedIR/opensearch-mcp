@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -734,15 +735,25 @@ def _rebuilt_status_host(h) -> dict:
     return {"hostname": h.hostname, "artifacts": arts}
 
 
-def _volume_host_name(image_stem: str, volume: Path) -> str:
-    """A volume's host name when the image gives no one name: the image's own
-    name and the volume, so two images' vol1 never become one host."""
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", image_stem).strip("-.") or "image"
-    return f"{stem}-{volume.name}"
+def _image_id(stem: str, key: Path) -> str:
+    """A disk image's name for its volume hosts: its stem and a short hash of
+    its resolved path, the same on every ingest of that file and different for
+    any other file (another folder, or a stem that differs only in case or
+    punctuation). For an image from an archive, `key` is the archive's path
+    joined with the image's name, since its extracted copy moves every run."""
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-.") or "image"
+    digest = hashlib.sha256(str(Path(key).resolve()).encode()).hexdigest()[:8]
+    return f"{clean}-{digest}"
+
+
+def _volume_host_name(image_id: str, volume: Path) -> str:
+    """A volume's host name when the image gives no one name, so two images'
+    vol1 never become one host."""
+    return f"{image_id}-{volume.name}"
 
 
 def _hostname_from_volumes(
-    volumes: list[Path], notes: list[tuple[str, str]], image_stem: str
+    volumes: list[Path], notes: list[tuple[str, str]], image_id: str
 ) -> str | None:
     """The registry hostname, taken only when exactly one volume holds a Windows
     install. With two or more (a dual boot), no name is forced: each install is
@@ -755,7 +766,7 @@ def _hostname_from_volumes(
     installs = [v for v in volumes if resolve_case_insensitive(v, _WINDOWS_SENTINEL)]
     if len(installs) > 1:
         found = ", ".join(f"{v.name}: {detect_hostname_from_volume(v) or '?'}" for v in installs)
-        names = ", ".join(_volume_host_name(image_stem, v) for v in installs)
+        names = ", ".join(_volume_host_name(image_id, v) for v in installs)
         note = (
             f"{len(installs)} Windows installs on this image ({found}); each is ingested "
             f"as its own host ({names}). Pass --hostname only if they are one machine"
@@ -776,9 +787,7 @@ def _hostname_from_volumes(
     return detected
 
 
-def _discover_volumes(
-    volumes: list[Path], hostname, force_hostname: bool, image_stem: str
-) -> list:
+def _discover_volumes(volumes: list[Path], hostname, force_hostname: bool, image_id: str) -> list:
     """Hosts on each mounted volume of a disk image, so every install is found
     (a scan of their shared parent finds only the first). With no hostname for
     the image, a host named after its volume (vol1) is named for the image too."""
@@ -788,7 +797,7 @@ def _discover_volumes(
         if not hostname:
             for h in found:
                 if h.hostname == v.name:
-                    h.hostname = _volume_host_name(image_stem, v)
+                    h.hostname = _volume_host_name(image_id, v)
         hosts += found
     return hosts
 
@@ -864,7 +873,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     scan_root = input_path
     vss_volumes: list = []
     volumes: list = []  # a disk image's mounted volumes
-    image_stem = ""  # the disk image's file name, without its suffix
+    image_id = ""  # the disk image's name for its volume hosts (_image_id)
     status_notes: list[tuple[str, str]] = []  # warnings for the run's status
 
     # Register cleanup for abnormal exit (OOM kill, unhandled exception)
@@ -894,7 +903,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 ]
                 if extracted_images:
                     img = extracted_images[0]
-                    image_stem = img.stem
+                    image_id = _image_id(img.stem, input_path / img.name)
                     print(f"  Found disk image: {img.name}")
                     # Archive-basename stamp removed per host-identity spec
                     # (silent "admin01-triage" pollution). Registry detect
@@ -923,14 +932,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # (silently-wrong of a different shape). C1 closes
                     # this via batch-discovery + host-unmapped.yaml.
                     if not hostname and volumes:
-                        hostname = _hostname_from_volumes(volumes, status_notes, image_stem)
+                        hostname = _hostname_from_volumes(volumes, status_notes, image_id)
 
                 scan_root = tmpdir
 
         elif container_type in ("ewf", "raw", "nbd"):
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Mounting {input_path.name}...")
-            image_stem = input_path.stem
+            image_id = _image_id(input_path.stem, input_path)
             volumes = mount_image(input_path, tmpdir, mount_ctx)
             if not volumes:
                 print("Error: no partition could be mounted from the disk image.", file=sys.stderr)
@@ -942,7 +951,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # disk images get the real ComputerName, not the filename.
             # Warn on miss — see the archive-path block above for why.
             if not hostname:
-                hostname = _hostname_from_volumes(volumes, status_notes, image_stem)
+                hostname = _hostname_from_volumes(volumes, status_notes, image_id)
 
             # VSS handling
             if vss_flag:
@@ -976,7 +985,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             container_type == "archive" and hostname
         )
         if volumes:  # a disk image: each mounted volume is scanned on its own
-            hosts = _discover_volumes(volumes, hostname, force_hn, image_stem)
+            hosts = _discover_volumes(volumes, hostname, force_hn, image_id)
         else:
             hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 

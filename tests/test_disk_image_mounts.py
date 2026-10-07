@@ -7,7 +7,9 @@ fdisk with real util-linux output and accepts every other call.
 
 from __future__ import annotations
 
+import argparse
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -323,12 +325,13 @@ def test_two_windows_installs_force_no_name_and_are_listed(tmp_path, registry, c
         _volume(tmp_path, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))
     ]
     notes: list = []
-    assert ingest_cli._hostname_from_volumes(volumes, notes, "dual boot") is None
+    assert ingest_cli._hostname_from_volumes(volumes, notes, "dual-boot-0a1b2c3d") is None
     ((label, note),) = notes
     assert label == "hostname"
     assert note.startswith(
         "2 Windows installs on this image (vol1: WIN10A, vol2: WIN11B); each is ingested "
-        "as its own host (dual-boot-vol1, dual-boot-vol2). Pass --hostname only if"
+        "as its own host (dual-boot-0a1b2c3d-vol1, dual-boot-0a1b2c3d-vol2). "
+        "Pass --hostname only if"
     )
     assert note in capsys.readouterr().err
 
@@ -355,11 +358,95 @@ def test_two_dual_boot_images_in_one_case_keep_four_hosts_and_indices(tmp_path):
     from opensearch_mcp import ingest_cli
     from opensearch_mcp.paths import build_index_name
 
-    a = ingest_cli._discover_volumes(_dual_boot(tmp_path / "a"), None, True, "lab-pc")
-    b = ingest_cli._discover_volumes(_dual_boot(tmp_path / "b"), None, True, "kiosk 7")
+    first = ingest_cli._image_id("lab-pc", tmp_path / "lab-pc.raw")
+    second = ingest_cli._image_id("kiosk 7", tmp_path / "kiosk 7.E01")
+    a = ingest_cli._discover_volumes(_dual_boot(tmp_path / "a"), None, True, first)
+    b = ingest_cli._discover_volumes(_dual_boot(tmp_path / "b"), None, True, second)
     names = [h.hostname for h in a + b]
-    assert names == ["lab-pc-vol1", "lab-pc-vol2", "kiosk-7-vol1", "kiosk-7-vol2"]
+    assert [re.sub("-[0-9a-f]{8}-", "-*-", n) for n in names] == [
+        "lab-pc-*-vol1",
+        "lab-pc-*-vol2",
+        "kiosk-7-*-vol1",
+        "kiosk-7-*-vol2",
+    ]
     assert len({build_index_name("c1", "evtx", n) for n in names}) == 4
+
+
+def _names(tmp_path, image_id: str) -> list[str]:
+    from opensearch_mcp import ingest_cli
+
+    vols = _dual_boot(tmp_path / f"m{len(list(tmp_path.glob('m*')))}")
+    return [h.hostname for h in ingest_cli._discover_volumes(vols, None, True, image_id)]
+
+
+def test_two_images_with_the_same_name_in_different_folders_keep_their_own_hosts(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    one = ingest_cli._image_id("disk", tmp_path / "site1" / "disk.E01")
+    two = ingest_cli._image_id("disk", tmp_path / "site2" / "disk.E01")
+    assert not set(_names(tmp_path, one)) & set(_names(tmp_path, two))
+
+
+@pytest.mark.parametrize("stems", [("lab pc", "lab-pc"), ("Alpha", "alpha")])
+def test_image_names_that_differ_only_in_case_or_spacing_keep_their_own_hosts(tmp_path, stems):
+    from opensearch_mcp import ingest_cli
+
+    one, two = (ingest_cli._image_id(s, tmp_path / f"{s}.raw") for s in stems)
+    assert not set(_names(tmp_path, one)) & set(_names(tmp_path, two))
+
+
+def test_the_same_image_gets_the_same_host_names_each_time(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    image = tmp_path / "disk.E01"
+    assert ingest_cli._image_id("disk", image) == ingest_cli._image_id("disk", image)
+    assert re.fullmatch(r"disk-[0-9a-f]{8}", ingest_cli._image_id("disk", image))
+
+
+def test_a_disk_image_inside_an_archive_names_its_hosts_after_the_image(tmp_path, monkeypatch):
+    import opensearch_mcp.containers as C
+    from opensearch_mcp import ingest_cli
+
+    work = tmp_path / "work"
+    work.mkdir()
+    archive = tmp_path / "evidence" / "collection.zip"
+    archive.parent.mkdir()
+    archive.write_bytes(b"PK")
+
+    def extract(path, dest, password=None):
+        (dest / "dual.raw").write_bytes(b"\0")
+
+    def mount(img, dest, ctx):
+        return _dual_boot(dest / "mnt")
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def preflight(case_id, scan_root, hosts):
+        seen["hosts"] = [h.hostname for h in hosts]
+        raise Stop
+
+    monkeypatch.setattr(C, "detect_container", lambda p: "archive")
+    monkeypatch.setattr(C, "cleanup_orphaned_mounts", lambda: None)
+    monkeypatch.setattr(C, "extract_container", extract)
+    monkeypatch.setattr(C, "is_velociraptor_collection", lambda p: False)
+    monkeypatch.setattr(C, "make_ingest_tmpdir", lambda case_id: work)
+    monkeypatch.setattr(C, "mount_image", mount)
+    monkeypatch.setattr(C, "cleanup_tmpdir", lambda *a, **k: None)
+    monkeypatch.setattr(ingest_cli, "_preflight_host_discovery", preflight)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "c1")
+    monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda c: None)
+    import opensearch_mcp.hostname as hn
+
+    monkeypatch.setattr(hn, "detect_hostname_from_volume", lambda v: None)
+    args = argparse.Namespace(path=str(archive), case="c1", yes=True, hostname=None)
+    with pytest.raises(Stop):
+        ingest_cli.cmd_scan(args)
+    want = ingest_cli._image_id("dual", archive / "dual.raw")
+    assert seen["hosts"] == [f"{want}-vol1", f"{want}-vol2"]
+    assert want.startswith("dual-")
 
 
 def test_a_one_install_image_with_a_registry_name_keeps_it(tmp_path):
