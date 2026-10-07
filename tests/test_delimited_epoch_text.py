@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from opensearch_mcp import parse_delimited
-from opensearch_mcp.paths import TIME_NOT_UNDERSTOOD, no_time_field_note
+from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, no_time_field_note
 
 
 def _stamp(tmp_path, monkeypatch, column, value, zeek=False):
@@ -34,6 +34,7 @@ def _stamp(tmp_path, monkeypatch, column, value, zeek=False):
     else:
         path = tmp_path / "events.csv"
         path.write_text(f"{column},note\n{value},x\n")
+    NO_TIME_FIELD.clear()  # this run's notes only, as the CLI starts each run
     TIME_NOT_UNDERSTOOD.clear()
     parse_delimited.ingest_delimited(path, None, "case-x-delimited-h", "h")
     (doc,) = [a["_source"] for a in sent]
