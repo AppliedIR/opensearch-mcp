@@ -58,8 +58,11 @@ def _stamps(tmp_path, dates, zone):
         ("2005-10-11T13:21:17-08:00", "2005-10-11T21:21:17Z"),
         ("2023-01-17T10:48:01.1234567-05:00", "2023-01-17T15:48:01.123456Z"),
         ("2023-01-17T10:48:01-0500", "2023-01-17T15:48:01Z"),
+        ("2023-01-29T08:00:00+05:30", "2023-01-29T02:30:00Z"),
+        ("2023-01-29T08:00:00+0530", "2023-01-29T02:30:00Z"),
+        ("2023-01-17T10:48:01.5+01:00", "2023-01-17T09:48:01.500000Z"),
     ],
-    ids=["-08:00", "fraction and -05:00", "-0500"],
+    ids=["-08:00", "fraction and -05:00", "-0500", "+05:30", "+0530", "fraction and +01:00"],
 )
 def test_a_date_with_its_own_offset_needs_no_time_zone(tmp_path, date, expected):
     stamps, notes = _stamps(tmp_path, [date], None)
@@ -142,7 +145,7 @@ def test_anchor_a_known_zone_converts_as_before_with_no_note(tmp_path, monkeypat
     assert stamps == sorted(
         [
             "2014-01-01T05:00:00Z",
-            "2005-06-23T13:48:00+05:30",
+            "2005-06-23T08:18:00Z",  # its own offset, as a negative one is
             "2024-03-04T05:06:07Z",
             "2023-01-17T15:48:01Z",
         ]
@@ -159,3 +162,10 @@ def test_an_out_of_range_date_is_counted_and_the_rest_ingested(tmp_path, zone):
     )
     assert sorted(stamps, key=str) == sorted([None, "2005-10-11T21:21:17Z"], key=str)
     assert any("1 task(s)" in n and "out of range" in n for n in notes), notes
+
+
+def test_a_positive_offset_wins_over_a_known_zone_as_a_negative_one_does(tmp_path):
+    stamps, _ = _stamps(
+        tmp_path, ["2023-01-29T08:00:00+05:30", "2005-10-11T13:21:17-08:00"], "America/New_York"
+    )
+    assert stamps == ["2023-01-29T02:30:00Z", "2005-10-11T21:21:17Z"]

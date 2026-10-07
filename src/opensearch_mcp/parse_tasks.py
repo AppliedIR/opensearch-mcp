@@ -135,7 +135,7 @@ def parse_tasks_dir(
         # Convert local timestamp to UTC
         if "@timestamp" in doc:
             ts_str = doc["@timestamp"]
-            if ts_str and not ts_str.endswith("Z") and "+" not in ts_str:
+            if ts_str and not ts_str.endswith("Z"):  # an offset of either sign converts
                 if tz_info or _OFFSET.search(ts_str):
                     try:
                         from datetime import datetime
