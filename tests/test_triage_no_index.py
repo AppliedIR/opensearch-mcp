@@ -16,13 +16,16 @@ from unittest.mock import patch
 
 import pytest
 from opensearchpy.exceptions import NotFoundError
+from sift_common import host_identity
 
 from opensearch_mcp import triage_remote as tr
 from opensearch_mcp import write_context as wc
 
+CASE = f"triage-{uuid.uuid4().hex[:8]}"  # a case of this release: no pre-0.7 indices
+
 
 def v2(artifact_type: str) -> str:
-    return f"case-{wc.case_identity(wc.case_dir_for('c1'))[0]}-{artifact_type}-0"
+    return f"case-{host_identity.ensure_case_uuid(wc.case_dir_for(CASE), 2)[0]}-{artifact_type}-0"
 
 
 class _OpenSearch:
@@ -30,7 +33,15 @@ class _OpenSearch:
         self.existing = existing
 
     def search(self, index, body, **kw):
-        matched = [n for n in self.existing if fnmatch.fnmatch(n, index)]
+        parts = [x.strip() for x in index.split(",") if x.strip()]
+        keep = [x for x in parts if not x.startswith("-")]
+        drop = [x[1:] for x in parts if x.startswith("-")]
+        matched = [  # as OpenSearch resolves a comma list with `-` exclusions
+            n
+            for n in self.existing
+            if any(fnmatch.fnmatch(n, k) for k in keep)
+            and not any(fnmatch.fnmatch(n, d) for d in drop)
+        ]
         if not matched:
             if kw.get("allow_no_indices") is False:
                 raise NotFoundError(404, "index_not_found_exception", f"no such index [{index}]")
@@ -61,7 +72,7 @@ def _enrich(existing):
         patch.object(tr, "gateway_available", return_value=True),
         patch.object(tr, "call_tool", side_effect=AssertionError("no lookup expected")),
     ):
-        return tr.enrich_remote(_OpenSearch(existing), "c1")
+        return tr.enrich_remote(_OpenSearch(existing), CASE)
 
 
 def test_no_index_is_skipped_with_a_reason_not_empty():
@@ -100,9 +111,9 @@ def test_the_cluster_names_the_missing_registry_pattern():
     except Exception as e:
         pytest.skip(f"OpenSearch not available: {e}")
     case = f"pytest-noreg-{uuid.uuid4().hex[:8]}"
+    c12 = host_identity.ensure_case_uuid(wc.case_dir_for(case), 2)[0]
     res = tr._enrich_registry_persistence(client, case)
     assert res["status"] == "skipped", res
-    c12 = wc.case_identity(wc.case_dir_for(case))[0]
     assert f"case-{c12}-registry-*" in res["reason"], res
 
 
@@ -115,6 +126,6 @@ def test_a_registry_index_runs_persistence_as_before():
             calls.append(index)
             return {"updated": 1, "total": 1}  # each rule matched a row
 
-    res = tr._enrich_registry_persistence(_WithUpdates([v2("registry")]), "c1")
+    res = tr._enrich_registry_persistence(_WithUpdates([v2("registry")]), CASE)
     assert calls and set(calls) == {v2("registry")[:-1] + "*"}, calls
     assert res == {"status": "complete", "enriched": len(calls)}, res

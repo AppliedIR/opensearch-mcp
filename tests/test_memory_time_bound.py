@@ -42,7 +42,11 @@ class _Client:
 
     def __init__(self):
         self.sent: list[dict] = []
-        self.indices = SimpleNamespace(get_settings=self._no, simulate_index_template=self._no)
+        self.indices = SimpleNamespace(
+            get_settings=self._no,
+            simulate_index_template=self._no,
+            get=lambda **kw: {},  # no index from before 0.7
+        )
 
     @staticmethod
     def _no(**kw):

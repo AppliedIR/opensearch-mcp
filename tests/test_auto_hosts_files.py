@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from sift_common import host_identity
 
 from opensearch_mcp import ingest_cli as cli
 from opensearch_mcp import ingest_status
@@ -52,7 +53,7 @@ def ingest(tmp_path, monkeypatch):
     from opensearch_mcp import write_context as wc
 
     case_id = f"pytest-ah-{uuid.uuid4().hex[:8]}"
-    base = f"case-{wc.case_identity(wc.case_dir_for(case_id))[0]}"
+    base = f"case-{host_identity.ensure_case_uuid(wc.case_dir_for(case_id), 2)[0]}"
     comp = json.loads((_MAPPINGS / "json_type_stability.json").read_text())
     client.cluster.put_component_template(name=f"{base}-comp", body=comp)
     body = copy.deepcopy(json.loads((_MAPPINGS / "delimited_template.json").read_text()))

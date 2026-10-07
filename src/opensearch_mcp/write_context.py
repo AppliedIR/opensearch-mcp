@@ -34,11 +34,10 @@ class NoWriteContext(RuntimeError):
 
 
 def case_identity(case_dir: str | os.PathLike) -> tuple[str, int]:
-    """``(c12, naming_version)`` of a case, from its CASE.yaml.
-
-    ``c12`` is the first 12 hex digits of ``case_uuid``. A case without one
-    predates case identities; it is read as naming version 1 under an id
-    derived from its ``case_id``.
+    """``(c12, naming_version)`` of a case, from its CASE.yaml: ``c12`` is
+    the first 12 hex digits of ``case_uuid``, and "" when it has none yet
+    (nothing has been written under an identity). Reads only: a write gets
+    its identity from ``host_identity.ensure_case_uuid``.
     """
     path = Path(case_dir) / "CASE.yaml"
     try:
@@ -48,10 +47,9 @@ def case_identity(case_dir: str | os.PathLike) -> tuple[str, int]:
     if not isinstance(meta, dict):
         meta = {}
     case_uuid = str(meta.get("case_uuid") or "").replace("-", "").lower()
-    if len(case_uuid) >= 12 and all(c in "0123456789abcdef" for c in case_uuid[:12]):
+    if len(case_uuid) == 32 and all(c in "0123456789abcdef" for c in case_uuid):
         return case_uuid[:12], int(meta.get("naming_version") or 1)
-    case_id = str(meta.get("case_id") or Path(case_dir).name)
-    return hashlib.sha256(f"case:{case_id}".encode()).hexdigest()[:12], 1
+    return "", int(meta.get("naming_version") or 1)
 
 
 @dataclass
@@ -123,7 +121,7 @@ def open_unit(
     """Record an evidence unit and its own host name, and return its context."""
     root = Path(case_dir)
     host_identity.ensure_host_files(root)
-    c12, _ = case_identity(root)
+    c12, _ = host_identity.ensure_case_uuid(root)  # the write's identity, minted if new
     unit = host_identity.unit_key(locator)
     host_identity.append_observations(
         root,
@@ -264,8 +262,8 @@ def prepare_index(client, index: str) -> None:
 SECOND_COPY_NOTE = (
     "this host already has pre-0.7 data in this case; this ingest adds a second copy"
 )
-# (host name as ingested, artifact type) -> the note, for this process's runs
-SECOND_COPY: dict[tuple[str, str], str] = {}
+# (case c12, host name as ingested, artifact type) -> the note, for this process's runs
+SECOND_COPY: dict[tuple[str, str, str], str] = {}
 
 
 def _v1_names(ctx: WriteContext) -> tuple[str, list[str]]:
@@ -297,7 +295,7 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
     from opensearch_mcp.paths import legacy_index_name
 
     atype = artifact_type_of(index)
-    key = (ctx.unit_raw, atype)
+    key = (ctx.c12, ctx.unit_raw, atype)
     if key in SECOND_COPY:
         return SECOND_COPY[key]
     note = ""
@@ -314,16 +312,22 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
     return note
 
 
-def second_copy_types(hostname: str = "") -> list[str]:
-    """Artifact types that got the notice in this process (for `hostname`)."""
+def second_copy_types(hostname: str = "", c12: str = "") -> list[str]:
+    """Artifact types that got the notice in this process: for `hostname`, in
+    case `c12` (the open context's when not given)."""
+    c12 = c12 or (current().c12 if current() is not None else "")
     return sorted(
-        {t for (h, t), note in SECOND_COPY.items() if note and (not hostname or h == hostname)}
+        {
+            t
+            for (c, h, t), note in SECOND_COPY.items()
+            if note and (not c12 or c == c12) and (not hostname or h == hostname)
+        }
     )
 
 
-def second_copy_note(hostname: str = "", artifact_type: str = "") -> str:
+def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
     """The notice for `hostname`'s `artifact_type`, or for any it got."""
-    types = second_copy_types(hostname)
+    types = second_copy_types(hostname, c12)
     if artifact_type:
         return SECOND_COPY_NOTE if artifact_type in types else ""
     return f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
@@ -358,14 +362,39 @@ def stamp(ctx: WriteContext, actions: list[dict]) -> None:
         if not str(action.get("_index", "")).startswith(prefix):
             continue
         src = action.setdefault("_source", {})
-        if src.get("vhir.unit") == ctx.unit and "vhir.host_key" in src:
-            continue  # already stamped (a batch sent again)
+        rid = action.get("_id")
+        if rid is not None and _stamped_here(action, src):
+            rid = src["vhir.rid"]  # a batch sent again: its parser id, not the stored one
+        _drop_owned(src)  # evidence never sets a record's machine
         raw, key, canonical = ctx.resolve(src.get("host.name"))
         src["host.name"] = raw
         src["host.id"] = canonical
         src["vhir.host_key"] = key
         src["vhir.unit"] = ctx.unit
-        rid = action.get("_id")
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
+
+
+# What the stamp owns, dotted and nested: evidence that carries them is restamped.
+_OWNED = ("host.id", "vhir.host_key", "vhir.unit", "vhir.rid", "vhir.prev_ids")
+
+
+def _stamped_here(action: dict, src: dict) -> bool:
+    """The action already went through stamp: its `_id` is the hash of the
+    key and parser id it carries. Evidence can't produce that: the key is a
+    random value it never sees."""
+    key, rid = src.get("vhir.host_key"), src.get("vhir.rid")
+    return bool(key and rid) and action.get("_id") == doc_id(str(key), str(rid))
+
+
+def _drop_owned(src: dict) -> None:
+    for name in _OWNED:
+        src.pop(name, None)
+    for parent, children in (("vhir", ("host_key", "unit", "rid", "prev_ids")), ("host", ("id",))):
+        node = src.get(parent)
+        if isinstance(node, dict):
+            for child in children:
+                node.pop(child, None)
+            if not node:
+                del src[parent]

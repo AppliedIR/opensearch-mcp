@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sift_common import host_identity
 
 import opensearch_mcp.server as srv
 from opensearch_mcp.server import (
@@ -292,7 +293,7 @@ class TestIdxGetEvent:
     def test_returns_document_with_id_and_index(self, mock_client):
         from opensearch_mcp import write_context as wc
 
-        index = f"case-{wc.case_identity(wc.case_dir_for('test-case'))[0]}-evtx-0"
+        index = f"case-{host_identity.ensure_case_uuid(wc.case_dir_for('test-case'))[0]}-evtx-0"
         mock_client.get.return_value = {
             "_id": "doc123",
             "_index": index,

@@ -14,6 +14,7 @@ import uuid
 
 import _scratch_templates
 import pytest
+from sift_common import host_identity
 
 # Skip entire module if opensearchpy is not installed
 opensearchpy = pytest.importorskip("opensearchpy")
@@ -655,9 +656,7 @@ class TestFailedArtifactWarning:
             )
             return p.stdout + p.stderr
 
-        from opensearch_mcp import write_context as wc
-
-        index = f"case-{wc.case_identity(case_dir)[0]}-registry-0"
+        index = f"case-{host_identity.ensure_case_uuid(case_dir)[0]}-registry-0"
         try:
             yield cid, run, index
         finally:

@@ -1340,7 +1340,6 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """
     from opensearch_mcp.case_scope import (
         CaseScopeError,
-        attach_legacy_alias,
         case_read_scope,
         scope_of,
         unattributed_indices,
@@ -1356,10 +1355,6 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     cid = scope.case_id
     client = _get_os()
     resp: dict = {}
-    try:
-        attach_legacy_alias(client, cid)
-    except Exception as e:
-        resp.setdefault("warnings", []).append(f"Could not attach the pre-0.7 indices: {e}")
     pattern = case_read_scope(cid, client)
 
     # Get all indices for this case

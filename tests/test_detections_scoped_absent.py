@@ -12,6 +12,7 @@ import shutil
 from unittest.mock import MagicMock
 
 import pytest
+from sift_common import host_identity
 
 from opensearch_mcp import server as srv
 from opensearch_mcp import write_context as wc
@@ -20,7 +21,7 @@ _which = shutil.which
 
 
 def c12(case: str) -> str:
-    return wc.case_identity(wc.case_dir_for(case))[0]
+    return host_identity.ensure_case_uuid(wc.case_dir_for(case), 2)[0]
 
 
 def _cluster(monkeypatch, indices: dict, branch: str, installed: bool):

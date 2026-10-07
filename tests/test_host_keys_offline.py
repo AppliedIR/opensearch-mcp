@@ -399,7 +399,9 @@ def test_case_host_fix_changes_no_document_and_records_a_suggestion(monkeypatch)
 def test_the_notice_reaches_a_scans_artifact_and_its_status(monkeypatch):
     from opensearch_mcp.results import ArtifactResult, HostResult
 
-    monkeypatch.setattr(wc, "SECOND_COPY", {("WKS01", "evtx"): wc.SECOND_COPY_NOTE})
+    monkeypatch.setattr(
+        wc, "SECOND_COPY", {(wc.current().c12, "WKS01", "evtx"): wc.SECOND_COPY_NOTE}
+    )
     host = SimpleNamespace(hostname="WKS01")
     hr = HostResult(hostname="WKS01", volume_root="/x")
     hr.artifacts.append(ArtifactResult(artifact="evtx", index="case-0123456789ab-evtx-0"))
@@ -410,7 +412,9 @@ def test_the_notice_reaches_a_scans_artifact_and_its_status(monkeypatch):
 
 
 def test_the_notice_reaches_a_background_runs_status(monkeypatch):
-    monkeypatch.setattr(wc, "SECOND_COPY", {("WKS01", "json-x"): wc.SECOND_COPY_NOTE})
+    monkeypatch.setattr(
+        wc, "SECOND_COPY", {(wc.current().c12, "WKS01", "json-x"): wc.SECOND_COPY_NOTE}
+    )
     written = {}
     monkeypatch.setattr(ingest_cli, "write_status", lambda **kw: written.update(kw))
     ingest_cli._write_bg_status("c", "r", "complete", "WKS01", "json", "t0")
@@ -431,12 +435,12 @@ def test_a_scan_of_a_pre_0_7_host_says_it_adds_a_second_copy(tmp_path, monkeypat
     """Through the scan's own host loop, not only the helper."""
     from opensearch_mcp.discover import DiscoveredHost
 
-    case, _ = new_case()
+    case, c12 = new_case()
     evtx_dir = tmp_path / "evtx"
     evtx_dir.mkdir()
     (evtx_dir / "Security.evtx").write_bytes(b"x" * 100_000)
     host = DiscoveredHost(hostname="WKS01", volume_root=tmp_path, evtx_dir=evtx_dir)
-    monkeypatch.setattr(wc, "SECOND_COPY", {("WKS01", "evtx"): wc.SECOND_COPY_NOTE})
+    monkeypatch.setattr(wc, "SECOND_COPY", {(c12, "WKS01", "evtx"): wc.SECOND_COPY_NOTE})
     with (
         patch.object(ingest, "parse_and_index", return_value=(5, 0, 0)),
         patch.object(ingest, "_safe_count", return_value=0),
@@ -449,3 +453,80 @@ def test_a_scan_of_a_pre_0_7_host_says_it_adds_a_second_copy(tmp_path, monkeypat
         )  # fmt: skip
     (ar,) = [a for a in result.hosts[0].artifacts if a.artifact == "evtx"]
     assert wc.SECOND_COPY_NOTE in ar.note
+
+
+# -- a record can't choose its machine; a write mints the case's identity
+
+
+def test_a_record_carrying_another_units_keys_is_restamped(tmp_path):
+    case, _ = new_case()
+    client = _Sent()
+    forged = {
+        "host.id": "DC01",
+        "vhir.host_key": "0" * 16,
+        "vhir.unit": "1" * 16,
+        "vhir.rid": "x",
+        "vhir": {"host_key": "2" * 16, "unit": "3" * 16, "prev_ids": ["y"]},
+        "host": {"id": "DC09"},
+    }
+    ctx = wc.open_unit(case, "evidence/x.json", "WKS10", source="test")
+    with wc.writing(ctx):
+        _send(client, [{"_index": wc.index_name("json-x"), "_id": "r1", "_source": dict(forged)}])
+    (action,) = client.actions
+    src = action["_source"]
+    assert src["vhir.unit"] == ctx.unit and src["vhir.host_key"] not in ("0" * 16, "2" * 16)
+    assert "vhir" not in src and "host" not in src
+    assert src["vhir.rid"] == "r1" and action["_id"] == wc.doc_id(src["vhir.host_key"], "r1")
+
+
+def test_a_batch_sent_again_keeps_its_ids():
+    case, _ = new_case()
+    client = _Sent()
+    ctx = wc.open_unit(case, "hosts/WKS11", "WKS11", source="test")
+    actions = [{"_index": None, "_id": "r1", "_source": {}}]
+    with wc.writing(ctx):
+        actions[0]["_index"] = wc.index_name("evtx")
+        _send(client, actions)
+        first = actions[0]["_id"]
+        _send(client, actions)
+    assert actions[0]["_id"] == first and actions[0]["_source"]["vhir.rid"] == "r1"
+
+
+def test_a_write_mints_the_case_identity_and_names_its_indices_by_it():
+    import yaml
+
+    d = wc.case_dir_for(f"noid-{uuid.uuid4().hex[:6]}")
+    (d / "CASE.yaml").write_text(f"case_id: {d.name}\n")
+    assert wc.case_identity(d)[0] == ""  # nothing derived from the case id
+    client = _Sent()
+    write(client, d, "hosts/WKS12", "WKS12", ["r1"])
+    case_uuid = yaml.safe_load((d / "CASE.yaml").read_text())["case_uuid"]
+    assert client.actions[0]["_index"] == f"case-{case_uuid.replace('-', '')[:12]}-evtx-0"
+
+
+def test_a_failed_read_leaves_the_pre_0_7_import_to_run_again():
+    from opensearch_mcp.case_scope import ensure_v1_imported
+
+    d = wc.case_dir_for(f"v1fail-{uuid.uuid4().hex[:6]}")
+    (d / "CASE.yaml").write_text(f"case_id: {d.name}\n")
+    client = MagicMock()
+    client.indices.get.return_value = {f"case-{d.name}-evtx-wks13": {}}
+    client.indices.get_mapping.side_effect = ConnectionError("cluster unreachable")
+    with pytest.raises(ConnectionError):
+        ensure_v1_imported(client, d)
+    assert not host_identity.load(d).v1_imported
+
+
+def test_the_second_copy_notice_is_per_case():
+    a, _ = new_case()
+    b, _ = new_case()
+    ca = wc.open_unit(a, "hosts/WKS14", "WKS14", source="test")
+    cb = wc.open_unit(b, "hosts/WKS14", "WKS14", source="test")
+    wc.SECOND_COPY[(ca.c12, "WKS14", "evtx")] = wc.SECOND_COPY_NOTE
+    try:
+        with wc.writing(cb):
+            assert wc.second_copy_note("WKS14", "evtx") == ""
+        with wc.writing(ca):
+            assert wc.second_copy_note("WKS14", "evtx") == wc.SECOND_COPY_NOTE
+    finally:
+        wc.SECOND_COPY.clear()

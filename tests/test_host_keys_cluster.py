@@ -15,7 +15,7 @@ from sift_common import host_identity
 from opensearch_mcp import bulk
 from opensearch_mcp import server as srv
 from opensearch_mcp import write_context as wc
-from opensearch_mcp.case_scope import attach_legacy_alias, ensure_v1_imported
+from opensearch_mcp.case_scope import CaseScopeError, case_read_scope, confine, ensure_v1_imported
 
 pytestmark = pytest.mark.integration
 
@@ -49,7 +49,7 @@ def cases(client, monkeypatch):
         else:
             u = uuid.uuid4().hex
             (d / "CASE.yaml").write_text(f"case_id: {cid}\ncase_uuid: {u}\nnaming_version: 2\n")
-        c12 = wc.case_identity(d)[0]
+        c12 = host_identity.ensure_case_uuid(d)[0]  # a pre-0.7 case gets one at its first write
         made.append((c12, _scratch_templates.install(client, f"hk-{c12}", c12=c12)))
         return d, c12
 
@@ -57,7 +57,6 @@ def cases(client, monkeypatch):
     yield new
     for c12, created in made:
         client.indices.delete(index=f"case-{c12}-*", ignore=[404])
-        client.indices.delete_alias(index="_all", name=f"vhir-legacy-{c12}", ignore=[404])
         _scratch_templates.remove(client, created)
     client.indices.delete(index=f"case-*-{tag}-*", ignore=[404])
 
@@ -102,7 +101,7 @@ def test_each_case_counts_searches_and_summarises_only_its_own_data(client, case
     v1_index(
         client, f"case-{acme2.name}-evtx-wks09", [{"host.name": "WKS09", "host.id": "WKS09"}] * 5
     )
-    write(client, v2a, "hosts/N1", "N1", evtx(7))
+    write(client, v2a, "hosts/NODE1", "NODE1", evtx(7))
     write(client, v2b, "hosts/S1", "S1", evtx(11))
     for case, n in ((acme, 3), (acme2, 5), (v2a, 7), (v2b, 11)):
         monkeypatch.setattr(srv, "_get_active_case", lambda c=case.name: c)
@@ -119,24 +118,90 @@ def test_a_renamed_case_folder_keeps_its_data(client, cases, monkeypatch):
     assert srv.idx_count(query="*")["count"] == 4
 
 
-def test_a_pre_0_7_case_gets_its_alias_also_for_indices_made_later(client, cases):
-    case, c12 = cases("legacy", v1=True)
+def _count(client, case):
+    return client.count(index=case_read_scope(case.name, client))["count"]
+
+
+def test_a_pre_0_7_case_reads_its_old_indices_also_ones_made_later(client, cases):
+    case, _ = cases("legacy", v1=True)
     v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
-    assert attach_legacy_alias(client, case.name)["attached"] == [f"case-{case.name}-evtx-wks10"]
+    assert _count(client, case) == 1
     v1_index(
-        client, f"case-{case.name}-registry-wks10", [{"host.name": "WKS10"}]
-    )  # by an older release
-    attach_legacy_alias(client, case.name)
-    members = sorted(client.indices.get_alias(name=f"vhir-legacy-{c12}"))
-    assert members == [f"case-{case.name}-evtx-wks10", f"case-{case.name}-registry-wks10"]
+        client, f"case-{case.name}-registry-wks10", [{"host.name": "WKS10"}] * 2
+    )  # older release
+    assert _count(client, case) == 3  # computed per read, nothing stored
 
 
-def test_a_restored_copy_attaches_no_alias(client, cases):
-    case, c12 = cases("copy", v1=True)
-    (case / "CASE.yaml").write_text(f"case_id: {case.name}\nlegacy_alias: none\n")
+def test_a_longer_case_ids_old_indices_stay_out_after_its_folder_is_renamed(client, cases):
+    case, _ = cases("acme", v1=True)
+    other = case.parent / f"{case.name}-2"
+    other.mkdir()
+    (other / "CASE.yaml").write_text(f"case_id: {case.name}-2\n")
+    other.rename(case.parent / f"moved-{cases.tag}")  # the id is in CASE.yaml, not the folder
     v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
-    assert attach_legacy_alias(client, case.name)["attached"] == []
-    assert not client.indices.exists_alias(name=f"vhir-legacy-{c12}")
+    v1_index(client, f"case-{case.name}-2-evtx-wks90", [{"host.name": "WKS90"}] * 4)
+    assert _count(client, case) == 1
+
+
+def test_an_old_index_read_before_its_case_appears_is_not_read_after(client, cases):
+    case, _ = cases("early", v1=True)
+    v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
+    v1_index(client, f"case-{case.name}-2-evtx-wks90", [{"host.name": "WKS90"}] * 4)
+    assert _count(client, case) == 5  # no case claims it yet
+    other = case.parent / f"{case.name}-2"
+    other.mkdir()
+    (other / "CASE.yaml").write_text(f"case_id: {case.name}-2\n")
+    assert _count(client, case) == 1
+
+
+def test_a_restored_copy_reads_no_old_indices_even_by_name(client, cases, monkeypatch):
+    case, c12 = cases("copy", v1=True)
+    meta = (case / "CASE.yaml").read_text()
+    (case / "CASE.yaml").write_text(meta + "legacy_alias: none\n")
+    v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
+    write(client, case, "hosts/WKS20", "WKS20", evtx(2))
+    assert _count(client, case) == 2  # its own records only
+    with pytest.raises(CaseScopeError):
+        confine(f"case-{case.name}-evtx-*", case.name, client)
+
+
+def test_an_exclusion_holds_through_count_search_update_and_snapshot(client, cases):
+    case, _ = cases("excl", v1=True)
+    v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}] * 2)
+    other = case.parent / f"{case.name}-2"
+    other.mkdir()
+    (other / "CASE.yaml").write_text(f"case_id: {case.name}-2\n")
+    v1_index(client, f"case-{case.name}-2-evtx-wks90", [{"host.name": "WKS90"}] * 3)
+    expr = case_read_scope(case.name, client)
+    assert "," in expr and "-case-" in expr
+    assert client.count(index=expr)["count"] == 2
+    assert (
+        client.search(index=expr, body={"track_total_hits": True})["hits"]["total"]["value"] == 2
+    )
+    body = {"script": {"source": "ctx._source.touched = true"}}
+    assert client.update_by_query(index=expr, body=body, refresh=True)["updated"] == 2
+    assert (
+        client.count(
+            index=f"case-{case.name}-2-*", body={"query": {"exists": {"field": "touched"}}}
+        )["count"]
+        == 0
+    )
+    repo = f"hk-{cases.tag}"
+    try:
+        client.snapshot.create_repository(
+            repository=repo, body={"type": "fs", "settings": {"location": repo}}
+        )
+    except Exception:
+        pytest.skip("this cluster has no snapshot path")
+    try:
+        body = {"indices": expr, "include_global_state": False}
+        snap = client.snapshot.create(
+            repository=repo, snapshot="s1", wait_for_completion=True, body=body
+        )
+        assert snap["snapshot"]["indices"] == [f"case-{case.name}-evtx-wks10"]
+    finally:
+        client.snapshot.delete(repository=repo, snapshot="s1", ignore=[404])
+        client.snapshot.delete_repository(repository=repo)
 
 
 def test_indices_no_case_can_claim_are_listed(client, cases, monkeypatch):
@@ -184,7 +249,7 @@ def test_a_pre_0_7_host_ingested_again_says_it_adds_a_second_copy(client, cases)
     wc.SECOND_COPY.clear()
     write(client, case, "hosts/WKS01", "WKS01", evtx(2))
     assert client.count(index=f"case-{c12}-evtx-0")["count"] == 2
-    assert wc.second_copy_note("WKS01", "evtx") == wc.SECOND_COPY_NOTE
+    assert wc.second_copy_note("WKS01", "evtx", c12) == wc.SECOND_COPY_NOTE
     out: dict = {}
     srv._existing_host_docs(client, case.name, "evtx", "WKS01", out)
     assert out["notes"] == [f"evtx: {wc.SECOND_COPY_NOTE}"]

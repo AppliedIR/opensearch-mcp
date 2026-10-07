@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+from sift_common import host_identity
 
 from opensearch_mcp import server
 from opensearch_mcp import write_context as wc
@@ -66,6 +67,7 @@ def root(tmp_path, monkeypatch):
     for cid in ("a", "b"):
         (cases / cid).mkdir(parents=True)
         (cases / cid / "CASE.yaml").write_text(f"case_id: {cid}\n")
+        host_identity.ensure_case_uuid(cases / cid, 2)
         _write(cases / cid / "audit", _entry(cid, "FAILED: line contains NUL"))
     home = tmp_path / "home"
     (home / ".vhir").mkdir(parents=True)

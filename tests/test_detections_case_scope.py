@@ -12,6 +12,7 @@ import fnmatch
 from unittest.mock import MagicMock
 
 import pytest
+from sift_common import host_identity
 
 from opensearch_mcp import ingest_status
 from opensearch_mcp import server as srv
@@ -19,7 +20,7 @@ from opensearch_mcp import write_context as wc
 
 
 def c12(case: str) -> str:
-    return wc.case_identity(wc.case_dir_for(case))[0]
+    return host_identity.ensure_case_uuid(wc.case_dir_for(case), 2)[0]
 
 
 def _indices():
@@ -43,6 +44,7 @@ def _count(index, **kw):
 
 @pytest.fixture
 def cluster(monkeypatch):
+    c12("case-a"), c12("case-b")  # both cases have their identities before any read
     client = MagicMock()
     client.count.side_effect = _count
     monkeypatch.setattr(srv, "_get_os", lambda: client)
@@ -70,18 +72,20 @@ def test_the_ingest_next_step_names_its_own_case(tmp_path, monkeypatch):
         {"hostname": "host1", "artifacts": [{"name": "evtx", "status": "complete", "indexed": 9}]},
         {"hostname": "hayabusa", "artifacts": [{"name": "hayabusa", "status": "complete"}]},
     ]
+    own = c12("case-b")
     ingest_status.write_status("case-b", 99999999, "r", "complete", hosts, {"indexed": 9}, "t0")
     (status,) = srv.idx_ingest_status(case_id="case-b")["ingests"]
     hint = [s for s in status["next_steps"] if "Hayabusa" in s]
     assert hint == [
         "Query Hayabusa alerts: idx_search(query='Level:(emer OR crit OR critical OR high)', "
-        f"index='case-{c12('case-b')}-hayabusa-*')"
+        f"index='case-{own}-hayabusa-*')"
     ], status["next_steps"]
 
 
 def test_a_named_case_and_no_case(monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: "A")
-    assert srv._hayabusa_index("Inc 9") == f"case-{c12('Inc 9')}-hayabusa-*"
-    assert srv._hayabusa_index() == f"case-{c12('A')}-hayabusa-*"
+    named, active = c12("Inc 9"), c12("A")
+    assert srv._hayabusa_index("Inc 9") == f"case-{named}-hayabusa-*"
+    assert srv._hayabusa_index() == f"case-{active}-hayabusa-*"
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
     assert srv._hayabusa_index() == ""  # no case: nothing, never every case's

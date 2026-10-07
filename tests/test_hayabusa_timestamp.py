@@ -43,7 +43,11 @@ class _Client:
 
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
-        self.indices = SimpleNamespace(get_settings=self._fail, simulate_index_template=self._fail)
+        self.indices = SimpleNamespace(
+            get_settings=self._fail,
+            simulate_index_template=self._fail,
+            get=lambda **kw: {},  # no index from before 0.7
+        )
 
     @staticmethod
     def _fail(**kw):

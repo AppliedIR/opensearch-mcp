@@ -8,6 +8,7 @@ the pointer itself names MFT and evtx, so a substring would match it.
 """
 
 import pytest
+from sift_common import host_identity
 
 from opensearch_mcp import server
 from opensearch_mcp import write_context as wc
@@ -17,7 +18,7 @@ INDICES: dict[str, list[tuple[str, int]]] = {}  # case -> [(index, docs)]
 
 
 def idx(case: str, artifact_type: str) -> str:
-    return f"case-{wc.case_identity(wc.case_dir_for(case))[0]}-{artifact_type}-0"
+    return f"case-{host_identity.ensure_case_uuid(wc.case_dir_for(case), 2)[0]}-{artifact_type}-0"
 
 
 class _Cat:
