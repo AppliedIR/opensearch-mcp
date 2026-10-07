@@ -1055,6 +1055,44 @@ def _not_answered(results: dict[str, dict]) -> dict[str, int]:
     return counts
 
 
+def _removed_providers(client, index_pattern: str, configured: set[str]) -> dict[str, int]:
+    """Providers whose answers are stored on the case's documents but that no
+    reply this run carries (every reply about an IOC has a block per
+    configured provider), with how many documents hold one."""
+    try:
+        caps = client.field_caps(
+            index=index_pattern, fields="threat_intel.iocs.*.outcome", request_timeout=60
+        )
+    except Exception:
+        return {}
+    stored = {
+        f.split(".")[2]
+        for f in caps.get("fields", {})
+        if f.count(".") == 3 and f.endswith(".outcome")
+    }
+    removed = {}
+    for name in sorted(stored - configured):
+        try:
+            n = client.count(
+                index=index_pattern,
+                body={"query": {"exists": {"field": f"threat_intel.iocs.{name}.outcome"}}},
+            )["count"]
+        except Exception:
+            continue
+        if n:
+            removed[name] = n
+    return removed
+
+
+def _removed_warnings(removed: dict[str, int]) -> list[str]:
+    return [
+        f"{_PROVIDER_LABELS.get(name, name)} is no longer configured: its earlier answers "
+        f"on {n} documents are dropped from each document this run stamps; re-add it and "
+        "run with force to restore them."
+        for name, n in sorted(removed.items())
+    ]
+
+
 def _not_answered_reason(counts: dict[str, int]) -> str:
     return "; ".join(
         f"{_PROVIDER_LABELS.get(name, name)}: {n} not answered"
@@ -1135,6 +1173,14 @@ def enrich_case(
     unavailable = outcomes.count(UNAVAILABLE)
     # Per provider: an IOC another provider matched still lacks this one's answer
     not_answered = _not_answered(results)
+    # A provider the replies no longer carry loses its stored answers on every
+    # document this run stamps: say so before it happens
+    configured = {n for r in results.values() for n in _blocks(r["entry"])}
+    warnings = (
+        _removed_warnings(_removed_providers(client, index_pattern, configured))
+        if configured
+        else []
+    )
 
     if on_progress:
         on_progress("stamping", matched=matched)
@@ -1153,6 +1199,7 @@ def enrich_case(
         "version_conflicts": conflicts,
         "legacy_stamps_cleared": legacy_cleared,
         "not_answered": not_answered,
+        "warnings": warnings,
     }
     # Complete only when every IOC had a confirmed lookup and every stamp
     # landed. A run that looked nothing up read "complete, 0 malicious".

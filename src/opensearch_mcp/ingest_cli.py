@@ -461,6 +461,7 @@ def _write_bg_status(
     counts=None,
     skipped_files=None,
     not_read=None,
+    note="",
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -478,6 +479,8 @@ def _write_bg_status(
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
     if status != "running" and no_time_field_note():
         art["note"] = no_time_field_note()
+    if note:  # appended, never replacing a note already there
+        art["note"] = "; ".join(filter(None, [art.get("note"), note]))
     if error:
         art["error"] = error
     if skipped_files:  # not ingested, and the status has to say so
@@ -2523,7 +2526,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     start_mono = time.monotonic()
     started_ts = datetime.now(timezone.utc).isoformat()
 
-    def _write_enrich_status(status, indexed=0, files_done=0, files_total=0, error=""):
+    def _write_enrich_status(status, indexed=0, files_done=0, files_total=0, error="", note=""):
         """Write enrichment status record. No-op if not running under run_id."""
         if not run_id:
             return
@@ -2539,6 +2542,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
             files_done=files_done,
             files_total=files_total,
             error=error,
+            note=note,
         )
 
     # Initial "running" write — idempotent under monotonic protection
@@ -2587,10 +2591,13 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
         # A run halted after stamping modified documents: its counts go
         # to the status and the audit trail before the failure is raised.
         halted = e.summary if isinstance(e, IntelEnrichmentHalted) else None
+        for warning in (halted or {}).get("warnings", []):
+            print(f"WARNING: {warning}", file=sys.stderr)
         _write_enrich_status(
             "failed",
             indexed=halted["documents_updated"] if halted else 0,
             error=f"{type(e).__name__}: {e}"[:500],
+            note="; ".join((halted or {}).get("warnings", [])),
         )
         if halted:
             _audit_enrichment(case_id, force, halted, incomplete=str(e))
@@ -2606,12 +2613,15 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     print(f"  Matched: {result['matched']} IOC(s)")
     print(f"  Not found: {result['not_found']} IOC(s)")
     print(f"  Unavailable: {result['unavailable']} IOC(s)")
+    for warning in result.get("warnings", []):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
     _write_enrich_status(
         "complete",
         indexed=result.get("documents_updated", 0),
         files_done=_progress_state["done"] or result.get("iocs_looked_up", 0),
         files_total=_progress_state["total"] or result.get("iocs_extracted", 0),
+        note="; ".join(result.get("warnings", [])),
     )
 
     _audit_enrichment(case_id, force, result)
@@ -2624,6 +2634,8 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
         f"{result.get('matched', 0)} matched, {result.get('not_found', 0)} not found, "
         f"{result.get('unavailable', 0)} unavailable"
     )
+    if result.get("warnings"):
+        summary += "; " + " ".join(result["warnings"])
     if incomplete:
         summary += f"; incomplete: {incomplete[:300]}"
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")

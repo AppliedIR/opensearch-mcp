@@ -291,3 +291,72 @@ def test_an_internal_address_reply_keeps_the_earlier_blocks(
             "NO_MATCH",
             "UNAVAILABLE",
         )
+
+
+MISP_GONE = (
+    "MISP is no longer configured: its earlier answers on 1 documents are dropped from "
+    "each document this run stamps; re-add it and run with force to restore them."
+)
+
+
+def _misp_then_opencti_only(client, case_id, quick):
+    """Run 1 with OpenCTI and MISP; a later document; run 2 with OpenCTI only."""
+    _run(
+        client,
+        case_id,
+        quick,
+        lambda i: reply(i, {"opencti": block("NO_MATCH"), "misp": _misp("MATCH", i)}),
+    )
+    _later_doc(client, case_id)
+
+
+def test_a_removed_provider_s_stored_answers_are_counted(os_client, quick):  # noqa: F811
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _misp_then_opencti_only(os_client, case_id, quick)
+        result, _ = _run(
+            os_client, case_id, quick, lambda i: reply(i, {"opencti": block("NO_MATCH")})
+        )
+        assert result["warnings"] == [MISP_GONE]
+
+
+def test_no_warning_while_every_provider_is_configured(os_client, quick):  # noqa: F811
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _misp_then_opencti_only(os_client, case_id, quick)
+        result, _ = _run(
+            os_client,
+            case_id,
+            quick,
+            lambda i: reply(i, {"opencti": block("NO_MATCH"), "misp": _misp("NO_MATCH", i)}),
+        )
+        assert result["warnings"] == []
+
+
+def test_the_warning_reaches_the_status_the_audit_and_the_console(
+    os_client,  # noqa: F811
+    quick,
+    tmp_path,
+    capsys,
+):
+    import argparse
+
+    from opensearch_mcp import ingest_cli, ingest_status
+    from opensearch_mcp.server import idx_ingest_status
+
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _misp_then_opencti_only(os_client, case_id, quick)
+        FakeGateway(lambda i: reply(i, {"opencti": block("NO_MATCH")})).install(quick)
+        quick.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+        quick.setenv("VHIR_INGEST_RUN_ID", "run-removed-provider")
+        quick.setattr(ingest_cli, "_resolve_case_id", lambda _c: case_id)
+        logged: list[dict] = []
+        quick.setattr(
+            ingest_cli,
+            "AuditWriter",
+            lambda **k: type("A", (), {"log": lambda self, **kw: logged.append(kw)})(),
+        )
+        ingest_cli.cmd_enrich_intel(argparse.Namespace(case=case_id, force=False, dry_run=False))
+        (status,) = idx_ingest_status(case_id=case_id)["ingests"]
+    assert any(MISP_GONE in w for w in status.get("warnings", [])), status
+    (record,) = logged
+    assert MISP_GONE in record["result_summary"]
+    assert f"WARNING: {MISP_GONE}" in capsys.readouterr().err
