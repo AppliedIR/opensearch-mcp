@@ -1237,6 +1237,35 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
     return warnings
 
 
+def _outcome_is(outcome: str) -> dict:
+    """Documents with an IOC entry of this outcome, whether the index maps
+    the field as keyword or (from before it was declared) as text."""
+    return {
+        "bool": {
+            "should": [
+                {"term": {"threat_intel.iocs.outcome": outcome}},
+                {"term": {"threat_intel.iocs.outcome.keyword": outcome}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
+def _intel_counts(client, pattern: str) -> dict:
+    """Documents checked, with any IOC matched, with any IOC unanswered, and
+    carrying an older release's single stamp."""
+
+    def count(query: dict) -> int:
+        return client.count(index=pattern, body={"query": query})["count"]
+
+    return {
+        "checked": count({"exists": {"field": "threat_intel.checked"}}),
+        "matched": count(_outcome_is("MATCH")),
+        "unavailable": count(_outcome_is("UNAVAILABLE")),
+        "legacy": count({"exists": {"field": "threat_intel.verdict"}}),
+    }
+
+
 @server.tool()
 def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """Get a complete overview of indexed evidence for a case.
@@ -1402,19 +1431,15 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         resp.setdefault("warnings", []).append(f"Triage stats query failed: {e}")
 
     try:
-        intel_count = client.count(
-            index=pattern,
-            body={"query": {"exists": {"field": "threat_intel.checked"}}},
-        )["count"]
-        if intel_count:
-            malicious = client.count(
-                index=pattern,
-                body={"query": {"term": {"threat_intel.verdict": "MALICIOUS"}}},
-            )["count"]
-            enrichment["threat_intel"] = {
-                "checked": intel_count,
-                "malicious": malicious,
-            }
+        intel = _intel_counts(client, pattern)
+        if any(intel.values()):
+            enrichment["threat_intel"] = intel
+        if intel["legacy"]:
+            resp.setdefault("warnings", []).append(
+                f"{intel['legacy']} documents carry an older release's single threat-intel "
+                "stamp; a forced enrichment run (idx_enrich_intel force=true) clears them and "
+                "stamps each IOC's answer"
+            )
     except Exception as e:
         resp.setdefault("warnings", []).append(f"Intel stats query failed: {e}")
 
@@ -2291,11 +2316,13 @@ def idx_enrich_intel(
     force: bool = False,
     include_filesystem: bool = False,
 ) -> dict:
-    """Enrich indexed evidence with OpenCTI threat intelligence.
+    """Enrich indexed evidence with threat intelligence.
 
-    Extracts unique IOCs (IPs, hashes, domains) from indexed data,
-    looks them up in OpenCTI via the gateway, and stamps matching
-    documents with threat_intel.verdict and confidence.
+    Extracts unique IOCs (IPs, hashes, domains) from indexed data, looks
+    each up with lookup_ioc (threat intel) via the gateway, and stamps
+    every document carrying it with an entry in threat_intel.iocs: the
+    outcome (MATCH, NO_MATCH, or UNAVAILABLE when it couldn't be asked)
+    and each platform's own records, verbatim. No verdict is computed.
 
     No LLM tokens consumed — all lookups are programmatic.
 

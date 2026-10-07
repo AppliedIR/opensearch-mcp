@@ -123,4 +123,5 @@ class TestEveryCarryingDocumentIsStamped:
         for hit in hits:
             source = hit["_source"]
             assert source.get("threat_intel.checked") is True, (name, source)
-            assert source.get("threat_intel.ioc_value") in CARRIED[name], (name, source)
+            stamped = {e["ioc_value"] for e in source.get("threat_intel.iocs", [])}
+            assert stamped and stamped <= CARRIED[name], (name, source)

@@ -15,6 +15,17 @@ from opensearch_mcp.threat_intel import (
 )
 
 
+def _answer(ioc: str, outcome: str = "MATCH") -> dict:
+    """lookup_ioc's reply: the aggregate outcome and OpenCTI's answer."""
+    matches = [{"name": ioc, "confidence": 85}] if outcome == "MATCH" else []
+    return {
+        "ioc": ioc,
+        "outcome": outcome,
+        "found": outcome == "MATCH",
+        "providers": {"opencti": {"outcome": outcome, "matches": matches}},
+    }
+
+
 class TestParseWaitHint:
     # Rev 6: jitter is +0.5s (was +2s). Clamp to [0.5, 120].
     def test_standard_hint(self):
@@ -108,12 +119,7 @@ class TestEnrichmentRateLimitFlow:
                     "error": "RateLimitError",
                     "message": "Rate limit exceeded. Wait 1s.",
                 }
-            return {
-                "found": True,
-                "entity_type": "indicator",
-                "name": params["ioc"],
-                "confidence": 85,
-            }
+            return _answer(params["ioc"])
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", fake_call_tool)
         monkeypatch.setattr(threat_intel.time, "sleep", lambda s: sleep_calls.append(s))
@@ -123,7 +129,7 @@ class TestEnrichmentRateLimitFlow:
 
         assert len(sleep_calls) == 3
         assert "1.2.3.4" in results
-        assert results["1.2.3.4"]["threat_intel.verdict"] == "MALICIOUS"
+        assert results["1.2.3.4"]["entry"]["outcome"] == "MATCH"
 
     def test_genuine_errors_trip_at_threshold(self, _patched):
         from opensearch_mcp import threat_intel
@@ -150,14 +156,14 @@ class TestEnrichmentRateLimitFlow:
 
         call_seq = iter(
             [
-                {"found": True, "confidence": 90},
-                {"error": "QueryError", "message": "bad"},
-                {"found": False},
+                lambda ioc: _answer(ioc),
+                lambda ioc: {"error": "QueryError", "message": "bad"},
+                lambda ioc: _answer(ioc, "NO_MATCH"),
             ]
         )
 
         def fake_call_tool(tool, params, timeout=15):
-            return next(call_seq)
+            return next(call_seq)(params["ioc"])
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", fake_call_tool)
 
@@ -213,7 +219,7 @@ class TestEnrichmentRateLimitFlow:
         def fake_call_tool(tool, params, timeout=15):
             if params.get("ioc") == "exhaust.me":
                 return {"error": "RateLimitError", "message": "Rate limit exceeded. Wait 1s"}
-            return {"found": True, "confidence": 75}
+            return _answer(params["ioc"])
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", fake_call_tool)
 
@@ -283,7 +289,7 @@ class TestEnrichmentRateLimitFlow:
             if call_count["n"] == 2:
                 # Mimic gateway disconnect / subprocess transport failure.
                 raise ConnectionError("gateway dropped connection mid-call")
-            return {"found": False}
+            return _answer(params["ioc"], "NO_MATCH")
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", fake_call_tool)
 
@@ -345,7 +351,7 @@ class TestEnrichWorkerResilience:
             attempt_counters[ioc] = attempt_counters.get(ioc, 0) + 1
             if attempt_counters[ioc] <= 2:
                 return {"error": "RateLimitError", "message": "Rate limit exceeded. Wait 0s."}
-            return {"found": True, "confidence": 90}
+            return _answer(ioc)
 
         monkeypatch.setattr("opensearch_mcp.gateway.call_tool", rate_limit_then_success)
 

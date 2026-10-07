@@ -74,16 +74,16 @@ class Case:
             for kind, values in iocs.items():
                 for v in values:
                     cov["enriched"].append(v)
-                    base = {"threat_intel.ioc_type": kind, "threat_intel.ioc_value": v}
-                    res[v] = (
-                        {
-                            **base,
-                            "threat_intel.verdict": "MALICIOUS",
-                            "threat_intel.confidence": 90,
-                        }
-                        if v in MAL
-                        else {**base, "threat_intel.checked": True}
-                    )
+                    res[v] = {
+                        "ioc_type": kind,
+                        "confirmed": True,
+                        "entry": {
+                            "ioc_type": kind,
+                            "ioc_value": v,
+                            "outcome": "MATCH" if v in MAL else "NO_MATCH",
+                            "checked_at": "2026-10-07T12:00:00+00:00",
+                        },
+                    }
             during_lookup()
             res["_intel_coverage"] = cov
             return res
@@ -98,14 +98,15 @@ class Case:
         return outcome
 
     def wrong(self):
-        """Documents whose verdict isn't the one they say they should get."""
+        """Documents whose matched entry isn't the one they say they should get
+        (MAL: an entry with outcome MATCH)."""
         hits = self.client.search(
             index=f"{self.prefix}-*", body={"size": 200, "query": {"match_all": {}}}
         )["hits"]["hits"]
         out = []
         for h in hits:
             s = h["_source"]
-            malicious = s.get("threat_intel.verdict") == "MALICIOUS"
+            malicious = any(e.get("outcome") == "MATCH" for e in s.get("threat_intel.iocs") or [])
             if malicious != (s["exp"] == "MAL"):
                 out.append((h["_index"][len(self.prefix) + 1 :], s["note"], malicious))
         return sorted(out)

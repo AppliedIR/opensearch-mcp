@@ -69,7 +69,7 @@ The LLM gets these tools via the MCP protocol:
 | `idx_ingest_accesslog` | Apache/Nginx access log ingest |
 | `idx_ingest_status` | Monitor running ingest operations |
 | `idx_enrich_triage` | Baseline enrichment via windows-triage-mcp |
-| `idx_enrich_intel` | Threat intel enrichment via OpenCTI |
+| `idx_enrich_intel` | Threat intel enrichment via lookup_ioc (threat intel) |
 | `idx_list_detections` | Detection alerts (Hayabusa/Sigma) |
 
 ### Enrich
@@ -78,7 +78,7 @@ Two post-ingest enrichment pipelines add context without LLM token cost:
 
 **Triage baseline** — Checks indexed filenames and services against the Windows baseline database (via windows-triage-mcp, part of the [sift-mcp](https://github.com/AppliedIR/sift-mcp) monorepo). Stamps documents with `triage.verdict` (EXPECTED, SUSPICIOUS, UNKNOWN, EXPECTED_LOLBIN). Includes 14 registry persistence detection rules (IFEO, Winlogon, LSA, Print Monitors, etc.) that run as direct OpenSearch queries — no external calls needed.
 
-**OpenCTI threat intel** — Extracts unique external IPs, hashes, and domains from indexed data, looks them up in OpenCTI via the gateway, and stamps matching documents with `threat_intel.verdict` and confidence. 200 unique IOCs checked in ~10 seconds vs. 100K inline lookups that would take 83 minutes.
+**Threat intel** — Extracts unique external IPs, hashes, and domains from indexed data, looks each up with `lookup_ioc` (threat intel) via the gateway, and stamps every document carrying it with an entry in `threat_intel.iocs`: the outcome (MATCH, NO_MATCH, or UNAVAILABLE when it couldn't be asked) and each platform's own records. No verdict is computed. 200 unique IOCs checked in ~10 seconds vs. 100K inline lookups that would take 83 minutes.
 
 Both enrichments are programmatic — zero LLM tokens consumed.
 
@@ -212,8 +212,8 @@ api_keys:
 |---|---|---|
 | `HAYABUSA_RULES_DIR` | *(autodetect)* | Path to hayabusa-rules directory (must contain a `config/` subdirectory). Set when hayabusa rules are installed outside the default locations (`/usr/local/share/hayabusa-rules`, `/usr/share/hayabusa-rules`, `/opt/hayabusa*/rules`). Example: `Environment=HAYABUSA_RULES_DIR=/srv/forensics/hayabusa-rules` in the gateway systemd unit file. |
 | `VHIR_SHARD_BREAKER_THRESHOLD` | `3` | Consecutive shard-limit batch failures before the bulk-write circuit breaker halts ingest. |
-| `VHIR_INTEL_BREAKER_THRESHOLD` | `10` | Consecutive non-rate-limit OpenCTI errors before enrichment halts. |
-| `VHIR_INTEL_RATE_LIMIT_RETRIES` | `5` | Per-IOC retry cap when OpenCTI rate-limits. |
+| `VHIR_INTEL_BREAKER_THRESHOLD` | `10` | Consecutive lookup errors, or consecutive UNAVAILABLE answers from every provider, before enrichment halts. Rate limits don't count. |
+| `VHIR_INTEL_RATE_LIMIT_RETRIES` | `5` | Per-IOC retry cap when a lookup is rate-limited. |
 | `VHIR_INTEL_MIN_INTERVAL_MS` | `100` | Minimum milliseconds between OpenCTI requests (default ~10 QPS). Prevents self-inflicted rate limits. Clamped to a 10ms floor. |
 
 All thresholds clamp to a sane lower bound (operator typo of `0` won't disable safety).
@@ -293,7 +293,7 @@ Also:
 Optional:
 - Volatility 3 (for memory forensics)
 - Gateway + windows-triage-mcp (for triage enrichment)
-- Gateway + opencti-mcp (for threat intel enrichment)
+- Gateway + the threat-intel backend (for threat intel enrichment)
 
 **Docker container data:** OpenSearch stores all indexed evidence in a Docker named volume (`opensearch-data`). Removing or recreating the container with `docker rm -f` destroys all indices. Use `vhir backup --all` before any Docker maintenance. The named volume persists across `docker compose down && up -d` (normal restart) but NOT across `docker volume rm` or `docker system prune --volumes`.
 

@@ -1,12 +1,13 @@
 """A stand-in for the gateway's REST endpoint, answering `lookup_ioc` with the
-response shapes opencti-mcp produces.
+response shapes the threat-intel backend produces.
 
-Shapes from sift-mcp `opencti_mcp/client.py::get_indicator_context` (found,
-not found, and the not-found whose observable search did not complete) and
-`opencti_mcp/server.py` (`_wrap_response`, the RateLimitError handler). The
-gateway wraps a tool result as {"tool", "backend", "result": [{"type":
-"text", "text": <json>}]}, which `opensearch_mcp.gateway.call_tool` unwraps —
-so the real client code runs; only the HTTP exchange is replaced.
+Shapes from sift-mcp `opencti_mcp/server.py::_lookup_ioc`: an aggregate
+`outcome` (MATCH, NO_MATCH, UNAVAILABLE), `providers` holding each platform's
+answer verbatim, `found` (null when UNAVAILABLE) and `note` on UNAVAILABLE, and
+the error reply of the backend's own query limit. The gateway wraps a tool
+result as {"tool", "backend", "result": [{"type": "text", "text": <json>}]},
+which `opensearch_mcp.gateway.call_tool` unwraps — so the real client code
+runs; only the HTTP exchange is replaced.
 """
 
 from __future__ import annotations
@@ -30,6 +31,59 @@ def _wrap(result: dict) -> dict:
     return result
 
 
+_QUERIED_AT = "2026-10-07T12:00:00+00:00"
+
+
+def opencti_record(ioc: str, confidence: int = 90, labels=None, revoked: bool = False) -> dict:
+    """An OpenCTI indicator record as the adapter passes it through."""
+    return {
+        "id": f"indicator--{abs(hash(ioc)) % 10**12:012d}",
+        "name": ioc,
+        "created": "2026-01-01T00:00:00Z",
+        "revoked": revoked,
+        "confidence": confidence,
+        "x_opencti_score": confidence,
+        "valid_until": "2027-01-01T00:00:00Z",
+        "objectLabel": [{"value": v} for v in (labels or ["malware"])],
+    }
+
+
+def block(outcome: str, matches=(), reason: str = "", version: str = "6.9.10") -> dict:
+    answer = {
+        "outcome": outcome,
+        "version": version,
+        "queried_at": _QUERIED_AT,
+        "matches": list(matches),
+    }
+    if reason:
+        answer["reason"] = reason
+    return answer
+
+
+def reply(ioc: str, providers: dict) -> dict:
+    """lookup_ioc's reply for these providers' answers."""
+    outcomes = [p["outcome"] for p in providers.values()]
+    outcome = (
+        "MATCH"
+        if "MATCH" in outcomes
+        else "UNAVAILABLE"
+        if "UNAVAILABLE" in outcomes
+        else "NO_MATCH"
+    )
+    result = {
+        "ioc": ioc,
+        "outcome": outcome,
+        "found": None if outcome == "UNAVAILABLE" else outcome == "MATCH",
+        "providers": providers,
+    }
+    if outcome == "UNAVAILABLE":
+        result["reason"] = "; ".join(
+            f"{n}: {p['reason']}" for n, p in providers.items() if p["outcome"] == "UNAVAILABLE"
+        )
+        result["note"] = f"Not answered: {result['reason']}"
+    return _wrap(result)
+
+
 def found(
     ioc: str,
     confidence: int,
@@ -38,49 +92,29 @@ def found(
     name: str | None = None,
     entity_type: str = "indicator",
 ) -> dict:
-    """OpenCTI's top full-text hit for `ioc`: by default its own indicator;
-    `name` and `entity_type` describe a hit that is something else."""
-    return _wrap(
-        {
-            "found": True,
-            "ioc": ioc,
-            "entity_type": entity_type,
-            "type": "stix",
-            "name": ioc if name is None else name,
-            "description": "",
-            "created": "2026-01-01T00:00:00Z",
-            "confidence": confidence,
-            "labels": labels or ["malware"],
-            "related_threat_actors": [],
-            "related_malware": [],
-            "mitre_techniques": [],
-            "source": "opencti",
-            "ioc_type": "hash",
-        }
-    )
+    """OpenCTI's own indicator for `ioc`. With another `name` or kind (a
+    full-text neighbour, an observable), the adapter has no exact record:
+    NO_MATCH. Names compare as the adapter compares them: ignoring case,
+    except for a fuzzy hash (SSDEEP's case carries meaning)."""
+    fuzzy = ioc.count(":") == 2 and ioc.split(":", 1)[0].isdigit()
+    same = name is None or (name == ioc if fuzzy else name.lower() == ioc.lower())
+    if not same or entity_type != "indicator":
+        return not_found(ioc)
+    record = opencti_record(ioc, confidence, labels)
+    return reply(ioc, {"opencti": block("MATCH", [record])})
 
 
 def not_found(ioc: str) -> dict:
-    return _wrap({"found": False, "ioc": ioc, "ioc_type": "hash"})
+    return reply(ioc, {"opencti": block("NO_MATCH")})
 
 
 def unconfirmed(ioc: str) -> dict:
-    """The observable search failed, so the absence is unconfirmed."""
-    return _wrap(
-        {
-            "found": False,
-            "ioc": ioc,
-            "note": (
-                "Observable lookup did not complete (ConnectionResetError: reset) — "
-                "absence of a match is unconfirmed, not a negative result."
-            ),
-            "ioc_type": "hash",
-        }
-    )
+    """OpenCTI couldn't be asked: UNAVAILABLE, with the reason."""
+    return reply(ioc, {"opencti": block("UNAVAILABLE", reason="can't reach OpenCTI")})
 
 
 def errored(ioc: str) -> dict:
-    return _wrap({"found": False, "ioc": ioc, "error": "Context unavailable: schema mismatch"})
+    return _wrap({"error": "query_failed", "message": "Query failed. Check server logs."})
 
 
 def text_reply(ioc: str) -> str:

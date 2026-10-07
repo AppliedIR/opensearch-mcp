@@ -1,12 +1,14 @@
-"""A `found` answer is a verdict only when it is an indicator for this IOC.
+"""Enrichment stamps the outcome lookup_ioc gives, and computes no verdict.
 
-`lookup_ioc` answers with OpenCTI's top full-text hit. For a value with no
-indicator of its own, that can be an unrelated indicator sharing a word with
-it, or an observable, which records a value and detects nothing. On a real
-case every SUSPICIOUS verdict was one of the two, including the case's own
-domain controller and SRV records. The shapes below are those answers, with
-the case's names replaced by synthetic ones and the unrelated indicators' by
-reserved ones.
+`lookup_ioc` used to answer with OpenCTI's top full-text hit, which could be
+an unrelated indicator sharing a word with the IOC, or an observable: on a
+real case every SUSPICIOUS verdict was one of the two, including the case's
+own domain controller and SRV records. Exactness is now the providers'
+contract (each answers only records whose value is the IOC), so enrichment
+takes `outcome` as given: those answers come back NO_MATCH and are stamped
+NO_MATCH, and no `threat_intel.verdict` is written. The shapes below are those
+answers, with the case's names replaced by synthetic ones and the unrelated
+indicators' by reserved ones.
 """
 
 from __future__ import annotations
@@ -58,26 +60,27 @@ def _lookup(monkeypatch, ioc_type: str, value: str, answer) -> tuple[dict, dict]
     return results[value], results["_intel_coverage"]
 
 
-class TestWhatIsAVerdict:
+class TestTheOutcomeIsTheBackends:
     @pytest.mark.parametrize("ioc", sorted(UNRELATED))
     def test_an_unrelated_indicator(self, quick, ioc):
         """Confirmed — the IOC has no indicator of its own — and no verdict."""
         intel, coverage = _lookup(quick, "domain", ioc, _answer)
-        assert "threat_intel.verdict" not in intel
-        assert intel["threat_intel.checked"] is True
+        assert intel["confirmed"] is True
+        assert intel["entry"]["outcome"] == "NO_MATCH"
+        assert "verdict" not in intel["entry"]
         assert ioc in coverage["enriched"]
 
     @pytest.mark.parametrize("confidence", [0, 90])
     def test_an_observable_of_exactly_this_value(self, quick, confidence):
         answer = lambda ioc: found(ioc, confidence, entity_type="observable")  # noqa: E731
         intel, _ = _lookup(quick, "domain", OBSERVED, answer)
-        assert "threat_intel.verdict" not in intel
+        assert intel["entry"]["outcome"] == "NO_MATCH"
 
     def test_an_indicator_whose_name_holds_the_ioc(self, quick):
         """A URL indicator on this host is a different IOC."""
         answer = lambda ioc: found(ioc, 90, name=f"http://{ioc}/payload")  # noqa: E731
         intel, _ = _lookup(quick, "ip", "8.8.4.4", answer)
-        assert "threat_intel.verdict" not in intel
+        assert intel["entry"]["outcome"] == "NO_MATCH"
 
     @pytest.mark.parametrize(
         "ioc_type, value, name",
@@ -90,12 +93,13 @@ class TestWhatIsAVerdict:
     )
     def test_the_iocs_own_indicator(self, quick, ioc_type, value, name):
         intel, _ = _lookup(quick, ioc_type, value, lambda ioc: found(ioc, 90, name=name))
-        assert intel["threat_intel.verdict"] == "MALICIOUS"
+        assert intel["entry"]["outcome"] == "MATCH"
+        assert intel["entry"]["opencti"]["matches"][0]["confidence"] == 90
 
     def test_ssdeep_case_carries_meaning(self, quick):
         value = "3:AbC+/x:AbC"
         intel, _ = _lookup(quick, "hash", value, lambda ioc: found(ioc, 90, name=value.lower()))
-        assert "threat_intel.verdict" not in intel
+        assert intel["entry"]["outcome"] == "NO_MATCH"
 
 
 @pytest.fixture(scope="module")
@@ -129,16 +133,17 @@ class TestThroughEnrichCase:
             summary = threat_intel.enrich_case(os_client, case_id)
             os_client.indices.refresh(index=f"case-{case_id}-*")
             hits = os_client.search(index=f"case-{case_id}-*", body={"size": 20})["hits"]["hits"]
-        assert (summary["status"], summary["iocs_looked_up"], summary["malicious"]) == (
+        assert (summary["status"], summary["iocs_looked_up"], summary["matched"]) == (
             "complete",
             len(names),
             1,
         )
-        assert summary["suspicious"] == 0
-        verdicts = {
-            h["_source"]["winlog"]["event_data"]["QueryName"]: h["_source"].get(
-                "threat_intel.verdict"
-            )
+        assert summary["not_found"] == len(names) - 1
+        outcomes = {
+            h["_source"]["winlog"]["event_data"]["QueryName"]: [
+                e["outcome"] for e in h["_source"]["threat_intel.iocs"]
+            ]
             for h in hits
         }
-        assert verdicts == {name: ("MALICIOUS" if name == OWN else None) for name in names}
+        assert outcomes == {name: ["MATCH" if name == OWN else "NO_MATCH"] for name in names}
+        assert not any("threat_intel.verdict" in h["_source"] for h in hits)

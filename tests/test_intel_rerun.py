@@ -1,12 +1,13 @@
-"""A second enrichment run doesn't lower a verdict an earlier run stamped.
+"""A second enrichment run never loses an answer an earlier run stamped.
 
 Extraction skips documents already checked, but stamping matches every
 document carrying the IOC, so a second run whose lookup graded an IOC lower
-(or didn't find it) rewrote documents the first run had stamped MALICIOUS,
-and reported the run complete. Without force a stamp now never replaces a
-higher verdict; force still does. Lookups go through the real gateway client
-against a mocked endpoint; the stamping runs on the cluster. Values are
-derived.
+(or didn't find it) used to rewrite the one stamp of documents the first run
+had stamped. Each IOC now has its own entry: a run replaces only the entries
+of the IOCs it looked up (force included), and an answer it couldn't get
+marks that IOC's entry UNAVAILABLE while keeping the earlier records. Lookups
+go through the real gateway client against a mocked endpoint; the stamping
+runs on the cluster. Values are derived.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import hashlib
 
 import pytest
 from _intel_case import intel_case
-from _intel_gateway import FakeGateway, found, not_found
+from _intel_gateway import FakeGateway, found, not_found, unconfirmed
 from test_intel_completion import os_client, quick  # noqa: F401
 
 from opensearch_mcp import threat_intel
@@ -25,38 +26,37 @@ H = hashlib.sha1(b"rerun-shared").hexdigest()
 X = hashlib.sha256(b"rerun-new").hexdigest()
 FIRST = {"json-pslist": [{"Pid": 1, "Hash": {"MD5": R, "SHA1": H}}]}
 
-MALICIOUS = lambda ioc: found(ioc, 90)  # noqa: E731
-SUSPICIOUS = lambda ioc: found(ioc, 50)  # noqa: E731
+MATCH = lambda ioc: found(ioc, 90)  # noqa: E731
 
 
-def _doc(client, case_id: str, pid: int) -> tuple:
+def _doc(client, case_id: str, pid: int) -> dict:
+    """{IOC: (outcome, records kept, checked_at)} for the document."""
     hits = client.search(
         index=f"case-{case_id}-json-pslist", body={"query": {"term": {"Pid": pid}}}
     )["hits"]["hits"]
     (source,) = [h["_source"] for h in hits]
-    return source.get("threat_intel.verdict"), source.get("threat_intel.ioc_value")
+    assert "threat_intel.verdict" not in source
+    return {
+        e["ioc_value"]: (
+            e["outcome"],
+            len((e.get("opencti") or {}).get("matches") or []),
+            e["checked_at"],
+        )
+        for e in source.get("threat_intel.iocs", [])
+    }
 
 
-def _stamp(client, case_id: str, pid: int) -> tuple:
-    hits = client.search(
-        index=f"case-{case_id}-json-pslist", body={"query": {"term": {"Pid": pid}}}
-    )["hits"]["hits"]
-    (source,) = [h["_source"] for h in hits]
-    return tuple(
-        source.get(f"threat_intel.{k}") for k in ("verdict", "ioc_value", "confidence", "labels")
-    )
-
-
-def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = False, read=_doc):  # noqa: F811
+def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = False):  # noqa: F811
     """Run 1 on the first document; add a second carrying H and a new IOC;
-    run 2. Returns (run 2 status, document 1 after, document 2 after)."""
+    run 2. Returns (run 2 status, document 1 after run 1, after run 2,
+    document 2 after)."""
     # Two runs, each with its own coverage: one map would resume the first.
     quick.setattr(threat_intel, "_coverage_path_for_run", lambda run: tmp_path / f"{run}.json")
     gateway = FakeGateway(lambda ioc: first[ioc]).install(quick)
     with intel_case(client, FIRST, prefix="pytest-rerun") as case_id:
         quick.setenv("VHIR_INGEST_RUN_ID", "rerun-1")
         threat_intel.enrich_case(client, case_id)
-        assert _doc(client, case_id, 1) == ("MALICIOUS", R)
+        before = _doc(client, case_id, 1)
         client.index(
             index=f"case-{case_id}-json-pslist",
             body={"Pid": 2, "Hash": {"SHA1": H, "SHA256": X}},
@@ -64,67 +64,55 @@ def _rerun(client, quick, tmp_path, first: dict, second: dict, force: bool = Fal
         )
         gateway.answer = lambda ioc: second[ioc]
         quick.setenv("VHIR_INGEST_RUN_ID", "rerun-2")
-        status = threat_intel.enrich_case(client, case_id, force=force)["status"]
-        return status, read(client, case_id, 1), read(client, case_id, 2)
+        try:
+            status = threat_intel.enrich_case(client, case_id, force=force)["status"]
+        except threat_intel.IntelEnrichmentHalted as e:
+            status = (e.summary or {}).get("status", "halted")
+        return status, before, _doc(client, case_id, 1), _doc(client, case_id, 2)
 
 
 @pytest.mark.integration
-class TestASecondRunKeepsTheHigherVerdict:
-    def test_the_shared_ioc_graded_suspicious(self, os_client, quick, tmp_path):  # noqa: F811
-        status, first, second = _rerun(
+class TestASecondRunKeepsEarlierAnswers:
+    def test_a_run_replaces_only_the_iocs_it_looked_up(self, os_client, quick, tmp_path):  # noqa: F811
+        status, before, first, second = _rerun(
             os_client,
             quick,
             tmp_path,
-            {R: MALICIOUS(R), H: SUSPICIOUS(H)},
-            {H: SUSPICIOUS(H), X: not_found(X)},
-        )
-        assert status == "complete"
-        assert first == ("MALICIOUS", R)
-        assert second == ("SUSPICIOUS", H)
-
-    def test_the_shared_ioc_not_found(self, os_client, quick, tmp_path):  # noqa: F811
-        """The verdict survived this one before; its IOC was rewritten."""
-        status, first, _ = _rerun(
-            os_client,
-            quick,
-            tmp_path,
-            {R: MALICIOUS(R), H: not_found(H)},
+            {R: MATCH(R), H: MATCH(H)},
             {H: not_found(H), X: not_found(X)},
         )
         assert status == "complete"
-        assert first == ("MALICIOUS", R)
+        assert first[R] == before[R]  # not looked up again: unchanged
+        assert first[H][0] == "NO_MATCH"
+        assert {k: v[0] for k, v in second.items()} == {H: "NO_MATCH", X: "NO_MATCH"}
 
-    def test_a_higher_grade_still_lands(self, os_client, quick, tmp_path):  # noqa: F811
-        _, first, second = _rerun(
+    def test_force_replaces_each_iocs_own_entry(self, os_client, quick, tmp_path):  # noqa: F811
+        _, before, first, _ = _rerun(
             os_client,
             quick,
             tmp_path,
-            {R: MALICIOUS(R), H: SUSPICIOUS(H)},
-            {H: MALICIOUS(H), X: not_found(X)},
-        )
-        assert first[0] == "MALICIOUS"
-        assert second == ("MALICIOUS", H)
-
-    def test_force_still_replaces_it(self, os_client, quick, tmp_path):  # noqa: F811
-        _, first, _ = _rerun(
-            os_client,
-            quick,
-            tmp_path,
-            {R: MALICIOUS(R), H: SUSPICIOUS(H)},
-            {R: SUSPICIOUS(R), H: SUSPICIOUS(H), X: not_found(X)},
+            {R: MATCH(R), H: MATCH(H)},
+            {R: not_found(R), H: MATCH(H), X: not_found(X)},
             force=True,
         )
-        assert first[0] == "SUSPICIOUS"
+        assert before[R][0] == "MATCH" and first[R][0] == "NO_MATCH"
+        assert first[H][0] == "MATCH"
 
-    def test_an_equal_grade_restamps(self, os_client, quick, tmp_path):  # noqa: F811
-        """Only a higher verdict is kept: at the same rank the newer lookup's
-        IOC, confidence and labels replace the older ones."""
-        _, first, _ = _rerun(
+    def test_an_answer_it_couldnt_get_keeps_the_earlier_records(
+        self,
+        os_client,  # noqa: F811
+        quick,  # noqa: F811
+        tmp_path,
+    ):
+        status, before, first, _ = _rerun(
             os_client,
             quick,
             tmp_path,
-            {R: found(R, 90, ["c2"]), H: SUSPICIOUS(H)},
-            {H: found(H, 95, ["apt"]), X: not_found(X)},
-            read=_stamp,
+            {R: MATCH(R), H: MATCH(H)},
+            {R: unconfirmed(R), H: MATCH(H), X: not_found(X)},
+            force=True,
         )
-        assert first == ("MALICIOUS", H, 95, ["apt"])
+        assert status == "incomplete"
+        outcome, records, checked_at = first[R]
+        assert (outcome, records) == ("UNAVAILABLE", 1)  # the earlier record kept
+        assert checked_at > before[R][2]

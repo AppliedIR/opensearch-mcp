@@ -46,7 +46,7 @@ CAUSES = {
     "every call raising": (lambda ioc: ConnectionRefusedError("ECONNREFUSED"), "exception 2"),
     "every call an error payload": (errored, "error 2"),
     "rate limit exhausted": (lambda ioc: rate_limited(), "rate_limit_exhausted 2"),
-    "an unconfirmed not-found": (unconfirmed, "unconfirmed 2"),
+    "an unavailable answer": (unconfirmed, "unavailable 2"),
     "a plain-text reply": (text_reply, "unconfirmed 2"),
 }
 
@@ -142,9 +142,12 @@ class TestAHaltedRunThatStamped:
         (record,) = [r for r in records if r["tool"] == "enrich_intel"]
         assert record["params"]["case_id"] == case_id
         summary = record["result_summary"]["value"]
-        assert summary.startswith("1 docs updated, 1 malicious, 0 suspicious; incomplete:")
-        assert "unconfirmed 1" in summary
-        assert (status["status"], status["total_indexed"]) == ("failed", 1)
+        # the unavailable IOC's document gets its UNAVAILABLE entry too
+        assert summary.startswith(
+            "2 docs updated, 1 matched, 0 not found, 1 unavailable; incomplete:"
+        )
+        assert "unavailable 1" in summary
+        assert (status["status"], status["total_indexed"]) == ("failed", 2)
 
 
 def _md5s(n: int, prefix: str = "capped") -> list[str]:
@@ -238,7 +241,9 @@ class TestStampsThatDidNotLand:
 
 
 class TestWhatCountsAsConfirmed:
-    """Confirmed only when the reply has `found` and no note or error."""
+    """Confirmed only when the reply's `outcome` is MATCH or NO_MATCH for this
+    IOC, with no error; `found` and a `note` don't decide it (a MATCH may
+    carry a note, and `found` is null when no one could answer)."""
 
     @pytest.mark.parametrize(
         "answer, confirmed",
@@ -250,15 +255,32 @@ class TestWhatCountsAsConfirmed:
             (text_reply, False),
             (lambda ioc: {"found": False, "ioc": ioc, "error": ""}, False),
             (lambda ioc: "[]", False),  # JSON, but not an object
+            (lambda ioc: {"found": True, "ioc": ioc, "confidence": 90}, False),  # no outcome
+            (lambda ioc: {**found(ioc, 90), "ioc": "other"}, False),
+            (lambda ioc: {**found(ioc, 90), "note": "101 indicators; 100 listed"}, True),
         ],
-        ids=["found", "not found", "note", "error", "text", "empty error", "json list"],
+        ids=[
+            "found",
+            "not found",
+            "unavailable",
+            "error",
+            "text",
+            "empty error",
+            "json list",
+            "an older backend's reply",
+            "another ioc's reply",
+            "a match with a note",
+        ],
     )
     def test_reply(self, quick, answer, confirmed):
         FakeGateway(answer).install(quick)
         results = threat_intel.batch_lookup({"hash": {MAL}})
         coverage = results.pop("_intel_coverage")
-        assert (MAL in results, MAL in coverage["enriched"]) == (confirmed, confirmed)
+        assert results[MAL]["confirmed"] is confirmed
+        assert (MAL in coverage["enriched"]) == confirmed
         assert (MAL in coverage["skipped"]) == (not confirmed)
+        if not confirmed:  # still an entry: the "couldn't ask" outcome
+            assert results[MAL]["entry"]["outcome"] == "UNAVAILABLE"
 
 
 @pytest.mark.integration
@@ -286,7 +308,7 @@ class TestAPlainTextReply:
             ).install(quick)
             summary = threat_intel.enrich_case(os_client, case_id)
         assert sorted(gateway.asked) == sorted([MAL, CLEAN])
-        assert (summary["status"], summary["iocs_looked_up"], summary["malicious"]) == (
+        assert (summary["status"], summary["iocs_looked_up"], summary["matched"]) == (
             "complete",
             2,
             1,
@@ -303,22 +325,25 @@ class TestACompleteRun:
             summary = threat_intel.enrich_case(os_client, case_id)
         assert summary["status"] == "complete"
         assert (summary["iocs_extracted"], summary["iocs_looked_up"]) == (2, 2)
-        assert summary["malicious"] == 1
+        assert (summary["matched"], summary["not_found"], summary["unavailable"]) == (1, 1, 0)
 
-    def test_the_confirmed_verdicts_are_still_stamped_when_the_run_is_not_complete(
+    def test_the_confirmed_answers_are_still_stamped_when_the_run_is_not_complete(
         self, os_client, quick
     ):
-        """One lookup confirmed, one unconfirmed: the confirmed verdict is
-        written, the unconfirmed IOC's document is left unstamped, and the
-        run is not complete."""
+        """One lookup confirmed, one unavailable: the confirmed answer is
+        stamped, the unavailable IOC's document gets an UNAVAILABLE entry but
+        isn't checked (the next run looks it up again), and the run is not
+        complete."""
         FakeGateway(lambda ioc: found(ioc, 90) if ioc == MAL else unconfirmed(ioc)).install(quick)
         with intel_case(os_client, DOCS, prefix="pytest-complete") as case_id:
-            with pytest.raises(threat_intel.IntelEnrichmentHalted, match="unconfirmed 1"):
+            with pytest.raises(threat_intel.IntelEnrichmentHalted, match="unavailable 1"):
                 threat_intel.enrich_case(os_client, case_id)
             os_client.indices.refresh(index=f"case-{case_id}-*")
             docs = {
                 h["_source"]["Pid"]: h["_source"]
                 for h in os_client.search(index=f"case-{case_id}-*")["hits"]["hits"]
             }
-        assert docs[1].get("threat_intel.verdict") == "MALICIOUS"
+        assert [e["outcome"] for e in docs[1]["threat_intel.iocs"]] == ["MATCH"]
+        assert "threat_intel.verdict" not in docs[1]
         assert "threat_intel.checked" not in docs[2]
+        assert [e["outcome"] for e in docs[2]["threat_intel.iocs"]] == ["UNAVAILABLE"]

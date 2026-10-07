@@ -1,4 +1,6 @@
-"""Post-ingest threat intel enrichment via OpenCTI (through gateway)."""
+"""Post-ingest threat-intel enrichment: each IOC is looked up with the
+threat-intel backend's lookup_ioc (through the gateway), and every platform's
+answer is stamped on the documents carrying it, as the platform gave it."""
 
 from __future__ import annotations
 
@@ -17,13 +19,12 @@ from opensearchpy import OpenSearch
 
 # --- Rate-limit pacing + hint parsing (Fix F) ---
 #
-# OpenCTI server (opencti_mcp/client.py:407-411) raises
-# RateLimitError(wait, limit_type) with a wait hint when its token
-# bucket drains. Message format (errors.py:101):
-#   "Rate limit exceeded for {limit_type}. Wait {wait_seconds:.1f}s."
-# Pre-Fix-F, the client ignored the hint and counted each rate-limit
-# as a circuit-breaker failure. Pacing + hint parsing together prevent
-# self-inflicted rate limits.
+# lookup_ioc (threat intel) answers a drained query limit with an error
+# carrying a wait hint ("Rate limit exceeded for {limit_type}. Wait
+# {wait_seconds:.1f}s."), and a platform that rate-limits with an
+# UNAVAILABLE reason saying "Too Many Requests". Either is waited out and
+# retried, never counted as a circuit-breaker failure. Pacing + hint
+# parsing together prevent self-inflicted rate limits.
 
 _WAIT_RE = re.compile(r"[Ww]ait\s+([\d.]+)", re.IGNORECASE)
 
@@ -48,7 +49,7 @@ class IntelEnrichmentHalted(RuntimeError):
     """Raised when an enrichment run cannot report itself complete: an
     extracted IOC has no confirmed lookup (gateway missing, lookups failing,
     rate limit exhausted, an unconfirmed not-found, the circuit breaker), or
-    a stamp did not land. The verdicts that were confirmed are still
+    a stamp did not land. The answers that were confirmed are still
     stamped; the message says what is missing and why.
 
     `summary` holds the run's counts when the halt comes after stamping:
@@ -523,37 +524,83 @@ def extract_unique_iocs(
     return iocs
 
 
-def _is_this_ioc(resp: dict, ioc_type: str, value: str) -> bool:
-    """Whether a `found` answer is an indicator for exactly this IOC.
+MATCH, NO_MATCH, UNAVAILABLE = "MATCH", "NO_MATCH", "UNAVAILABLE"
+_CONFIRMED = (MATCH, NO_MATCH)
 
-    `lookup_ioc` searches OpenCTI's full text and answers with the top hit.
-    For a value with no indicator of its own that can be an unrelated
-    indicator sharing a word with it (an internal host's SRV record answered
-    by some other domain), or an observable, which records a value and
-    detects nothing. The name is compared in lookup form, so case counts only
-    where it carries meaning.
-    """
-    if resp.get("entity_type") != "indicator":
-        return False
-    return _lookup_form(ioc_type, str(resp.get("name", ""))) == value
+
+def _entry(ioc_type: str, value: str, outcome: str, reply: dict | None, reason: str = "") -> dict:
+    """One IOC's entry on a document: the outcome, when it was asked, and
+    each provider's answer verbatim under its own name."""
+    entry: dict[str, Any] = {
+        "ioc_type": ioc_type,
+        "ioc_value": value,
+        "outcome": outcome,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if reason:
+        entry["reason"] = reason[:500]
+    providers = (reply or {}).get("providers")
+    if isinstance(providers, dict):
+        for name, block in providers.items():
+            if isinstance(name, str) and isinstance(block, dict) and name not in entry:
+                entry[name] = block
+    return entry
+
+
+def _unconfirmed_why(resp: dict, value: str) -> str:
+    if resp.get("error"):
+        return f"error: {resp.get('message') or resp['error']}"
+    outcome = resp.get("outcome")
+    if outcome == UNAVAILABLE:
+        return f"unavailable: {resp.get('reason') or resp.get('note') or 'no reason given'}"
+    if outcome is None:
+        if resp.get("text"):  # tool output that isn't a JSON object
+            return f"unconfirmed: {str(resp['text'])[:200]}"
+        return "unconfirmed: the reply has no outcome (an older threat-intel backend)"
+    if outcome not in _CONFIRMED:
+        return f"unconfirmed: unknown outcome {str(outcome)[:40]!r}"
+    return "unconfirmed: the reply is for another IOC"
+
+
+def _rate_limited(resp: dict) -> str:
+    """The rate-limit message in a reply, or "": a query-limit error, or an
+    UNAVAILABLE whose providers were rate-limited (and none failed otherwise)."""
+    if resp.get("error"):
+        msg = str(resp.get("message") or resp["error"])
+        return msg if _is_rate_limit(msg) else ""
+    if resp.get("outcome") != UNAVAILABLE:
+        return ""
+    reasons = [
+        str(block.get("reason") or "")
+        for block in (resp.get("providers") or {}).values()
+        if isinstance(block, dict) and block.get("outcome") == UNAVAILABLE
+    ]
+    if reasons and all(_is_rate_limit(r) for r in reasons):
+        return "; ".join(reasons)
+    return ""
 
 
 def batch_lookup(
     iocs: dict[str, set[str]],
     on_progress=None,
 ) -> dict[str, dict]:
-    """Look up IOCs via gateway -> opencti-mcp -> OpenCTI.
+    """Look up IOCs with lookup_ioc (threat intel), through the gateway.
 
-    Rev 6 — adds:
-      - Inter-request pacing (~10 QPS default, env-configurable) to
-        avoid self-inflicting OpenCTI rate-limits.
-      - Rate-limit hint parsing ("Wait X.Xs"); sleeps + retries without
-        counting against the circuit breaker.
-      - Per-IOC coverage map persisted via atomic rename, enabling
-        resume after crash.
+    MATCH and NO_MATCH are confirmed. An UNAVAILABLE reply, a reply with no
+    `outcome` (an older backend) or for another IOC, and an error are not:
+    they still get an UNAVAILABLE entry (the "couldn't ask" outcome), stay
+    in the coverage map's skipped list and keep the run incomplete.
 
-    Returns {ioc_value: result_dict} for found IOCs + a
-    "_intel_coverage" key with the complete enriched/skipped map.
+    The circuit breaker counts consecutive failures per provider (a
+    provider's UNAVAILABLE) and for the backend itself (errors, unreadable
+    replies); it halts the run when the backend's count, or every
+    provider's, reaches the threshold, so one provider down never stops
+    another's answers. Rate limits are waited out and retried, never
+    counted. Pacing is ~10 QPS by default.
+
+    Returns {ioc_value: {"ioc_type", "confirmed", "entry"}} plus an
+    "_intel_coverage" key with the complete enriched/skipped map. The
+    coverage map is persisted after every IOC, so a crashed run resumes.
     """
     from opensearch_mcp.gateway import call_tool, gateway_available
 
@@ -573,17 +620,23 @@ def batch_lookup(
     results: dict = {}
     total = sum(len(v) for v in iocs.values())
     done = 0
-    consecutive_failures = 0
+    backend_failures = 0  # consecutive errors and unreadable replies
+    provider_failures: dict[str, int] = {}  # consecutive UNAVAILABLE, per provider
     last_call = 0.0  # monotonic clock of last request
+
+    def tripped() -> str:
+        if backend_failures >= circuit_threshold:
+            return f"{backend_failures} consecutive lookup errors"
+        if provider_failures and all(n >= circuit_threshold for n in provider_failures.values()):
+            names = ", ".join(sorted(provider_failures))
+            return f"every provider ({names}) unavailable {circuit_threshold} times in a row"
+        return ""
 
     for ioc_type, values in iocs.items():
         for value in values:
-            if consecutive_failures >= circuit_threshold:
-                print(
-                    f"WARNING: {consecutive_failures} consecutive OpenCTI "
-                    f"non-rate-limit errors — halting enrichment",
-                    file=sys.stderr,
-                )
+            why_halt = tripped()
+            if why_halt:
+                print(f"WARNING: {why_halt} — halting enrichment", file=sys.stderr)
                 coverage["skipped"].setdefault(value, "circuit_breaker_halt")
                 _atomic_write_coverage(coverage_path, coverage)
                 results["_intel_coverage"] = coverage
@@ -608,24 +661,26 @@ def batch_lookup(
                 try:
                     resp = call_tool("lookup_ioc", {"ioc": value}, timeout=15)
                 except Exception as e:
-                    consecutive_failures += 1
-                    coverage["skipped"][value] = f"exception: {str(e)[:120]}"
-                    print(
-                        f"WARNING: OpenCTI lookup failed for {value}: {e}",
-                        file=sys.stderr,
-                    )
+                    backend_failures += 1
+                    why = f"exception: {str(e)[:120]}"
+                    coverage["skipped"][value] = why
+                    results[value] = {
+                        "ioc_type": ioc_type,
+                        "confirmed": False,
+                        "entry": _entry(ioc_type, value, UNAVAILABLE, None, why),
+                    }
+                    print(f"WARNING: lookup failed for {value}: {e}", file=sys.stderr)
                     ioc_handled = True
                     break
                 last_call = time.monotonic()
                 if not isinstance(resp, dict):
                     resp = {"text": json.dumps(resp)}
-                err = resp.get("error")
-                msg = resp.get("message", err or "") if err else ""
 
-                if err and _is_rate_limit(msg):
-                    wait = _parse_wait_hint(msg)
+                limited = _rate_limited(resp)
+                if limited:
+                    wait = _parse_wait_hint(limited)
                     print(
-                        f"INFO: OpenCTI rate-limit on {value}; sleeping "
+                        f"INFO: rate-limited on {value}; sleeping "
                         f"{wait:.1f}s (attempt {attempt + 1}/"
                         f"{rate_limit_max_retries})",
                         file=sys.stderr,
@@ -634,52 +689,42 @@ def batch_lookup(
                     attempt += 1
                     continue
 
-                if err:
-                    # Genuine non-rate-limit error — count toward breaker.
-                    consecutive_failures += 1
-                    coverage["skipped"][value] = f"error: {msg[:120]}"
-                    print(
-                        f"WARNING: OpenCTI error for {value}: {msg}",
-                        file=sys.stderr,
-                    )
+                # Each provider's own run of failures (a provider that
+                # answered resets its count, whatever another one did)
+                for name, block in (resp.get("providers") or {}).items():
+                    if isinstance(block, dict):
+                        if block.get("outcome") == UNAVAILABLE:
+                            provider_failures[name] = provider_failures.get(name, 0) + 1
+                        else:
+                            provider_failures[name] = 0
+
+                outcome = resp.get("outcome")
+                confirmed = (
+                    not resp.get("error") and outcome in _CONFIRMED and resp.get("ioc") == value
+                )
+                if not confirmed:
+                    why = _unconfirmed_why(resp, value)
+                    if outcome != UNAVAILABLE or resp.get("error"):
+                        backend_failures += 1
+                    else:
+                        backend_failures = 0  # the backend answered
+                    coverage["skipped"][value] = why[:160]
+                    results[value] = {
+                        "ioc_type": ioc_type,
+                        "confirmed": False,
+                        "entry": _entry(ioc_type, value, UNAVAILABLE, resp, why),
+                    }
+                    print(f"WARNING: no confirmed answer for {value}: {why}", file=sys.stderr)
                     ioc_handled = True
                     break
 
-                if "found" not in resp or "note" in resp or "error" in resp:
-                    # Confirmed only when the answer says found or not found
-                    # and carries no note or error. A not-found with a note
-                    # did not complete (the observable search failed, say),
-                    # and a reply without `found` (a tool's plain-text
-                    # output) answered nothing: neither is stamped or counted.
-                    detail = resp.get("note") or resp.get("text") or json.dumps(resp)
-                    coverage["skipped"][value] = f"unconfirmed: {str(detail)[:120]}"
-                    ioc_handled = True
-                    break
-
-                # Success — reset breaker; record enrichment.
-                consecutive_failures = 0
+                backend_failures = 0
                 coverage["enriched"].append(value)
-
-                if not resp.get("found", False) or not _is_this_ioc(resp, ioc_type, value):
-                    results[value] = {
-                        "threat_intel.checked": True,
-                        "threat_intel.ioc_type": ioc_type,
-                        "threat_intel.ioc_value": value,
-                        "threat_intel.source": "opencti",
-                    }
-                else:
-                    confidence = resp.get("confidence", 0) or 0
-                    labels = resp.get("labels", [])
-                    results[value] = {
-                        "threat_intel.verdict": (
-                            "MALICIOUS" if confidence >= 80 else "SUSPICIOUS"
-                        ),
-                        "threat_intel.confidence": confidence,
-                        "threat_intel.labels": labels,
-                        "threat_intel.ioc_type": ioc_type,
-                        "threat_intel.ioc_value": value,
-                        "threat_intel.source": "opencti",
-                    }
+                results[value] = {
+                    "ioc_type": ioc_type,
+                    "confirmed": True,
+                    "entry": _entry(ioc_type, value, outcome, resp),
+                }
                 ioc_handled = True
                 break
 
@@ -692,6 +737,12 @@ def batch_lookup(
                     file=sys.stderr,
                 )
                 coverage["skipped"][value] = "rate_limit_exhausted"
+                why = f"rate-limited: {rate_limit_max_retries} retries exhausted"
+                results[value] = {
+                    "ioc_type": ioc_type,
+                    "confirmed": False,
+                    "entry": _entry(ioc_type, value, UNAVAILABLE, None, why),
+                }
 
             # Persist coverage after every IOC (resumability).
             _atomic_write_coverage(coverage_path, coverage)
@@ -700,8 +751,67 @@ def batch_lookup(
     return results
 
 
-# Stamp order: a verdict of higher rank is written later, so it stands.
-_VERDICT_RANK = {"SUSPICIOUS": 1, "MALICIOUS": 2}
+# The keys an older release stamped on a document, one IOC per document. A
+# forced run clears them (with `checked`), so those documents are looked up
+# again and get per-IOC entries.
+_LEGACY_KEYS = (
+    "threat_intel.verdict",
+    "threat_intel.confidence",
+    "threat_intel.labels",
+    "threat_intel.ioc_value",
+    "threat_intel.ioc_type",
+    "threat_intel.source",
+    "threat_intel.enriched_at",
+    "threat_intel.checked",
+)
+
+# One IOC's entry in `threat_intel.iocs`, keyed on its exact lookup form and
+# type. A confirmed answer replaces it whole and marks the document checked;
+# an unconfirmed one sets outcome, time and reason, and keeps the providers'
+# earlier answers (or adds a new entry). Nothing else on the document changes.
+_STAMP_SCRIPT = """
+def key = 'threat_intel.iocs';
+def entries = ctx._source[key];
+if (!(entries instanceof List)) { entries = new ArrayList(); }
+int at = -1;
+for (int i = 0; i < entries.size(); i++) {
+  def e = entries.get(i);
+  if (e instanceof Map && params.entry.ioc_value.equals(e.get('ioc_value'))
+      && params.entry.ioc_type.equals(e.get('ioc_type'))) { at = i; break; }
+}
+if (params.confirmed) {
+  if (at >= 0) { entries.set(at, params.entry); } else { entries.add(params.entry); }
+  ctx._source['threat_intel.checked'] = true;
+} else if (at >= 0) {
+  def e = entries.get(at);
+  e.put('outcome', params.entry.outcome);
+  e.put('checked_at', params.entry.checked_at);
+  e.put('reason', params.entry.reason);
+} else {
+  entries.add(params.entry);
+}
+ctx._source[key] = entries;
+"""
+
+
+def clear_legacy_stamps(client: OpenSearch, index_pattern: str) -> int:
+    """Remove an older release's one-IOC-per-document stamp keys (only those
+    keys), in one request; returns the documents changed."""
+    result = client.update_by_query(
+        index=index_pattern,
+        body={
+            "query": {"exists": {"field": "threat_intel.ioc_value"}},
+            "script": {
+                "source": "for (k in params.keys) { ctx._source.remove(k) }",
+                "lang": "painless",
+                "params": {"keys": list(_LEGACY_KEYS)},
+            },
+        },
+        request_timeout=300,
+        conflicts="proceed",
+        refresh=True,
+    )
+    return result.get("updated", 0)
 
 
 def stamp_documents(
@@ -711,7 +821,7 @@ def stamp_documents(
     origins: dict[str, set[tuple[str, str]]],
     force: bool = False,
 ) -> tuple[int, int, int]:
-    """Stamp indexed documents with threat_intel.* fields via update-by-query.
+    """Stamp each looked-up IOC's entry on the documents carrying it.
 
     Returns (documents updated, version conflicts, stamp requests that failed).
 
@@ -720,16 +830,13 @@ def stamp_documents(
     value is lower-cased, and a Sysmon `Hashes` part is stored inside the
     whole string, so a term on the lookup value missed both.
 
-    A document carrying several IOCs is stamped once per IOC, and the last
-    stamp's fields stand. So the IOCs are stamped in ascending rank — not
-    found, then SUSPICIOUS, then MALICIOUS — and each request refreshes, so
-    the next one reads the document it just wrote. Without the refresh a
-    later request met a stale version and skipped the document: measured on
-    copies of real pslist, Sysmon and ProcsWMI documents, 123-289 of 1,124
-    lost their MALICIOUS verdict. A conflict that still happens is counted
-    and returned, never retried here.
+    A document carrying several IOCs gets one entry per IOC; a stamp for one
+    IOC touches only its own entry. Each request refreshes, so the next one
+    reads the document it just wrote: without the refresh a later request met
+    a stale version and skipped the document. A conflict that still happens
+    is counted and returned, never retried here. `force` is handled by the
+    caller (clear_legacy_stamps).
     """
-    now = datetime.now(timezone.utc).isoformat()
     total_updated = 0
     conflicts = 0
     failed = 0
@@ -756,11 +863,7 @@ def stamp_documents(
         except Exception as e:
             keyword_indices = None
             print(f"WARNING: domain stamps skipped, mappings unreadable: {e}", file=sys.stderr)
-    ranked = sorted(
-        ioc_results.items(),
-        key=lambda item: (_VERDICT_RANK.get(item[1].get("threat_intel.verdict"), 0), item[0]),
-    )
-    for ioc_value, intel in ranked:
+    for ioc_value, result in sorted(ioc_results.items()):
         where = origins.get(ioc_value)
         if not where:
             continue
@@ -779,32 +882,10 @@ def stamp_documents(
             failed += 1
             continue
 
-        intel_with_ts = dict(intel)
-        intel_with_ts["threat_intel.enriched_at"] = now
-        intel_with_ts["threat_intel.checked"] = True
-
-        set_clauses = []
-        params: dict = {
-            "_rank": _VERDICT_RANK.get(intel.get("threat_intel.verdict"), 0),
-            "_ranks": _VERDICT_RANK,
-        }
-        for k, v in intel_with_ts.items():
-            safe_key = k.replace(".", "_")
-            set_clauses.append(f"ctx._source['{k}'] = params.{safe_key}")
-            params[safe_key] = v
-        # Without force, a stamp never replaces a higher verdict a previous
-        # run left on the document. Read from _source: the verdict isn't
-        # mapped as keyword in every index, so a query can't exclude it.
-        script = "; ".join(set_clauses)
-        if not force:
-            script = (
-                "def old = ctx._source['threat_intel.verdict'];"
-                " if (old != null && params._ranks.getOrDefault(old, 0) > params._rank)"
-                f" {{ ctx.op = 'noop' }} else {{ {script} }}"
-            )
-
+        entry = dict(result["entry"])
+        entry.setdefault("reason", "")
         try:
-            result = client.update_by_query(
+            response = client.update_by_query(
                 index=index_pattern,
                 body={
                     "query": {
@@ -814,9 +895,9 @@ def stamp_documents(
                         }
                     },
                     "script": {
-                        "source": script,
+                        "source": _STAMP_SCRIPT,
                         "lang": "painless",
-                        "params": params,
+                        "params": {"entry": entry, "confirmed": bool(result["confirmed"])},
                     },
                 },
                 request_timeout=120,
@@ -824,8 +905,8 @@ def stamp_documents(
                 requests_per_second=1000,
                 refresh=True,
             )
-            total_updated += result.get("updated", 0)
-            conflicts += result.get("version_conflicts", 0)
+            total_updated += response.get("updated", 0)
+            conflicts += response.get("version_conflicts", 0)
         except Exception as e:
             failed += 1
             print(
@@ -928,11 +1009,17 @@ def enrich_case(
     results = batch_lookup(iocs, on_progress=on_progress)
     coverage = results.pop("_intel_coverage", {})
 
-    malicious = sum(1 for r in results.values() if r.get("threat_intel.verdict") == "MALICIOUS")
-    suspicious = sum(1 for r in results.values() if r.get("threat_intel.verdict") == "SUSPICIOUS")
+    outcomes = [r["entry"]["outcome"] if r["confirmed"] else UNAVAILABLE for r in results.values()]
+    matched = outcomes.count(MATCH)
+    not_found = outcomes.count(NO_MATCH)
+    unavailable = outcomes.count(UNAVAILABLE)
+
+    # Under force, an older release's one-IOC stamps are cleared first: the
+    # run then gives those documents per-IOC entries
+    legacy_cleared = clear_legacy_stamps(client, index_pattern) if force else 0
 
     if on_progress:
-        on_progress("stamping", matched=len(results))
+        on_progress("stamping", matched=matched)
     origins = {value: where for found in iocs.values() for value, where in found.items()}
     updated, conflicts, failed_stamps = stamp_documents(
         client, index_pattern, results, origins, force=force
@@ -941,10 +1028,12 @@ def enrich_case(
     counts = {
         "iocs_extracted": total_iocs,
         "iocs_looked_up": len(results),
-        "malicious": malicious,
-        "suspicious": suspicious,
+        "matched": matched,
+        "not_found": not_found,
+        "unavailable": unavailable,
         "documents_updated": updated,
         "version_conflicts": conflicts,
+        "legacy_stamps_cleared": legacy_cleared,
     }
     # Complete only when every IOC had a confirmed lookup and every stamp
     # landed. A run that looked nothing up read "complete, 0 malicious".

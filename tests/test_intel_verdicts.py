@@ -1,11 +1,12 @@
-"""No verdict is silently lost on a document carrying several IOCs.
+"""No answer is silently lost on a document carrying several IOCs.
 
-Each IOC is stamped by its own update-by-query and the last one's fields
-stand, so the order decides which verdict a document keeps — and without a
-refresh between requests a later one met a stale version and skipped the
-document. Measured on copies of real pslist, Sysmon and ProcsWMI documents,
-the old stamping lost MALICIOUS on 123-289 of 1,124. Stamps now go in
-ascending rank, each refreshing, and conflicts are counted.
+Each IOC was stamped by its own update-by-query into one set of
+`threat_intel.*` fields, so the last stamp's fields stood: a document kept one
+IOC's verdict and lost the others' (the order and a refresh decided which;
+measured on copies of real pslist, Sysmon and ProcsWMI documents, 123-289 of
+1,124 lost theirs). Each IOC now has its own entry in `threat_intel.iocs`, a
+stamp touches only its own IOC's entry, and every order ends with one entry
+per IOC. Each request still refreshes, and conflicts are counted.
 
 Values are derived.
 """
@@ -27,33 +28,32 @@ def _h(algo: str, text: str) -> str:
     return hashlib.new(algo, text.encode()).hexdigest()
 
 
-MAL = _h("md5", "malicious")  # MALICIOUS, confidence 90
-SUS = _h("sha1", "suspicious")  # SUSPICIOUS, confidence 50
+MAL = _h("md5", "matched")
+SUS = _h("sha1", "matched too")
 NF = _h("sha256", "not found")
-SYS_MAL = _h("md5", "sysmon malicious").upper()
+SYS_MAL = _h("md5", "sysmon matched").upper()
 SYS_NF = _h("sha256", "sysmon not found").upper()
 
 
-def _intel(value: str, verdict: str | None) -> dict:
-    intel = {
-        "threat_intel.ioc_type": "hash",
-        "threat_intel.ioc_value": value,
-        "threat_intel.source": "opencti",
+def _result(value: str, outcome: str) -> dict:
+    return {
+        "ioc_type": "hash",
+        "confirmed": True,
+        "entry": {
+            "ioc_type": "hash",
+            "ioc_value": value,
+            "outcome": outcome,
+            "checked_at": "2026-10-07T12:00:00+00:00",
+        },
     }
-    if verdict:
-        intel["threat_intel.verdict"] = verdict
-        intel["threat_intel.confidence"] = 90 if verdict == "MALICIOUS" else 50
-    else:
-        intel["threat_intel.checked"] = True
-    return intel
 
 
 RESULTS = {
-    MAL: _intel(MAL, "MALICIOUS"),
-    SUS: _intel(SUS, "SUSPICIOUS"),
-    NF: _intel(NF, None),
-    SYS_MAL.lower(): _intel(SYS_MAL.lower(), "MALICIOUS"),
-    SYS_NF.lower(): _intel(SYS_NF.lower(), None),
+    MAL: _result(MAL, "MATCH"),
+    SUS: _result(SUS, "MATCH"),
+    NF: _result(NF, "NO_MATCH"),
+    SYS_MAL.lower(): _result(SYS_MAL.lower(), "MATCH"),
+    SYS_NF.lower(): _result(SYS_NF.lower(), "NO_MATCH"),
 }
 ORIGINS = {
     MAL: {("Hash.MD5", MAL)},
@@ -67,32 +67,32 @@ DOCS = {
     "json-pslistsus": [{"Pid": 2, "Hash": {"SHA1": SUS, "SHA256": NF}}],
     "winevt-sysmon": [{"winlog": {"event_data": {"Hashes": f"MD5={SYS_MAL},SHA256={SYS_NF}"}}}],
 }
-# document -> (verdict it must end with, the IOC it must name)
+# document -> {IOC: outcome}, one entry each
 EXPECTED = {
-    "json-pslist": ("MALICIOUS", MAL),
-    "json-pslistsus": ("SUSPICIOUS", SUS),
-    "winevt-sysmon": ("MALICIOUS", SYS_MAL.lower()),
+    "json-pslist": {MAL: "MATCH", SUS: "MATCH", NF: "NO_MATCH"},
+    "json-pslistsus": {SUS: "MATCH", NF: "NO_MATCH"},
+    "winevt-sysmon": {SYS_MAL.lower(): "MATCH", SYS_NF.lower(): "NO_MATCH"},
 }
 
 
-class TestTheOrderAndTheRefresh:
-    def test_ascending_rank_each_refreshing_and_conflicts_summed(self):
+class TestEachRequestRefreshes:
+    def test_every_ioc_stamped_each_refreshing_and_conflicts_summed(self):
         client = MagicMock()
         client.update_by_query.side_effect = [
             {"updated": 1, "version_conflicts": 0},
             {"updated": 1, "version_conflicts": 2},
             {"updated": 1, "version_conflicts": 1},
         ]
-        results = {v: RESULTS[v] for v in (MAL, NF, SUS)}  # worst order in
+        results = {v: RESULTS[v] for v in (MAL, NF, SUS)}
         updated, conflicts, failed = threat_intel.stamp_documents(
             client, "case-x-*", results, ORIGINS
         )
 
         stamped = [
-            c.kwargs["body"]["script"]["params"]["threat_intel_ioc_value"]
+            c.kwargs["body"]["script"]["params"]["entry"]["ioc_value"]
             for c in client.update_by_query.call_args_list
         ]
-        assert stamped == [NF, SUS, MAL]
+        assert sorted(stamped) == sorted([MAL, NF, SUS])
         assert all(c.kwargs["refresh"] is True for c in client.update_by_query.call_args_list)
         assert (updated, conflicts, failed) == (3, 3, 0)
 
@@ -118,14 +118,17 @@ def _outcome(client, case_id: str) -> dict:
     out = {}
     for name in DOCS:
         source = client.search(index=f"case-{case_id}-{name}")["hits"]["hits"][0]["_source"]
-        out[name] = (source.get("threat_intel.verdict"), source.get("threat_intel.ioc_value"))
+        entries = source.get("threat_intel.iocs", [])
+        assert "threat_intel.verdict" not in source, source
+        out[name] = {e["ioc_value"]: e["outcome"] for e in entries}
+        assert len(entries) == len(out[name]), entries  # one entry per IOC
     return out
 
 
 @pytest.mark.integration
-class TestMultiIOCDocumentsKeepTheirVerdict:
+class TestMultiIOCDocumentsKeepEveryAnswer:
     @pytest.mark.parametrize("order", list(itertools.permutations([MAL, SUS, NF])))
-    def test_every_order_ends_on_the_highest_verdict_naming_its_ioc(self, os_client, order):
+    def test_every_order_ends_with_one_entry_per_ioc(self, os_client, order):
         """All six orders the three pslist IOCs can arrive in."""
         results = {value: RESULTS[value] for value in order}
         results.update({v: RESULTS[v] for v in (SYS_NF.lower(), SYS_MAL.lower())})
@@ -143,10 +146,8 @@ class TestMultiIOCDocumentsKeepTheirVerdict:
         )
 
         def answer(ioc: str) -> dict:
-            if ioc in (MAL, SYS_MAL.lower()):
+            if ioc in (MAL, SUS, SYS_MAL.lower()):
                 return found(ioc, 90)
-            if ioc == SUS:
-                return found(ioc, 50)
             return not_found(ioc)
 
         FakeGateway(answer).install(monkeypatch)

@@ -2479,12 +2479,12 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
 
 # ---------------------------------------------------------------------------
-# cmd_enrich_intel — OpenCTI threat intel enrichment
+# cmd_enrich_intel — threat intel enrichment
 # ---------------------------------------------------------------------------
 
 
 def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> None:
-    """Enrich indexed data with OpenCTI threat intel.
+    """Enrich indexed data with threat intel (lookup_ioc, each platform's records).
 
     Progress is written to the shared `ingest-status` dir with
     `artifact_name="intel"` so the async MCP entry point
@@ -2563,7 +2563,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
                 _write_enrich_status("running", indexed=done, files_done=done, files_total=total)
             else:
                 _progress_state["total"] = total
-                print(f"Looking up {total} IOCs via OpenCTI...")
+                print(f"Looking up {total} IOCs with lookup_ioc (threat intel)...")
                 _write_enrich_status("running", files_total=total)
         elif event == "stamping":
             print(f"Stamping {kw['matched']} matched IOCs to documents...")
@@ -2603,8 +2603,9 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
         return
 
     print(f"\nDone. {result['documents_updated']} documents updated.")
-    print(f"  MALICIOUS: {result['malicious']}")
-    print(f"  SUSPICIOUS: {result['suspicious']}")
+    print(f"  Matched: {result['matched']} IOC(s)")
+    print(f"  Not found: {result['not_found']} IOC(s)")
+    print(f"  Unavailable: {result['unavailable']} IOC(s)")
 
     _write_enrich_status(
         "complete",
@@ -2620,7 +2621,8 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
     """The audit record of an enrichment run that stamped documents."""
     summary = (
         f"{result['documents_updated']} docs updated, "
-        f"{result['malicious']} malicious, {result['suspicious']} suspicious"
+        f"{result.get('matched', 0)} matched, {result.get('not_found', 0)} not found, "
+        f"{result.get('unavailable', 0)} unavailable"
     )
     if incomplete:
         summary += f"; incomplete: {incomplete[:300]}"
@@ -3052,7 +3054,7 @@ def main() -> None:
     p_alog.set_defaults(func=cmd_ingest_accesslog)
 
     # enrich-intel subcommand
-    p_enrich = sub.add_parser("enrich-intel", help="Enrich indexed data with OpenCTI threat intel")
+    p_enrich = sub.add_parser("enrich-intel", help="Enrich indexed data with threat intel")
     p_enrich.add_argument("--case", help="Case ID")
     p_enrich.add_argument("--force", action="store_true", help="Re-enrich already-enriched docs")
     p_enrich.add_argument(

@@ -26,7 +26,10 @@
         "threat_intel.ioc_type": {"type": "keyword"},
         "threat_intel.ioc_value": {"type": "keyword"},
         "threat_intel.enriched_at": {"type": "date"},
-        "threat_intel.checked": {"type": "boolean"}
+        "threat_intel.checked": {"type": "boolean"},
+        "threat_intel.iocs.outcome": {"type": "keyword"},
+        "threat_intel.iocs.ioc_value": {"type": "keyword"},
+        "threat_intel.iocs.ioc_type": {"type": "keyword"}
       }
     }
   },
