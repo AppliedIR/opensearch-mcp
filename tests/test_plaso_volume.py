@@ -68,7 +68,7 @@ def _l2t(seen):
 
 
 def test_an_image_volume_is_read_with_roots_read_capability_only(calls, tmp_path):
-    run_plaso_volume("linux,!filestat", tmp_path / "vol1", tmp_path / "wd", read_as_root=True)
+    run_plaso_volume("linux", tmp_path / "vol1", tmp_path / "wd", read_as_root=True)
     cmd, kw = _l2t(calls)
     prefix = ["sudo", "-n", "setpriv", "--reuid", str(os.getuid()), "--regid"]
     prefix += [str(os.getgid()), "--init-groups", "--inh-caps", "+dac_read_search"]
@@ -76,7 +76,7 @@ def test_an_image_volume_is_read_with_roots_read_capability_only(calls, tmp_path
     assert cmd[: len(prefix)] == prefix
     wd = tmp_path / "wd"
     for flag, value in (
-        ("--parsers", "linux,!filestat"),
+        ("--parsers", "linux"),
         ("--logfile", str(wd / "l2t.log.gz")),
         ("--temporary_directory", str(wd / "tmp")),
         ("--storage_file", str(wd / "out.plaso")),
@@ -118,10 +118,10 @@ def test_the_runs_for_each_kind_of_host(tmp_path):
         "",
     )
     assert WINDOWS_PARSERS == "sqlite/chrome_27_history,esedb/msie_webcache,text/setupapi"
-    # An image: filestat comes from the file system itself (fls), not Plaso.
-    assert plaso_runs(_host(tmp_path, "linux", True)) == ([("linux,!filestat", tmp_path)], "")
+    # A mounted image keeps filestat; its times are the file system's: no note.
+    assert plaso_runs(_host(tmp_path, "linux", True)) == ([("linux", tmp_path)], "")
     assert plaso_runs(_host(tmp_path, "macos", True)) == (
-        [("macos,unified_logging,!filestat", tmp_path)],
+        [("macos,unified_logging", tmp_path)],
         "",
     )
     assert plaso_runs(_host(tmp_path, "macos"))[0] == [("macos,unified_logging", tmp_path)]
@@ -151,7 +151,7 @@ for _ in range(3):
         time.sleep(600)
         os._exit(0)
     pids.append(pid)
-open(os.environ["STUB_PIDS"], "w").write(" ".join(map(str, pids)))
+open(os.environ["STUB_PIDS"], "w").write(" ".join(map(str, [os.getpid()] + pids)))
 if os.environ.get("STUB_EXIT"):
     sys.exit(int(os.environ["STUB_EXIT"]))  # the workers outlive their parent
 time.sleep(600)

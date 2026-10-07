@@ -282,9 +282,9 @@ def plaso_runs(host) -> tuple[list[tuple[str, Path]], str]:
     """The (parser expression, source) runs for a host's plaso artifact, and
     a note for its status (empty when none).
 
-    On a disk image the file timeline comes from The Sleuth Kit, which reads
-    the file system's own times, so Plaso leaves filestat out. On a folder,
-    filestat is Plaso's only file timeline, and its times may be the copy's."""
+    Both keep filestat, Plaso's file timeline. On a mounted image its times
+    are the file system's; on a folder they may be the copy's, and the note
+    says so."""
     from opensearch_mcp.discover import PLASO_WINDOWS_DIRS
     from opensearch_mcp.paths import resolve_case_insensitive
 
@@ -295,7 +295,7 @@ def plaso_runs(host) -> tuple[list[tuple[str, Path]], str]:
     # A Mac's unified logs (.tracev3) aren't in Plaso's macos preset.
     preset = "macos,unified_logging" if host.os == "macos" else host.os
     if host.from_image:
-        return [(f"{preset},!filestat", vr)], ""
+        return [(preset, vr)], ""
     return [(preset, vr)], "file times may reflect the copy, not the original system"
 
 
@@ -406,9 +406,13 @@ def run_plaso_volume(
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _kill_tree(proc.pid)
-            proc.wait()
+            try:
+                proc.wait(timeout=30)
+                what = "killed"
+            except subprocess.TimeoutExpired:  # the kill didn't take; never hang here
+                what = f"still running (pid {proc.pid}) after a kill"
             raise RuntimeError(
-                f"log2timeline killed after {timeout} s; nothing from this run was "
+                f"log2timeline {what} after {timeout} s; nothing from this run was "
                 f"indexed. Log:\n{_log_tail(workdir)}"
             )
     if rc != 0:
