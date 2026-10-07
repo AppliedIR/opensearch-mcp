@@ -736,10 +736,14 @@ def batch_lookup(
                     else:
                         backend_failures = 0  # the backend answered
                     coverage["skipped"][value] = why[:160]
+                    # A reply's blocks are this IOC's only when the reply is about it
+                    about = not resp.get("error") and resp.get("ioc") == value
                     results[value] = {
                         "ioc_type": ioc_type,
                         "confirmed": False,
-                        "entry": _entry(ioc_type, value, UNAVAILABLE, resp, why),
+                        "entry": _entry(
+                            ioc_type, value, UNAVAILABLE, resp if about else None, why
+                        ),
                     }
                     print(f"WARNING: no confirmed answer for {value}: {why}", file=sys.stderr)
                     ioc_handled = True
@@ -795,7 +799,8 @@ _LEGACY_KEYS = (
 # One IOC's entry in `threat_intel.iocs`, keyed on its exact lookup form and
 # type, merged per provider: a provider's new answer (MATCH or NO_MATCH)
 # replaces its earlier block, and an earlier answer is kept when the new block
-# isn't one (an outage never erases what a platform said). The outcome is
+# isn't one (an outage never erases what a platform said). A new entry with no
+# block at all (an error, a reply about another IOC) keeps every earlier block. The outcome is
 # then recomputed from the merged blocks (a reply has one per configured
 # provider). The document is `checked` only when every entry on it has an
 # answer in each of its blocks, so a later run asks again for the rest.
@@ -821,11 +826,16 @@ for (int i = 0; i < entries.size(); i++) {
       && params.entry.ioc_type.equals(e.get('ioc_type'))) { at = i; break; }
 }
 def merged = new HashMap(params.entry);
+boolean blockless = true;
+for (def k : merged.keySet()) { if (isBlock(merged.get(k))) { blockless = false; } }
 if (at >= 0 && entries.get(at) instanceof Map) {
   def old = entries.get(at);
   for (def k : old.keySet()) {
-    if (answered(old.get(k), params.answered) && !answered(merged.get(k), params.answered)) {
-      merged.put(k, old.get(k));
+    def ob = old.get(k);
+    // No block at all (an error, another IOC's reply): every earlier one stays
+    if (blockless ? isBlock(ob)
+        : answered(ob, params.answered) && !answered(merged.get(k), params.answered)) {
+      merged.put(k, ob);
     }
   }
 }

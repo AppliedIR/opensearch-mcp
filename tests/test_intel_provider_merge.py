@@ -82,7 +82,7 @@ def _later_doc(client, case_id):
 
 
 def test_an_outage_keeps_opencti_s_earlier_records(os_client, quick):  # noqa: F811
-    """The UAT's repro: an earlier MATCH, then an outage and a non-force run."""
+    """An earlier MATCH, then an OpenCTI outage and a non-force run."""
     with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
         _run(
             os_client,
@@ -186,3 +186,90 @@ def test_an_ioc_only_in_destination_ip_is_looked_up(os_client, quick):  # noqa: 
         assert asked == [DEST_IP]
         assert result["matched"] == 1
         assert _entry(_doc(os_client, case_id, "json-conn"), DEST_IP)["outcome"] == "MATCH"
+
+
+MISP_DOWN = block("UNAVAILABLE", reason="can't reach MISP")
+
+
+def _first_run_leaves_misp_unanswered(client, case_id, quick, opencti=None):
+    _run(
+        client,
+        case_id,
+        quick,
+        lambda i: reply(i, {"opencti": opencti or block("NO_MATCH"), "misp": MISP_DOWN}),
+    )
+    assert "threat_intel.checked" not in _doc(client, case_id, "json-first")
+
+
+def test_a_failed_lookup_keeps_every_earlier_block_and_the_document_unchecked(
+    os_client,  # noqa: F811
+    quick,
+):
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _first_run_leaves_misp_unanswered(os_client, case_id, quick)
+        _run(os_client, case_id, quick, lambda i: ConnectionError("gateway down"))
+        first = _doc(os_client, case_id, "json-first")
+        entry = _entry(first)
+        assert entry["outcome"] == "UNAVAILABLE"
+        assert entry["opencti"]["outcome"] == "NO_MATCH"
+        assert entry["misp"]["outcome"] == "UNAVAILABLE"  # still owed an answer
+        assert "threat_intel.checked" not in first
+
+
+def test_a_reply_about_another_ioc_brings_no_blocks(os_client, quick):  # noqa: F811
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _run(os_client, case_id, quick, lambda i: reply(OTHER, {"opencti": _opencti_match(OTHER)}))
+        first = _doc(os_client, case_id, "json-first")
+        entry = _entry(first)
+        assert entry["outcome"] == "UNAVAILABLE"
+        assert threat_intel._blocks(entry) == {}
+        assert "threat_intel.checked" not in first
+
+
+def test_a_reply_about_another_ioc_keeps_the_earlier_answer(os_client, quick):  # noqa: F811
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _first_run_leaves_misp_unanswered(os_client, case_id, quick, _opencti_match(IOC))
+        _run(
+            os_client,
+            case_id,
+            quick,
+            lambda i: reply(
+                OTHER, {"opencti": block("NO_MATCH"), "misp": _misp("NO_MATCH", OTHER)}
+            ),
+        )
+        entry = _entry(_doc(os_client, case_id, "json-first"))
+        assert (entry["opencti"]["outcome"], len(entry["opencti"]["matches"])) == ("MATCH", 3)
+        assert entry["misp"]["outcome"] == "UNAVAILABLE"
+        assert entry["outcome"] == "MATCH"
+
+
+def test_anchor_a_provider_no_longer_configured_leaves_no_stale_block(
+    os_client,  # noqa: F811
+    quick,
+):
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _first_run_leaves_misp_unanswered(os_client, case_id, quick)
+        _run(os_client, case_id, quick, lambda i: reply(i, {"opencti": block("NO_MATCH")}))
+        first = _doc(os_client, case_id, "json-first")
+        assert "misp" not in _entry(first)
+        assert first["threat_intel.checked"] is True
+
+
+def test_an_internal_address_reply_keeps_the_earlier_blocks(
+    os_client,  # noqa: F811
+    quick,
+):
+    with intel_case(os_client, {"json-first": [{"Hash": {"MD5": IOC}}]}) as case_id:
+        _first_run_leaves_misp_unanswered(os_client, case_id, quick)
+
+        def internal(i):
+            r = reply(i, {})
+            r.update(outcome="UNAVAILABLE", found=None, reason="internal address")
+            return r
+
+        _run(os_client, case_id, quick, internal)
+        entry = _entry(_doc(os_client, case_id, "json-first"))
+        assert (entry["opencti"]["outcome"], entry["misp"]["outcome"]) == (
+            "NO_MATCH",
+            "UNAVAILABLE",
+        )
