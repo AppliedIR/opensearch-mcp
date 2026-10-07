@@ -258,6 +258,7 @@ def test_start_now_lets_the_run_go_on_under_the_proposed_machine(gate):
 def test_a_host_list_naming_every_unit_starts_the_run_with_no_examiner_action(gate):
     command, args = _listed(gate)
     command(args)  # never waits: it would block this thread
+    assert gate.status()["hosts_confirmed"] is True  # what the launch reads
     assert gate.writes and RUN not in hi.load(gate.case_dir).waits
     assert {w["host.id"] for w in gate.writes} == {"WKS71"}
 
@@ -406,8 +407,12 @@ def test_the_review_lists_machines_not_yet_confirmed(gate):
         {"key": started, "canonical": "A", "pairs": [[u, "A"]]}]}},
         hi.load(gate.case_dir).obs_offset)  # fmt: skip
     key, _ = hi.get_or_mint(gate.case_dir, u, "B")  # a new machine
+    done = hi.new_machine_key()
+    hi.append_decision(gate.case_dir, {"action": "confirm", "args": {"machines": [
+        {"key": done, "canonical": "C", "pairs": [[u, "C"]]}]}},
+        hi.load(gate.case_dir).obs_offset)  # fmt: skip
     keys, note = srv._host_review(gate.case_id)
-    assert keys == {started, key} and note == ""
+    assert keys == {started, key} and note == ""  # never the confirmed one
 
 
 # -- the dry run encourages a host list
@@ -462,13 +467,16 @@ def test_runs_waiting_for_their_hosts_count_at_admission_and_are_listed(gate, mo
     assert {r["status"] for r in refused["running"]} == {host_gate.AWAITING}
 
 
-def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate):
+def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate, monkeypatch):
     root = gate.tmp / "hosts"
     for h in ("H1", "H2", "H3"):
         (root / h).mkdir(parents=True)
         (root / h / "e.csv").write_text("when,what\n2026-01-01T00:00:00Z,a\n")
     args = argparse.Namespace(path=str(root), case=None, hostname=None, time_field="when",
                               recursive=True)  # fmt: skip
+    calls = []
+    real_gate = cli._gate
+    monkeypatch.setattr(cli, "_gate", lambda *a, **k: calls.append(1) or real_gate(*a, **k))
     t, out = gate.start(cli.cmd_ingest_delimited, args)
     gate.waiting()
     assert len(hi.load(gate.case_dir).waits[RUN]) == 3  # every host, in one wait
@@ -476,6 +484,7 @@ def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate):
     t.join(15)
     assert out == {"ok": True}
     assert {w["host.name"] for w in gate.writes} == {"H1", "H2", "H3"}
+    assert calls == [1]  # the leaves went through the walk's one pass
 
 
 def test_a_waiting_runs_status_outlives_the_cleanup_by_age(gate):
@@ -509,3 +518,12 @@ def test_a_launch_whose_run_was_cancelled_says_so(gate, monkeypatch):
                                error="run run-gate was cancelled in the Hosts tab")  # fmt: skip
     out = srv._answer_after_gate({"status": "started"}, gate.case_id, 4245, RUN)
     assert out["status"] == "cancelled" and "cancelled in the Hosts tab" in out["error"]
+
+
+def test_a_cancelled_run_stays_cancelled(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    ingest_status.write_status("c1", 4246, RUN, "cancelled", [], {}, "t0")
+    for live in ("running", "starting", host_gate.AWAITING):
+        ingest_status.write_status("c1", 4246, RUN, live, [], {}, "t0")
+    (f,) = (tmp_path / "status").glob("*.json")
+    assert json.loads(f.read_text())["status"] == "cancelled"

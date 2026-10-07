@@ -149,14 +149,15 @@ def test_an_ai_written_csv_naming_a_confirmed_host_isnt_stored_under_it(run, mon
         hi.load(d).obs_offset)  # fmt: skip
     f = d / "work" / "rows.csv"
     f.parent.mkdir()
-    f.write_text("when,Computer\n2026-01-01T00:00:00Z,WKS01\n")
+    sampled = "".join("2026-01-01T00:00:00Z,SRV09\n" for _ in range(names_scan.ROWS))
+    f.write_text("when,Computer\n" + sampled + "2026-01-01T00:00:01Z,WKS01\n")  # past the sample
     cli.cmd_ingest_delimited(argparse.Namespace(
         path=str(f), case=None, hostname="rows", time_field="when"))  # fmt: skip
-    assert run and {w["host.name"] for w in run} == {"WKS01"}
-    assert key not in {w["vhir.host_key"] for w in run}
+    late = [w for w in run if w["host.name"] == "WKS01"]
+    assert late and key not in {w["vhir.host_key"] for w in late}
     monkeypatch.setattr(srv, "_get_active_case", lambda: d.name)
-    resp = {"results": [{} for _ in run]}
-    srv._annotate_hosts(resp, d.name, hits=[{"_source": w} for w in run])
+    resp = {"results": [{} for _ in late]}
+    srv._annotate_hosts(resp, d.name, hits=[{"_source": w} for w in late])
     assert all(doc.get("host_unconfirmed") for doc in resp["results"])
 
 
@@ -221,3 +222,36 @@ def test_a_dying_worker_never_fails_a_run_whose_name_only_holds_its_pid(tmp_path
         sys.excepthook(*sys.exc_info())
     (f,) = (tmp_path / "status").glob("*.json")
     assert json.loads(f.read_text())["status"] == "running"
+
+
+def test_a_velociraptor_collection_the_ai_wrote_gives_the_ais_names():
+    d = case()
+    coll = d / "work" / "coll"
+    coll.mkdir(parents=True)
+    (coll / "collection_context.json").write_text(
+        json.dumps({"client_info": {"hostname": "WKS05", "fqdn": "wks05.corp.example.test"}})
+    )
+    unit = names_scan.velociraptor_unit(coll, d / "work" / "coll.zip", d)
+    assert {n.origin for n in unit.names} == {names_scan.AI_WRITTEN}
+
+
+def test_a_scan_judges_only_the_units_it_read_against_the_host_list():
+    from sift_common import host_proposal
+
+    d = case()
+    host_proposal.upload_host_list(d, "WKS06\nWKS07\n", "ex1")
+    other = hi.unit_key("evidence/WKS07")  # names that arrived without a scan of it
+    hi.append_observations(d, [
+        {"kind": "unit", "unit": other, "locator": "evidence/WKS07"},
+        {"kind": "name", "unit": other, "raw": "WKS07", "evidence": "SYSTEM ComputerName",
+         "origin": "artifact"},
+        {"kind": "name", "unit": other, "raw": "WKS07", "evidence": "Security.evtx Computer",
+         "origin": "artifact"},
+    ])  # fmt: skip
+    scanned = names_scan.Unit(locator="evidence/WKS06", source="host folder")
+    scanned.add("WKS06", "SYSTEM ComputerName", "artifact")
+    scanned.add("WKS06", "Security.evtx Computer", "artifact")
+    names_scan.record(d, [scanned])
+    state = hi.load(d)
+    assert state.machine_of_pair(scanned.key, "WKS06") is not None
+    assert state.machine_of_pair(other, "WKS07") is None  # not this scan's to judge
