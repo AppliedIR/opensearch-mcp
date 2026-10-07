@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 
 from opensearchpy import OpenSearch
 
@@ -15,11 +16,6 @@ from opensearch_mcp.gateway import call_tool, gateway_available
 from opensearch_mcp.paths import sanitize_index_component
 
 logger = logging.getLogger(__name__)
-
-
-def _escape_wildcard(value: str) -> str:
-    """Escape wildcard characters in OpenSearch query values."""
-    return value.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
 
 
 _MAX_CONSECUTIVE_FAILURES = 3
@@ -86,6 +82,11 @@ def enrich_remote(
 
     results: dict = {}
 
+    # Stamps this version no longer writes are removed (events other than process
+    # creation and 7045, and values of a service key other than ImagePath);
+    # everything else is re-stamped below.
+    results["_cleared"] = _clear_stamps(client, safe_case)
+
     # --- Gateway-independent: registry persistence R1-R14, R16 ---
     results["registry_persistence"] = _enrich_registry_persistence(client, safe_case, on_progress)
 
@@ -121,19 +122,42 @@ def enrich_remote(
             artifact_name=name,
             query=query,
             on_progress=on_progress,
+            flags_only=(name == "tasks"),
+            hash_field="SHA1.keyword" if name == "amcache" else None,
         )
 
-    # Service enrichment (check_service)
-    results["evtx_svc"] = _enrich_evtx_services(client, safe_case, on_progress)
-    results["vol_svcs"] = _enrich_service_artifact(
+    # Service enrichment (check_service): name plus executable, each doc's own pair
+    results["evtx_svc"] = _enrich_services(
         client,
-        safe_case,
-        index_pattern=f"case-{safe_case}-vol-svcscan-*",
-        name_field="Name.keyword",
-        artifact_name="vol_svcs",
-        on_progress=on_progress,
+        f"case-{safe_case}-evtx-*",
+        {"term": {"event.code": 7045}},
+        _svc_from_7045,
+        "evtx_svc",
+        on_progress,
     )
-    results["registry_svcs"] = _enrich_registry_services(client, safe_case, on_progress)
+    results["vol_svcs"] = _enrich_services(
+        client,
+        f"case-{safe_case}-vol-svcscan-*",
+        {"match_all": {}},
+        _svc_from_svcscan,
+        "vol_svcs",
+        on_progress,
+    )
+    results["registry_svcs"] = _enrich_services(
+        client,
+        f"case-{safe_case}-registry-*",
+        {
+            "bool": {
+                "must": [
+                    {"wildcard": {"KeyPath.keyword": "*\\\\Services\\\\*"}},
+                    {"term": {"ValueName.keyword": "ImagePath"}},
+                ]
+            }
+        },
+        _svc_from_registry,
+        "registry_svcs",
+        on_progress,
+    )
 
     # Registry Run keys (check_file on ValueData)
     results["registry_run"] = _enrich_registry_run_keys(client, safe_case, on_progress)
@@ -183,15 +207,28 @@ def _enrich_file_artifact(
     artifact_name: str,
     query: str = "*",
     on_progress=None,
+    flags_only: bool = False,
+    hash_field: str | None = None,
 ) -> dict:
-    """Enrich file-based artifacts in batch via check_file."""
+    """Enrich file-based artifacts in batch via check_file.
+
+    hash_field (Amcache's SHA1): check_file runs once per path and hash, so
+    each hash gets its own answer; a missing or empty hash is one more value."""
+    paths_agg: dict = {"terms": {"field": path_field, "size": 5000}}
+    if hash_field:
+        paths_agg["aggs"] = {
+            "hashes": {
+                "terms": {"field": hash_field, "size": 100, "missing": ""},
+                "aggs": {"sizes": {"terms": {"field": "Size.keyword", "size": 1}}},
+            }
+        }
     try:
         agg_result = client.search(
             index=index_pattern,
             allow_no_indices=False,
             body={
                 "query": {"query_string": {"query": query}},
-                "aggs": {"paths": {"terms": {"field": path_field, "size": 5000}}},
+                "aggs": {"paths": paths_agg},
                 "size": 0,
             },
         )
@@ -209,6 +246,7 @@ def _enrich_file_artifact(
     paths_agg = agg_result.get("aggregations", {}).get("paths", {})
     buckets = paths_agg.get("buckets", [])
     unchecked = paths_agg.get("sum_other_doc_count", 0)
+    hashes_unread = 0
     if not buckets:
         return {"status": "empty", "checked": 0}
 
@@ -230,22 +268,57 @@ def _enrich_file_artifact(
         # Skip non-path entries (AppX metadata, hex strings, empty)
         if not path or not (path[0] in ("\\", "/") or (len(path) > 1 and path[1] == ":")):
             continue
+        hashes = bucket.get("hashes", {}).get("buckets") if hash_field else None
+        if hash_field:  # a path's hashes past the first 100 aren't read
+            hashes_unread += bucket.get("hashes", {}).get("sum_other_doc_count", 0)
+        if hashes:  # one answer per hash: {hash: result}
+            answers = {}
+            for h in hashes:
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    break
+                size = (h.get("sizes", {}).get("buckets") or [{}])[0].get("key", "")
+                args, note = _amcache_args(path, str(h["key"]), str(size))
+                try:
+                    result = call_tool("check_file", args, timeout=15)
+                    consecutive_failures = 0
+                    succeeded = True
+                except Exception:
+                    consecutive_failures += 1
+                    continue
+                if result.get("verdict"):
+                    result = _reference_mismatch(result)
+                    if note:
+                        result = dict(result, reasons=[*result.get("reasons", []), note])
+                    answers[str(h["key"])] = result
+            if answers:
+                verdicts[path] = answers
+            continue
         try:
             result = call_tool("check_file", {"path": path}, timeout=15)
             consecutive_failures = 0
             succeeded = True
             if result.get("verdict"):
-                verdicts[path] = result
+                verdicts[path] = _flags_only(result) if flags_only else result
         except Exception:
             consecutive_failures += 1
             continue
 
     if not verdicts:
-        return _loop_result(
-            consecutive_failures, succeeded, 0, unchecked, checked=len(buckets), enriched=0
+        return _hashes_unread(
+            _loop_result(
+                consecutive_failures, succeeded, 0, unchecked, checked=len(buckets), enriched=0
+            ),
+            hashes_unread,
         )
 
-    enriched, write_failures = _batch_stamp_verdicts(client, index_pattern, path_field, verdicts)
+    by_hash = {p: v for p, v in verdicts.items() if "verdict" not in v}
+    plain = {p: v for p, v in verdicts.items() if "verdict" in v}
+    enriched, write_failures = _batch_stamp_verdicts(
+        client, index_pattern, path_field, plain, query
+    )
+    if by_hash:
+        more, failed = _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash)
+        enriched, write_failures = enriched + more, write_failures + failed
 
     if on_progress:
         on_progress(
@@ -255,14 +328,26 @@ def _enrich_file_artifact(
             enriched=enriched,
         )
 
-    return _loop_result(
-        consecutive_failures,
-        succeeded,
-        write_failures,
-        unchecked,
-        checked=len(buckets),
-        enriched=enriched,
+    return _hashes_unread(
+        _loop_result(
+            consecutive_failures,
+            succeeded,
+            write_failures,
+            unchecked,
+            checked=len(buckets),
+            enriched=enriched,
+        ),
+        hashes_unread,
     )
+
+
+def _hashes_unread(result: dict, n: int) -> dict:
+    """A result that also says how many documents' hashes weren't read."""
+    if not n:
+        return result
+    why = f"{n} documents hold hashes past a path's first 100 and were not checked"
+    reason = f"{result['reason']}; {why}" if result.get("reason") else why
+    return {**result, "status": "failed", "reason": reason, "unchecked_hash_docs": n}
 
 
 def _batch_stamp_verdicts(
@@ -270,6 +355,7 @@ def _batch_stamp_verdicts(
     index_pattern: str,
     path_field: str,
     verdicts: dict,
+    scope_query: str = "*",
 ) -> int:
     """Batch-stamp verdicts by grouping paths with identical verdicts.
 
@@ -333,11 +419,18 @@ def _batch_stamp_verdicts(
                 chunk_params["reason_map"] = {
                     p: params["reason_map"][p] for p in chunk if p in params["reason_map"]
                 }
+            paths_query = {"terms": {path_field: chunk}}
             try:
                 resp = client.update_by_query(
                     index=index_pattern,
                     body={
-                        "query": {"terms": {path_field: chunk}},
+                        "query": paths_query
+                        if scope_query == "*"
+                        else {
+                            "bool": {
+                                "filter": [paths_query, {"query_string": {"query": scope_query}}]
+                            }
+                        },
                         "script": {
                             "source": "; ".join(script_lines),
                             "lang": "painless",
@@ -363,273 +456,264 @@ def _batch_stamp_verdicts(
 # ---------------------------------------------------------------------------
 
 
-def _enrich_evtx_services(client, safe_case, on_progress=None):
-    """Enrich evtx 7045 service install events via check_service."""
-    index = f"case-{safe_case}-evtx-*"
-    try:
-        # No _source filter — "winlog.event_data" is a literal dotted key
-        # (normalize.py:128), not a nested path. _source filtering treats
-        # dots as path separators and would miss it.
-        result = client.search(
-            index=index,
-            allow_no_indices=False,
-            body={"query": {"term": {"event.code": 7045}}, "size": 5000},
-        )
-    except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
-
-    hits = result["hits"]["hits"]
-    if not hits:
-        return {"status": "empty", "checked": 0}
-
-    service_names = set()
-    for h in hits:
-        ed = h["_source"].get("winlog.event_data", {})
-        if isinstance(ed, dict) and ed.get("ServiceName"):
-            service_names.add(ed["ServiceName"])
-
-    if on_progress:
-        on_progress("triage_start", artifact="evtx_svc", unique_values=len(service_names))
-
-    enriched = 0
-    write_failures = 0
-    consecutive_failures = 0
-    succeeded = False
-    for name in service_names:
-        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            break
-        try:
-            verdict = call_tool(
-                "check_service",
-                {"service_name": name, "os_version": "Windows"},
-                timeout=15,
-            )
-            consecutive_failures = 0
-            succeeded = True
-            if not verdict.get("verdict"):
-                continue
-            reasons = verdict.get("reasons", [])
-            script_lines = [
-                "ctx._source['triage.verdict'] = params.verdict",
-                "ctx._source['triage.checked'] = true",
-            ]
-            params: dict = {"verdict": verdict["verdict"]}
-            if reasons:
-                script_lines.append("ctx._source['triage.reason'] = params.reason")
-                params["reason"] = "; ".join(reasons)
-            resp = _ubq(
-                client,
-                index=index,
-                body={
-                    "query": {
-                        "bool": {
-                            "must": [
-                                {"term": {"event.code": 7045}},
-                                {"term": {"winlog.event_data.ServiceName": name}},
-                            ]
-                        }
-                    },
-                    "script": {
-                        "source": "; ".join(script_lines),
-                        "lang": "painless",
-                        "params": params,
-                    },
-                },
-                conflicts="proceed",
-                requests_per_second=1000,
-            )
-            enriched += resp.get("updated", 0)
-        except _WriteFailed:
-            write_failures += 1
-        except Exception:
-            consecutive_failures += 1
-
-    if on_progress:
-        on_progress(
-            "triage_done",
-            artifact="evtx_svc",
-            checked=len(service_names),
-            enriched=enriched,
-        )
-    return _loop_result(
-        consecutive_failures,
-        succeeded,
-        write_failures,
-        checked=len(service_names),
-        enriched=enriched,
-    )
+_TRIAGE_FIELDS = [
+    "triage.verdict",
+    "triage.reason",
+    "triage.checked",
+    "triage.confidence",
+    "triage.lolbin",
+    "triage.expected_paths",
+]
+_AMCACHE_HASH_LIMIT = 31457280  # Amcache's SHA1 covers only the first 30 MiB of a file
 
 
-def _enrich_service_artifact(
-    client, safe_case, index_pattern, name_field, artifact_name, on_progress=None
-):
-    """Enrich service-based artifacts (vol3 svcscan, registry Services)."""
-    try:
-        agg_result = client.search(
-            index=index_pattern,
-            allow_no_indices=False,
-            body={
-                "query": {"match_all": {}},
-                "aggs": {"names": {"terms": {"field": name_field, "size": 5000}}},
-                "size": 0,
+def _clear_stamps(client, safe_case):
+    script = {
+        "source": "for (f in params.f) { ctx._source.remove(f) }",
+        "lang": "painless",
+        "params": {"f": _TRIAGE_FIELDS},
+    }
+    stamped = {"exists": {"field": "triage.checked"}}
+    scopes = [
+        (
+            f"case-{safe_case}-evtx-*",
+            {
+                "bool": {
+                    "filter": [stamped],
+                    "must_not": [{"terms": {"event.code": [4688, 1, 7045]}}],
+                }
             },
-        )
-    except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
-
-    names_agg = agg_result.get("aggregations", {}).get("names", {})
-    buckets = names_agg.get("buckets", [])
-    unchecked = names_agg.get("sum_other_doc_count", 0)
-    if not buckets:
-        return {"status": "empty", "checked": 0}
-
-    if on_progress:
-        on_progress("triage_start", artifact=artifact_name, unique_values=len(buckets))
-
-    enriched = 0
-    write_failures = 0
-    consecutive_failures = 0
-    succeeded = False
-    for bucket in buckets:
-        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            break
-        name = bucket["key"]
+        ),
+        (
+            f"case-{safe_case}-registry-*",
+            {
+                "bool": {
+                    "filter": [stamped, {"wildcard": {"KeyPath.keyword": "*\\\\Services\\\\*"}}],
+                    "must_not": [{"term": {"ValueName.keyword": "ImagePath"}}],
+                }
+            },
+        ),
+    ]
+    cleared = 0
+    for index, query in scopes:
         try:
-            verdict = call_tool(
-                "check_service",
-                {"service_name": name, "os_version": "Windows"},
-                timeout=15,
+            cleared += _ubq_to_completion(
+                client, index=index, body={"query": query, "script": script}
             )
-            consecutive_failures = 0
-            succeeded = True
-            if not verdict.get("verdict"):
-                continue
-            reasons = verdict.get("reasons", [])
-            script_lines = [
-                "ctx._source['triage.verdict'] = params.verdict",
-                "ctx._source['triage.checked'] = true",
-            ]
-            params: dict = {"verdict": verdict["verdict"]}
-            if reasons:
-                script_lines.append("ctx._source['triage.reason'] = params.reason")
-                params["reason"] = "; ".join(reasons)
+        except Exception as e:
+            return {"status": "failed", "reason": f"retired stamps could not be cleared: {e}"}
+    return {"status": "complete", "cleared": cleared}
+
+
+_CLEAR_WAIT = 3600  # seconds a clear may take before triage gives up on it
+
+
+def _ubq_to_completion(client, index, body, wait=_CLEAR_WAIT, poll=1.0) -> int:
+    """Run an update_by_query as a task and wait for it, returning its count.
+
+    Called synchronously, a large one outlives the client's 10 s read timeout
+    (and its response, with one header per batch, can be misread), so the
+    caller would carry on, and stamp, while it still runs. Polling the task
+    gives the true count, and nothing after it starts first."""
+    resp = client.update_by_query(
+        index=index,
+        body=body,
+        conflicts="proceed",
+        allow_no_indices=True,
+        wait_for_completion=False,
+        request_timeout=60,
+    )
+    task = resp.get("task")
+    if not task:  # nothing matched an index: no task was started
+        return resp.get("updated", 0)
+    deadline = time.monotonic() + wait
+    while True:
+        status = client.tasks.get(task_id=task, request_timeout=60)
+        if status.get("completed"):
+            if status.get("error"):
+                raise RuntimeError(status["error"].get("reason", status["error"]))
+            response = status.get("response", {})
+            if response.get("failures"):
+                raise RuntimeError(f"{len(response['failures'])} documents failed")
+            return response.get("updated", 0)
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"still running after {wait} s (task {task})")
+        time.sleep(poll)
+
+
+def _flags_only(result: dict) -> dict:
+    """An entry that only names a file: keep SUSPICIOUS and the LOLBin flag, never EXPECTED."""
+    if not str(result.get("verdict", "")).startswith("EXPECTED"):
+        return result
+    reasons = [
+        "Target file: " + "; ".join(result.get("reasons", [])),
+        "The entry itself is not compared to a baseline",
+    ]
+    return dict(result, verdict="UNKNOWN", confidence="low", reasons=reasons)
+
+
+_REFERENCE_MISMATCH = (
+    "hash differs from every reference build; may be a patch level not in the reference"
+)
+
+
+def _amcache_args(path: str, sha1: str, size: str) -> tuple[dict, str | None]:
+    """check_file's arguments for one Amcache path and SHA1, and a note when
+    the hash isn't passed (none recorded, or past what Amcache hashes)."""
+    if len(sha1) != 40 or not all(c in "0123456789abcdefABCDEF" for c in sha1):
+        return {"path": path}, "Hash not compared: Amcache recorded no SHA1 for this entry"
+    if size.isdigit() and int(size) > _AMCACHE_HASH_LIMIT:
+        return {"path": path}, "Hash not compared: Amcache hashes only the first 30 MiB of a file"
+    return {"path": path, "hash": sha1}, None
+
+
+def _reference_mismatch(result: dict) -> dict:
+    """A hash that matches no reference build of the path, with nothing else
+    critical, is most often a patch level the reference doesn't hold: UNKNOWN
+    here, never SUSPICIOUS and never EXPECTED."""
+    critical = [f for f in result.get("findings", []) if f.get("severity") == "critical"]
+    if [f.get("type") for f in critical] != ["hash_mismatch"]:
+        return result
+    return dict(result, verdict="UNKNOWN", confidence="low", reasons=[_REFERENCE_MISMATCH])
+
+
+def _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash) -> tuple[int, int]:
+    """Stamp each doc with the answer for its own path and hash; a doc with
+    no hash, or an empty one, takes the "" answer."""
+    source_path = path_field.removesuffix(".keyword")
+    source_hash = hash_field.removesuffix(".keyword")
+    script = (
+        "def m = params.m.get(ctx._source[params.pf]); "
+        "def h = ctx._source[params.hf]; "
+        "def r = m == null ? null : m.get(h == null ? '' : h.toString()); "
+        "if (r == null) { ctx.op = 'noop' } else { "
+        "ctx._source['triage.verdict'] = r.v; ctx._source['triage.checked'] = true; "
+        "ctx._source['triage.confidence'] = r.c; ctx._source['triage.reason'] = r.r; "
+        "if (r.l) { ctx._source['triage.lolbin'] = true } }"
+    )
+    updated = failed = 0
+    paths = list(by_hash)
+    for i in range(0, len(paths), 500):
+        chunk = paths[i : i + 500]
+        m = {
+            p: {
+                h: {
+                    "v": r["verdict"],
+                    "c": r.get("confidence", "low"),
+                    "r": "; ".join(r.get("reasons", [])),
+                    "l": bool(r.get("is_lolbin")),
+                }
+                for h, r in by_hash[p].items()
+            }
+            for p in chunk
+        }
+        try:
             resp = _ubq(
                 client,
                 index=index_pattern,
                 body={
-                    "query": {"term": {name_field: name}},
+                    "query": {"terms": {path_field: chunk}},
                     "script": {
-                        "source": "; ".join(script_lines),
+                        "source": script,
                         "lang": "painless",
-                        "params": params,
+                        "params": {"m": m, "pf": source_path, "hf": source_hash},
                     },
                 },
                 conflicts="proceed",
                 requests_per_second=1000,
             )
-            enriched += resp.get("updated", 0)
+            updated += resp.get("updated", 0)
         except _WriteFailed:
-            write_failures += 1
-        except Exception:
-            consecutive_failures += 1
+            failed += len(chunk)
+    return updated, failed
 
-    if on_progress:
-        on_progress(
-            "triage_done",
-            artifact=artifact_name,
-            checked=len(buckets),
-            enriched=enriched,
-        )
-    return _loop_result(
-        consecutive_failures,
-        succeeded,
-        write_failures,
-        unchecked,
-        checked=len(buckets),
-        enriched=enriched,
+
+def _svc_from_registry(src):
+    return src.get("KeyPath", "").replace("/", "\\").rsplit("\\", 1)[-1], src.get("ValueData", "")
+
+
+def _svc_from_7045(src):
+    ed = src.get("winlog.event_data", {})
+    return (ed.get("ServiceName"), ed.get("ImagePath", "")) if isinstance(ed, dict) else (None, "")
+
+
+def _svc_from_svcscan(src):
+    """The registry's ImagePath first: the in-memory Binary still shows the old
+    executable until a hijacked service restarts. Binary when it's the only one
+    and names a file (a driver object isn't one)."""
+    registry = (src.get("Binary (Registry)") or "").strip()
+    memory = (src.get("Binary") or "").strip()
+    is_file = memory and not memory.lower().startswith(("\\driver\\", "\\filesystem\\"))
+    return src.get("Name"), registry or (memory if is_file else "")
+
+
+def _all_hits(client, index, query):
+    """Every hit for the query, read in pages through a scroll."""
+    resp = client.search(
+        index=index, allow_no_indices=False, scroll="2m", body={"query": query, "size": 1000}
     )
-
-
-def _enrich_registry_services(client, safe_case, on_progress=None):
-    """Enrich registry Services key entries via check_service."""
-    index = f"case-{safe_case}-registry-*"
-    # Services keys: KeyPath ends with \Services\{ServiceName},
-    # need to extract service names from KeyPath, not ValueName.
-    # Use a scroll/search instead to extract unique last path components.
+    scroll_id = resp.get("_scroll_id")
     try:
-        result = client.search(
-            index=index,
-            allow_no_indices=False,
-            body={
-                "query": {
-                    "bool": {
-                        "must": [
-                            {"wildcard": {"KeyPath.keyword": "*\\\\Services\\\\*"}},
-                            {"term": {"ValueName.keyword": "ImagePath"}},
-                        ]
-                    }
-                },
-                "size": 5000,
-            },
-        )
+        while resp["hits"]["hits"]:
+            yield from resp["hits"]["hits"]
+            if not scroll_id:
+                break
+            resp = client.scroll(scroll_id=scroll_id, scroll="2m")
+            scroll_id = resp.get("_scroll_id", scroll_id)
+    finally:
+        if scroll_id:
+            try:
+                client.clear_scroll(scroll_id=scroll_id)
+            except Exception:
+                pass
+
+
+def _enrich_services(client, index, query, extract, artifact_name, on_progress=None):
+    """check_service once per (name, executable string); the verdict goes only
+    to the docs that carry that pair. Every matching doc is read."""
+    try:
+        hits = list(_all_hits(client, index, query))
     except Exception as e:
         return {"status": "skipped", "reason": str(e)}
-
-    hits = result["hits"]["hits"]
     if not hits:
         return {"status": "empty", "checked": 0}
-
-    # Extract unique service names from KeyPath
-    services: dict = {}  # service_name -> image_path
+    groups: dict = {}
     for h in hits:
-        src = h["_source"]
-        key_path = src.get("KeyPath", "")
-        # KeyPath: ...\Services\ServiceName
-        parts = key_path.replace("/", "\\").rsplit("\\", 1)
-        if len(parts) > 1:
-            svc_name = parts[-1]
-            services[svc_name] = src.get("ValueData", "")
-
+        name, image_path = extract(h["_source"])
+        if name:
+            groups.setdefault((name, image_path or ""), []).append(h["_id"])
     if on_progress:
-        on_progress("triage_start", artifact="registry_svcs", unique_values=len(services))
-
-    enriched = 0
-    write_failures = 0
-    consecutive_failures = 0
+        on_progress("triage_start", artifact=artifact_name, unique_values=len(groups))
+    enriched = write_failures = consecutive_failures = unanswered = 0
     succeeded = False
-    for svc_name in services:
+    for (name, image_path), ids in groups.items():
         if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
             break
+        args = {"service_name": name}
+        if image_path:
+            args["binary_path"] = image_path
         try:
-            verdict = call_tool(
-                "check_service",
-                {"service_name": svc_name, "os_version": "Windows"},
-                timeout=15,
-            )
+            verdict = call_tool("check_service", args, timeout=15)
             consecutive_failures = 0
             succeeded = True
-            if not verdict.get("verdict"):
+            if not verdict.get("verdict"):  # an error answer, not a verdict
+                unanswered += 1
                 continue
-            reasons = verdict.get("reasons", [])
-            script_lines = [
-                "ctx._source['triage.verdict'] = params.verdict",
-                "ctx._source['triage.checked'] = true",
-            ]
-            params: dict = {"verdict": verdict["verdict"]}
-            if reasons:
-                script_lines.append("ctx._source['triage.reason'] = params.reason")
-                params["reason"] = "; ".join(reasons)
+            params = {
+                "verdict": verdict["verdict"],
+                "confidence": verdict.get("confidence", "low"),
+                "reason": "; ".join(verdict.get("reasons", [])),
+            }
             resp = _ubq(
                 client,
                 index=index,
                 body={
-                    "query": {
-                        "wildcard": {
-                            "KeyPath.keyword": f"*\\\\Services\\\\{_escape_wildcard(svc_name)}*"
-                        }
-                    },
+                    "query": {"ids": {"values": ids}},
                     "script": {
-                        "source": "; ".join(script_lines),
+                        "source": "ctx._source['triage.verdict'] = params.verdict; "
+                        "ctx._source['triage.checked'] = true; "
+                        "ctx._source['triage.confidence'] = params.confidence; "
+                        "ctx._source['triage.reason'] = params.reason",
                         "lang": "painless",
                         "params": params,
                     },
@@ -642,17 +726,16 @@ def _enrich_registry_services(client, safe_case, on_progress=None):
             write_failures += 1
         except Exception:
             consecutive_failures += 1
-
     if on_progress:
-        on_progress(
-            "triage_done",
-            artifact="registry_svcs",
-            checked=len(services),
-            enriched=enriched,
-        )
-    return _loop_result(
-        consecutive_failures, succeeded, write_failures, checked=len(services), enriched=enriched
+        on_progress("triage_done", artifact=artifact_name, checked=len(groups), enriched=enriched)
+    result = _loop_result(
+        consecutive_failures, succeeded, write_failures, checked=len(groups), enriched=enriched
     )
+    if unanswered:
+        why = f"{unanswered} check_service calls returned no verdict"
+        reason = f"{result['reason']}; {why}" if result.get("reason") else why
+        result = {**result, "status": "failed", "reason": reason, "unanswered": unanswered}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +789,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
         if not value_data.strip():
             continue
         try:
-            verdict = call_tool("check_file", {"path": value_data}, timeout=15)
+            verdict = _flags_only(call_tool("check_file", {"path": value_data}, timeout=15))
             consecutive_failures = 0
             succeeded = True
             if not verdict.get("verdict"):
@@ -827,7 +910,7 @@ def _enrich_registry_check_file(
         if dll_filter and not value.lower().endswith(".dll"):
             continue
         try:
-            verdict = call_tool("check_file", {"path": value}, timeout=15)
+            verdict = _flags_only(call_tool("check_file", {"path": value}, timeout=15))
             consecutive_failures = 0
             succeeded = True
             if not verdict.get("verdict"):

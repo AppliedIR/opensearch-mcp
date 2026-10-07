@@ -44,18 +44,24 @@ class StubOS:
             values = [f"C:\\Windows\\x{i}.dll" for i in range(self.n)]
             buckets = [{"key": v} for v in values]
             return {"hits": {"hits": []}, "aggregations": {name: {"buckets": buckets}}}
-        if "event.code" in str(body):  # evtx 7045
+        if "svcscan" in index:  # vol3 svcscan
             hits = [
-                {"_source": {"winlog.event_data": {"ServiceName": f"svc{i}"}}}
+                {"_id": f"v{i}", "_source": {"Name": f"svc{i}", "Binary (Registry)": "C:\\a.exe"}}
+                for i in range(self.n)
+            ]
+        elif "event.code" in str(body):  # evtx 7045
+            hits = [
+                {"_id": f"e{i}", "_source": {"winlog.event_data": {"ServiceName": f"svc{i}"}}}
                 for i in range(self.n)
             ]
         else:  # registry Services ImagePath
             hits = [
                 {
+                    "_id": f"r{i}",
                     "_source": {
                         "KeyPath": f"HKLM\\SYSTEM\\Services\\svc{i}",
                         "ValueData": "C:\\a.exe",
-                    }
+                    },
                 }
                 for i in range(self.n)
             ]

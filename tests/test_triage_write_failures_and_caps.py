@@ -24,8 +24,9 @@ GW = [
     "registry_activestub",
     "registry_netsh",
 ]
-# entries whose values come from a terms aggregation (the 5,000-value cap)
-AGG = [k for k in GW if k not in ("evtx_svc", "registry_svcs")]
+# entries whose values come from a terms aggregation (the 5,000-value cap);
+# the three service sources read every doc
+AGG = [k for k in GW if k not in ("evtx_svc", "vol_svcs", "registry_svcs")]
 
 
 class StubOS:
@@ -38,15 +39,25 @@ class StubOS:
 
     def search(self, index, body, **kw):
         aggs = body.get("aggs", {})
+        if "svcscan" in index:
+            hit = {"_id": "v1", "_source": {"Name": "s", "Binary (Registry)": "C:\\a.exe"}}
+            return {"hits": {"hits": [hit]}}
         if aggs:
             name = next(iter(aggs))
             buckets = [{"key": "C:\\x\\a.dll", "doc_count": 1}]
             agg = {"buckets": buckets, "sum_other_doc_count": self.other}
             return {"hits": {"hits": []}, "aggregations": {name: agg}}
         if "event.code" in str(body):
-            return {"hits": {"hits": [{"_source": {"winlog.event_data": {"ServiceName": "s"}}}]}}
+            hit = {"_id": "e1", "_source": {"winlog.event_data": {"ServiceName": "s"}}}
+            return {"hits": {"hits": [hit]}}
         hits = [
-            {"_source": {"KeyPath": "ROOT\\ControlSet001\\Services\\s", "ValueData": "C:\\a.exe"}}
+            {
+                "_id": "r1",
+                "_source": {
+                    "KeyPath": "ROOT\\ControlSet001\\Services\\s",
+                    "ValueData": "C:\\a.exe",
+                },
+            }
         ]
         return {"hits": {"hits": hits}}
 

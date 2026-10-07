@@ -126,7 +126,11 @@ def test_a_re_triage_moves_a_run_key_off_suspicious(triage):
     run(case, {"verdict": "SUSPICIOUS", "confidence": "medium", "reasons": ["first"]})
     assert stamp(case, "Helper") == ("SUSPICIOUS", "first")
     run(case, {"verdict": "EXPECTED", "confidence": "high", "reasons": ["second"]})
-    assert stamp(case, "Helper") == ("EXPECTED", "second")
+    # A Run value only flags: an EXPECTED target file is written as UNKNOWN.
+    assert stamp(case, "Helper") == (
+        "UNKNOWN",
+        "Target file: second; The entry itself is not compared to a baseline",
+    )
 
 
 def test_a_re_triage_repairs_an_overwritten_ifeo_verdict(triage):

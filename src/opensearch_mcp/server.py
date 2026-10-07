@@ -2349,9 +2349,20 @@ def idx_enrich_triage(
 ) -> dict:
     """Run triage baseline enrichment on already-indexed data.
 
-    Checks indexed filenames and services against the Windows baseline
-    database (known_good.db) via the gateway. Stamps documents with
-    triage.verdict (EXPECTED, SUSPICIOUS, UNKNOWN, EXPECTED_LOLBIN).
+    Checks indexed files and services against the default-install Windows
+    baseline (known_good.db) via the gateway, and stamps triage.verdict
+    (EXPECTED, EXPECTED_LOLBIN, SUSPICIOUS, UNKNOWN). EXPECTED means a default
+    file or service in its default place, never "benign":
+    - a service needs its name and its executable (the ImagePath, the 7045
+      event's, or svcscan's registry binary) to match; only the docs carrying
+      that pair get the verdict;
+    - Amcache entries are checked with their SHA1; a SHA1 that matches no
+      reference build reads UNKNOWN (often a patch level), never EXPECTED;
+    - process-creation events (4688, Sysmon 1) carry their image's verdict;
+      other events get no stamp;
+    - tasks, Run, Active Setup and NetSh entries only flag (SUSPICIOUS, or
+      UNKNOWN with the LOLBin flag): the entry itself isn't in the baseline.
+    A re-run removes stamps this version no longer writes and re-stamps the rest.
 
     Use this after ingesting evidence to add baseline context, or to
     re-enrich after the triage database is updated.
