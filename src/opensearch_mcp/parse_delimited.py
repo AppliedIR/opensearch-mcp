@@ -12,7 +12,7 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _detect_encoding, _doc_id
-from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
+from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, auto_detect_time_field
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
 
@@ -168,8 +168,8 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
 
 
 # An epoch written as text (Zeek's ts, a CSV column): the integer part's width
-# says the unit (10 digits: seconds from 2001; 13: ms; 16: µs). Any other width
-# (20230129, 202301292357) is left for OpenSearch as before.
+# says the unit (10 digits: seconds from 2001; 13: ms; 16: µs). Digits of any
+# other width (20230129, 202301292357) get no @timestamp and are counted.
 _EPOCH_TEXT = re.compile(r"(\d+)(\.\d+)?")
 _EPOCH_DIVISOR = {9: 1, 10: 1, 13: 1e3, 16: 1e6}
 
@@ -222,6 +222,7 @@ def ingest_delimited(
 
     format_name = fmt.get("format", "csv")
     count = skipped = bulk_failed = host_renamed = 0
+    not_understood = 0  # digit-only time values of no epoch width
     actions: list[dict] = []
     ts_field = time_field
     if format_name == "bodyfile" and not ts_field:
@@ -241,6 +242,10 @@ def ingest_delimited(
                 record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
             elif isinstance(val, str) and (epoch := _epoch_text(val)):
                 record["@timestamp"] = epoch
+            elif isinstance(val, str) and _EPOCH_TEXT.fullmatch(val.strip()):
+                # Not an epoch's width: as @timestamp OpenSearch would read
+                # epoch milliseconds (20230129 → 1970). Kept in its own field.
+                not_understood += 1
             else:
                 # Hayabusa writes local time as "2022-11-28 18:48:24.526 +00:00",
                 # a form @timestamp rejects; as UTC ISO it's accepted.
@@ -310,4 +315,6 @@ def ingest_delimited(
 
     if not ts_field and count and str(path.absolute()) not in NO_TIME_FIELD:
         NO_TIME_FIELD.append(str(path.absolute()))
+    if not_understood:
+        TIME_NOT_UNDERSTOOD.append((str(path.absolute()), not_understood))
     return count, skipped, bulk_failed, host_renamed

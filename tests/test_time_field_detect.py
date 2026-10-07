@@ -293,3 +293,25 @@ def test_a_fractional_epoch_as_text_reads_like_the_number(tmp_path, text):
 def test_zero_with_a_fraction_as_text_is_skipped(tmp_path):
     (doc,) = _json(tmp_path, [{"Timestamp": "0.0"}])
     assert "@timestamp" not in doc
+
+
+@pytest.mark.integration
+def test_a_digit_date_is_counted_in_the_status_and_not_found_in_1970(
+    cluster_case, tmp_path, monkeypatch
+):
+    """Through the CLI and a cluster: the run's note counts them, and a time
+    search over 1970-1977 (where OpenSearch put them) finds nothing."""
+    data = tmp_path / "events.csv"
+    data.write_text("date,what\n202301292357,a\n20230129,b\n2023-01-29T23:57:00Z,c\n")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "digit-dates")
+    args = argparse.Namespace(path=str(data), case=cluster_case, hostname="h1", time_field="date")
+    cli.cmd_ingest_delimited(args)
+    (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
+    (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
+    assert "2 time values not understood; left without a timestamp" in note
+    client = cli.get_client()
+    index = f"case-{cluster_case}-delim-*"
+    client.indices.refresh(index=index)
+    early = {"range": {"@timestamp": {"gte": "1970-01-01", "lt": "1977-01-01"}}}
+    assert client.count(index=index, body={"query": early})["count"] == 0
+    assert client.count(index=index)["count"] == 3

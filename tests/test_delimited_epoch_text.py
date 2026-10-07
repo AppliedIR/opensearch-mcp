@@ -4,8 +4,10 @@ csv and Zeek give every value as text, and only real numbers were converted,
 so a Zeek `ts` of 1675036674.123456 or a CSV `ts` of 1675036674 went to
 @timestamp as digits, which OpenSearch reads as epoch milliseconds:
 1970-01-20. Digits whose integer part has 9-10, 13 or 16 digits are now
-read as seconds, milliseconds or microseconds; any other width (a `20230129`
-date, `202301292357`, 12 or 15 digits) is left as it was.
+read as seconds, milliseconds or microseconds. Digits of any other width (a
+`20230129` date, `202301292357`, 12 or 15 digits) went to @timestamp too, read
+as 1970 and 1976; they now stay in their own field without @timestamp, and
+the run's note counts them.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from opensearch_mcp import parse_delimited
+from opensearch_mcp.paths import TIME_NOT_UNDERSTOOD, no_time_field_note
 
 
 def _stamp(tmp_path, monkeypatch, column, value, zeek=False):
@@ -31,8 +34,10 @@ def _stamp(tmp_path, monkeypatch, column, value, zeek=False):
     else:
         path = tmp_path / "events.csv"
         path.write_text(f"{column},note\n{value},x\n")
+    TIME_NOT_UNDERSTOOD.clear()
     parse_delimited.ingest_delimited(path, None, "case-x-delimited-h", "h")
     (doc,) = [a["_source"] for a in sent]
+    assert doc[column if not zeek else "ts"] == value  # its own field, as given
     return doc.get("@timestamp")
 
 
@@ -66,13 +71,22 @@ def test_anchor_a_millisecond_epoch_keeps_its_instant(tmp_path, monkeypatch, val
 @pytest.mark.parametrize(
     "column, value",
     [
-        ("time", "2023-01-29T23:57:54Z"),
         ("date", "20230129"),
         ("date", "202301292357"),
         ("time", "999999999999"),
         ("time", "167503667412345"),
+        ("date", " 20230129 "),
     ],
-    ids=["iso", "yyyymmdd", "yyyymmddHHMM", "12 digits", "15 digits"],
+    ids=["yyyymmdd", "yyyymmddHHMM", "12 digits", "15 digits", "spaced"],
 )
-def test_anchor_other_values_reach_opensearch_as_before(tmp_path, monkeypatch, column, value):
-    assert _stamp(tmp_path, monkeypatch, column, value) == value
+def test_digits_of_no_epoch_width_get_no_timestamp_and_are_counted(
+    tmp_path, monkeypatch, column, value
+):
+    assert _stamp(tmp_path, monkeypatch, column, value) is None
+    assert TIME_NOT_UNDERSTOOD == [(str((tmp_path / "events.csv").absolute()), 1)]
+    assert no_time_field_note() == "1 time values not understood; left without a timestamp"
+
+
+def test_anchor_an_iso_time_reaches_opensearch_as_before(tmp_path, monkeypatch):
+    assert _stamp(tmp_path, monkeypatch, "time", "2023-01-29T23:57:54Z") == "2023-01-29T23:57:54Z"
+    assert TIME_NOT_UNDERSTOOD == []

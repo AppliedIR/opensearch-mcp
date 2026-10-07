@@ -24,7 +24,12 @@ from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.memory_tiers import TIERS
 from opensearch_mcp.parse_csv import ingest_csv
-from opensearch_mcp.paths import NO_TIME_FIELD, no_time_field_note, vhir_dir
+from opensearch_mcp.paths import (
+    NO_TIME_FIELD,
+    TIME_NOT_UNDERSTOOD,
+    no_time_field_note,
+    vhir_dir,
+)
 from opensearch_mcp.tools import TOOLS
 
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
@@ -1729,6 +1734,7 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 
 def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
     NO_TIME_FIELD.clear()  # this run's files only
+    TIME_NOT_UNDERSTOOD.clear()
     """Ingest JSON/JSONL files."""
     from opensearch_mcp import __version__
     from opensearch_mcp.bulk import reset_circuit_breaker
@@ -1980,6 +1986,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         hosts_reason = ""
         host_counts: list[tuple] = []
         missed: list[str] = []  # each sub-run starts its own list
+        not_understood: list[tuple[str, int]] = []
         not_read: list[str] = []
         for h in auto_hosts:
             sub_args = copy.copy(args)
@@ -1990,6 +1997,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"\n--- Host: {h} ---")
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
             missed.extend(NO_TIME_FIELD)
+            not_understood.extend(TIME_NOT_UNDERSTOOD)
             if result:
                 hosts_indexed += result[0]
                 hosts_failed += result[1]
@@ -2000,6 +2008,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
         NO_TIME_FIELD[:] = list(dict.fromkeys(missed))
+        TIME_NOT_UNDERSTOOD[:] = not_understood
         if run_id:
             final_status, final_error = _terminal_status(hosts_indexed, hosts_failed, hosts_reason)
             _write_bg_status(
@@ -2038,6 +2047,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_reason = ""
         walk_counts: list[tuple] = []
         walk_missed: list[str] = []  # each sub-run starts its own list
+        walk_not_understood: list[tuple[str, int]] = []
         not_read: list[str] = []
         for d in subdirs:
             sub_args = copy.copy(args)
@@ -2048,6 +2058,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             try:
                 result = cmd_ingest_delimited(sub_args, examiner=examiner)
                 walk_missed.extend(NO_TIME_FIELD)
+                walk_not_understood.extend(TIME_NOT_UNDERSTOOD)
                 if result:
                     walk_indexed += result[0]
                     walk_failed += result[1]
@@ -2081,6 +2092,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # regression where an empty-subdirs walk exits without writing
         # any terminal status and the atexit guard mislabels it failed.
         NO_TIME_FIELD[:] = list(dict.fromkeys(walk_missed))
+        TIME_NOT_UNDERSTOOD[:] = walk_not_understood
         if run_id:
             # Each subdir's own final write lands in this same status file,
             # so the last one would stand for the whole walk; write the sum.
@@ -2102,6 +2114,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
         return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts), not_read
     NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
+    TIME_NOT_UNDERSTOOD.clear()
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)
