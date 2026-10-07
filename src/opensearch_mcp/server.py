@@ -488,6 +488,58 @@ def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> st
         expr = ""
     return f"idx_search(query='{query}'" + (f", index='{expr}')" if expr else ")")
 
+def _scan_case_dir(case_id: str = ""):
+    from opensearch_mcp.write_context import case_dir_for
+
+    cid = case_id or _get_active_case() or ""
+    d = case_dir_for(cid) if cid else None
+    return d if d is not None and (d / "CASE.yaml").is_file() else None
+
+
+def _folder_scan(hosts: list, case_id: str) -> list[dict]:
+    """The names scan of a folder's hosts, recorded in the case's host logs."""
+    from opensearch_mcp import names_scan
+
+    case_dir = _scan_case_dir(case_id)
+    units = [names_scan.host_folder_unit(h, case_dir) for h in hosts]
+    return names_scan.record(case_dir, units) if case_dir else [u.summary() for u in units]
+
+
+def _container_scan(image: Path, container_type: str, case_id: str) -> dict:
+    """What a container's scan can say before anything is mounted or
+    extracted: a disk image's volumes as candidates (read without mounting),
+    or, for an archive, that its names arrive after extraction."""
+    from opensearch_mcp import names_scan
+
+    if container_type == "archive":
+        return {"note": "names arrive after extraction: the run scans what the archive holds"}
+    from opensearch_mcp.parse_plaso import volume_inventory
+
+    leaves, error = volume_inventory(image)
+    case_dir = _scan_case_dir(case_id)
+    units = names_scan.image_candidates(image, leaves, case_dir)
+    out: dict = {
+        "volumes": names_scan.record(case_dir, units)
+        if case_dir
+        else [u.summary() for u in units],
+        "note": "each volume is a candidate machine; its names are read when the run reaches it",
+    }
+    if error:
+        out["error"] = error
+    return out
+
+
+def _memory_scan(image: Path, hostname: str) -> list[dict]:
+    """The names scan of a memory image (or an archive of them: names
+    arrive after extraction)."""
+    from opensearch_mcp import names_scan
+
+    case_dir = _scan_case_dir()
+    if image.suffix.lower() in (".7z", ".zip"):
+        return [{"locator": str(image), "note": "names arrive after extraction"}]
+    unit = names_scan.memory_unit(image, image, "", hostname or "", case_dir)
+    return names_scan.record(case_dir, [unit]) if case_dir else [unit.summary()]
+
 
 def _detect_preparsed_csvs(path: Path) -> str | None:
     """Check for pre-parsed CSV output and suggest the right ingest tool."""
@@ -1709,8 +1761,7 @@ def idx_ingest(
                 )
             if hostname:
                 resp["hostname"] = hostname
-            else:
-                resp["suggested_hostname"] = evidence_path.stem.split("-")[0]
+            resp["scan"] = _container_scan(evidence_path, container_type, case_id)
             aid = audit.log(
                 tool="idx_ingest",
                 params={
@@ -1789,6 +1840,7 @@ def idx_ingest(
             result_summary=f"discovery: {len(hosts)} hosts",
         )
         resp = {"status": "preview", "hosts": summary, "case_id": case_id}
+        resp["scan"] = _folder_scan(hosts, case_id)
         if aid:
             resp["audit_id"] = aid
         return resp
@@ -2960,6 +3012,7 @@ def idx_ingest_memory(
             "tier": tier,
             "plugins": plugin_list,
             "plugin_count": len(plugin_list),
+            "scan": _memory_scan(Path(path), hostname),
         }
         aid = audit.log(
             tool="idx_ingest_memory",

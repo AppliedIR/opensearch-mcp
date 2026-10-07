@@ -293,6 +293,34 @@ def _register_memory_evidence(image_path: Path, hostname: str) -> None:
         pass
 
 
+_NAME_VARIABLES = ("COMPUTERNAME", "USERDOMAIN")
+
+
+def observe_envar_names(records: list[dict]) -> list[str]:
+    """Record the image's COMPUTERNAME and USERDOMAIN values as names its
+    evidence gives. They are observations only: the image keeps the machine
+    it was given."""
+    from sift_common import host_identity
+
+    from opensearch_mcp.write_context import current
+
+    ctx = current()
+    found: list[tuple[str, str]] = []
+    for r in records:
+        var, value = str(r.get("Variable") or ""), r.get("Value")
+        if var.upper() in _NAME_VARIABLES and isinstance(value, str) and value.strip():
+            pair = (value.strip(), f"windows.envars {var.upper()}")
+            if pair not in found:
+                found.append(pair)
+    if ctx is not None and found:
+        host_identity.append_observations(
+            ctx.case_dir,
+            [{"kind": "name", "unit": ctx.unit, "raw": raw, "evidence": ev,
+              "origin": host_identity.ARTIFACT} for raw, ev in found],
+        )  # fmt: skip
+    return [raw for raw, _ in found]
+
+
 def ingest_memory(
     image_path: Path,
     client: OpenSearch,
@@ -382,6 +410,8 @@ def ingest_memory(
                 on_progress("plugin_failed", plugin=plugin, error=str(e))
             continue
 
+        if plugin == "windows.envars":
+            observe_envar_names(records)
         if not records:
             results[plugin] = {"status": "empty", "indexed": 0}
             if on_progress:

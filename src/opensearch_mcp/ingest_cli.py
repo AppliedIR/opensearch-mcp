@@ -43,13 +43,16 @@ def _case_dir_for(case_id: str) -> Path | None:
     return case_dir_for(case_id)
 
 
-def _open_unit(case_id: str, path, hostname: str, source: str, origin: str = "argument"):
-    """Open the write context of one evidence argument (a file or folder):
-    every record written until the next one belongs to this unit. Exits when
-    the case has no directory, since no record may be stored without its
-    machine."""
+def _open_unit(
+    case_id: str, path, hostname: str, source: str, origin: str = "argument", files=None
+):
+    """Scan one evidence argument (a file or folder) for host names, record
+    them, and open its write context: every record written until the next one
+    belongs to this unit. Exits when the case has no directory, since no
+    record may be stored without its machine."""
     from sift_common.host_identity import unit_locator
 
+    from opensearch_mcp import names_scan
     from opensearch_mcp import write_context as wc
 
     case_dir = _case_dir_for(case_id)
@@ -59,6 +62,9 @@ def _open_unit(case_id: str, path, hostname: str, source: str, origin: str = "ar
             file=sys.stderr,
         )
         sys.exit(1)
+    scanned = names_scan.files_unit(Path(path), hostname, list(files or []), case_dir)
+    for u in names_scan.record(case_dir, [scanned]):
+        print(f"  host names: {u['locator']}: {', '.join(u['names']) or '(none)'}")
     ctx = wc.open_unit(
         case_dir,
         unit_locator(path, case_dir),
@@ -762,15 +768,29 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
 
 
 def _set_units(
-    hosts, case_id: str, input_path: Path, tmpdir, hostname, name_origin: str, offsets=None
+    hosts,
+    case_id: str,
+    input_path: Path,
+    tmpdir,
+    hostname,
+    name_origin: str,
+    offsets=None,
+    archive: tuple[Path, str] | None = None,
 ) -> None:
     """Give each discovered host its evidence unit: the input, plus the
     host's place in it when the input is an image or an archive (the volume
     offset, the volume Plaso reads, or the path inside the extraction), never
-    the temporary mount, so a re-ingest is the same unit."""
-    from sift_common.host_identity import unit_locator
+    the temporary mount, so a re-ingest is the same unit. `archive` is
+    (archive, member) for an image that came out of an archive: its units
+    are named by the archive and the image's name in it."""
+    from sift_common.host_identity import unit_locator as _locator
 
     case_dir = _case_dir_for(case_id)
+    root, prefix = archive if archive else (input_path, "")
+
+    def unit_locator(_input, _case_dir, member="", offset=None):
+        member = "/".join(x for x in (prefix, member) if x and x != ".") or "."
+        return _locator(root, _case_dir, member=member, offset=offset)
 
     def inside(path, root) -> str | None:
         try:
@@ -781,7 +801,7 @@ def _set_units(
     for h in hosts:
         if name_origin and hostname and h.hostname == hostname and h.name_origin == "folder":
             h.name_origin = name_origin
-        if h.unit_locator or tmpdir is None and h.image_path is None:
+        if h.unit_locator or tmpdir is None and h.image_path is None and not archive:
             continue  # a folder: its own volume root
         if h.image_path is not None:  # read straight off the image
             where = inside(h.image_path, tmpdir) if tmpdir is not None else None
@@ -815,6 +835,55 @@ def _run_summary(result) -> str:
 def _kept_total(result) -> dict:
     """The status totals' count of shadow-copy entries kept, when there are any."""
     return {"already_present": result.already_present} if result.already_present else {}
+
+def _record_scan(
+    case_id: str, input_path: Path, hosts: list, image_notes: list, extra=()
+) -> list[dict]:
+    """Record the scan's units and names in the case's host logs, print them,
+    and return the summary. Volumes no reader covers are recorded as unnamed
+    candidates, with why."""
+    from opensearch_mcp import names_scan
+
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None:
+        return []
+    units = list(extra) + [names_scan.host_folder_unit(h, case_dir) for h in hosts]
+    units += [
+        names_scan.noted_volume_unit(input_path, offset, note, case_dir)
+        for offset, note in image_notes
+    ]
+    summary = names_scan.record(case_dir, units)
+    for u in summary:
+        names = ", ".join(u["names"]) or "(no name yet)"
+        print(f"  host names: {u['locator']}: {names}")
+    return summary
+
+
+def _ingest_each_extracted(command, args, archive: Path, images: list, examiner: str) -> None:
+    """Ingest every image an archive held, one run each: each is its own
+    evidence unit (the archive and the image's name in it) with its own run
+    status, under the caller's run id plus the image's number."""
+    import copy
+
+    base_run = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
+    failed = []
+    for n, image in enumerate(sorted(images), 1):
+        sub = copy.copy(args)
+        sub.path, sub.from_archive, sub.archive_member = str(image), str(archive), image.name
+        print(f"\n--- {archive.name}: image {n} of {len(images)}: {image.name} ---")
+        os.environ["VHIR_INGEST_RUN_ID"] = f"{base_run}-{n}"
+        try:
+            command(sub, examiner=examiner)
+        except SystemExit as e:  # one image's failure doesn't stop the others
+            if e.code:
+                failed.append(f"{image.name} (exit {e.code})")
+        except Exception as e:
+            failed.append(f"{image.name} ({type(e).__name__}: {e})")
+        finally:
+            os.environ["VHIR_INGEST_RUN_ID"] = base_run
+    if failed:
+        print(f"Images that failed: {'; '.join(failed)}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _rebuilt_status_host(h) -> dict:
@@ -1059,6 +1128,15 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
     # Absolute: Plaso and the volume helper run in their own work folders
     input_path = Path(args.path).resolve()
+    from opensearch_mcp import names_scan
+
+    # An image another run extracted from an archive: its units and image id
+    # are named by the archive and the image's name in it.
+    from_archive = None
+    if getattr(args, "from_archive", None):
+        from_archive = (Path(args.from_archive), args.archive_member)
+    image_key = Path(args.from_archive) / args.archive_member if from_archive else input_path
+    velociraptor = None
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
 
@@ -1143,6 +1221,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     if hostname:
                         name_origin = "artifact"
                         print(f"  Hostname from collection: {hostname}")
+                velociraptor = names_scan.velociraptor_unit(
+                    tmpdir, input_path, _case_dir_for(case_id)
+                )
                 scan_root = normalize_velociraptor(tmpdir)
             else:
                 # Check if extraction produced a disk image (e.g., VHDX.7z, E01.7z)
@@ -1151,6 +1232,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 extracted_images = [
                     f for f in tmpdir.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
                 ]
+                if len(extracted_images) > 1:  # each image: its own unit, mount and run
+                    _ingest_each_extracted(
+                        lambda a, examiner="": cmd_scan(a), args, input_path, extracted_images, ""
+                    )
+                    return
                 if extracted_images:
                     img = extracted_images[0]
                     image_id = _image_id(img.stem, input_path / img.name, _case_dir_for(case_id))
@@ -1209,7 +1295,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         elif container_type in ("ewf", "raw", "nbd"):
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Mounting {input_path.name}...", flush=True)
-            image_id = _image_id(input_path.stem, input_path, _case_dir_for(case_id))
+            image_id = _image_id(input_path.stem, image_key, _case_dir_for(case_id))
             volumes = mount_image(input_path, tmpdir, mount_ctx)
             image_hosts, image_covered, image_notes = _image_hosts(
                 input_path, image_id, examiner_hostname
@@ -1256,7 +1342,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         elif container_type == "dmg":  # read by Plaso alone: no mount, no sudo
             tmpdir = make_ingest_tmpdir(case_id)
-            image_id = _image_id(input_path.stem, input_path, _case_dir_for(case_id))
+            image_id = _image_id(input_path.stem, image_key, _case_dir_for(case_id))
             image_hosts, image_covered, image_notes = _image_hosts(
                 input_path, image_id, examiner_hostname
             )
@@ -1333,32 +1419,27 @@ def cmd_scan(args: argparse.Namespace) -> None:
         # Replaces the prior fail-loud `_classify_or_fail`.
         # Image hosts join before the host dictionary is consulted
         hosts += image_hosts
+        if velociraptor is not None:  # the collection is one unit: its client
+            for h in hosts:
+                h.unit_locator = velociraptor.locator
         _set_units(
-            hosts, case_id, input_path, tmpdir, hostname, name_origin, offsets=mount_ctx.offsets
+            hosts,
+            case_id,
+            input_path,
+            tmpdir,
+            hostname,
+            name_origin,
+            offsets=mount_ctx.offsets,
+            archive=from_archive,
         )
-        host_discovery_report, case_host_dict = _preflight_host_discovery(
-            case_id, scan_root, hosts
-        )
-        if host_discovery_report["decisions_applied"]:
-            print(f"Host discovery: {len(host_discovery_report['decisions_applied'])} hosts")
-            for d in host_discovery_report["decisions_applied"]:
-                if d["decision"] != "already_mapped":
-                    print(
-                        f"  {d['raw']!r} → {d['applied_canonical']!r} "
-                        f"({d['decision']}, confidence {d['confidence']:.2f})"
-                    )
-        # CR round-4 UX: surface mapping_upgrade_required on the CLI
-        # path. The MCP path already exposes it via idx_ingest_status;
-        # CLI operators see it via stderr.
-        _ms = host_discovery_report.get("mapping_status", {})
-        if _ms.get("status") == "mapping_upgrade_required":
-            print(
-                f"WARNING: {len(_ms.get('indices_text', []))} case indices have "
-                "host.id as non-keyword (pre-v1 mapping). case_host_fix will "
-                "refuse on these indices. Reindex or delete + re-ingest. "
-                f"Affected: {_ms.get('indices_text', [])}",
-                file=sys.stderr,
-            )
+        # The names scan: every unit and the host names its evidence gives,
+        # recorded before anything is written. Records get their machine from
+        # these logs, so the v1 host dictionary is no longer written.
+        case_host_dict = None
+        unread = image_notes + [  # partitions that didn't mount and no image run read
+            (off, why) for off, why in mount_ctx.failed_offsets.items() if off not in image_covered
+        ]
+        _record_scan(case_id, input_path, hosts, unread, [velociraptor] if velociraptor else [])
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and tmpdir and vss_volumes:  # a disk image, or one from an archive
@@ -1834,7 +1915,7 @@ def cmd_csv(args: argparse.Namespace) -> None:
     cfg = TOOLS[tool_name]
     from opensearch_mcp.write_context import index_name as _index_name
 
-    _open_unit(case_id, csv_path, hostname, source=f"{tool_name} csv")
+    _open_unit(case_id, csv_path, hostname, source=f"{tool_name} csv", files=[csv_path])
     index_name = _index_name(cfg.index_suffix)
 
     client = get_client()
@@ -1994,7 +2075,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     from opensearch_mcp.paths import stem_type
     from opensearch_mcp.write_context import index_name as _index_name
 
-    _open_unit(case_id, input_path, hostname, source="json")
+    _open_unit(case_id, input_path, hostname, source="json", files=files)
     total = total_sk = total_bf = 0
     _json_failed_files: list[tuple[str, str]] = []
     try:
@@ -2362,7 +2443,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.paths import stem_type
     from opensearch_mcp.write_context import index_name as _index_name
 
-    _open_unit(case_id, input_path, hostname, source="delimited")
+    _open_unit(case_id, input_path, hostname, source="delimited", files=files)
     total = total_sk = total_bf = 0
     touched: set[str] = set()
     _delim_failed_files: list[tuple[str, str]] = []  # (path, error[:200])
@@ -2567,7 +2648,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
     from opensearch_mcp.write_context import index_name as _index_name
 
-    ctx = _open_unit(case_id, input_path, hostname, source="access log")
+    ctx = _open_unit(case_id, input_path, hostname, source="access log", files=files)
     total = total_sk = total_bf = 0
     _alog_failed_files: list[tuple[str, str]] = []
     _alog_unindexed: list[str] = []  # read, but no line of it indexed
@@ -2861,7 +2942,6 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     image_path = Path(args.path)
     given_path = image_path
     _mem_extract_dir = None  # Track for cleanup
-    _mem_not_read: list[str] = []  # other images in the archive
 
     # Extract from archive if needed
     if image_path.suffix.lower() in (".7z", ".zip"):
@@ -2885,15 +2965,11 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 shutil.rmtree(_mem_extract_dir, ignore_errors=True)
                 print(f"Error: No memory image found in {image_path}", file=sys.stderr)
                 sys.exit(1)
+            if len(extracted) > 1:  # each image is its own unit and its own run
+                _ingest_each_extracted(cmd_ingest_memory, args, given_path, extracted, examiner)
+                return
             image_path = extracted[0]
             print(f"Extracted: {image_path} ({image_path.stat().st_size / (1024**3):.1f} GB)")
-            if len(extracted) > 1:  # one hostname per run: name the images left out
-                _mem_not_read = [
-                    f"{f.name} (not ingested: the archive holds {len(extracted)} images; "
-                    f"only {image_path.name} was ingested)"
-                    for f in extracted[1:]
-                ]
-                print(f"Warning: {'; '.join(_mem_not_read)}", file=sys.stderr)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             shutil.rmtree(_mem_extract_dir, ignore_errors=True)
             # Not the exception's text: it quotes the command, password and all.
@@ -2960,9 +3036,6 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         "hostname": hostname,
         "artifacts": status_plugins,
     }
-    if _mem_not_read:
-        archive = {"name": "archive", "not_read": _mem_not_read, "warnings_only": True}
-        status_host["artifacts"] = status_plugins + [archive]
 
     def _write_mem_status(status: str, error: str = "") -> None:
         from opensearch_mcp.bulk import get_last_bulk_reason
@@ -3042,7 +3115,11 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     timeout = getattr(args, "timeout", 3600)
     from sift_common.host_identity import unit_locator
 
+    from opensearch_mcp import names_scan
+
     member = image_path.name if image_path != given_path else ""
+    if getattr(args, "from_archive", None):  # one image of several in an archive
+        given_path, member = Path(args.from_archive), args.archive_member
     case_dir = _case_dir_for(case_id)
     if case_dir is None or not (case_dir / "CASE.yaml").is_file():
         print(
@@ -3052,6 +3129,8 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         sys.exit(1)
     from opensearch_mcp import write_context as wc
 
+    scanned = names_scan.memory_unit(image_path, given_path, member, hostname, case_dir)
+    names_scan.record(case_dir, [scanned])
     wc.set_current(
         wc.open_unit(
             case_dir,

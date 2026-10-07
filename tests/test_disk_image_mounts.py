@@ -262,6 +262,7 @@ def test_a_partition_that_does_not_mount_is_reported(monkeypatch, tmp_path, caps
         "mount: /x: wrong fs type, bad option."
     )
     assert ctx.failures == [want]
+    assert ctx.failed_offsets == {104448 * 512: want}  # by offset, for the names scan
     assert want in capsys.readouterr().err
     assert [p.name for p in mounted] == ["vol0", "vol2"]  # the others still mount
 
@@ -422,7 +423,7 @@ def test_a_disk_image_inside_an_archive_names_its_hosts_after_the_image(tmp_path
     class Stop(Exception):
         pass
 
-    def preflight(case_id, scan_root, hosts):
+    def preflight(case_id, input_path, hosts, image_notes, extra=()):  # the names scan
         seen["hosts"] = [h.hostname for h in hosts]
         raise Stop
 
@@ -433,7 +434,7 @@ def test_a_disk_image_inside_an_archive_names_its_hosts_after_the_image(tmp_path
     monkeypatch.setattr(C, "make_ingest_tmpdir", lambda case_id: work)
     monkeypatch.setattr(C, "mount_image", mount)
     monkeypatch.setattr(C, "cleanup_tmpdir", lambda *a, **k: None)
-    monkeypatch.setattr(ingest_cli, "_preflight_host_discovery", preflight)
+    monkeypatch.setattr(ingest_cli, "_record_scan", preflight)
     monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "c1")
     monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda c: None)
     import opensearch_mcp.hostname as hn

@@ -100,6 +100,7 @@ class MountContext:
         self._nbd_devices: list[str] = []  # qemu-nbd -d
         self._loop_devices: list[str] = []  # losetup -d
         self.failures: list[str] = []  # partitions that were tried and didn't mount
+        self.failed_offsets: dict[int, str] = {}  # the same, by byte offset
         self.not_mounted: list[str] = []  # partitions left unmounted on purpose (LVM)
         self.offsets: dict[Path, int] = {}  # mount point -> byte offset in the image
         self.vss_sources: dict[str, str] = {}  # shadow copy id -> the volume it came from
@@ -267,6 +268,7 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
                     f"{why[0] if why else f'mount exit {e.returncode}'}"
                 )
                 ctx.failures.append(failure)
+                ctx.failed_offsets[offset] = failure
                 print(f"  WARNING: {failure}", file=sys.stderr)
 
     # Fallback: direct mount for volume images without partition table

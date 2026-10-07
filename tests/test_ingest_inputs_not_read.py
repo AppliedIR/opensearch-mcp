@@ -294,15 +294,11 @@ def mem(tmp_path, monkeypatch):
     return run
 
 
-def test_an_archive_with_two_memory_images_ingests_one_and_names_the_other(mem):
+def test_an_archive_with_two_memory_images_ingests_both(mem):
     st = mem("hostA.raw", "hostB.vmem")
-    ingested = "hostA.raw" if "Memory image: hostA.raw" in st["log"] else "hostB.vmem"
-    other = ({"hostA.raw", "hostB.vmem"} - {ingested}).pop()
-    assert f"Memory image: {ingested}" in st["log"], st
-    assert (
-        f"{other} (not ingested: the archive holds 2 images; only {ingested} was ingested)"
-        in st["log"]
-    ), st
+    assert "Memory image: hostA.raw" in st["log"], st
+    assert "Memory image: hostB.vmem" in st["log"], st
+    assert "not ingested" not in st["log"], st
     assert list(mem.tmp.glob("vhir-mem-*")) == []
 
 
@@ -351,28 +347,21 @@ def mem_status(bg, mem, tmp_path, monkeypatch):
         bg.cmd_ingest_memory(args)
         return _status(), seen[0]
 
+    run.seen = seen
     return run
 
 
-def test_the_status_names_the_images_an_archive_run_left_out(mem_status):
-    st, ingested = mem_status("hostA.raw", "hostB.vmem", "hostC.mem")
-    others = sorted({"hostA.raw", "hostB.vmem", "hostC.mem"} - {ingested})
-    (w,) = _not_read(st)
-    assert w.startswith("hostA: archive: 2 file(s) or folder(s) were not ingested"), w
-    for name in others:
-        assert f"{name} (not ingested: the archive holds 3 images; only {ingested} was" in w, w
-    assert ingested + " (" not in w, w
-    assert st["status"] == "complete" and st["total_indexed"] == 1, st
-    assert [c["artifact"] for c in st["checklist"]] == ["windows.info"], st
+def test_every_image_an_archive_holds_is_ingested_as_its_own_unit(mem_status):
+    from sift_common import host_identity
 
+    from opensearch_mcp import write_context as wc
 
-def test_a_two_image_archive_names_the_other_only_in_the_warnings(mem_status):
-    st, ingested = mem_status("hostA.raw", "hostB.vmem")
-    other = ({"hostA.raw", "hostB.vmem"} - {ingested}).pop()
-    (w,) = _not_read(st)
-    assert w.startswith("hostA: archive: 1 file(s) or folder(s) were not ingested"), w
-    assert f"{other} (not ingested: the archive holds 2 images; only {ingested}" in w, w
-    assert [c["artifact"] for c in st["checklist"]] == ["windows.info"], st
+    mem_status("hostA.raw", "hostB.vmem", "hostC.mem")
+    assert sorted(mem_status.seen) == ["hostA.raw", "hostB.vmem", "hostC.mem"]
+    units = host_identity.load(wc.case_dir_for("c1")).units.values()
+    locators = sorted(u["locator"] for u in units if u.get("source") == "memory image")
+    assert [loc.rsplit("!", 1)[1] for loc in locators] == ["hostA.raw", "hostB.vmem", "hostC.mem"]
+    assert len({loc.rsplit("!", 1)[0] for loc in locators}) == 1  # one archive
 
 
 def test_a_one_image_archive_carries_no_warning(mem_status):

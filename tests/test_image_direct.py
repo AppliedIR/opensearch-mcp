@@ -681,7 +681,7 @@ def test_the_dual_boot_warning_names_the_image_host(tmp_path, monkeypatch):
     assert "(disk-vol1, disk-p2)" in notes[0][1]
 
 
-def test_image_hosts_reach_the_host_dictionary_from_a_relative_path(tmp_path, monkeypatch):
+def test_image_hosts_reach_the_names_scan_from_a_relative_path(tmp_path, monkeypatch):
     import argparse
 
     import opensearch_mcp.containers as C
@@ -701,7 +701,7 @@ def test_image_hosts_reach_the_host_dictionary_from_a_relative_path(tmp_path, mo
 
     seen = {}
 
-    def preflight(case_id, scan_root, hosts):
+    def preflight(case_id, input_path, hosts, image_notes, extra=()):  # the names scan
         seen["hosts"] = [(h.hostname, h.os) for h in hosts]
         raise Stop
 
@@ -711,7 +711,7 @@ def test_image_hosts_reach_the_host_dictionary_from_a_relative_path(tmp_path, mo
     monkeypatch.setattr(C, "cleanup_orphaned_mounts", lambda: None)
     monkeypatch.setattr(C, "make_ingest_tmpdir", lambda case_id: work)
     monkeypatch.setattr(C, "mount_image", lambda img, dest, ctx: [])
-    monkeypatch.setattr(ingest_cli, "_preflight_host_discovery", preflight)
+    monkeypatch.setattr(ingest_cli, "_record_scan", preflight)
     monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "c1")
     monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda c: None)
     args = argparse.Namespace(path="dual.raw", case="c1", yes=True, hostname=None)
