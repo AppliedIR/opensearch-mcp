@@ -38,8 +38,13 @@ echo "vshadowmount $*" >> "$VSS_LOG"
 for last; do :; done
 touch "$last/vss1" "$last/vss2"
 """,
-    "sudo": "#!/bin/sh\nexit 0\n",
-    "fusermount": "#!/bin/sh\nexit 0\n",  # the scan's cleanup: nothing was really mounted
+    # vshadowmount runs as root: run the stand-in; anything else does nothing
+    "sudo": """#!/bin/sh
+echo "sudo $*" >> "$VSS_LOG"
+[ "$1" = vshadowmount ] && exec "$@"
+exit 0
+""",
+    "fusermount": '#!/bin/sh\necho "fusermount $*" >> "$VSS_LOG"\n',  # nothing really mounted
 }
 
 
@@ -305,7 +310,10 @@ def test_a_shadow_copy_with_no_live_host_has_a_unit_that_outlasts_the_run(
 def test_shadow_copies_whose_stores_all_fail_to_mount_are_not_called_none(
     vss, tmp_path, monkeypatch, capsys
 ):
-    (tmp_path / "bin" / "sudo").write_text("#!/bin/sh\nexit 32\n")
+    # vshadowmount runs; each store's loop mount fails
+    (tmp_path / "bin" / "sudo").write_text(
+        '#!/bin/sh\n[ "$1" = vshadowmount ] && exec "$@"\nexit 32\n'
+    )
     hosts, out = _scan_shadow_copies(tmp_path, monkeypatch, capsys, live=())
     assert hosts == []  # nothing to ingest
     assert "No volume shadow copies found" not in out.out
@@ -339,3 +347,37 @@ def test_a_volume_whose_boot_sector_cannot_be_read_is_not_called_none(vss, tmp_p
         f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: "
         "its boot sector couldn't be read (Permission denied)"
     ]
+
+
+def test_vshadowmount_runs_as_root_and_lets_the_examiner_read_it(vss, tmp_path):
+    """root's loop mount of a vssN file can't read a FUSE mount the examiner
+    made, so vshadowmount runs under sudo, as ewfmount does."""
+    found, _, log = vss([GPT_DATA], [GPT_DATA], {"vol0": 1048576, "vol1": GPT_DATA})
+    image, mnt = tmp_path / "disk.raw", tmp_path / "mnt"
+    assert found == ["vss1", "vss2"]
+    sudo = [line for line in log.splitlines() if line.startswith("sudo ")]
+    assert sudo == [
+        f"sudo vshadowmount -X allow_other -o {GPT_DATA} {image} {mnt}/_vss",
+        f"sudo mount -o ro,loop,noexec {mnt}/_vss/vss1 {mnt}/vss1",
+        f"sudo mount -o ro,loop,noexec {mnt}/_vss/vss2 {mnt}/vss2",
+    ]
+
+
+def test_a_volume_image_s_stores_mount_as_root_too(vss, tmp_path):
+    _, _, log = vss([0], [0], None)
+    image, mnt = tmp_path / "disk.raw", tmp_path / "mnt"
+    assert f"sudo vshadowmount -X allow_other {image} {mnt}/_vss" in log.splitlines()
+
+
+def test_cleanup_unmounts_the_stores_then_their_fuse_mount_as_root(vss, tmp_path):
+    ctx = MountContext()
+    vss([0], [0], None, ctx)
+    mnt = tmp_path / "mnt"
+    log = tmp_path / "vss.log"
+    before = len(log.read_text().splitlines())
+    ctx.cleanup()
+    assert log.read_text().splitlines()[before:] == [
+        f"sudo umount {mnt}/vss2",
+        f"sudo umount {mnt}/vss1",
+        f"sudo umount {mnt}/_vss",
+    ]  # the root-owned FUSE mount never goes to the examiner's fusermount

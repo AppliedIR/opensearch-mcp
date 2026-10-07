@@ -507,9 +507,11 @@ def _mount_vss_at(
     tag = f"{prefix}-" if prefix else ""
     vss_mount = dest / f"_{tag}vss"
     vss_mount.mkdir()
+    # Mounted by root so root's loop mount of each vssN can read it, as
+    # _mount_ewf does; allow_other keeps it readable by the examiner
     try:
         subprocess.run(
-            ["vshadowmount", *at, str(raw_path), str(vss_mount)],
+            ["sudo", "vshadowmount", "-X", "allow_other", *at, str(raw_path), str(vss_mount)],
             check=True,
             capture_output=True,
         )
@@ -517,7 +519,7 @@ def _mount_vss_at(
         vss_mount.rmdir()
         why = (e.stderr or b"").decode(errors="replace").strip().splitlines()[-1:]
         return [], f"vshadowmount failed: {why[0] if why else f'exit {e.returncode}'}"
-    ctx.add_fuse(vss_mount)
+    ctx.add_mount(vss_mount)  # root's mount: unmounted by root, after its stores
 
     # Mount each vssN file as a filesystem
     results = []
