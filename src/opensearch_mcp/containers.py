@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -91,6 +92,7 @@ class MountContext:
         self._fuse_mounts: list[Path] = []  # FUSE mounts (fusermount -u)
         self._nbd_devices: list[str] = []  # qemu-nbd -d
         self._loop_devices: list[str] = []  # losetup -d
+        self.failures: list[str] = []  # partitions that were tried and didn't mount
 
     def add_mount(self, mount_point: Path) -> None:
         self._mounts.append(mount_point)
@@ -184,8 +186,14 @@ def _mount_raw(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     return _mount_raw_partitions(path, dest, ctx)
 
 
+# Partition types that hold no filesystem, as fdisk prints them: MBR Ids
+# (the first token) for extended containers and swap, and GPT names.
+_SKIP_MBR_IDS = {"5", "f", "85", "82"}
+_SKIP_GPT_TYPES = {"Microsoft reserved", "BIOS boot", "Linux swap"}
+
+
 def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list[Path]:
-    """Detect and mount NTFS partitions from a raw disk image."""
+    """Mount every filesystem partition of a raw disk image, read-only."""
     check_sudo()
     result = subprocess.run(
         ["fdisk", "-l", str(raw_path)],
@@ -200,7 +208,8 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
     if partitions:
         for idx, part in enumerate(partitions):
             # GPT gives the type name; MBR gives the Id and its name ("7 HPFS/NTFS/exFAT")
-            if part["type"] != "Microsoft basic data" and part["type"].split()[:1] != ["7"]:
+            mbr_id = (part["type"].split() or [""])[0]
+            if part["type"] in _SKIP_GPT_TYPES or mbr_id in _SKIP_MBR_IDS:
                 continue
             mount_point = dest / f"vol{idx}"
             mount_point.mkdir()
@@ -223,8 +232,15 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
                 )
                 ctx.add_mount(mount_point)
                 mounted.append(mount_point)
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as e:
                 mount_point.rmdir()
+                why = (e.stderr or b"").decode(errors="replace").strip().splitlines()[:1]
+                failure = (
+                    f"partition type '{part['type']}' at offset {offset} did not mount: "
+                    f"{why[0] if why else f'mount exit {e.returncode}'}"
+                )
+                ctx.failures.append(failure)
+                print(f"  WARNING: {failure}", file=sys.stderr)
 
     # Fallback: direct mount for volume images without partition table
     if not mounted:

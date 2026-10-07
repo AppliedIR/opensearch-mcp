@@ -733,6 +733,45 @@ def _rebuilt_status_host(h) -> dict:
     return {"hostname": h.hostname, "artifacts": arts}
 
 
+def _hostname_from_volumes(volumes: list[Path], notes: list[tuple[str, str]]) -> str | None:
+    """The registry hostname, taken only when exactly one volume holds a Windows
+    install. With two or more (a dual boot), no name is forced: each install is
+    ingested as its own host, and a warning lists them."""
+    from opensearch_mcp.discover import _WINDOWS_SENTINEL
+    from opensearch_mcp.hostname import detect_hostname_from_volume
+    from opensearch_mcp.paths import resolve_case_insensitive
+
+    installs = [v for v in volumes if resolve_case_insensitive(v, _WINDOWS_SENTINEL)]
+    if len(installs) > 1:
+        found = ", ".join(f"{v.name}: {detect_hostname_from_volume(v) or '?'}" for v in installs)
+        note = (
+            f"{len(installs)} Windows installs on this image ({found}); each is ingested "
+            "as its own host. Pass --hostname only if they are one machine"
+        )
+        notes.append(("hostname", note))
+        print(f"  WARNING: {note}", file=sys.stderr)
+        return None
+    detected = detect_hostname_from_volume(installs[0]) if installs else None
+    if detected:
+        print(f"  Hostname from volume registry: {detected}")
+    else:
+        print(
+            "  WARNING: could not detect hostname from registry; "
+            "falling back to directory-scan (weaker signal — "
+            "consider passing --hostname <canonical> explicitly)",
+            file=sys.stderr,
+        )
+    return detected
+
+
+def _discover_volumes(volumes: list[Path], hostname, force_hostname: bool) -> list:
+    """Hosts on each mounted volume of a disk image, so every install is found
+    (a scan of their shared parent finds only the first)."""
+    return [
+        h for v in volumes for h in discover(v, hostname=hostname, force_hostname=force_hostname)
+    ]
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
     """Scan a directory for artifacts, run EZ tools, index."""
     from opensearch_mcp.containers import (
@@ -803,6 +842,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
     tmpdir = None
     scan_root = input_path
     vss_volumes: list = []
+    volumes: list = []  # a disk image's mounted volumes
+    status_notes: list[tuple[str, str]] = []  # warnings for the run's status
 
     # Register cleanup for abnormal exit (OOM kill, unhandled exception)
     import atexit
@@ -838,7 +879,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     volumes = mount_image(img, tmpdir, mount_ctx)
                     if not volumes:
                         print(
-                            "Error: No NTFS partitions in extracted image.",
+                            "Error: no partition could be mounted from the extracted image.",
                             file=sys.stderr,
                         )
                         sys.exit(1)
@@ -859,19 +900,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # (silently-wrong of a different shape). C1 closes
                     # this via batch-discovery + host-unmapped.yaml.
                     if not hostname and volumes:
-                        from opensearch_mcp.hostname import detect_hostname_from_volume
-
-                        detected = detect_hostname_from_volume(volumes[0])
-                        if detected:
-                            hostname = detected
-                            print(f"  Hostname from volume registry: {hostname}")
-                        else:
-                            print(
-                                "  WARNING: could not detect hostname from registry; "
-                                "falling back to directory-scan (weaker signal — "
-                                "consider passing --hostname <canonical> explicitly)",
-                                file=sys.stderr,
-                            )
+                        hostname = _hostname_from_volumes(volumes, status_notes)
 
                 scan_root = tmpdir
 
@@ -880,7 +909,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             print(f"Mounting {input_path.name}...")
             volumes = mount_image(input_path, tmpdir, mount_ctx)
             if not volumes:
-                print("Error: No NTFS partitions found in disk image.", file=sys.stderr)
+                print("Error: no partition could be mounted from the disk image.", file=sys.stderr)
                 sys.exit(1)
             print(f"  Mounted {len(volumes)} volume(s)")
 
@@ -889,19 +918,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # disk images get the real ComputerName, not the filename.
             # Warn on miss — see the archive-path block above for why.
             if not hostname:
-                from opensearch_mcp.hostname import detect_hostname_from_volume
-
-                detected = detect_hostname_from_volume(volumes[0])
-                if detected:
-                    hostname = detected
-                    print(f"  Hostname from volume registry: {hostname}")
-                else:
-                    print(
-                        "  WARNING: could not detect hostname from registry; "
-                        "falling back to directory-scan (weaker signal — "
-                        "consider passing --hostname <canonical> explicitly)",
-                        file=sys.stderr,
-                    )
+                hostname = _hostname_from_volumes(volumes, status_notes)
 
             # VSS handling
             if vss_flag:
@@ -934,7 +951,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
         force_hn = container_type in ("ewf", "raw", "nbd") or (
             container_type == "archive" and hostname
         )
-        hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
+        if volumes:  # a disk image: each mounted volume is scanned on its own
+            hosts = _discover_volumes(volumes, hostname, force_hn)
+        else:
+            hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 
         # --- Pre-preflight peek fallback ---
         # When registry detect missed AND discover() produced hosts with
@@ -1352,7 +1372,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 print(f"  Triage enrichment failed: {e}")
             from opensearch_mcp.ingest_status import finish_status
 
-            finish_status(case_id, os.getpid(), note=triage_note)
+            status_notes += [("mount", f) for f in mount_ctx.failures]
+            if triage_note:
+                status_notes.insert(0, ("triage", triage_note))
+            finish_status(case_id, os.getpid(), notes=status_notes)
 
     finally:
         mount_ctx.cleanup()

@@ -1,4 +1,5 @@
-"""MBR NTFS partitions are mounted, and an E01 is mounted so root can read it.
+"""Every filesystem partition of a disk image is mounted, an E01 is mounted so
+root can read it, and a partition that won't mount is reported.
 
 No command runs here: subprocess.run is replaced by a recorder that answers
 fdisk with real util-linux output and accepts every other call.
@@ -68,12 +69,16 @@ def _mount_offsets(calls) -> list[str]:
     ]
 
 
-def test_mbr_ntfs_partitions_are_mounted_and_others_are_not(calls, tmp_path):
+def test_every_mbr_partition_is_mounted_with_its_size(calls, tmp_path):
     calls.fdisk_text = MBR
     mounted = containers._mount_raw_partitions(
         Path("/evidence/disk.raw"), tmp_path, containers.MountContext()
     )
-    assert _mount_offsets(calls) == [f"offset={2048 * 512}", f"offset={104448 * 512}"]
+    assert _mount_offsets(calls) == [
+        f"offset={2048 * 512}",
+        f"offset={104448 * 512}",
+        f"offset={124928 * 512}",  # 27 Hidden NTFS WinRE is a filesystem too
+    ]
     # each loop device ends where its partition does, so the second can mount too
     assert [
         o
@@ -81,9 +86,8 @@ def test_mbr_ntfs_partitions_are_mounted_and_others_are_not(calls, tmp_path):
         if c[:2] == ["sudo", "mount"]
         for o in c[3].split(",")
         if o.startswith("sizelimit=")
-    ] == ["sizelimit=52428800", "sizelimit=10485760"]
-    assert f"offset={124928 * 512}" not in str(calls)  # 27 Hidden NTFS WinRE
-    assert [p.name for p in mounted] == ["vol0", "vol1"]
+    ] == ["sizelimit=52428800", "sizelimit=10485760", "sizelimit=2097152"]
+    assert [p.name for p in mounted] == ["vol0", "vol1", "vol2"]
 
 
 def test_a_gpt_basic_data_partition_is_still_mounted(calls, tmp_path):
@@ -106,7 +110,7 @@ def test_an_e01_is_mounted_by_root_for_the_examiner_and_unmounted_with_sudo(call
     calls.clear()
     ctx.cleanup()
     umounts = [c[2] for c in calls if c[:2] == ["sudo", "umount"]]
-    assert umounts == [str(tmp_path / "vol1"), str(tmp_path / "vol0"), str(ewf)]
+    assert umounts == [str(tmp_path / v) for v in ("vol2", "vol1", "vol0")] + [str(ewf)]
     assert not [c for c in calls if c[0] == "fusermount"]
 
 
@@ -124,9 +128,215 @@ Device              Boot Start   End Sectors Size Id Type
 """
 
 
-def test_an_mbr_id_that_only_starts_with_7_is_not_mounted(calls, tmp_path):
+def test_an_mbr_partition_of_any_filesystem_id_is_mounted(calls, tmp_path):
     calls.fdisk_text = PCIX
     containers._mount_raw_partitions(
         Path("/evidence/pcix.raw"), tmp_path, containers.MountContext()
     )
-    assert _mount_offsets(calls) == [f"offset={22528 * 512}"]  # not the 75 at 2048
+    assert _mount_offsets(calls) == [f"offset={2048 * 512}", f"offset={22528 * 512}"]
+
+
+# Real util-linux 2.37.2 `fdisk -l` lines for each skipped type, beside types
+# that must be tried (83 Linux, Linux filesystem, LVM, APFS, LDM data, ...).
+MBR_SKIPS = """\
+Disk /evidence/mbr1.img: 64 MiB, 67108864 bytes, 131072 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+Disklabel type: dos
+
+Device               Boot Start    End Sectors Size Id Type
+/evidence/mbr1.img1  *     2048   6143    4096   2M  7 HPFS/NTFS/exFAT
+/evidence/mbr1.img2        6144  14335    8192   4M  7 HPFS/NTFS/exFAT
+/evidence/mbr1.img3       14336  18431    4096   2M 82 Linux swap / Solaris
+/evidence/mbr1.img4       18432 131071  112640  55M  5 Extended
+/evidence/mbr1.img5       20480  24575    4096   2M  7 HPFS/NTFS/exFAT
+/evidence/mbr1.img6       26624  30719    4096   2M 83 Linux
+/evidence/mbr1.img7       32768  36863    4096   2M 27 Hidden NTFS WinRE
+"""
+
+_EXTENDED = """\
+Disk /evidence/mbr2.img: 32 MiB, 33554432 bytes, 65536 sectors
+Sector size (logical/physical): 512 bytes / 512 bytes
+Disklabel type: dos
+
+Device               Boot Start   End Sectors Size Id Type
+/evidence/mbr2.img1        2048  6143    4096   2M  c W95 FAT32 (LBA)
+/evidence/mbr2.img2        8192 65535   57344  28M {}
+/evidence/mbr2.img5       10240 14335    4096   2M  7 HPFS/NTFS/exFAT
+"""
+MBR_EXTENDED_LBA = _EXTENDED.format(" f W95 Ext'd (LBA)")
+MBR_EXTENDED_LINUX = _EXTENDED.format("85 Linux extended")
+
+GPT_SKIPS = """\
+Disk /evidence/gpt1.img: 64 MiB, 67108864 bytes, 131072 sectors
+Sector size (logical/physical): 512 bytes / 512 bytes
+Disklabel type: gpt
+
+Device               Start   End Sectors Size Type
+/evidence/gpt1.img1   2048  4095    2048   1M BIOS boot
+/evidence/gpt1.img2   4096  8191    4096   2M EFI System
+/evidence/gpt1.img3   8192 12287    4096   2M Microsoft reserved
+/evidence/gpt1.img4  12288 20479    8192   4M Microsoft basic data
+/evidence/gpt1.img5  20480 24575    4096   2M Windows recovery environment
+/evidence/gpt1.img6  24576 28671    4096   2M Linux swap
+/evidence/gpt1.img7  28672 32767    4096   2M Linux filesystem
+/evidence/gpt1.img8  32768 36863    4096   2M Linux LVM
+/evidence/gpt1.img9  36864 40959    4096   2M Apple HFS/HFS+
+/evidence/gpt1.img10 40960 45055    4096   2M Apple APFS
+/evidence/gpt1.img11 45056 49151    4096   2M Linux RAID
+/evidence/gpt1.img12 49152 53247    4096   2M Microsoft LDM metadata
+/evidence/gpt1.img13 53248 57343    4096   2M Microsoft LDM data
+"""
+
+
+def _tried(calls) -> list[tuple[int, int]]:
+    """(offset, sizelimit) of each partition mount, in order."""
+    out = []
+    for c in calls:
+        if c[:2] == ["sudo", "mount"]:
+            opts = dict(o.split("=") for o in c[3].split(",") if "=" in o)
+            out.append((int(opts["offset"]), int(opts["sizelimit"])))
+    return out
+
+
+@pytest.mark.parametrize(
+    "table, tried",
+    [
+        # 82 swap and 5 Extended skipped; 7, 7, 7, 83 Linux and 27 tried
+        (MBR_SKIPS, [(2048, 4096), (6144, 8192), (20480, 4096), (26624, 4096), (32768, 4096)]),
+        # f and 85 extended containers skipped; c FAT32 and the logical 7 tried
+        (MBR_EXTENDED_LBA, [(2048, 4096), (10240, 4096)]),
+        (MBR_EXTENDED_LINUX, [(2048, 4096), (10240, 4096)]),
+        # BIOS boot, Microsoft reserved and Linux swap skipped; the rest tried
+        (
+            GPT_SKIPS,
+            [(4096, 4096), (12288, 8192), (20480, 4096)]
+            + [(s, 4096) for s in (28672, 32768, 36864, 40960, 45056, 49152, 53248)],
+        ),
+    ],
+    ids=["mbr", "mbr extended f", "mbr extended 85", "gpt"],
+)
+def test_every_partition_but_the_non_filesystem_types_is_tried(calls, tmp_path, table, tried):
+    calls.fdisk_text = table
+    containers._mount_raw_partitions(Path("/evidence/x.img"), tmp_path, containers.MountContext())
+    assert _tried(calls) == [(start * 512, sectors * 512) for start, sectors in tried]
+
+
+@pytest.mark.parametrize(
+    "fdisk_text",
+    [
+        "Disk /evidence/vol.img: 32 MiB, 33554432 bytes, 65536 sectors\n",  # no table
+        "fdisk: cannot open /evidence/vol.img: Input/output error\n",
+    ],
+    ids=["no partition table", "unreadable table"],
+)
+def test_a_volume_image_is_mounted_whole(calls, tmp_path, fdisk_text):
+    calls.fdisk_text = fdisk_text
+    mounted = containers._mount_raw_partitions(
+        Path("/evidence/vol.img"), tmp_path, containers.MountContext()
+    )
+    mounts = [c for c in calls if c[:2] == ["sudo", "mount"]]
+    assert [m[3] for m in mounts] == ["ro,loop,noexec"]
+    assert [p.name for p in mounted] == ["vol0"]
+
+
+def test_a_partition_that_does_not_mount_is_reported(monkeypatch, tmp_path, capsys):
+    def run(cmd, *a, **k):
+        cmd = [str(c) for c in cmd]
+        if cmd[:2] == ["fdisk", "-l"]:
+            return subprocess.CompletedProcess(cmd, 0, MBR, "")
+        if cmd[:2] == ["sudo", "mount"] and f"offset={104448 * 512}" in cmd[3]:
+            raise subprocess.CalledProcessError(
+                32, cmd, b"", b"mount: /x: wrong fs type, bad option.\nmore detail\n"
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(containers.subprocess, "run", run)
+    ctx = containers.MountContext()
+    mounted = containers._mount_raw_partitions(Path("/evidence/disk.raw"), tmp_path, ctx)
+    want = (
+        f"partition type '7 HPFS/NTFS/exFAT' at offset {104448 * 512} did not mount: "
+        "mount: /x: wrong fs type, bad option."
+    )
+    assert ctx.failures == [want]
+    assert want in capsys.readouterr().err
+    assert [p.name for p in mounted] == ["vol0", "vol2"]  # the others still mount
+
+
+def test_each_status_note_is_a_labelled_warning(tmp_path, monkeypatch):
+    from opensearch_mcp import ingest_status
+
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    ingest_status.write_status("c1", 7, "r", "running", [], {}, "2026-10-07T00:00:00Z")
+    ingest_status.finish_status("c1", 7, notes=[("triage", "t"), ("mount", "m")])
+    (path,) = (tmp_path / "status").glob("*.json")
+    data = __import__("json").loads(path.read_text())
+    assert data["status"] == "complete"
+    assert [(h["hostname"], h["artifacts"]) for h in data["hosts"]] == [
+        ("triage", [{"name": "triage", "note": "t", "warnings_only": True}]),
+        ("mount", [{"name": "mount", "note": "m", "warnings_only": True}]),
+    ]
+
+
+def _volume(root: Path, name: str, windows: bool) -> Path:
+    v = root / name
+    v.mkdir()
+    if windows:
+        (v / "Windows/System32/config").mkdir(parents=True)
+        (v / "Windows/System32/config/SYSTEM").write_bytes(b"x")
+        logs = v / "Windows/System32/winevt/Logs"
+        logs.mkdir(parents=True)
+        (logs / "Security.evtx").write_bytes(b"x" * 100)
+    return v
+
+
+@pytest.fixture
+def registry(monkeypatch):
+    """detect_hostname_from_volume answers from the volume's name."""
+    read: list[str] = []
+    names = {"vol1": "WIN10A", "vol2": "WIN11B"}
+
+    def detect(v):
+        read.append(v.name)
+        return names.get(v.name)
+
+    import opensearch_mcp.hostname as hostname
+
+    monkeypatch.setattr(hostname, "detect_hostname_from_volume", detect)
+    return read
+
+
+def test_the_registry_name_comes_from_the_one_windows_volume(tmp_path, registry):
+    from opensearch_mcp import ingest_cli
+
+    volumes = [_volume(tmp_path, "vol0", False), _volume(tmp_path, "vol1", True)]
+    notes: list = []
+    assert ingest_cli._hostname_from_volumes(volumes, notes) == "WIN10A"
+    assert registry == ["vol1"] and notes == []
+
+
+def test_two_windows_installs_force_no_name_and_are_listed(tmp_path, registry, capsys):
+    from opensearch_mcp import ingest_cli
+
+    volumes = [
+        _volume(tmp_path, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))
+    ]
+    notes: list = []
+    assert ingest_cli._hostname_from_volumes(volumes, notes) is None
+    ((label, note),) = notes
+    assert label == "hostname"
+    assert note.startswith("2 Windows installs on this image (vol1: WIN10A, vol2: WIN11B)")
+    assert note in capsys.readouterr().err
+
+
+def test_each_windows_install_on_an_image_is_its_own_host(tmp_path):
+    from opensearch_mcp import ingest_cli
+
+    volumes = [
+        _volume(tmp_path, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))
+    ]
+    hosts = ingest_cli._discover_volumes(volumes, None, True)
+    assert [(h.hostname, h.volume_root.name) for h in hosts] == [
+        ("vol1", "vol1"),
+        ("vol2", "vol2"),
+    ]
