@@ -631,65 +631,49 @@ def _resolve_case_id(args_case: str | None) -> str:
     sys.exit(1)
 
 
-def _ensure_case_active(case_id: str) -> None:
-    """Ensure the case is active and SMB share is configured.
-
-    Tries gateway case_activate first (handles SMB + wintools).
-    Falls back to setting active_case file + inline SMB repoint.
-    """
+def _active_case_name() -> str:
+    """The case `active_case` names, or "" when none is set."""
     active_case = vhir_dir() / "active_case"
-    if active_case.exists():
-        current = Path(active_case.read_text().strip()).name
-        if current == case_id:
-            return
+    if not active_case.exists():
+        return ""
+    raw = active_case.read_text().strip()
+    return Path(raw).name if raw else ""
 
-    # Try gateway (handles SMB + wintools notification)
+
+def _ensure_case_active(case_id: str) -> None:
+    """Make `case_id` the active case through the gateway's case_activate
+    (which also moves the evidence share), and say on stderr what happened.
+
+    Whether it worked is read from the active case pointer afterwards, never
+    from the call's return. Nothing here writes the pointer or Samba itself.
+    """
+    previous = _active_case_name()
+    if previous == case_id:
+        return
+
+    reason = ""
     try:
         from opensearch_mcp.gateway import call_tool
 
-        call_tool("case_activate", {"case_id": case_id})
-        return
-    except Exception:
-        pass
+        result = call_tool("case_activate", {"case_id": case_id})
+        if isinstance(result, dict) and result.get("error"):
+            reason = str(result["error"])
+    except Exception as e:
+        reason = f"the gateway couldn't be reached: {e}"
 
-    # Fallback: set active_case file + try inline SMB repoint
-    case_path = vhir_dir() / "cases" / case_id
-    if case_path.is_dir():
-        active_case.parent.mkdir(parents=True, exist_ok=True)
-        active_case.write_text(str(case_path))
-    _repoint_samba_if_configured(case_id)
-
-
-def _repoint_samba_if_configured(case_id: str) -> None:
-    """Repoint SMB [cases] share to the case directory. No-op if Samba not configured."""
-    import os
-    import subprocess
-
-    samba_yaml = vhir_dir() / "samba.yaml"
-    if not samba_yaml.is_file():
-        return
-    case_dir = vhir_dir() / "cases" / case_id
-    if not case_dir.is_dir():
-        return
-    target = str(case_dir)
-    doc = yaml.safe_load(samba_yaml.read_text()) or {}
-    if doc.get("active_share_target") == target:
-        return
-    conf_path = "/etc/samba/smb.conf.d/vhir-cases.conf"
-    username = doc.get("force_user", os.environ.get("USER", "sansforensics"))
-    conf = (
-        f"[cases]\n    path = {target}\n    valid users = vhir-smb\n"
-        f"    read only = no\n    force user = {username}\n"
-        f"    create mask = 0644\n    directory mask = 0755\n    browseable = yes\n"
-    )
-    try:
-        Path(conf_path).write_text(conf)
-        subprocess.run(["smbcontrol", "all", "reload-config"], capture_output=True)
-    except PermissionError:
-        subprocess.run(["sudo", "tee", conf_path], input=conf.encode(), capture_output=True)
-        subprocess.run(["smbcontrol", "all", "reload-config"], capture_output=True)
-    doc["active_share_target"] = target
-    samba_yaml.write_text(yaml.dump(doc))
+    if _active_case_name() == case_id:
+        was = f"it was {previous}" if previous else "no case was active"
+        print(
+            f"Case {case_id} is now the active case ({was}); "
+            f"findings recorded from now on go to {case_id}.",
+            file=sys.stderr,
+        )
+    else:
+        reason = reason or "the active case didn't change"
+        print(
+            f"Case {case_id} wasn't made active ({reason}); run `vhir case activate {case_id}`.",
+            file=sys.stderr,
+        )
 
 
 def _parse_date(value: str) -> datetime:
