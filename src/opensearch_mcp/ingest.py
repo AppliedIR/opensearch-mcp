@@ -371,6 +371,18 @@ def hayabusa_staging_stem(ctx) -> str:
     return f"hayabusa-{ctx.c12}-{ctx.unit}-{run}"
 
 
+def _run_root_of(host, run_tmpdir) -> Path | None:
+    """`run_tmpdir` when the host's logs are under it (an image or archive
+    extracted or mounted for this run); None for a folder."""
+    if run_tmpdir is None or not host.evtx_dir:
+        return None
+    try:
+        Path(host.evtx_dir).relative_to(run_tmpdir)
+    except ValueError:
+        return None
+    return Path(run_tmpdir)
+
+
 def run_hayabusa_batch(
     hosts,
     client,
@@ -379,16 +391,22 @@ def run_hayabusa_batch(
     on_progress=None,
     host_dict=None,
     case_dir=None,
+    run_tmpdir=None,
 ) -> dict:
     """Run Hayabusa on all hosts' evtx dirs, ingest CSV results.
 
     Called as a post-ingest phase — evtx data is already indexed.
+    run_tmpdir: the run's extract/mount directory, for an image or archive.
     """
     with wc.restoring():
-        return _run_hayabusa_batch(hosts, client, case_id, audit, on_progress, host_dict, case_dir)
+        return _run_hayabusa_batch(
+            hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir
+        )
 
 
-def _run_hayabusa_batch(hosts, client, case_id, audit, on_progress, host_dict, case_dir):
+def _run_hayabusa_batch(
+    hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir=None
+):
     import shutil
     import subprocess
 
@@ -504,6 +522,7 @@ def _run_hayabusa_batch(hosts, client, case_id, audit, on_progress, host_dict, c
                 source_file=str(csv_output),
                 pipeline_version=_PIPELINE_VERSION,
                 host_dict=host_dict,
+                id_root=_run_root_of(host, run_tmpdir),
             )
             results[host.hostname] = cnt
             if callable(on_progress):

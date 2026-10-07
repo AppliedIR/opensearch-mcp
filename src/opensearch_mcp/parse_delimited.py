@@ -194,6 +194,19 @@ def _is_a_number_not_zero(val: str) -> bool:
     return float(val.strip()) != 0
 
 
+def _id_input(record: dict, id_root: Path | None) -> dict:
+    """The record as its id hashes it: `EvtxFile` relative to `id_root` when
+    it's under it, otherwise in full, as it always was."""
+    evtx_file = record.get("EvtxFile")
+    if id_root is None or not evtx_file:
+        return record
+    try:
+        relative = Path(evtx_file).relative_to(id_root)
+    except ValueError:
+        return record
+    return {**record, "EvtxFile": relative.as_posix()}
+
+
 def ingest_delimited(
     path: Path,
     client: OpenSearch,
@@ -210,10 +223,14 @@ def ingest_delimited(
     batch_size: int = 1000,
     on_progress: object = None,
     host_dict=None,
+    id_root: Path | None = None,
 ) -> tuple[int, int, int, int]:
     """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed).
 
     on_progress: optional callable(indexed_so_far) for status updates on large files.
+    id_root: a Hayabusa run's temp directory. An `EvtxFile` under it is hashed
+    relative to it, so another run of the same image or archive (in another
+    temp directory) gives the same ids; the stored value is unchanged.
     """
     from opensearch_mcp.paths import validate_index_name
 
@@ -285,7 +302,7 @@ def ingest_delimited(
             record["source_host"] = record.pop("host")
             host_renamed += 1
 
-        doc_id = _doc_id(index_name, record, volatile_keys=_DELIM_VOLATILE)
+        doc_id = _doc_id(index_name, _id_input(record, id_root), volatile_keys=_DELIM_VOLATILE)
 
         # Use per-row Computer field if present (Hayabusa, EvtxECmd), else CLI hostname
         record["host.name"] = record.pop("Computer", None) or hostname
