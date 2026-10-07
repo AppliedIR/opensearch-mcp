@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,6 +167,26 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
                 yield dict(row)
 
 
+# An epoch written as text (Zeek's ts, a CSV column): the integer part's width
+# says the unit. Any other width (20230129) is left for OpenSearch as before.
+_EPOCH_TEXT = re.compile(r"(\d+)(\.\d+)?")
+_EPOCH_DIVISOR = {9: 1, 10: 1, 12: 1e3, 13: 1e3, 15: 1e6, 16: 1e6}
+
+
+def _epoch_text(val: str) -> str | None:
+    """The UTC ISO time of a seconds, milliseconds or microseconds epoch
+    written as text, or None."""
+    m = _EPOCH_TEXT.fullmatch(val.strip())
+    divisor = _EPOCH_DIVISOR.get(len(m.group(1))) if m else None
+    if divisor is None:
+        return None
+    try:
+        when = datetime.fromtimestamp(float(m.group(0)) / divisor, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return when.isoformat()
+
+
 def ingest_delimited(
     path: Path,
     client: OpenSearch,
@@ -217,6 +238,8 @@ def ingest_delimited(
                 elif val > 1e12:
                     val = val / 1e3  # milliseconds
                 record["@timestamp"] = datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+            elif isinstance(val, str) and (epoch := _epoch_text(val)):
+                record["@timestamp"] = epoch
             else:
                 # Hayabusa writes local time as "2022-11-28 18:48:24.526 +00:00",
                 # a form @timestamp rejects; as UTC ISO it's accepted.
