@@ -647,8 +647,13 @@ def _svc_from_svcscan(src):
     return src.get("Name"), registry or (memory if is_file else "")
 
 
+class _PartialRead(RuntimeError):
+    """A scroll failed after its first page: some matching docs were not read."""
+
+
 def _all_hits(client, index, query):
-    """Every hit for the query, read in pages through a scroll."""
+    """Every hit for the query, read in pages through a scroll. A failure
+    after the first page raises _PartialRead."""
     resp = client.search(
         index=index, allow_no_indices=False, scroll="2m", body={"query": query, "size": 1000}
     )
@@ -658,7 +663,10 @@ def _all_hits(client, index, query):
             yield from resp["hits"]["hits"]
             if not scroll_id:
                 break
-            resp = client.scroll(scroll_id=scroll_id, scroll="2m")
+            try:
+                resp = client.scroll(scroll_id=scroll_id, scroll="2m")
+            except Exception as e:
+                raise _PartialRead(str(e)) from e
             scroll_id = resp.get("_scroll_id", scroll_id)
     finally:
         if scroll_id:
@@ -673,6 +681,8 @@ def _enrich_services(client, index, query, extract, artifact_name, on_progress=N
     to the docs that carry that pair. Every matching doc is read."""
     try:
         hits = list(_all_hits(client, index, query))
+    except _PartialRead as e:
+        return {"status": "failed", "reason": f"not every matching document could be read: {e}"}
     except Exception as e:
         return {"status": "skipped", "reason": str(e)}
     if not hits:
