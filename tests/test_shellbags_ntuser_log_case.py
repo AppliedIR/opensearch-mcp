@@ -34,7 +34,9 @@ def _hive(dirty: bool, bags: int) -> bytes:
     return b"regf" + struct.pack("<II", 7, 6 if dirty else 7) + b"\0" * 20 + b"BAG" * bags
 
 
-def _sbecmd(cmd: list[str], calls: list[list[str]], writes_logs=False) -> tuple[str, str]:
+def _sbecmd(
+    cmd: list[str], calls: list[list[str]], writes_logs=False, one_name=False
+) -> tuple[str, str]:
     """SBECmd's measured behaviour: hives by name at any depth, symlinked files skipped,
     logs only as "<hive name>.LOG1/2" in that exact case; a log holding b"BAD" fails replay."""
     calls.append(cmd)
@@ -66,6 +68,8 @@ def _sbecmd(cmd: list[str], calls: list[list[str]], writes_logs=False) -> tuple[
             lines.append(f"\tThere was an error processing {f}. {NULL}")
             continue
         name = f"{f.stem}_{csvf}" if csvf else f"{f.stem}.csv"
+        if one_name:  # every run names its output the same
+            name = "SBECmd_Output.csv"
         (out / name).write_text("BagPath\n" + "x\n" * data.count(b"BAG"))
         lines.append(f"Finished processing {f}")
     return "\n".join(lines + ["Processing complete!"]), ""
@@ -96,7 +100,9 @@ def _digest(root: Path) -> dict[str, str]:
     }
 
 
-def _scan(profile: Path, replay=None, writes_logs=False) -> tuple[dict, list[list[str]]]:
+def _scan(
+    profile: Path, replay=None, writes_logs=False, one_name=False
+) -> tuple[dict, list[list[str]]]:
     """replay: what the second SBECmd run raises."""
     calls: list[list[str]] = []
 
@@ -104,7 +110,7 @@ def _scan(profile: Path, replay=None, writes_logs=False) -> tuple[dict, list[lis
         if replay is not None and calls:
             calls.append(cmd)
             raise replay
-        return _sbecmd(cmd, calls, writes_logs)
+        return _sbecmd(cmd, calls, writes_logs, one_name)
 
     def ingest_csv(csv_path, **kw):
         return len(csv_path.read_text().splitlines()) - 1, 0, 0
@@ -233,3 +239,28 @@ def test_a_replay_that_writes_to_its_logs_leaves_the_evidence_unchanged(tmp_path
     status, _ = _scan(profile, writes_logs=True)
     assert _detail(status).startswith("8 docs submitted")
     assert _digest(profile) == before
+
+
+def test_a_replay_s_csv_named_like_the_first_run_s_keeps_both(tmp_path, status_dir):
+    status, calls = _scan(_profile(tmp_path), one_name=True)
+    assert len(calls) == 2
+    assert _detail(status).startswith("8 docs submitted")  # 5 UsrClass + 3 NTUSER
+
+
+def test_a_replay_folder_that_can_t_be_made_is_named_and_keeps_the_first_run(
+    tmp_path, status_dir, monkeypatch
+):
+    made = Path.mkdir
+
+    def mkdir(self, *a, **k):
+        if self.name == "replay":
+            raise PermissionError(13, "Permission denied", str(self))
+        return made(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    profile = _profile(tmp_path)
+    status, calls = _scan(profile)
+    assert len(calls) == 1
+    assert _detail(status).startswith("5 docs submitted")
+    (w,) = status["warnings"]
+    assert f"{profile}/NTUSER.DAT (its transaction logs couldn't be replayed: " in w

@@ -383,17 +383,17 @@ def run_and_ingest(
         if fixed:
             hive, view = fixed
             replay = Path(tmpdir) / "replay"
-            replay.mkdir()
             cmd = [cfg.binary, "-d", str(view), "--csv", str(replay)]
             try:
+                replay.mkdir()
                 more = _run_tool(cmd, cfg.binary)[0].replace(str(view / hive.name), str(hive))
             except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
                 # The first run's rows (UsrClass) are still ingested; NTUSER is named
                 why = str(e).replace(str(view / hive.name), str(hive)).replace(tmpdir, "…")
                 replay_failed = f"{hive} (its transaction logs couldn't be replayed: {why})"
-            else:  # only a replay that finished adds its rows
+            else:  # only a replay that finished adds its rows, beside the first run's
                 for csv_file in replay.glob("*.csv"):
-                    csv_file.rename(Path(tmpdir) / csv_file.name)
+                    csv_file.rename(Path(tmpdir) / f"replay-{csv_file.name}")
         if not_read is not None:
             not_read.extend(_failed_files(_stdout, tool_name))
             errors = _tool_errors(_stdout, artifact_path)
