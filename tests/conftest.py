@@ -92,6 +92,23 @@ def _case_for_every_ingest(request, monkeypatch):
         wc.set_current(None)
 
 
+@pytest.fixture(autouse=True)
+def _hosts_confirmed(request, monkeypatch):
+    """Ingest waits until the examiner confirms each unit's hosts. Rows about
+    something else run as if every host were confirmed; `@pytest.mark.host_gate`
+    keeps the real gate. Workers started as their own process keep it too."""
+    if request.node.get_closest_marker("host_gate"):
+        yield
+        return
+    from sift_common import host_gate
+
+    from opensearch_mcp import server
+
+    monkeypatch.setattr(host_gate, "unresolved", lambda state, units: [])
+    monkeypatch.setattr(server, "_GATE_ANSWER_SECONDS", 0.0)
+    yield
+
+
 @pytest.fixture
 def windows_tree(tmp_path):
     """Create a full Windows directory structure under tmp_path and return it."""

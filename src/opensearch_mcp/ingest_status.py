@@ -11,6 +11,10 @@ from pathlib import Path
 
 from opensearch_mcp.paths import vhir_dir
 
+AWAITING = "awaiting host confirmation"  # the run writes nothing until its hosts are confirmed
+CANCELLED = "cancelled"  # by the examiner, while it waited
+_LIVE = ("running", "starting", AWAITING)  # a worker owns these: the sweep checks it lives
+
 _STATUS_DIR = vhir_dir() / "ingest-status"
 
 
@@ -27,8 +31,10 @@ def write_status(
     bulk_failed_reason: str = "",
     elapsed_seconds: float = 0.0,
     log_file: str = "",
+    message: str = "",
 ) -> None:
-    """Write ingest progress atomically.
+    """Write ingest progress atomically. `message` is what the run asks of
+    the examiner (while it waits for host confirmation).
 
     UAT 2026-04-23: terminal states (`complete`, `failed`) are
     monotonic and must not be downgraded by a later `running` or
@@ -51,11 +57,13 @@ def write_status(
     # narrower than the unguarded case and closes the observed bug.
     if status == "starting" and path.exists():
         return  # the launcher's record never replaces one the worker wrote
-    if status in ("running", "starting") and path.exists():
+    confirmed = False
+    if path.exists():
         try:
             existing = json.loads(path.read_text())
-            if existing.get("status") in ("complete", "failed"):
+            if status in _LIVE and existing.get("status") in ("complete", "failed", CANCELLED):
                 return
+            confirmed = existing.get("hosts_confirmed") is True
         except (json.JSONDecodeError, OSError):
             pass  # Unreadable existing file — fall through to write
     data = {
@@ -77,6 +85,10 @@ def write_status(
         # archive) isn't in its /proc/<pid>/environ, so the sweep can't
         # confirm it there.
         data["run_id_from_env"] = False
+    if message:
+        data["message"] = message
+    if confirmed and status != AWAITING:  # kept: the launcher reads it once
+        data["hosts_confirmed"] = True
     if not log_file and run_id:
         # The launcher writes the worker's log here; workers don't pass it.
         launched = _STATUS_DIR.parent / "ingest-logs" / f"{run_id}.log"
@@ -90,6 +102,32 @@ def write_status(
             json.dump(data, f)
             f.flush()
             os.fsync(f.fileno())
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def mark_hosts_confirmed(case_id: str, pid: int, run_id: str) -> None:
+    """Note on the run's status that its hosts passed the gate, so the
+    launcher can answer that the run started (rather than waits)."""
+    path = _status_path_safe(case_id, pid, run_id)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {"run_id": run_id, "pid": pid, "status": "running", "case_id": case_id,
+                "hosts": [], "totals": {}}  # fmt: skip
+    if data.get("status") == AWAITING:
+        data["status"] = "running"
+    data["hosts_confirmed"] = True
+    _STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(_STATUS_DIR), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
         os.replace(tmp, str(path))
     except BaseException:
         try:
@@ -207,7 +245,7 @@ def read_active_ingests() -> list[dict]:
         # Skip orphaned PID-0 placeholders
         if data.get("pid") == 0:
             continue
-        if data.get("status") in ("running", "starting"):
+        if data.get("status") in _LIVE:
             pid = data.get("pid", 0)
             # A self-made run id gets the PID-only check (alive, not a zombie).
             run_id = data.get("run_id", "") if data.get("run_id_from_env", True) else ""

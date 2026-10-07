@@ -73,7 +73,83 @@ def _open_unit(
         run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
     )
     wc.set_current(ctx)
+    _gate(case_id, [ctx.unit])
     return ctx
+
+
+def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
+    """Hold the run, writing nothing, until every unit's host names belong to
+    a machine the examiner confirmed (or chose Start now for) in the Hosts
+    tab; then take the case lock shared for the rest of the run, so no host
+    rename can change machines under it. A cancelled run ends here."""
+    from sift_common import host_gate
+    from sift_common import host_identity as hi
+
+    from opensearch_mcp import write_context as wc
+    from opensearch_mcp.ingest_status import AWAITING, CANCELLED, write_status
+
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None:
+        return  # every caller has refused a case with no directory already
+    run = run_id or os.environ.get("VHIR_INGEST_RUN_ID", "")
+    started = datetime.now(timezone.utc).isoformat()
+
+    def on_wait(summary: dict) -> None:
+        print(
+            f"Waiting for host confirmation ({summary['unresolved']} host name(s)): "
+            f"{summary['message']}.",
+            file=sys.stderr,
+        )
+        for h in summary["hosts"]:
+            print(f"  {h['locator']}: {h['raw'] or '(none)'}: {h['reason']}", file=sys.stderr)
+        if run:
+            hosts = [
+                {"hostname": h["raw"] or h["locator"],
+                 "artifacts": [{"name": "host confirmation", "status": "awaiting",
+                                "note": f"{h['locator']}: {h['reason']}"}]}
+                for h in summary["hosts"]
+            ]  # fmt: skip
+            write_status(case_id, os.getpid(), run, AWAITING, hosts,
+                         {"unresolved": summary["unresolved"]}, started,
+                         message=summary["message"])  # fmt: skip
+
+    try:
+        host_gate.wait_for_hosts(case_dir, run or f"cli-{os.getpid()}", units, on_wait)
+    except host_gate.RunCancelled as e:
+        if run:
+            write_status(case_id, os.getpid(), run, CANCELLED, [], {}, started, error=str(e))
+        print(f"Cancelled: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        wc.hold(hi.case_lock(case_dir, shared=True))
+        op = hi.unfinished_op(case_dir)
+    except (hi.CaseLockBusy, hi.HostLogError) as e:
+        op = {"error": str(e)}
+    if op:
+        why = op.get("error") or (
+            f"host rename incomplete: {op.get('from', '?')} → {op.get('to', '?')}"
+        )
+        if run:
+            write_status(case_id, os.getpid(), run, "failed", [], {}, started, error=why)
+        print(f"Error: {why}; nothing was written.", file=sys.stderr)
+        sys.exit(1)
+    if run:  # the run goes on: the launcher answers "started"
+        from opensearch_mcp.ingest_status import mark_hosts_confirmed
+
+        mark_hosts_confirmed(case_id, os.getpid(), run)
+
+
+def _confirmed_name(case_dir, ctx) -> str:
+    """For a unit opened with no host name: the name its confirmed machine
+    holds for it, which its records then carry."""
+    from sift_common import host_identity as hi
+
+    state = hi.load(case_dir)
+    named = sorted(raw for (unit, raw) in state.bindings if unit == ctx.unit)
+    own = [r for r in named if r == state.machine_of_pair(ctx.unit, r).canonical]
+    raw = (own or named or [""])[0]  # the machine's own name when it is one of them
+    ctx.unit_raw = raw
+    return raw
 
 
 def _closes_write_context(fn):
@@ -836,6 +912,7 @@ def _discover_volumes(
     return hosts
 
 
+@_closes_write_context
 def cmd_scan(args: argparse.Namespace) -> None:
     """Scan a directory for artifacts, run EZ tools, index."""
     from opensearch_mcp.containers import (
@@ -1283,6 +1360,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
         import uuid
 
         run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
+
+        # Every host's unit and name recorded, then nothing written until
+        # they're confirmed
+        from opensearch_mcp import write_context as wc
+
+        _scan_case_dir = _case_dir_for(case_id)
+        _gate(
+            case_id,
+            [wc.host_context(_scan_case_dir, case_id, h, run_id).unit for h in hosts],
+            run_id,
+        )
 
         client = get_client()
         _preflight_shard_capacity(
@@ -2721,7 +2809,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
 
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
-    hostname = args.hostname
+    hostname = getattr(args, "hostname", "") or ""
     tier = getattr(args, "tier", 1)
     plugins_str = getattr(args, "plugins", None)
     plugins = [p.strip() for p in plugins_str.split(",")] if plugins_str else None
@@ -2737,7 +2825,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         plugin_list = TIER_1
 
     print(f"Memory image: {image_path.name}")
-    print(f"Hostname: {hostname}")
+    print(f"Hostname: {hostname or '(none given: the examiner confirms it)'}")
     print(f"Tier {tier}: {len(plugin_list)} plugins")
 
     if not getattr(args, "yes", False):
@@ -2764,7 +2852,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     # Build plugin checklist for status
     status_plugins = [{"name": p, "status": "pending"} for p in plugin_list]
     status_host = {
-        "hostname": hostname,
+        "hostname": hostname or image_path.name,
         "artifacts": status_plugins,
     }
 
@@ -2871,6 +2959,10 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             run_id=run_id or "",
         )
     )
+    _gate(case_id, [wc.current().unit], run_id or "")
+    if not hostname:  # the name the examiner confirmed for this image
+        hostname = _confirmed_name(case_dir, wc.current())
+        status_host["hostname"] = hostname
     try:
         results = ingest_memory(
             image_path=image_path,
@@ -3040,7 +3132,9 @@ def main() -> None:
     # memory subcommand
     p_mem = sub.add_parser("memory", help="Parse memory image with Volatility 3")
     p_mem.add_argument("path", help="Path to memory image")
-    p_mem.add_argument("--hostname", required=True, help="Source hostname")
+    p_mem.add_argument(
+        "--hostname", default="", help="Source hostname (else the examiner names it)"
+    )
     p_mem.add_argument("--case", help="Case ID")
     p_mem.add_argument("--tier", type=int, default=1, choices=sorted(TIERS), help="Analysis depth")
     p_mem.add_argument("--plugins", help="Specific plugins (comma-separated)")

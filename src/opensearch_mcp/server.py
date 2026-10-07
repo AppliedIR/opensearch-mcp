@@ -367,6 +367,66 @@ _SEARCH_EXCLUDE_FIELDS = frozenset(
 _MAX_FIELD_CHARS = 500
 
 
+def _host_review(case_id: str = "") -> tuple[set[str], str]:
+    """The machine keys the examiner hasn't confirmed (proposed by Start now,
+    or new), and the rename-incomplete note while a host operation is
+    unfinished. Both empty when the case has no host logs."""
+    from sift_common import host_identity as hi
+
+    case_dir = _scan_case_dir(case_id)
+    if case_dir is None:
+        return set(), ""
+    try:
+        state = hi.load(case_dir)
+        op = hi.unfinished_op(case_dir)
+    except hi.HostLogError as e:
+        return set(), f"host logs unreadable: {e}"
+    keys = {k for m in state.machines.values() if m.state != hi.CONFIRMED for k in m.keys}
+    note = f"host rename incomplete: {op.get('from', '?')} → {op.get('to', '?')}" if op else ""
+    return keys, note
+
+
+def _annotate_hosts(resp: dict, case_id: str, client=None, index="", query_body=None,
+                    field: str = "", hits=None) -> dict:  # fmt: skip
+    """Mark what came from machines the examiner hasn't confirmed: each search
+    hit (`host_unconfirmed`), or for a count, aggregate or timeline the number
+    of documents, per bucket for an aggregate. Adds the rename-incomplete note."""
+    keys, note = _host_review(case_id)
+    if note:
+        resp["host_note"] = note
+    if not keys:
+        return resp
+    if hits is not None:  # the documents of a search, in the order of its hits
+        for doc, hit in zip(resp["results"], hits):
+            if (hit.get("_source") or {}).get("vhir.host_key") in keys:
+                doc["host_unconfirmed"] = True
+        return resp
+    try:  # a separate count: the answer above stands whatever this gives
+        body: dict = {
+            "query": {"bool": {"must": [query_body], "filter": [
+                {"terms": {"vhir.host_key": sorted(keys)}}]}},
+            "size": 0,
+            "track_total_hits": True,
+        }  # fmt: skip
+        if field:
+            body["aggs"] = {"agg": {"terms": {"field": field, "size": 500}}}
+        result = client.search(index=index, body=body, ignore_unavailable=True)
+        total = int(result["hits"]["total"]["value"])
+        per = {b["key"]: int(b["doc_count"]) for b in result.get("aggregations", {})
+               .get("agg", {}).get("buckets", [])} if field else {}  # fmt: skip
+    except Exception:
+        return resp
+    if total:
+        resp["host_unconfirmed"] = total
+        resp["host_unconfirmed_note"] = (
+            f"{total:,} document(s) come from machines the examiner hasn't confirmed"
+        )
+    for b in resp.get("buckets", []):
+        if per.get(b.get("key")):
+            b["host_unconfirmed"] = per[b["key"]]
+    return resp
+
+
 def _strip_hits(
     hits: list[dict],
     exclude_fields: frozenset[str] = _SEARCH_EXCLUDE_FIELDS,
@@ -487,6 +547,67 @@ def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> st
     except Exception:
         expr = ""
     return f"idx_search(query='{query}'" + (f", index='{expr}')" if expr else ")")
+
+
+_GATE_ANSWER_SECONDS = 10.0  # how long a launch waits to say whether the run waits
+
+
+def _answer_after_gate(resp: dict, case_id: str, pid: int, run_id: str) -> dict:
+    """Say whether a just-started run waits for host confirmation: watch its
+    status until the worker passes the gate, waits at it, or ends. A run
+    whose hosts can't be known yet (an archive being extracted) says so."""
+    import json as _json
+    import time as _time
+
+    from opensearch_mcp.ingest_status import AWAITING, _status_path_safe
+
+    path = _status_path_safe(case_id, pid, run_id)
+    deadline = _time.monotonic() + _GATE_ANSWER_SECONDS
+    while True:
+        try:
+            data = _json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if data.get("status") == AWAITING:
+            hosts = [
+                a.get("note", "")
+                for h in data.get("hosts") or []
+                for a in h.get("artifacts") or []
+            ]
+            resp.update(
+                status=AWAITING,
+                unresolved=(data.get("totals") or {}).get("unresolved", len(hosts)),
+                unresolved_hosts=hosts,
+                message=(
+                    f"Nothing is written yet: {data.get('message', '')}. "
+                    "Then call idx_ingest_status() to follow the run."
+                ),
+            )
+            return resp
+        if data.get("hosts_confirmed") or data.get("status") in (
+            "complete",
+            "failed",
+            "cancelled",
+        ):
+            return resp
+        if _time.monotonic() >= deadline:
+            resp["hosts_note"] = (
+                "Its host names are checked once the run reads them; if they need the "
+                f"examiner, idx_ingest_status() shows '{AWAITING}'."
+            )
+            return resp
+        _time.sleep(0.2)
+
+
+def _with_host_list_hint(resp: dict, case_id: str = "") -> dict:
+    """Add the host-list encouragement while the case has no list loaded."""
+    from sift_common.host_gate import host_list_hint
+
+    case_dir = _scan_case_dir(case_id)
+    hint = host_list_hint(case_dir) if case_dir is not None else ""
+    if hint:
+        resp["host_list_hint"] = hint
+    return resp
 
 
 def _scan_case_dir(case_id: str = ""):
@@ -811,6 +932,7 @@ def idx_search(
     _add_field_hint(resp, index, client)
 
     _add_shimcache_reminder(resp, index, docs)
+    _annotate_hosts(resp, case_id, hits=result["hits"]["hits"])
     aid = audit.log(
         tool="idx_search",
         params={"query": query, "index": requested, "scope": index, "limit": limit},
@@ -855,6 +977,7 @@ def idx_count(
             err["audit_id"] = aid
         return err
     resp = {"count": result["count"]}
+    _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
     aid = audit.log(
         tool="idx_count",
         params={"query": query, "index": requested, "scope": index},
@@ -914,6 +1037,7 @@ def idx_aggregate(
         "buckets": buckets,
         "truncated": len(buckets) >= limit,
     }
+    _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
     aid = audit.log(
         tool="idx_aggregate",
         params={"field": field, "query": query, "index": requested, "scope": index},
@@ -1027,6 +1151,7 @@ def idx_timeline(
         "interval": interval,
         "buckets": buckets,
     }
+    _annotate_hosts(resp, case_id, client, index, query_body)
     aid = audit.log(
         tool="idx_timeline",
         params={"query": query, "index": requested, "scope": index, "interval": interval},
@@ -1763,6 +1888,7 @@ def idx_ingest(
             if hostname:
                 resp["hostname"] = hostname
             resp["scan"] = _container_scan(evidence_path, container_type, case_id)
+            _with_host_list_hint(resp, case_id)
             aid = audit.log(
                 tool="idx_ingest",
                 params={
@@ -1842,6 +1968,7 @@ def idx_ingest(
         )
         resp = {"status": "preview", "hosts": summary, "case_id": case_id}
         resp["scan"] = _folder_scan(hosts, case_id)
+        _with_host_list_hint(resp, case_id)
         if aid:
             resp["audit_id"] = aid
         return resp
@@ -2006,7 +2133,7 @@ def idx_ingest(
     }
     if aid:
         resp["audit_id"] = aid
-    return resp
+    return _answer_after_gate(resp, case_id, proc.pid, run_id)
 
 
 def _log_tail(path: str, limit: int = 2048) -> list[str]:
@@ -2835,7 +2962,7 @@ def _launch_background(
     )
     if aid:
         resp["audit_id"] = aid
-    return resp
+    return _answer_after_gate(resp, active_case, proc.pid, run_id)
 
 
 def _launch_enrich_background(
@@ -2964,7 +3091,7 @@ def _launch_enrich_background(
 @server.tool()
 def idx_ingest_memory(
     path: str,
-    hostname: str,
+    hostname: str = "",
     tier: int = 1,
     plugins: list[str] | None = None,
     dry_run: bool = True,
@@ -2973,7 +3100,9 @@ def idx_ingest_memory(
 
     Args:
         path: Path to memory image (.raw, .vmem, .dmp, etc.)
-        hostname: Source hostname for the memory image.
+        hostname: Source hostname for the memory image, if known. A name
+            given here is the AI's: it never confirms a machine. With none,
+            the examiner names the image's machine in the Hosts tab.
         tier: Analysis depth (1=fast/essential, 2=moderate, 3=deep).
         plugins: Override tier — run only these specific plugins.
         dry_run: Preview plugins (default True). Set False to execute.
@@ -2997,6 +3126,7 @@ def idx_ingest_memory(
             "plugin_count": len(plugin_list),
             "scan": _memory_scan(Path(path), hostname),
         }
+        _with_host_list_hint(resp)
         aid = audit.log(
             tool="idx_ingest_memory",
             params={"path": path, "dry_run": True, "tier": tier},
@@ -3084,8 +3214,7 @@ def idx_ingest_memory(
         "opensearch_mcp.ingest_cli",
         "memory",
         path,
-        "--hostname",
-        hostname,
+        *(["--hostname", hostname] if hostname else []),
         "--case",
         active_case,
         "--tier",
@@ -3114,7 +3243,12 @@ def idx_ingest_memory(
         pid=0,
         run_id=run_id,
         status="starting",
-        hosts=[{"hostname": hostname, "artifacts": [{"name": "memory", "status": "starting"}]}],
+        hosts=[
+            {
+                "hostname": hostname or Path(path).name,
+                "artifacts": [{"name": "memory", "status": "starting"}],
+            }
+        ],
         totals={"indexed": 0, "artifacts_total": len(plugin_list), "artifacts_complete": 0},
         started=_started_ts,
         log_file=str(_lf),
@@ -3132,7 +3266,12 @@ def idx_ingest_memory(
         pid=proc.pid,
         run_id=run_id,
         status="starting",
-        hosts=[{"hostname": hostname, "artifacts": [{"name": "memory", "status": "starting"}]}],
+        hosts=[
+            {
+                "hostname": hostname or Path(path).name,
+                "artifacts": [{"name": "memory", "status": "starting"}],
+            }
+        ],
         totals={"indexed": 0, "artifacts_total": len(plugin_list), "artifacts_complete": 0},
         started=_started_ts,
         log_file=str(_lf),
@@ -3141,6 +3280,7 @@ def idx_ingest_memory(
     resp = {
         "status": "started",
         "pid": proc.pid,
+        "run_id": run_id,
         "tier": tier,
         "plugins": plugin_list,
         "log_file": str(_lf),
@@ -3157,7 +3297,7 @@ def idx_ingest_memory(
     )
     if aid:
         resp["audit_id"] = aid
-    return resp
+    return _answer_after_gate(resp, active_case, proc.pid, run_id)
 
 
 def _get_active_case() -> str | None:

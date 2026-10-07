@@ -91,12 +91,29 @@ def set_current(ctx: WriteContext | None) -> None:
 
 @contextlib.contextmanager
 def restoring():
-    """Put back, on leaving the block, the context open on entering it."""
+    """Put back, on leaving the block, the context open on entering it, and
+    release what the block held (the case lock a run takes after its gate)."""
     prev = current()
+    held = getattr(_tls, "held", None)
+    _tls.held = contextlib.ExitStack()
     try:
         yield
     finally:
         _tls.ctx = prev
+        try:
+            _tls.held.close()
+        finally:
+            _tls.held = held
+
+
+_process_held = contextlib.ExitStack()  # a worker's own run: released as it exits
+
+
+def hold(cm) -> None:
+    """Enter ``cm`` until the enclosing ``restoring()`` block ends (the
+    process, outside one)."""
+    stack = getattr(_tls, "held", None)
+    (stack if stack is not None else _process_held).enter_context(cm)
 
 
 @contextlib.contextmanager
@@ -124,13 +141,12 @@ def open_unit(
     host_identity.ensure_host_files(root)
     c12, _ = host_identity.ensure_case_uuid(root)  # the write's identity, minted if new
     unit = host_identity.unit_key(locator)
-    host_identity.append_observations(
-        root,
-        [
-            {"kind": "unit", "unit": unit, "locator": locator, "source": source},
-            {"kind": "name", "unit": unit, "raw": raw, "evidence": source, "origin": origin},
-        ],
-    )
+    records = [{"kind": "unit", "unit": unit, "locator": locator, "source": source}]
+    if raw:  # a unit given no name gets its machine from the examiner, at the gate
+        records.append(
+            {"kind": "name", "unit": unit, "raw": raw, "evidence": source, "origin": origin}
+        )
+    host_identity.append_observations(root, records)
     for key in [k for k in REMOVED if k[:2] == (c12, raw)]:
         del REMOVED[key]  # a run reports its own removals, not an earlier run's
     return WriteContext(
