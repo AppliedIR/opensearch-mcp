@@ -68,7 +68,7 @@ def test_a_date_with_its_own_offset_keeps_it(tmp_path, date, expected):
     [
         ("2014-01-01T00:00:00", "2014-01-01T05:00:00Z"),
         ("2024-03-04T05:06:07.123", "2024-03-04T10:06:07.123000Z"),
-        ("2005-06-23T13:48:00+08:00", "2005-06-23T13:48:00+08:00"),
+        ("2005-06-23T13:48:00+08:00", "2005-06-23T05:48:00Z"),  # converted, as a negative one
         ("2024-03-04T05:06:07.1234567Z", "2024-03-04T05:06:07.1234567Z"),
     ],
     ids=["no fraction", "three fraction digits", "positive offset", "Z"],
