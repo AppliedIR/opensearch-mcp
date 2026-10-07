@@ -259,7 +259,10 @@ def test_indices_no_case_can_claim_are_listed(client, cases, monkeypatch):
 
 def test_machine_fields_given_as_a_list_by_the_evidence_are_not_indexed(client, cases):
     case, _ = cases("forge")
-    forged = {"vhir": [{"host_key": "forged", "note": "kept"}], "host": [{"id": "FORGED"}]}
+    forged = {
+        "vhir": [[{"host_key": "forged"}], {"note": "kept"}],
+        "host": [[{"id": "FORGED"}]],
+    }
     ctx = write(client, case, "evidence/x.json", "WKS10", {"r1": forged}, artifact="json-x")
     index = f"case-{ctx.c12}-json-x-*"
     for field, value in (("vhir.host_key", "forged"), ("host.id", "FORGED")):
@@ -267,6 +270,9 @@ def test_machine_fields_given_as_a_list_by_the_evidence_are_not_indexed(client, 
         assert r["count"] == 0, field
     assert (
         client.count(index=index, body={"query": {"term": {"vhir.unit": ctx.unit}}})["count"] == 1
+    )
+    assert wc.removed_note("WKS10", "json-x", ctx.c12) == (
+        "2 reserved identity fields removed from evidence"
     )
 
 

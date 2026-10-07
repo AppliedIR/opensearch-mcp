@@ -462,16 +462,30 @@ def _hayabusa_index(case_id: str = "", client=None) -> str:
         return ""
 
 
-def _hayabusa_query(query: str, expr: str, client=None) -> str:
+def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> str:
     """An idx_search call over the Hayabusa alerts `expr` names, in a form its
-    `index` accepts: exclusions ("-…") become the indices they leave, and
-    the index is left out when those can't be named."""
-    if any(seg.startswith("-") for seg in expr.split(",")):
+    `index` accepts: an expression it would refuse (an exclusion, or a
+    pre-0.7 wildcard another case's indices could match) becomes the
+    indices it names, and the index is left out when those can't be named."""
+    from opensearch_mcp.case_scope import CaseScopeError, confine
+
+    if not expr:
+        return f"idx_search(query='{query}')"
+    if client is None:
         try:
-            found = (client or _get_os()).indices.get(index=expr, expand_wildcards="open")
-            expr = ",".join(sorted(found))
+            client = _get_os()
         except Exception:
-            expr = ""
+            client = None
+    try:
+        if _validate_index(expr) is None:
+            confine(expr, case_id or _get_active_case() or "", client)
+            return f"idx_search(query='{query}', index='{expr}')"
+    except CaseScopeError:
+        pass
+    try:
+        expr = ",".join(sorted(client.indices.get(index=expr, expand_wildcards="open")))
+    except Exception:
+        expr = ""
     return f"idx_search(query='{query}'" + (f", index='{expr}')" if expr else ")")
 
 
@@ -2151,10 +2165,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     "then idx_aggregate on host.name and event.code"
                 )
             if "hayabusa" in artifacts_done or any("hayabusa" in a for a in artifacts_done):
-                hb = _hayabusa_index(ing.get("case_id") or "")
-                next_steps.append(
-                    f"Query Hayabusa alerts: {_hayabusa_query(_HAYABUSA_TOP_QUERY, hb)}"
-                )
+                hb_case = ing.get("case_id") or ""
+                hb = _hayabusa_query(_HAYABUSA_TOP_QUERY, _hayabusa_index(hb_case), hb_case)
+                next_steps.append(f"Query Hayabusa alerts: {hb}")
             # Pick a concrete artifact_type example from what was ingested
             example_type = "event_logs_security"
             for art in artifacts_done:
@@ -3170,7 +3183,7 @@ def idx_list_detections(
                 if hb_count:
                     resp["suggestion"] = (
                         f"Sigma detectors unavailable. {hb_count:,} Hayabusa alerts available. "
-                        f"Query: {_hayabusa_query(_HAYABUSA_TOP_QUERY, hb_index, client)}"
+                        f"Query: {_hayabusa_query(_HAYABUSA_TOP_QUERY, hb_index, client=client)}"
                     )
                 else:
                     resp["suggestion"] = "Sigma detectors unavailable on OpenSearch 3.5. " + (
@@ -3181,7 +3194,7 @@ def idx_list_detections(
             except Exception:
                 resp["suggestion"] = (
                     "Sigma detectors unavailable. Check Hayabusa: "
-                    f"{_hayabusa_query('Level:*', hb_index, client)}"
+                    f"{_hayabusa_query('Level:*', hb_index, client=client)}"
                 )
             return resp
         raise
@@ -3224,7 +3237,7 @@ def idx_list_detections(
             if hb_count:
                 hayabusa_hint = (
                     f"No Sigma detections. {hb_count:,} Hayabusa alerts available. "
-                    f"Query: {_hayabusa_query(_HAYABUSA_TOP_QUERY, hb_index, client)}"
+                    f"Query: {_hayabusa_query(_HAYABUSA_TOP_QUERY, hb_index, client=client)}"
                 )
             else:
                 hayabusa_hint = "No Sigma detections (disabled on OpenSearch 3.5). " + (

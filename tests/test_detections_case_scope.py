@@ -13,6 +13,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from sift_common import host_identity
 
 from opensearch_mcp import ingest_status
@@ -21,7 +22,14 @@ from opensearch_mcp import write_context as wc
 
 
 def c12(case: str) -> str:
-    return host_identity.ensure_case_uuid(wc.case_dir_for(case), 2)[0]
+    """The case's identity, as a case made by 0.7: another row may have
+    made the same case id first, without a naming version."""
+    d = wc.case_dir_for(case)
+    meta = yaml.safe_load((d / "CASE.yaml").read_text()) or {}
+    if meta.get("naming_version") != 2:
+        meta["naming_version"] = 2
+        (d / "CASE.yaml").write_text(yaml.safe_dump(meta))
+    return host_identity.ensure_case_uuid(d, 2)[0]
 
 
 def _indices():
@@ -63,7 +71,7 @@ def test_the_active_cases_alerts_only(cluster, branch):
     suggestion = srv.idx_list_detections()["suggestion"]
     assert "124 Hayabusa alerts" in suggestion, suggestion
     assert f"index='case-{c12('case-a')}-hayabusa-*'" in suggestion, suggestion
-    assert "744" not in suggestion and "case-*-hayabusa-*" not in suggestion
+    assert "744 Hayabusa" not in suggestion and "case-*-hayabusa-*" not in suggestion
 
 
 def test_the_ingest_next_step_names_its_own_case(tmp_path, monkeypatch):
@@ -141,3 +149,29 @@ def test_a_hint_with_an_exclusion_names_indices_idx_search_accepts(old_case_besi
     (hint,) = [s for s in status["next_steps"] if "Hayabusa" in s]
     assert srv._validate_index(_hinted_index(hint)) is None
     assert _hinted_index(hint) == f"case-{old}-hayabusa-wks10"
+
+
+def test_a_hint_for_a_case_beside_a_0_7_case_with_a_longer_id_works(monkeypatch, tmp_path):
+    from opensearch_mcp.case_scope import confine
+
+    old = f"old{uuid.uuid4().hex[:6]}"
+    wc.case_dir_for(old)  # pre-0.7: no case_uuid
+    # made by 0.7, so no pre-0.7 indices, but its id reaches under the alert prefix
+    newer = wc.case_dir_for(f"{old}-hayabusa-review")
+    (newer / "CASE.yaml").write_text(
+        f"case_id: {old}-hayabusa-review\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"
+    )
+    names = {f"case-{old}-hayabusa-wks10": 7}
+    client = MagicMock()
+    client.indices.get.side_effect = lambda index, **kw: _resolve(index, names)
+    client.count.side_effect = lambda index, **kw: {
+        "count": sum(names[n] for n in _resolve(index, names))
+    }
+    client.transport.perform_request.return_value = {"total_findings": 0, "findings": []}
+    monkeypatch.setattr(srv, "_get_os", lambda: client)
+    monkeypatch.setattr(srv.audit, "log", lambda **kw: None)
+    monkeypatch.setattr(srv, "_get_active_case", lambda: old)
+    assert "-case-" not in srv._hayabusa_index()  # the exclusion was dropped
+    index = _hinted_index(srv.idx_list_detections()["suggestion"])
+    assert srv._validate_index(index) is None
+    assert confine(index, old, client) == index  # idx_search accepts it

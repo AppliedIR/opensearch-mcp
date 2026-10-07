@@ -511,11 +511,12 @@ def _write_bg_status(
     caught exception as an uncaught crash.
     """
     from opensearch_mcp.bulk import get_last_bulk_reason
-    from opensearch_mcp.write_context import second_copy_note
+    from opensearch_mcp.write_context import removed_note, second_copy_note
 
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
     notes = [no_time_field_note()] if status != "running" else []
     notes.append(second_copy_note(hostname))
+    notes.append(removed_note(hostname))
     notes.append(note)  # appended, never replacing a note already there
     if any(notes):
         art["note"] = "; ".join(n for n in notes if n)

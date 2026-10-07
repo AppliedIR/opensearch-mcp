@@ -264,6 +264,8 @@ SECOND_COPY_NOTE = (
 )
 # (case c12, host name as ingested, artifact type) -> the note, for this process's runs
 SECOND_COPY: dict[tuple[str, str, str], str] = {}
+# Machine fields the evidence carried and the stamp removed, per (case, unit name, type)
+REMOVED: dict[tuple[str, str, str], int] = {}
 
 
 def _v1_names(ctx: WriteContext) -> tuple[str, list[str]]:
@@ -333,6 +335,22 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
     return f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
 
 
+def removed_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
+    """How many reserved identity fields the evidence of `hostname` (of
+    `artifact_type`) carried and the stamp removed, as a status note."""
+    c12 = c12 or (current().c12 if current() is not None else "")
+    n = sum(
+        v
+        for (c, h, t), v in REMOVED.items()
+        if (not c12 or c == c12)
+        and (not hostname or h == hostname)
+        and (not artifact_type or t == artifact_type)
+    )
+    if not n:
+        return ""
+    return f"{n} reserved identity field{'' if n == 1 else 's'} removed from evidence"
+
+
 def stamp_or_refuse(actions: list[dict], client=None) -> None:
     """Stamp ``actions`` with the open context; refuse a write to a case
     index when no context is open, so no record is stored without its machine."""
@@ -363,9 +381,13 @@ def stamp(ctx: WriteContext, actions: list[dict]) -> None:
             continue
         src = action.setdefault("_source", {})
         rid = action.get("_id")
-        if rid is not None and _stamped_here(action, src):
+        resent = rid is not None and _stamped_here(action, src)
+        if resent:
             rid = src["vhir.rid"]  # a batch sent again: its parser id, not the stored one
-        _drop_owned(src)  # evidence never sets a record's machine
+        removed = _drop_owned(src, resent)  # evidence never sets a record's machine
+        if removed:
+            key = (ctx.c12, ctx.unit_raw, artifact_type_of(action["_index"]))
+            REMOVED[key] = REMOVED.get(key, 0) + removed
         raw, key, canonical = ctx.resolve(src.get("host.name"))
         src["host.name"] = raw
         src["host.id"] = canonical
@@ -388,19 +410,56 @@ def _stamped_here(action: dict, src: dict) -> bool:
     return bool(key and rid) and action.get("_id") == doc_id(str(key), str(rid))
 
 
-def _drop_owned(src: dict) -> None:
-    """Remove the stamp's own fields in every shape evidence can give them:
-    dotted, nested, and a list of objects (which OpenSearch indexes as the
-    same field)."""
+# Field names the stamp owns, at any depth of the subtree they belong to.
+_RESERVED = {"vhir": {"host_key", "unit", "rid", "prev_ids"}, "host": {"id"}}
+
+
+def _drop_owned(src: dict, resent: bool = False) -> int:
+    """Remove the stamp's own fields wherever evidence put them: dotted, or
+    at any depth of a `vhir` or `host` subtree (objects and lists of them,
+    which OpenSearch indexes as the same fields). Returns how many came from
+    the evidence. A parser's own `host.id`, and the stamp's own fields on a
+    batch sent again, aren't counted: the stamp always replaces those."""
+    count = 0
     for name in _OWNED:
-        src.pop(name, None)
-    for parent, children in (("vhir", ("host_key", "unit", "rid", "prev_ids")), ("host", ("id",))):
-        node = src.get(parent)
-        for item in node if isinstance(node, list) else [node]:
-            if isinstance(item, dict):
-                for child in children:
-                    item.pop(child, None)
-        if isinstance(node, list):
-            node[:] = [item for item in node if item != {}]
-        if isinstance(node, (dict, list)) and not node:
-            del src[parent]
+        if name in src:
+            del src[name]
+            count += 0 if resent or name == "host.id" else 1
+    for key in list(src):
+        top, _, rest = key.partition(".")
+        names = _RESERVED.get(top)
+        if names is None:
+            continue
+        if rest and rest.rpartition(".")[2] in names:  # dotted, deeper than _OWNED
+            del src[key]
+            count += 1
+            continue
+        removed = _strip(src[key], names)
+        if removed and src[key] in ({}, []):
+            del src[key]
+        count += removed
+    return count
+
+
+def _strip(node, names: set[str]) -> int:
+    """Remove `names` at any depth of `node`; drop what that empties."""
+    count = 0
+    if isinstance(node, dict):
+        for key in list(node):
+            if key.rpartition(".")[2] in names:
+                del node[key]
+                count += 1
+                continue
+            removed = _strip(node[key], names)
+            if removed and node[key] in ({}, []):
+                del node[key]
+            count += removed
+    elif isinstance(node, list):
+        kept = []
+        for item in node:
+            removed = _strip(item, names)
+            count += removed
+            if not (removed and item in ({}, [])):
+                kept.append(item)
+        node[:] = kept
+    return count

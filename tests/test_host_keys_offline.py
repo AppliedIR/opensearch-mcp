@@ -422,6 +422,31 @@ def test_the_notice_reaches_a_background_runs_status(monkeypatch):
     assert wc.SECOND_COPY_NOTE in art["note"]
 
 
+REMOVED_NOTE = "3 reserved identity fields removed from evidence"
+
+
+def test_the_removal_count_reaches_a_scans_artifact_and_its_status(monkeypatch):
+    from opensearch_mcp.results import ArtifactResult, HostResult
+
+    monkeypatch.setattr(wc, "REMOVED", {(wc.current().c12, "WKS01", "evtx"): 3})
+    host = SimpleNamespace(hostname="WKS01")
+    hr = HostResult(hostname="WKS01", volume_root="/x")
+    hr.artifacts.append(ArtifactResult(artifact="evtx", index="case-0123456789ab-evtx-0"))
+    status = [{"hostname": "WKS01", "artifacts": [{"name": "evtx"}]}]
+    ingest._add_second_copy_notes(host, 0, hr, status)
+    assert hr.artifacts[0].note == REMOVED_NOTE
+    assert status[0]["artifacts"][0]["note"] == REMOVED_NOTE
+
+
+def test_the_removal_count_reaches_a_background_runs_status(monkeypatch):
+    monkeypatch.setattr(wc, "REMOVED", {(wc.current().c12, "WKS01", "json-x"): 3})
+    written = {}
+    monkeypatch.setattr(ingest_cli, "write_status", lambda **kw: written.update(kw))
+    ingest_cli._write_bg_status("c", "r", "complete", "WKS01", "json", "t0")
+    (art,) = written["hosts"][0]["artifacts"]
+    assert REMOVED_NOTE in art["note"]
+
+
 @pytest.mark.no_case_dirs
 def test_a_case_folder_without_its_case_yaml_is_refused(tmp_path, monkeypatch):
     monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
@@ -494,6 +519,48 @@ def test_machine_fields_given_as_a_list_are_removed_before_the_stamp():
     assert src["vhir"] == [{"note": 1}] and "host" not in src
     assert src["vhir.host_key"] != "forged" and src["host.id"] != "DC09"
     assert action["_id"] == wc.doc_id(src["vhir.host_key"], "r1")
+
+
+def _values(node):
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _values(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _values(v)
+    else:
+        yield node
+
+
+def test_machine_fields_at_any_depth_are_removed_and_counted():
+    case, _ = new_case()
+    client = _Sent()
+    forged = {
+        "vhir": {
+            "a": [[{"host_key": "forged-1"}], [{"keep": 1}]],  # a list in a list
+            "b": {"c": {"d": {"e": {"unit": "forged-2"}}}},  # depth 5
+            "rid": "forged-3",
+        },
+        "host": [
+            {"os": {"id": "forged-4", "name": "kept"}},
+            [{"id": "forged-5"}],
+        ],  # dict in list in dict
+        "vhir.x.prev_ids": ["forged-6"],  # dotted, deeper than the stamp's own
+        "host.name": "WKS10",  # evidence's own name: kept
+    }
+    ctx = wc.open_unit(case, "evidence/deep.json", "WKS10", source="test")
+    with wc.writing(ctx):
+        actions = [{"_index": wc.index_name("json-x"), "_id": "r1", "_source": forged}]
+        _send(client, actions)
+        _send(client, actions)  # a batch sent again removes nothing more
+    src = client.actions[-1]["_source"]
+    assert not {"forged-1", "forged-2", "forged-3", "forged-4", "forged-5", "forged-6"} & set(
+        _values(src)
+    )
+    assert src["vhir"] == {"a": [[{"keep": 1}]]} and src["host"] == [{"os": {"name": "kept"}}]
+    assert src["host.name"] == "WKS10"
+    note = wc.removed_note("WKS10", "json-x", ctx.c12)
+    assert note == "6 reserved identity fields removed from evidence"
 
 
 def test_a_batch_sent_again_keeps_its_ids():

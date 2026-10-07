@@ -1458,12 +1458,16 @@ def _run_custom_parser(
 
 def _add_second_copy_notes(host, host_idx, host_result, status_hosts) -> None:
     """In a case from before 0.7: say on each artifact of the host that
-    already had pre-0.7 data of its type that this ingest added a second copy."""
+    already had pre-0.7 data of its type that this ingest added a second copy.
+    In any case: say how many reserved identity fields its evidence carried."""
     for ar in host_result.artifacts:
         ctx = getattr(host, "write_ctx", None)
-        note = wc.second_copy_note(
-            host.hostname, wc.artifact_type_of(ar.index or ""), ctx.c12 if ctx else ""
+        atype, c12 = wc.artifact_type_of(ar.index or ""), ctx.c12 if ctx else ""
+        notes = (
+            wc.second_copy_note(host.hostname, atype, c12),
+            wc.removed_note(host.hostname, atype, c12) if atype else "",
         )
+        note = "; ".join(n for n in notes if n)
         if not note:
             continue
         ar.note = "; ".join(n for n in (ar.note, note) if n)
