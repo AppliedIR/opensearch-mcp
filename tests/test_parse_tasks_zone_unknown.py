@@ -150,3 +150,12 @@ def test_anchor_a_known_zone_converts_as_before_with_no_note(tmp_path, monkeypat
     assert "note" not in status and artifact.note == ""
     assert logged["result_summary"] == "4 indexed"
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("zone", [None, "America/New_York"], ids=["zone unknown", "zone known"])
+def test_an_out_of_range_date_is_counted_and_the_rest_ingested(tmp_path, zone):
+    stamps, notes = _stamps(
+        tmp_path, ["9999-12-31T23:59:59-01:00", "2005-10-11T13:21:17-08:00"], zone
+    )
+    assert sorted(stamps, key=str) == sorted([None, "2005-10-11T21:21:17Z"], key=str)
+    assert any("1 task(s)" in n and "out of range" in n for n in notes), notes

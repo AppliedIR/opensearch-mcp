@@ -121,6 +121,7 @@ def parse_tasks_dir(
     skipped = 0
     bulk_failed = 0
     undated = 0  # local times with the time zone unknown
+    unreadable = 0  # dates that don't parse or are out of range
     actions: list[dict] = []
 
     for task_file in sorted(tasks_dir.rglob("*")):
@@ -146,8 +147,9 @@ def parse_tasks_dir(
                         doc["@timestamp"] = (
                             aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
                         )
-                    except ValueError:
+                    except (ValueError, OverflowError):  # 9999-12-31T23:59:59-01:00
                         del doc["@timestamp"]
+                        unreadable += 1
                 else:
                     # Local time with the time zone unknown: no reliable time
                     del doc["@timestamp"]
@@ -190,5 +192,10 @@ def parse_tasks_dir(
         notes.append(
             f"{undated} task(s) indexed without @timestamp: their dates are local "
             "time and this system's time zone is unknown"
+        )
+    if unreadable and notes is not None:
+        notes.append(
+            f"{unreadable} task(s) indexed without @timestamp: their dates can't be "
+            "read or are out of range"
         )
     return count, skipped, bulk_failed
