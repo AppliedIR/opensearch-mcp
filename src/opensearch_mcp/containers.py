@@ -416,11 +416,51 @@ def _find_free_nbd() -> str:
 # ---------------------------------------------------------------------------
 
 
-def mount_vss(raw_path: Path, dest: Path, ctx: MountContext) -> list[tuple[str, Path]]:
-    """Mount volume shadow copies. Returns list of (vss_id, mount_path)."""
-    # Check if vshadowinfo is available and image has VSS
+def _is_ntfs(raw_path: Path, offset: int) -> bool:
+    """Whether an NTFS boot sector starts `offset` bytes into the image."""
+    try:
+        with open(raw_path, "rb") as f:
+            f.seek(offset + 3)
+            return f.read(8) == b"NTFS    "
+    except OSError:
+        return False
+
+
+def mount_vss(
+    raw_path: Path,
+    dest: Path,
+    ctx: MountContext,
+    offsets: dict[str, int] | None = None,
+    notes: list[tuple[str, str]] | None = None,
+) -> list[tuple[str, Path]]:
+    """Mount volume shadow copies. Returns list of (vss_id, mount_path).
+
+    `offsets` names each mounted volume's byte offset in the image: the
+    shadow copies of every NTFS one are read at its offset (on a partitioned
+    disk, a read of the whole image finds none). Without it, the image is
+    one volume. An NTFS volume with none is said in `notes`.
+    """
+    if offsets is None:
+        volumes = {"": 0}
+    else:
+        volumes = {name: off for name, off in offsets.items() if _is_ntfs(raw_path, off)}
+    results = []
+    for name, offset in sorted(volumes.items(), key=lambda v: v[1]):
+        found = _mount_vss_at(raw_path, dest, ctx, offset, name if len(volumes) > 1 else "")
+        if not found and notes is not None and name:
+            notes.append(("vss", f"no shadow copies found on {name} (offset {offset})"))
+        results += found
+    return results
+
+
+def _mount_vss_at(
+    raw_path: Path, dest: Path, ctx: MountContext, offset: int, prefix: str
+) -> list[tuple[str, Path]]:
+    """The shadow copies of the NTFS volume `offset` bytes into the image,
+    mounted as `<prefix>-vssN` (`vssN` with no prefix)."""
+    at = ["-o", str(offset)] if offset else []
     result = subprocess.run(
-        ["vshadowinfo", str(raw_path)],
+        ["vshadowinfo", *at, str(raw_path)],
         capture_output=True,
         text=True,
     )
@@ -438,11 +478,12 @@ def mount_vss(raw_path: Path, dest: Path, ctx: MountContext) -> list[tuple[str, 
         return []
 
     # Mount all stores via vshadowmount
-    vss_mount = dest / "_vss"
+    tag = f"{prefix}-" if prefix else ""
+    vss_mount = dest / f"_{tag}vss"
     vss_mount.mkdir()
     try:
         subprocess.run(
-            ["vshadowmount", str(raw_path), str(vss_mount)],
+            ["vshadowmount", *at, str(raw_path), str(vss_mount)],
             check=True,
             capture_output=True,
         )
@@ -457,7 +498,8 @@ def mount_vss(raw_path: Path, dest: Path, ctx: MountContext) -> list[tuple[str, 
         vss_file = vss_mount / f"vss{i}"
         if not vss_file.exists():
             continue
-        vss_mp = dest / f"vss{i}"
+        vss_id = f"{tag}vss{i}"
+        vss_mp = dest / vss_id
         vss_mp.mkdir()
         try:
             subprocess.run(
@@ -473,7 +515,7 @@ def mount_vss(raw_path: Path, dest: Path, ctx: MountContext) -> list[tuple[str, 
                 capture_output=True,
             )
             ctx.add_mount(vss_mp)
-            results.append((f"vss{i}", vss_mp))
+            results.append((vss_id, vss_mp))
         except subprocess.CalledProcessError:
             vss_mp.rmdir()
 

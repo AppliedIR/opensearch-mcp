@@ -985,6 +985,11 @@ def _covered_names(mount_ctx, covered: dict) -> dict:
     return {v: covered[off] for v, off in mount_ctx.offsets.items() if off in covered}
 
 
+def _volume_offsets(mount_ctx) -> dict[str, int]:
+    """Each mounted volume's name and byte offset in its image."""
+    return {mp.name: off for mp, off in mount_ctx.offsets.items() if off is not None and off >= 0}
+
+
 def _discover_volumes(
     volumes: list[Path],
     hostname,
@@ -1157,7 +1162,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     print(f"  Mounted {len(volumes)} volume(s)")
 
                     if vss_flag and volumes:
-                        vss_volumes = mount_vss(img, tmpdir, mount_ctx)
+                        vss_volumes = mount_vss(
+                            img, tmpdir, mount_ctx, _volume_offsets(mount_ctx), status_notes
+                        )
                         if vss_volumes:
                             print(f"  Found {len(vss_volumes)} volume shadow copies")
 
@@ -1219,7 +1226,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     vss_raw = ewf_raw
                 else:
                     vss_raw = input_path
-                vss_volumes = mount_vss(vss_raw, tmpdir, mount_ctx)
+                vss_volumes = mount_vss(
+                    vss_raw, tmpdir, mount_ctx, _volume_offsets(mount_ctx), status_notes
+                )
                 if vss_volumes:
                     print(f"  Found {len(vss_volumes)} volume shadow copies")
                 else:
