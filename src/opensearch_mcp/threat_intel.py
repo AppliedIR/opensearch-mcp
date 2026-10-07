@@ -1136,10 +1136,9 @@ def enrich_case(
 
     Returns summary dict.
     """
-    from opensearch_mcp.paths import sanitize_index_component
+    from opensearch_mcp.case_scope import case_read_scope
 
-    safe_case = sanitize_index_component(case_id)
-    index_pattern = f"case-{safe_case}-*"
+    index_pattern = case_read_scope(case_id, client)
 
     if on_progress:
         on_progress("extracting", message="Extracting unique IOCs from indexed data")

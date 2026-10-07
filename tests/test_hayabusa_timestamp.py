@@ -85,7 +85,7 @@ def hayabusa(tmp_path, monkeypatch):
     def run(csv_text: str) -> list[tuple[str, dict]]:
         fixture.write_text(csv_text)
         client = _Client()
-        host = SimpleNamespace(hostname="host-a", evtx_dir=str(evtx))
+        host = SimpleNamespace(hostname="host-a", evtx_dir=str(evtx), volume_root=evtx)
         result = ingest.run_hayabusa_batch([host], client, "rowcase")
         assert result == {"host-a": len(ROWS)}, result
         return client.sent

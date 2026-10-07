@@ -41,6 +41,57 @@ def _reset_enrichment():
     reset_enrichment_state()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _case_dirs(tmp_path_factory):
+    """Every record is stored with its machine, which lives in the case's host
+    logs, and every read is scoped by the case's CASE.yaml: give each case id
+    a test names a case directory with a CASE.yaml (an existing one under
+    VHIR_CASES_DIR or the active case is used as it is). Session-wide, so
+    module fixtures that ingest before the first test get one too.
+    `@pytest.mark.no_case_dirs` restores the real lookup for one test."""
+    from opensearch_mcp import write_context as wc
+
+    root = tmp_path_factory.mktemp("cases")
+    real = wc.case_dir_for
+
+    def case_dir_for(case_id):
+        if not case_id or Path(case_id).name != case_id:
+            return None
+        d = real(case_id) or root / case_id
+        d.mkdir(parents=True, exist_ok=True)
+        if not (d / "CASE.yaml").exists():
+            (d / "CASE.yaml").write_text(f"case_id: {case_id}\n")
+        return d
+
+    case_dir_for.real = real
+    wc.case_dir_for = case_dir_for
+    try:
+        yield root
+    finally:
+        wc.case_dir_for = real
+
+
+@pytest.fixture(autouse=True)
+def _case_for_every_ingest(request, monkeypatch):
+    """Open a unit for writes made outside an ingest run (inner parsers called
+    directly). `@pytest.mark.no_case_dirs` turns this and the case-directory
+    hook off, for rows about a missing case or a write with no run open."""
+    from opensearch_mcp import write_context as wc
+
+    if request.node.get_closest_marker("no_case_dirs"):
+        monkeypatch.setattr(wc, "case_dir_for", wc.case_dir_for.real)
+        yield
+        return
+    default = wc.open_unit(
+        wc.case_dir_for("test-case"), "evidence/test-host", "TEST-HOST", source="test"
+    )
+    wc.set_current(default)
+    try:
+        yield
+    finally:
+        wc.set_current(None)
+
+
 @pytest.fixture
 def windows_tree(tmp_path):
     """Create a full Windows directory structure under tmp_path and return it."""

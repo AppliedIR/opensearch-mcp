@@ -15,19 +15,26 @@ import pytest
 
 from opensearch_mcp import ingest_status
 from opensearch_mcp import server as srv
+from opensearch_mcp import write_context as wc
 
-INDICES = {
-    "case-case-a-hayabusa-host1": 124,
-    "case-case-b-hayabusa-host9": 620,
-    "case-case-a-evtx-host1": 5000,
-}
+
+def c12(case: str) -> str:
+    return wc.case_identity(wc.case_dir_for(case))[0]
+
+
+def _indices():
+    return {
+        f"case-{c12('case-a')}-hayabusa-0": 124,
+        f"case-{c12('case-b')}-hayabusa-0": 620,
+        f"case-{c12('case-a')}-evtx-0": 5000,
+    }
 
 
 def _count(index, **kw):
     return {
         "count": sum(
             n
-            for name, n in INDICES.items()
+            for name, n in _indices().items()
             for pattern in index.split(",")
             if fnmatch.fnmatchcase(name, pattern.strip())
         )
@@ -52,7 +59,7 @@ def test_the_active_cases_alerts_only(cluster, branch):
         cluster.transport.perform_request.return_value = {"total_findings": 0, "findings": []}
     suggestion = srv.idx_list_detections()["suggestion"]
     assert "124 Hayabusa alerts" in suggestion, suggestion
-    assert "index='case-case-a-hayabusa-*'" in suggestion, suggestion
+    assert f"index='case-{c12('case-a')}-hayabusa-*'" in suggestion, suggestion
     assert "744" not in suggestion and "case-*-hayabusa-*" not in suggestion
 
 
@@ -68,13 +75,13 @@ def test_the_ingest_next_step_names_its_own_case(tmp_path, monkeypatch):
     hint = [s for s in status["next_steps"] if "Hayabusa" in s]
     assert hint == [
         "Query Hayabusa alerts: idx_search(query='Level:(emer OR crit OR critical OR high)', "
-        "index='case-case-b-hayabusa-*')"
+        f"index='case-{c12('case-b')}-hayabusa-*')"
     ], status["next_steps"]
 
 
 def test_a_named_case_and_no_case(monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: "A")
-    assert srv._hayabusa_index("Inc 9") == "case-inc-9-hayabusa-*"
-    assert srv._hayabusa_index() == "case-a-hayabusa-*"
+    assert srv._hayabusa_index("Inc 9") == f"case-{c12('Inc 9')}-hayabusa-*"
+    assert srv._hayabusa_index() == f"case-{c12('A')}-hayabusa-*"
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
-    assert srv._hayabusa_index() == "case-*-hayabusa-*"
+    assert srv._hayabusa_index() == ""  # no case: nothing, never every case's

@@ -51,4 +51,5 @@ testpaths = ["tests"]
 pythonpath = ["tests"]
 markers = [
     "integration: tests requiring OpenSearch Docker container",
+    "no_case_dirs: the test gets no automatic case directory or default write context",
 ]

@@ -18,6 +18,11 @@ import pytest
 from opensearchpy.exceptions import NotFoundError
 
 from opensearch_mcp import triage_remote as tr
+from opensearch_mcp import write_context as wc
+
+
+def v2(artifact_type: str) -> str:
+    return f"case-{wc.case_identity(wc.case_dir_for('c1'))[0]}-{artifact_type}-0"
 
 
 class _OpenSearch:
@@ -68,13 +73,13 @@ def test_no_index_is_skipped_with_a_reason_not_empty():
 
 def test_an_existing_index_with_nothing_to_check_is_empty():
     existing = [
-        "case-c1-shimcache-h",
-        "case-c1-amcache-h",
-        "case-c1-evtx-h",
-        "case-c1-tasks-h",
-        "case-c1-vol-dlllist-h",
-        "case-c1-vol-svcscan-h",
-        "case-c1-registry-h",
+        v2("shimcache"),
+        v2("amcache"),
+        v2("evtx"),
+        v2("tasks"),
+        v2("vol-dlllist"),
+        v2("vol-svcscan"),
+        v2("registry"),
     ]
     res = _enrich(existing)
     assert {name: res[name]["status"] for name in GATEWAY} == dict.fromkeys(GATEWAY, "empty")
@@ -97,7 +102,8 @@ def test_the_cluster_names_the_missing_registry_pattern():
     case = f"pytest-noreg-{uuid.uuid4().hex[:8]}"
     res = tr._enrich_registry_persistence(client, case)
     assert res["status"] == "skipped", res
-    assert f"case-{case}-registry-*" in res["reason"], res
+    c12 = wc.case_identity(wc.case_dir_for(case))[0]
+    assert f"case-{c12}-registry-*" in res["reason"], res
 
 
 def test_a_registry_index_runs_persistence_as_before():
@@ -109,6 +115,6 @@ def test_a_registry_index_runs_persistence_as_before():
             calls.append(index)
             return {"updated": 1, "total": 1}  # each rule matched a row
 
-    res = tr._enrich_registry_persistence(_WithUpdates(["case-c1-registry-h"]), "c1")
-    assert calls and set(calls) == {"case-c1-registry-*"}, calls
+    res = tr._enrich_registry_persistence(_WithUpdates([v2("registry")]), "c1")
+    assert calls and set(calls) == {v2("registry")[:-1] + "*"}, calls
     assert res == {"status": "complete", "enriched": len(calls)}, res

@@ -37,13 +37,14 @@ def cluster(monkeypatch):
     client = MagicMock()
     client.search.side_effect = _search
     monkeypatch.setattr(srv.audit, "log", lambda **kw: None)
+    monkeypatch.setattr(srv, "_get_active_case", lambda: "test-case")
     with patch.object(srv, "_get_os", return_value=client):
         yield client
 
 
 def test_aggregate(cluster):
-    assert srv.idx_aggregate(field="host.name", index="case-x-*")["total_docs"] == TRUE_TOTAL
+    assert srv.idx_aggregate(field="host.name")["total_docs"] == TRUE_TOTAL
 
 
 def test_timeline(cluster):
-    assert srv.idx_timeline(index="case-x-*")["total_docs"] == TRUE_TOTAL
+    assert srv.idx_timeline()["total_docs"] == TRUE_TOTAL

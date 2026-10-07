@@ -13,7 +13,6 @@ import time
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.gateway import call_tool, gateway_available
-from opensearch_mcp.paths import sanitize_index_component
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +62,23 @@ def _loop_result(
     return {"status": "complete", **counts}
 
 
+class _CaseIndices:
+    """A case's indices, read through its scope (see case_scope)."""
+
+    def __init__(self, case_id: str, client) -> None:
+        self.case_id, self.client = case_id, client
+
+
+def _index(case_ix: _CaseIndices | str, artifact_type: str = "") -> str:
+    """The case's indices of `artifact_type` (all of them when empty); a
+    bare case id reads without the client, so no pre-0.7 alias members."""
+    from opensearch_mcp.case_scope import case_read_scope
+
+    if isinstance(case_ix, str):
+        return case_read_scope(case_ix, None, artifact_type=artifact_type)
+    return case_read_scope(case_ix.case_id, case_ix.client, artifact_type=artifact_type)
+
+
 def enrich_remote(
     client: OpenSearch,
     case_id: str,
@@ -72,11 +88,17 @@ def enrich_remote(
 
     Returns dict with counts per artifact type.
     """
-    safe_case = sanitize_index_component(case_id)
+    from opensearch_mcp.case_scope import CaseScopeError, scope_of
+
+    try:
+        scope_of(case_id)
+    except CaseScopeError as e:
+        return {"error": str(e)}
+    case_ix = _CaseIndices(case_id, client)
 
     # Refresh indices so aggregations see all recently ingested docs
     try:
-        client.indices.refresh(index=f"case-{safe_case}-*")
+        client.indices.refresh(index=_index(case_ix))
     except Exception:
         pass
 
@@ -85,10 +107,10 @@ def enrich_remote(
     # Stamps this version no longer writes are removed (events other than process
     # creation and 7045, and values of a service key other than ImagePath);
     # everything else is re-stamped below.
-    results["_cleared"] = _clear_stamps(client, safe_case)
+    results["_cleared"] = _clear_stamps(client, case_ix)
 
     # --- Gateway-independent: registry persistence R1-R14, R16 ---
-    results["registry_persistence"] = _enrich_registry_persistence(client, safe_case, on_progress)
+    results["registry_persistence"] = _enrich_registry_persistence(client, case_ix, on_progress)
 
     # --- Gateway-dependent: file + service enrichment ---
     if not gateway_available():
@@ -117,8 +139,8 @@ def enrich_remote(
     ]:
         results[name] = _enrich_file_artifact(
             client,
-            safe_case,
-            index_pattern=f"case-{safe_case}-{suffix}-*",
+            case_ix,
+            index_pattern=_index(case_ix, suffix),
             path_field=field,
             artifact_name=name,
             query=query,
@@ -130,7 +152,7 @@ def enrich_remote(
     # Service enrichment (check_service): name plus executable, each doc's own pair
     results["evtx_svc"] = _enrich_services(
         client,
-        f"case-{safe_case}-evtx-*",
+        _index(case_ix, "evtx"),
         {"term": {"event.code": 7045}},
         _svc_from_7045,
         "evtx_svc",
@@ -138,7 +160,7 @@ def enrich_remote(
     )
     results["vol_svcs"] = _enrich_services(
         client,
-        f"case-{safe_case}-vol-svcscan-*",
+        _index(case_ix, "vol-svcscan"),
         {"match_all": {}},
         _svc_from_svcscan,
         "vol_svcs",
@@ -146,7 +168,7 @@ def enrich_remote(
     )
     results["registry_svcs"] = _enrich_services(
         client,
-        f"case-{safe_case}-registry-*",
+        _index(case_ix, "registry"),
         {
             "bool": {
                 "must": [
@@ -161,12 +183,12 @@ def enrich_remote(
     )
 
     # Registry Run keys (check_file on ValueData)
-    results["registry_run"] = _enrich_registry_run_keys(client, safe_case, on_progress)
+    results["registry_run"] = _enrich_registry_run_keys(client, case_ix, on_progress)
 
     # R15: Active Setup StubPath (check_file)
     results["registry_activestub"] = _enrich_registry_check_file(
         client,
-        safe_case,
+        case_ix,
         query_body={
             "bool": {
                 "filter": [
@@ -183,7 +205,7 @@ def enrich_remote(
     # R17: NetSh Helper DLLs (check_file)
     results["registry_netsh"] = _enrich_registry_check_file(
         client,
-        safe_case,
+        case_ix,
         query_body={
             "bool": {
                 "should": [
@@ -215,7 +237,7 @@ def enrich_remote(
 
 def _enrich_file_artifact(
     client: OpenSearch,
-    safe_case: str,
+    case_ix: _CaseIndices | str,
     index_pattern: str,
     path_field: str,
     artifact_name: str,
@@ -481,7 +503,7 @@ _TRIAGE_FIELDS = [
 _AMCACHE_HASH_LIMIT = 31457280  # Amcache's SHA1 covers only the first 30 MiB of a file
 
 
-def _clear_stamps(client, safe_case):
+def _clear_stamps(client, case_ix):
     script = {
         "source": "for (f in params.f) { ctx._source.remove(f) }",
         "lang": "painless",
@@ -490,7 +512,7 @@ def _clear_stamps(client, safe_case):
     stamped = {"exists": {"field": "triage.checked"}}
     scopes = [
         (
-            f"case-{safe_case}-evtx-*",
+            _index(case_ix, "evtx"),
             {
                 "bool": {
                     "filter": [stamped],
@@ -499,7 +521,7 @@ def _clear_stamps(client, safe_case):
             },
         ),
         (
-            f"case-{safe_case}-registry-*",
+            _index(case_ix, "registry"),
             {
                 "bool": {
                     "filter": [stamped, {"wildcard": {"KeyPath.keyword": "*\\\\Services\\\\*"}}],
@@ -767,9 +789,9 @@ def _enrich_services(client, index, query, extract, artifact_name, on_progress=N
 # ---------------------------------------------------------------------------
 
 
-def _enrich_registry_run_keys(client, safe_case, on_progress=None):
+def _enrich_registry_run_keys(client, case_ix, on_progress=None):
     """Enrich registry Run key entries with check_file."""
-    index = f"case-{safe_case}-registry-*"
+    index = _index(case_ix, "registry")
     run_keys = [
         {"wildcard": {"KeyPath.keyword": "*\\\\Run\\\\*"}},
         {"wildcard": {"KeyPath.keyword": "*\\\\Run"}},
@@ -883,7 +905,7 @@ def _enrich_registry_run_keys(client, safe_case, on_progress=None):
 # ---------------------------------------------------------------------------
 def _enrich_registry_check_file(
     client,
-    safe_case,
+    case_ix,
     query_body,
     value_field,
     artifact_name,
@@ -894,7 +916,7 @@ def _enrich_registry_check_file(
 
     Used for R15 (Active Setup StubPath) and R17 (NetSh helper DLLs).
     """
-    index = f"case-{safe_case}-registry-*"
+    index = _index(case_ix, "registry")
     try:
         result = client.search(
             index=index,
@@ -1005,7 +1027,7 @@ _UNSTAMP_OWN = """{
 }"""
 
 
-def _enrich_registry_persistence(client, safe_case, on_progress=None):
+def _enrich_registry_persistence(client, case_ix, on_progress=None):
     """Flag registry persistence mechanisms via update_by_query.
 
     Implements R1-R14, R16. R15 (Active Setup) and R17 (NetSh) use
@@ -1014,7 +1036,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
     No gateway calls — queries OpenSearch directly. Runs even when
     gateway is unavailable.
     """
-    index = f"case-{safe_case}-registry-*"
+    index = _index(case_ix, "registry")
     total_updated = 0
     rules_failed = 0
     no_data: list[str] = []

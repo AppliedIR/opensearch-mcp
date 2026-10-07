@@ -139,7 +139,15 @@ def flush_bulk(
     segments — and the timeout is then retried as if transient. A refused
     record is counted in `failed` and named in the last bulk reason by
     `_id` and field path; the rest of the batch is sent.
+
+    Every action into the open ingest run's case is first given its
+    machine: `host.id`, `vhir.host_key`, `vhir.unit`, `vhir.rid` (the
+    parser's own id) and an `_id` that carries the machine key. A write to a
+    case index with no run open is refused.
     """
+    from opensearch_mcp.write_context import stamp_or_refuse
+
+    stamp_or_refuse(actions, client)
     refused = 0
     if depth_limit and actions:
         actions, refused = _refuse_too_deep(client, actions)

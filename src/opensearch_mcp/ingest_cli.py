@@ -36,22 +36,53 @@ _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
 
 
 def _case_dir_for(case_id: str) -> Path | None:
-    """Resolve the on-disk case directory for `case_id`.
+    """The on-disk case directory for `case_id` (`VHIR_CASES_DIR`, default
+    `~/cases`), or None. Only a bare directory name is accepted."""
+    from opensearch_mcp.write_context import case_dir_for
 
-    Prefers `VHIR_CASES_DIR` env, falls back to `~/cases/`. Returns None
-    if the directory doesn't exist — callers (batch-discovery) treat
-    that as "no dict available, proceed with current behavior" rather
-    than aborting.
+    return case_dir_for(case_id)
 
-    M1 guard: reject case_id with any path component (e.g. "../etc",
-    "/abs/path", "foo/bar"). Only the bare directory name is allowed;
-    anything else is path-traversal hygiene.
-    """
-    if not case_id or Path(case_id).name != case_id:
-        return None
-    cases_root = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
-    case_dir = cases_root / case_id
-    return case_dir if case_dir.is_dir() else None
+
+def _open_unit(case_id: str, path, hostname: str, source: str, origin: str = "argument"):
+    """Open the write context of one evidence argument (a file or folder):
+    every record written until the next one belongs to this unit. Exits when
+    the case has no directory, since no record may be stored without its
+    machine."""
+    from sift_common.host_identity import unit_locator
+
+    from opensearch_mcp import write_context as wc
+
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None or not (case_dir / "CASE.yaml").is_file():
+        print(
+            f"Error: no case directory for {case_id!r}: records can't be given their machine.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    ctx = wc.open_unit(
+        case_dir,
+        unit_locator(path, case_dir),
+        hostname,
+        source=source,
+        origin=origin,
+        run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
+    )
+    wc.set_current(ctx)
+    return ctx
+
+
+def _closes_write_context(fn):
+    """Close any write context `fn` opened when it returns or raises."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from opensearch_mcp import write_context as wc
+
+        with wc.restoring():
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _load_case_host_dict(case_id: str):
@@ -116,7 +147,12 @@ def _ensure_host_id_keyword_mapping(case_id: str) -> dict:
     except Exception as e:
         return {"status": "skipped", "reason": f"client unavailable: {type(e).__name__}"}
 
-    index_pattern = f"case-{case_id.lower()}-*"
+    from opensearch_mcp.case_scope import CaseScopeError, case_read_scope
+
+    try:
+        index_pattern = case_read_scope(case_id, client)
+    except CaseScopeError as e:
+        return {"status": "skipped", "reason": str(e)}
     try:
         mappings = client.indices.get_mapping(index=index_pattern, allow_no_indices=True)
     except Exception as e:
@@ -475,12 +511,14 @@ def _write_bg_status(
     caught exception as an uncaught crash.
     """
     from opensearch_mcp.bulk import get_last_bulk_reason
+    from opensearch_mcp.write_context import second_copy_note
 
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
-    if status != "running" and no_time_field_note():
-        art["note"] = no_time_field_note()
-    if note:  # appended, never replacing a note already there
-        art["note"] = "; ".join(filter(None, [art.get("note"), note]))
+    notes = [no_time_field_note()] if status != "running" else []
+    notes.append(second_copy_note(hostname))
+    notes.append(note)  # appended, never replacing a note already there
+    if any(notes):
+        art["note"] = "; ".join(n for n in notes if n)
     if error:
         art["error"] = error
     if skipped_files:  # not ingested, and the status has to say so
@@ -737,6 +775,45 @@ def _merge_config(args: argparse.Namespace, config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _set_units(
+    hosts, case_id: str, input_path: Path, tmpdir, hostname, name_origin: str, offsets=None
+) -> None:
+    """Give each discovered host its evidence unit: the input, plus the
+    host's place in it when the input is an image or an archive (the volume
+    offset, the volume Plaso reads, or the path inside the extraction), never
+    the temporary mount, so a re-ingest is the same unit."""
+    from sift_common.host_identity import unit_locator
+
+    case_dir = _case_dir_for(case_id)
+
+    def inside(path, root) -> str | None:
+        try:
+            return Path(path).relative_to(root).as_posix()
+        except ValueError:
+            return None
+
+    for h in hosts:
+        if name_origin and hostname and h.hostname == hostname and h.name_origin == "folder":
+            h.name_origin = name_origin
+        if h.unit_locator or tmpdir is None and h.image_path is None:
+            continue  # a folder: its own volume root
+        if h.image_path is not None:  # read straight off the image
+            where = inside(h.image_path, tmpdir) if tmpdir is not None else None
+            member = "/".join(x for x in (where, h.volume_label) if x and x != ".")
+            h.unit_locator = unit_locator(input_path, case_dir, member=member or ".")
+            continue
+        vol = next((v for v in (offsets or {}) if inside(h.volume_root, v) is not None), None)
+        if vol is not None:
+            rest = inside(h.volume_root, vol)
+            h.unit_locator = unit_locator(
+                input_path, case_dir, member="" if rest == "." else rest, offset=offsets[vol]
+            )
+        else:
+            h.unit_locator = unit_locator(
+                input_path, case_dir, member=inside(h.volume_root, tmpdir) or "."
+            )
+
+
 def _rebuilt_status_host(h) -> dict:
     """A host's status entry rebuilt from its result for the hayabusa phase,
     keeping the evtx files it dropped before parsing."""
@@ -760,14 +837,18 @@ def _rebuilt_status_host(h) -> dict:
     return {"hostname": h.hostname, "artifacts": arts}
 
 
-def _image_id(stem: str, key: Path) -> str:
+def _image_id(stem: str, key: Path, case_dir: Path | None = None) -> str:
     """A disk image's name for its volume hosts: its stem and a short hash of
-    its resolved path, the same on every ingest of that file and different for
-    any other file (another folder, or a stem that differs only in case or
-    punctuation). For an image from an archive, `key` is the archive's path
-    joined with the image's name, since its extracted copy moves every run."""
+    its path, the same on every ingest of that file and different for any
+    other file (another folder, or a stem that differs only in case or
+    punctuation). Inside the case directory the path is case-relative, so a
+    renamed case folder keeps the name. For an image from an archive, `key`
+    is the archive's path joined with the image's name, since its extracted
+    copy moves every run."""
+    from sift_common.host_identity import unit_locator
+
     clean = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-.") or "image"
-    digest = hashlib.sha256(str(Path(key).resolve()).encode()).hexdigest()[:8]
+    digest = hashlib.sha256(unit_locator(key, case_dir).encode()).hexdigest()[:8]
     return f"{clean}-{digest}"
 
 
@@ -974,6 +1055,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
     include = _parse_set(getattr(args, "include", None))
     exclude = _parse_set(getattr(args, "exclude", None))
     hostname = getattr(args, "hostname", None)
+    # Where the scan's host name came from: an argument, or the evidence.
+    name_origin = "argument" if hostname else ""
     vss_flag = getattr(args, "vss", False)
     password = getattr(args, "password", None)
     tz_override = getattr(args, "source_timezone", None)
@@ -1041,6 +1124,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if not hostname:
                     hostname = read_velociraptor_hostname(tmpdir)
                     if hostname:
+                        name_origin = "artifact"
                         print(f"  Hostname from collection: {hostname}")
                 scan_root = normalize_velociraptor(tmpdir)
             else:
@@ -1052,7 +1136,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 ]
                 if extracted_images:
                     img = extracted_images[0]
-                    image_id = _image_id(img.stem, input_path / img.name)
+                    image_id = _image_id(img.stem, input_path / img.name, _case_dir_for(case_id))
                     print(f"  Found disk image: {img.name}")
                     # Archive-basename stamp removed per host-identity spec
                     # (silent "admin01-triage" pollution). Registry detect
@@ -1092,13 +1176,15 @@ def cmd_scan(args: argparse.Namespace) -> None:
                             image_id,
                             _covered_names(mount_ctx, image_covered),
                         )
+                        if hostname:
+                            name_origin = "artifact"
 
                 scan_root = tmpdir
 
         elif container_type in ("ewf", "raw", "nbd"):
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Mounting {input_path.name}...")
-            image_id = _image_id(input_path.stem, input_path)
+            image_id = _image_id(input_path.stem, input_path, _case_dir_for(case_id))
             volumes = mount_image(input_path, tmpdir, mount_ctx)
             image_hosts, image_covered, image_notes = _image_hosts(
                 input_path, image_id, examiner_hostname
@@ -1119,6 +1205,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 hostname = _hostname_from_volumes(
                     volumes, status_notes, image_id, _covered_names(mount_ctx, image_covered)
                 )
+                if hostname:
+                    name_origin = "artifact"
 
             # VSS handling
             if vss_flag:
@@ -1140,7 +1228,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         elif container_type == "dmg":  # read by Plaso alone: no mount, no sudo
             tmpdir = make_ingest_tmpdir(case_id)
-            image_id = _image_id(input_path.stem, input_path)
+            image_id = _image_id(input_path.stem, input_path, _case_dir_for(case_id))
             image_hosts, image_covered, image_notes = _image_hosts(
                 input_path, image_id, examiner_hostname
             )
@@ -1199,6 +1287,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # per-host evidence subdirs.
                     if not h.hostname or h.hostname.startswith("_"):
                         h.hostname = peeked
+                        h.name_origin = "artifact"
 
         # Preflight host discovery — auto-apply exact decisions to
         # the case dictionary BEFORE parsers run. v1 always proceeds;
@@ -1206,6 +1295,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
         # Replaces the prior fail-loud `_classify_or_fail`.
         # Image hosts join before the host dictionary is consulted
         hosts += image_hosts
+        _set_units(
+            hosts, case_id, input_path, tmpdir, hostname, name_origin, offsets=mount_ctx.offsets
+        )
         host_discovery_report, case_host_dict = _preflight_host_discovery(
             case_id, scan_root, hosts
         )
@@ -1252,7 +1344,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 base_hostname = (
                     windows or [h.hostname for h in hosts] or [hostname or "unknown"]
                 )[0]
-                vss_host = DiscoveredHost(hostname=base_hostname, volume_root=vr, vss_id=v_id)
+                base = next((h for h in hosts if h.hostname == base_hostname), None)
+                vss_host = DiscoveredHost(
+                    hostname=base_hostname,
+                    volume_root=vr,
+                    vss_id=v_id,
+                    unit_locator=base.unit_locator if base else "",
+                    name_origin=base.name_origin if base else "folder",
+                )
                 discover_artifacts(vss_host)
                 if vss_host.artifacts or vss_host.evtx_dir:
                     hosts.append(vss_host)
@@ -1388,6 +1487,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 on_progress=_cli_progress,
                 host_dict=case_host_dict,
                 final_status="running" if hayabusa_follows or triage_follows else "complete",
+                case_dir=_case_dir_for(case_id),
             )
         except ShardCapacityExhausted as _sce:
             # Circuit-breaker trip mid-run. Write a terminal status so
@@ -1504,6 +1604,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     audit=audit,
                     on_progress=_hayabusa_progress,
                     host_dict=case_host_dict,
+                    case_dir=_case_dir_for(case_id),
                 )
                 total_alerts = _sum_hayabusa_alerts(hb_results)
                 # Post-B84 visibility (UAT 2026-04-24): surface the
@@ -1624,6 +1725,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+@_closes_write_context
 def cmd_csv(args: argparse.Namespace) -> None:
     """Ingest a pre-parsed CSV (examiner identifies the tool).
 
@@ -1653,9 +1755,10 @@ def cmd_csv(args: argparse.Namespace) -> None:
     from opensearch_mcp import __version__
 
     cfg = TOOLS[tool_name]
-    from opensearch_mcp.paths import build_index_name as _build_idx
+    from opensearch_mcp.write_context import index_name as _index_name
 
-    index_name = _build_idx(case_id, cfg.index_suffix, hostname)
+    _open_unit(case_id, csv_path, hostname, source=f"{tool_name} csv")
+    index_name = _index_name(cfg.index_suffix)
 
     client = get_client()
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
@@ -1735,6 +1838,7 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 # ---------------------------------------------------------------------------
 
 
+@_closes_write_context
 def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
     NO_TIME_FIELD.clear()  # this run's files only
     TIME_NOT_UNDERSTOOD.clear()
@@ -1810,17 +1914,16 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 
     from opensearch_mcp.bulk import ShardCapacityExhausted
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
+    from opensearch_mcp.paths import stem_type
+    from opensearch_mcp.write_context import index_name as _index_name
 
+    _open_unit(case_id, input_path, hostname, source="json")
     total = total_sk = total_bf = 0
     _json_failed_files: list[tuple[str, str]] = []
     try:
         for idx, f in enumerate(files):
-            suffix = getattr(args, "index_suffix", None) or f"json-{f.stem}"
-            if not suffix.startswith("json-"):
-                suffix = f"json-{suffix}"
-            from opensearch_mcp.paths import build_index_name as _build_idx_j
-
-            index_name = _build_idx_j(case_id, suffix, hostname)
+            suffix = stem_type("json", getattr(args, "index_suffix", None) or f.stem)
+            index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
             try:
                 cnt, sk, bf, hr = ingest_json(
@@ -1933,6 +2036,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 # ---------------------------------------------------------------------------
 
 
+@_closes_write_context
 def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest delimited files."""
     from opensearch_mcp import __version__
@@ -2178,7 +2282,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     from opensearch_mcp.bulk import ShardCapacityExhausted
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
+    from opensearch_mcp.paths import stem_type
+    from opensearch_mcp.write_context import index_name as _index_name
 
+    _open_unit(case_id, input_path, hostname, source="delimited")
     total = total_sk = total_bf = 0
     touched: set[str] = set()
     _delim_failed_files: list[tuple[str, str]] = []  # (path, error[:200])
@@ -2188,18 +2295,15 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             detected = fmt.get("format", "csv")
             user_suffix = getattr(args, "index_suffix", None)
             if user_suffix:
-                suffix = user_suffix
-                if not suffix.startswith(("delim-", "zeek-", "bodyfile-")):
-                    suffix = f"delim-{suffix}"
-            elif detected == "zeek":
-                suffix = f"zeek-{f.stem}"
-            elif detected == "bodyfile":
-                suffix = f"bodyfile-{f.stem}"
+                prefix, _, stem = user_suffix.partition("-")
+                if prefix not in ("delim", "zeek", "bodyfile") or not stem:
+                    prefix, stem = "delim", user_suffix
+            elif detected in ("zeek", "bodyfile"):
+                prefix, stem = detected, f.stem
             else:
-                suffix = f"delim-{f.stem}"
-            from opensearch_mcp.paths import build_index_name as _build_idx_d
-
-            index_name = _build_idx_d(case_id, suffix, hostname)
+                prefix, stem = "delim", f.stem
+            suffix = stem_type(prefix, stem)
+            index_name = _index_name(suffix)
             print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
             if detected == "unknown":
                 print("skipped (unrecognized format)")
@@ -2327,6 +2431,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 # ---------------------------------------------------------------------------
 
 
+@_closes_write_context
 def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__
@@ -2379,16 +2484,18 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             files_total=len(files),
         )
 
+    from sift_common.host_identity import unit_locator
+
     from opensearch_mcp.bulk import ShardCapacityExhausted
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
+    from opensearch_mcp.write_context import index_name as _index_name
 
+    ctx = _open_unit(case_id, input_path, hostname, source="access log")
     total = total_sk = total_bf = 0
     _alog_failed_files: list[tuple[str, str]] = []
     try:
         for idx, f in enumerate(files):
-            from opensearch_mcp.paths import build_index_name as _build_idx_a
-
-            index_name = _build_idx_a(case_id, suffix, hostname)
+            index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
             try:
                 cnt, sk, bf = ingest_accesslog(
@@ -2398,7 +2505,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
                     hostname,
                     time_from=time_from,
                     time_to=time_to,
-                    source_file=str(f),
+                    source_file=unit_locator(f, ctx.case_dir),
                     ingest_audit_id=aid,
                     pipeline_version=f"opensearch-mcp-{__version__}",
                     host_dict=case_host_dict,
@@ -2498,7 +2605,6 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     force = getattr(args, "force", False)
     include_filesystem = getattr(args, "include_filesystem", False)
 
-    from opensearch_mcp.paths import sanitize_index_component
     from opensearch_mcp.threat_intel import (
         IntelEnrichmentHalted,
         enrich_case,
@@ -2508,9 +2614,13 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
     client = get_client()
 
     if getattr(args, "dry_run", False):
-        safe_case = sanitize_index_component(case_id)
+        from opensearch_mcp.case_scope import case_read_scope
+
         iocs = extract_unique_iocs(
-            client, f"case-{safe_case}-*", force=force, include_filesystem=include_filesystem
+            client,
+            case_read_scope(case_id, client),
+            force=force,
+            include_filesystem=include_filesystem,
         )
         print(f"Case: {case_id}")
         print(f"  External IPs: {len(iocs['ip'])}")
@@ -2651,6 +2761,7 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
 # ---------------------------------------------------------------------------
 
 
+@_closes_write_context
 def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Parse a memory image with Volatility 3 and index results."""
     from opensearch_mcp import __version__
@@ -2660,6 +2771,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     reset_circuit_breaker()
 
     image_path = Path(args.path)
+    given_path = image_path
     _mem_extract_dir = None  # Track for cleanup
     _mem_not_read: list[str] = []  # other images in the archive
 
@@ -2839,6 +2951,28 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     _warn_if_mapping_upgrade_required(case_id)
 
     timeout = getattr(args, "timeout", 3600)
+    from sift_common.host_identity import unit_locator
+
+    member = image_path.name if image_path != given_path else ""
+    case_dir = _case_dir_for(case_id)
+    if case_dir is None or not (case_dir / "CASE.yaml").is_file():
+        print(
+            f"Error: no case directory for {case_id!r}: records can't be given their machine.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    from opensearch_mcp import write_context as wc
+
+    wc.set_current(
+        wc.open_unit(
+            case_dir,
+            unit_locator(given_path, case_dir, member=member),
+            hostname,
+            source="memory image",
+            origin="argument",
+            run_id=run_id or "",
+        )
+    )
     try:
         results = ingest_memory(
             image_path=image_path,

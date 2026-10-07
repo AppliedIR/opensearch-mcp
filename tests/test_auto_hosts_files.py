@@ -49,8 +49,10 @@ def ingest(tmp_path, monkeypatch):
         client.cluster.health()
     except Exception as e:
         pytest.skip(f"OpenSearch not available: {e}")
+    from opensearch_mcp import write_context as wc
+
     case_id = f"pytest-ah-{uuid.uuid4().hex[:8]}"
-    base = f"case-{case_id}"
+    base = f"case-{wc.case_identity(wc.case_dir_for(case_id))[0]}"
     comp = json.loads((_MAPPINGS / "json_type_stability.json").read_text())
     client.cluster.put_component_template(name=f"{base}-comp", body=comp)
     body = copy.deepcopy(json.loads((_MAPPINGS / "delimited_template.json").read_text()))
@@ -74,7 +76,7 @@ def ingest(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: case_id)
 
     def run(files: dict) -> dict:
-        """files: {name: rows}; returns {index suffix: sorted row tags}."""
+        """files: {name: rows}; returns {"<artifact type>/<host>": sorted row tags}."""
         flat = tmp_path / "flat"
         flat.mkdir()
         for name, n in files.items():
@@ -90,9 +92,11 @@ def ingest(tmp_path, monkeypatch):
         client.indices.refresh(index=f"{base}-*")
         out = {}
         for idx in sorted(client.indices.get(index=f"{base}-*")):
-            hits = client.search(index=idx, body={"size": 100, "_source": ["what"]})
-            out[idx[len(base) + 1 :]] = sorted(h["_source"]["what"] for h in hits["hits"]["hits"])
-        return out
+            hits = client.search(index=idx, body={"size": 100, "_source": ["what", "host.name"]})
+            for h in hits["hits"]["hits"]:
+                key = f"{idx[len(base) + 1 : -2]}/{h['_source']['host.name'].lower()}"
+                out.setdefault(key, []).append(h["_source"]["what"])
+        return {k: sorted(v) for k, v in out.items()}
 
     run.case_id = case_id
     try:
@@ -125,17 +129,17 @@ def case_status(ingest):
 )
 def test_each_host_gets_only_its_own_file(ingest, h1, h2):
     got = ingest({h1: 3, h2: 2})
-    s1, s2 = Path(h1).stem.lower(), Path(h2).stem.lower()
+    s1, s2 = (Path(h).stem.lower().replace("-", "_") for h in (h1, h2))
     assert got == {
-        f"delim-{s1}-host1": [f"{Path(h1).stem}-{i}" for i in range(3)],
-        f"delim-{s2}-host2": [f"{Path(h2).stem}-{i}" for i in range(2)],
+        f"delim-{s1}/host1": [f"{Path(h1).stem}-{i}" for i in range(3)],
+        f"delim-{s2}/host2": [f"{Path(h2).stem}-{i}" for i in range(2)],
     }, got
 
 
 @pytest.mark.integration
 def test_a_file_with_no_host_in_its_name_is_skipped(ingest, capsys):
     got = ingest({"EvtxECmd-HOST1.csv": 2, "EvtxECmd-HOST2.csv": 2, "readme.csv": 1})
-    assert set(got) == {"delim-evtxecmd-host1-host1", "delim-evtxecmd-host2-host2"}, got
+    assert set(got) == {"delim-evtxecmd_host1/host1", "delim-evtxecmd_host2/host2"}, got
     assert "Skipped 1 file(s) whose name gives none of the hosts" in capsys.readouterr().out
 
 

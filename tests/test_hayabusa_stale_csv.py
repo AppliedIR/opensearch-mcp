@@ -2,7 +2,7 @@
 
 Hayabusa 3.9.0 doesn't overwrite an existing output file: it prints
 "[ERROR] ... already exists" on stderr, exits 0 and leaves the file as it
-was. The output name is fixed per case and host, so a second evtx ingest for
+was. The output name was fixed per case and host, so a second evtx ingest for
 a host indexed the first run's alerts as the new run's. It also exits 0
 without writing when it finds no .evtx files.
 """
@@ -14,6 +14,7 @@ import pytest
 
 import opensearch_mcp.ingest as ingest
 import opensearch_mcp.parse_delimited as parse_delimited
+from opensearch_mcp import write_context as wc
 
 # Models measured Hayabusa 3.9.0 (no -C given).
 STUB = """#!/bin/sh
@@ -71,16 +72,19 @@ def hb(tmp_path, monkeypatch):
 
     monkeypatch.setattr(parse_delimited, "ingest_delimited", ingest_delimited)
 
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run1")
+    host = SimpleNamespace(hostname="HOST1", evtx_dir=evtx, volume_root=evtx)
+    stem = ingest.hayabusa_staging_stem(wc.host_context(None, "case1", host))
+
     def run():
         events = []
-        host = SimpleNamespace(hostname="HOST1", evtx_dir=evtx)
         results = ingest.run_hayabusa_batch(
             [host], None, "case1", on_progress=lambda ev, **kw: events.append((ev, kw))
         )
         return results, events
 
-    csv = out_dir / "hayabusa-case1-host1.csv"
-    prev = out_dir / "hayabusa-case1-host1.prev.csv"
+    csv = out_dir / f"{stem}.csv"
+    prev = out_dir / f"{stem}.prev.csv"
     return SimpleNamespace(run=run, sent=sent, csv=csv, prev=prev, monkeypatch=monkeypatch)
 
 

@@ -398,7 +398,7 @@ def test_a_failed_run_fails_the_artifact_and_the_other_run_is_kept(tmp_path, mon
     monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
     monkeypatch.setattr(parse_plaso, "can_sudo", lambda: pytest.fail("Windows doesn't probe"))
     monkeypatch.setattr(parse_plaso, "flush_bulk", lambda c, a: (len(a), 0))
-    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i, unit="": 0)
     status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
 
     class Audit:
@@ -453,7 +453,7 @@ def test_a_linux_folder_is_read_with_roots_read_capability_when_sudo_works(
 
     monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
     monkeypatch.setattr(parse_plaso, "can_sudo", lambda: sudo)
-    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i, unit="": 0)
     status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
     ingest._ingest_plaso_volume(
         None,

@@ -65,7 +65,16 @@ def _detect_encoding(path: Path) -> str:
 
 # Fields containing per-run volatile data (temp dir paths) or VSS metadata.
 # Excluded from content hash to ensure dedup stability across re-ingests.
-_VOLATILE_KEYS = {"PluginDetailFile", "SourceFile", "HivePath", "vhir.vss_id"}
+# The host fields too: the stored id carries the machine key, and a renamed
+# or merged machine must give a re-ingested row the same id.
+_VOLATILE_KEYS = {
+    "PluginDetailFile",
+    "SourceFile",
+    "HivePath",
+    "vhir.vss_id",
+    "host.id",
+    "host.name",
+}
 
 
 def _doc_id(
@@ -217,11 +226,7 @@ def ingest_csv(
             # Provenance differs across re-ingests (different source_file),
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
-            id_row = row
-            if not row_host and per_row_host:  # keep the _id the per-row host gave
-                id_id = _resolve_cached(host_dict, per_row_host) if host_dict is not None else None
-                id_row = {**row, "host.name": per_row_host, "host.id": id_id or per_row_host}
-            _id = _doc_id(index_name, id_row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
 
             # Provenance fields (added after ID computation)
             if source_file:

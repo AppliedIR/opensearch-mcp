@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from opensearch_mcp import write_context as wc
 from opensearch_mcp.tools import run_and_ingest
 
 CSV = (
@@ -12,13 +13,6 @@ CSV = (
     "C:\\Users\\u\\b.automaticDestinations-ms,abc,,,C:\\b.txt,2023-01-12 11:00:00\n"
     "C:\\Users\\u\\c.automaticDestinations-ms,abc,wkstn,wkstn,C:\\c.txt,2023-01-12 12:00:00\n"
 )
-# The _id values these three rows had before (case "t", scan host "wkstn", no host
-# dictionary): a re-ingest must overwrite the same documents.
-GOLDEN = {
-    "S:\\share\\a.docx": "1c45cabd3c5f3a6a4bd1",
-    "C:\\b.txt": "76efa9b3e610c1802417",
-    "C:\\c.txt": "37cca10bacfec74c2e25",
-}
 
 
 def _ingest(tool="jumplists"):
@@ -33,9 +27,11 @@ def _ingest(tool="jumplists"):
         (out / "20260101000000_AutomaticDestinations.csv").write_text(CSV, encoding="utf-8")
         return "", ""
 
+    ctx = wc.open_unit(wc.case_dir_for("t"), "evidence/wkstn", "wkstn", source="test")
     with (
         patch("opensearch_mcp.parse_csv.flush_bulk", side_effect=fake_flush),
         patch("opensearch_mcp.tools._run_tool", side_effect=fake_run),
+        wc.writing(ctx),
     ):
         run_and_ingest(
             tool_name=tool,
@@ -60,9 +56,13 @@ def test_jumplist_rows_keep_the_tracker_hostname_column():
     assert docs["S:\\share\\a.docx"]["_source"]["MachineID"] == "fileserver"
 
 
-def test_jumplist_doc_ids_are_unchanged_so_reingest_overwrites():
-    docs = _ingest()
-    assert {p: a["_id"] for p, a in docs.items()} == GOLDEN
+def _ids(docs):
+    return {p: a["_id"] for p, a in docs.items()}
+
+
+def test_jumplist_doc_ids_are_the_same_on_reingest_so_it_overwrites():
+    first = _ids(_ingest())
+    assert first == _ids(_ingest()) and len(set(first.values())) == 3
 
 
 def test_the_csv_subcommand_also_takes_the_scanned_host_for_jumplists(tmp_path):
@@ -91,4 +91,4 @@ def test_the_csv_subcommand_also_takes_the_scanned_host_for_jumplists(tmp_path):
             )
         )
     assert {a["_source"]["host.name"] for a in sent} == {"wkstn"}
-    assert {a["_source"]["Path"]: a["_id"] for a in sent} == GOLDEN
+    assert {a["_source"]["Path"]: a["_id"] for a in sent} == _ids(_ingest())

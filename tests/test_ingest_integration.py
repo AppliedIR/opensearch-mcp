@@ -608,7 +608,7 @@ class TestFailedArtifactWarning:
     first 1,000 rows are flushed. Not a NUL: only Python 3.10 fails on that."""
 
     @pytest.fixture
-    def scan(self, tmp_path, tag, monkeypatch):
+    def scan(self, tmp_path, tag, monkeypatch, os_client):
         import os
         import shutil
         import subprocess
@@ -655,7 +655,13 @@ class TestFailedArtifactWarning:
             )
             return p.stdout + p.stderr
 
-        return cid, run  # its indices go with the module fixture's case-{tag}-* delete
+        from opensearch_mcp import write_context as wc
+
+        index = f"case-{wc.case_identity(case_dir)[0]}-registry-0"
+        try:
+            yield cid, run, index
+        finally:
+            os_client.indices.delete(index=index, ignore=[404])
 
     @staticmethod
     def incomplete(cid):
@@ -664,27 +670,31 @@ class TestFailedArtifactWarning:
         resp = server.idx_case_summary(case_id=cid)
         return [w for w in resp.get("warnings", []) if "may be incomplete" in w]
 
-    def test_a_partial_failure_is_flagged_with_the_index_count(self, os_client, scan):
-        cid, run = scan
+    @staticmethod
+    def host_count(os_client, index, host):
+        body = {"query": {"term": {"host.name": host}}}
+        return os_client.count(index=index, body=body)["count"]
+
+    def test_a_partial_failure_is_flagged_with_the_hosts_count(self, os_client, scan):
+        cid, run, index = scan
         out = run("dev01", fail=True)
-        index = f"case-{cid}-registry-dev01"
         os_client.indices.refresh(index=index)
-        assert os_client.count(index=index)["count"] == 1000, out  # one flush, then the failure
+        assert self.host_count(os_client, index, "dev01") == 1000, out  # one flush, then failure
         assert self.incomplete(cid) == [
-            f"{index} (1,000 docs) may be incomplete: the most recent ingest of registry"
-            " on dev01 failed (FAILED: field larger than field limit (10485760))"
+            f"{index} (1,000 docs from dev01) may be incomplete: the most recent ingest of"
+            " registry on dev01 failed (FAILED: field larger than field limit (10485760))"
         ], out
 
     def test_only_the_failed_host_and_only_until_it_succeeds(self, os_client, scan):
-        cid, run = scan
+        cid, run, index = scan
         run("dev01", fail=True)
         out = run("dev02", fail=False)
-        os_client.indices.refresh(index=f"case-{cid}-*")
-        assert os_client.count(index=f"case-{cid}-registry-dev02")["count"] == 1500, out
+        os_client.indices.refresh(index=index)
+        assert self.host_count(os_client, index, "dev02") == 1500, out
         (warning,) = self.incomplete(cid)
-        assert warning.startswith(f"case-{cid}-registry-dev01 (1,000 docs) may be incomplete")
+        assert warning.startswith(f"{index} (1,000 docs from dev01) may be incomplete"), warning
         out = run("dev01", fail=False)
-        os_client.indices.refresh(index=f"case-{cid}-*")
+        os_client.indices.refresh(index=index)
         assert self.incomplete(cid) == [], out
 
 
@@ -727,7 +737,7 @@ class TestTriageSummaryAfterIngest:
         from pathlib import Path
 
         from opensearch_mcp.parse_csv import ingest_csv
-        from opensearch_mcp.paths import build_index_name
+        from opensearch_mcp.paths import legacy_index_name
 
         cid = f"{tag}-triage-{'blocked' if blocked else 'open'}"
         case_dir = tmp_path / "cases" / cid
@@ -747,7 +757,7 @@ class TestTriageSummaryAfterIngest:
         (tree / "Windows" / "AppCompat" / "Programs").mkdir(parents=True)
         (tree / "Windows" / "AppCompat" / "Programs" / "Amcache.hve").write_bytes(b"regf")
 
-        registry = build_index_name(cid, "registry", "h1")
+        registry = legacy_index_name(cid, "registry", "h1")
         rows = tmp_path / "registry.csv"
         rows.write_text(_RECMD_HEADER + "\n" + _IFEO_ROW + "\n")
         ingest_csv(rows, os_client, registry, "h1")

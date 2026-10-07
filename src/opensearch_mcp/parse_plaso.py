@@ -37,6 +37,8 @@ _PLASO_VOLATILE_KEYS = {
     "pathspec",
     "sha256_hash",  # Plaso storage hash, not evidence hash
     "vhir.vss_id",
+    "host.id",  # the stored id carries the machine key
+    "host.name",
 }
 
 

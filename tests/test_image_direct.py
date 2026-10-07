@@ -291,7 +291,7 @@ def test_an_image_run_takes_its_selectors_and_no_root_or_zone(tmp_path, monkeypa
     monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
     monkeypatch.setattr(parse_plaso, "can_sudo", lambda: pytest.fail("no sudo for an image"))
     monkeypatch.setattr(parse_plaso, "flush_bulk", lambda c, a: (len(a), 0))
-    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i, unit="": 0)
     status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
 
     class Audit:
@@ -554,7 +554,7 @@ def _plaso_status_of(tmp_path, monkeypatch, host, jsonl_text=""):
         return jsonl, {}
 
     monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
-    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i, unit="": 0)
     status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
 
     class Audit:
@@ -635,7 +635,7 @@ def test_a_new_york_volume_keeps_its_zone_under_a_berlin_override(tmp_path, monk
     from opensearch_mcp.results import HostResult
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i, unit="": 0)
     status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
 
     class Audit:

@@ -14,8 +14,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from opensearch_mcp import server as srv
+from opensearch_mcp import write_context as wc
 
 _which = shutil.which
+
+
+def c12(case: str) -> str:
+    return wc.case_identity(wc.case_dir_for(case))[0]
 
 
 def _cluster(monkeypatch, indices: dict, branch: str, installed: bool):
@@ -49,7 +54,7 @@ BRANCHES = ["no sigma plugin", "no sigma findings"]
 
 @pytest.mark.parametrize("branch", BRANCHES)
 def test_another_cases_alerts_dont_hide_the_absent_hayabusa(monkeypatch, branch):
-    indices = {"case-case-b-hayabusa-host9": 372, "case-case-a-evtx-host1": 5000}
+    indices = {f"case-{c12('case-b')}-hayabusa-0": 372, f"case-{c12('case-a')}-evtx-0": 5000}
     suggestion = _cluster(monkeypatch, indices, branch, installed=False)
     assert srv._HAYABUSA_ABSENT in suggestion, suggestion
     assert "372" not in suggestion and "Hayabusa alerts available" not in suggestion
@@ -58,11 +63,11 @@ def test_another_cases_alerts_dont_hide_the_absent_hayabusa(monkeypatch, branch)
 @pytest.mark.parametrize("branch", BRANCHES)
 def test_the_active_cases_own_alerts_are_counted_and_pointed_to(monkeypatch, branch):
     indices = {
-        "case-case-a-hayabusa-host1": 124,
-        "case-case-b-hayabusa-host9": 372,
-        "case-case-a-evtx-host1": 5000,
+        f"case-{c12('case-a')}-hayabusa-0": 124,
+        f"case-{c12('case-b')}-hayabusa-0": 372,
+        f"case-{c12('case-a')}-evtx-0": 5000,
     }
     suggestion = _cluster(monkeypatch, indices, branch, installed=False)
     assert "124 Hayabusa alerts" in suggestion, suggestion
-    assert "index='case-case-a-hayabusa-*'" in suggestion, suggestion
+    assert f"index='case-{c12('case-a')}-hayabusa-*'" in suggestion, suggestion
     assert "496" not in suggestion and srv._HAYABUSA_ABSENT not in suggestion

@@ -46,7 +46,10 @@ def mock_client():
     """Provide a mock OpenSearch client and inject it into server module."""
     client = MagicMock()
     client.cluster.health.return_value = {"status": "green"}
-    with patch("opensearch_mcp.server.get_client", return_value=client):
+    with (
+        patch("opensearch_mcp.server.get_client", return_value=client),
+        patch("opensearch_mcp.server._get_active_case", return_value="test-case"),
+    ):
         yield client
 
 
@@ -287,14 +290,17 @@ class TestIdxAggregate:
 
 class TestIdxGetEvent:
     def test_returns_document_with_id_and_index(self, mock_client):
+        from opensearch_mcp import write_context as wc
+
+        index = f"case-{wc.case_identity(wc.case_dir_for('test-case'))[0]}-evtx-0"
         mock_client.get.return_value = {
             "_id": "doc123",
-            "_index": "case-test-evtx-host1",
+            "_index": index,
             "_source": {"event.code": 4624, "user.name": "admin"},
         }
-        resp = idx_get_event(event_id="doc123", index="case-test-evtx-host1")
+        resp = idx_get_event(event_id="doc123", index=index)
         assert resp["_id"] == "doc123"
-        assert resp["_index"] == "case-test-evtx-host1"
+        assert resp["_index"] == index
         assert resp["event.code"] == 4624
 
 

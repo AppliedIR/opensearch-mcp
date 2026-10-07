@@ -477,21 +477,6 @@ class TestPreflightToParserIntegration:
         }
         assert _detect_host_id_mapping_type(both) == "keyword"
 
-    def test_case_host_fix_passes_request_timeout(self):
-        """WSL2 R4 Test 3 — case_host_fix must pass request_timeout to
-        update_by_query so the default client read_timeout doesn't fire
-        false-negative on hundred-thousand-doc reindex calls. Verified
-        via source-text (test-mocking the timeout would over-fit)."""
-        import inspect
-
-        from opensearch_mcp import server
-
-        src = inspect.getsource(server._case_host_fix_impl)
-        assert "request_timeout=600" in src, (
-            "case_host_fix must pass request_timeout=600 to update_by_query "
-            "to avoid client-side ConnectionTimeout on multi-100K-doc hosts."
-        )
-
     def test_standalone_entries_run_h1_back_patch(self):
         """CR R4b — standalone entries (cmd_ingest_delimited/json/
         accesslog/memory) skip preflight. The H1 mapping back-patch
@@ -518,26 +503,6 @@ class TestPreflightToParserIntegration:
                 f"this entry leaves text-mapped host.id silently."
             )
 
-    def test_case_host_fix_script_noop_guards_already_flipped(self):
-        """WSL2 R5 — must_not bool filter alone is not sufficient because
-        on a text-mapped (pre-v1) host.id, the term query doesn't behave
-        as exact-match. Defense-in-depth: the painless script also
-        checks `ctx._source['host.id'] == params.id` and sets ctx.op =
-        'noop', so retry-after-timeout doesn't re-touch already-flipped
-        docs regardless of mapping type.
-        """
-        import inspect
-
-        from opensearch_mcp import server
-
-        src = inspect.getsource(server._case_host_fix_impl)
-        assert "ctx.op = 'noop'" in src, (
-            "case_host_fix painless script must include ctx.op = 'noop' "
-            "guard so retry-after-timeout doesn't re-touch already-flipped "
-            "docs on text-mapped indices."
-        )
-        assert "ctx._source['host.id'] == params.id" in src
-
     def test_case_host_fix_outer_envelope_catches_unexpected_exception(self):
         """WSL2 R5 — case_host_fix entry has an outer try/except that
         catches InvalidHostnameValue + generic Exception and returns
@@ -551,71 +516,6 @@ class TestPreflightToParserIntegration:
         assert "except InvalidHostnameValue" in src
         assert "except Exception" in src
         assert '"isError": True' in src
-
-    def test_case_host_fix_retry_skips_already_flipped(self):
-        """WSL2 Round-3 Test 3 — case_host_fix on 188K docs hit a
-        ConnectionTimeout after 174K flipped. Retry must skip the
-        already-flipped 174K and only touch the remaining 14K.
-
-        Verified via source-text: query body has must + must_not, where
-        must_not excludes docs already at new_canonical.
-        """
-        import inspect
-
-        from opensearch_mcp import server
-
-        src = inspect.getsource(server._case_host_fix_impl)
-        # Must clause: term host.name == raw
-        assert '"must": [{"term": {"host.name": raw}}]' in src, (
-            "case_host_fix must use bool/must term filter on host.name"
-        )
-        # Must-not clause: host.id already at new_canonical → skip
-        assert '"must_not": [{"term": {"host.id": new_canonical}}]' in src, (
-            "case_host_fix must skip already-flipped docs on retry "
-            "to bound the cost of retry-after-ConnectionTimeout"
-        )
-
-    def test_case_host_fix_refuses_text_mapped_index(self, tmp_path, monkeypatch):
-        """H1 defensive — refuse case_host_fix when any case index has
-        host.id mapped as text (pre-v1 upgrade path). update_by_query
-        would succeed but host.id queries would silently miss."""
-        from unittest.mock import patch
-
-        _seed_case_v1(tmp_path, "INC-H1", dict_hosts={"admin01": {"aliases": ["admin01"]}})
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        fake_vhir = tmp_path / "vhir"
-        fake_vhir.mkdir()
-        (fake_vhir / "active_case").write_text("INC-H1\n")
-        monkeypatch.setattr("opensearch_mcp.paths.vhir_dir", lambda: fake_vhir)
-        monkeypatch.setattr("opensearch_mcp.server.vhir_dir", lambda: fake_vhir, raising=False)
-
-        with patch("opensearch_mcp.server._get_os") as mock_get_os:
-            mock_client = MagicMock()
-            # Simulate a pre-v1 index where host.id is text.
-            mock_client.indices.get_mapping.return_value = {
-                "case-inc-h1-evtx-stale": {
-                    "mappings": {
-                        "properties": {
-                            "host.id": {
-                                "type": "text",
-                                "fields": {"keyword": {"type": "keyword"}},
-                            },
-                        }
-                    }
-                },
-            }
-            mock_get_os.return_value = mock_client
-
-            from opensearch_mcp.server import case_host_fix
-
-            result = case_host_fix(raw="admin01", new_canonical="admin01-new")
-
-        assert result.get("status") == "mapping_upgrade_required"
-        assert result.get("isError") is True
-        assert "case-inc-h1-evtx-stale" in result.get("indices_text", [])
-        # update_by_query must NOT have been called.
-        assert not mock_client.update_by_query.called
 
     def test_case_id_path_traversal_rejected(self):
         """M1 — case_id with path components rejected."""
@@ -796,7 +696,6 @@ class TestPreflightToParserIntegration:
         with (
             patch("opensearch_mcp.ingest.parse_and_index", side_effect=_stub_parse),
             patch("opensearch_mcp.ingest.AuditWriter"),
-            patch("opensearch_mcp.ingest._build_idx", return_value="case-test-evtx-x"),
             patch("opensearch_mcp.ingest._safe_count", return_value=0),
             patch("opensearch_mcp.ingest.sha256_file", return_value="abcd"),
             patch("opensearch_mcp.ingest._write_ingest_manifest"),
@@ -921,120 +820,6 @@ class TestCaseHostFix:
         assert "wksn01" in reloaded.hosts
         assert "wksn01" not in reloaded.hosts["wkstn01"]["aliases"]
         assert reloaded.resolve("wksn01") == "wksn01"
-
-    def test_fix_when_raw_is_itself_a_canonical(self, tmp_path, monkeypatch):
-        """Issue #4 — operator collapses an existing canonical into another.
-
-        Pre-fix: case_host_fix("wkstn01", "admin01") with wkstn01 as a
-        canonical would leave wkstn01.hosts entry orphaned. After
-        _rebuild_alias_map, the canonical self-mapping (wkstn01 → wkstn01)
-        wins over the new alias mapping (wkstn01 → admin01), so resolve
-        still returns "wkstn01". The fix deletes the canonical entry.
-        """
-        from unittest.mock import patch
-
-        _seed_case_v1(
-            tmp_path,
-            "INC-EDGE",
-            dict_hosts={
-                "admin01": {"aliases": ["admin01"]},
-                "wkstn01": {"aliases": ["wkstn01"]},  # collapsed-from
-            },
-        )
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        fake_vhir = tmp_path / "vhir"
-        fake_vhir.mkdir()
-        (fake_vhir / "active_case").write_text("INC-EDGE\n")
-        monkeypatch.setattr("opensearch_mcp.paths.vhir_dir", lambda: fake_vhir)
-        monkeypatch.setattr("opensearch_mcp.server.vhir_dir", lambda: fake_vhir, raising=False)
-
-        with patch("opensearch_mcp.server._get_os") as mock_get_os:
-            mock_client = MagicMock()
-            mock_client.update_by_query.return_value = {"updated": 0, "took": 1}
-            mock_get_os.return_value = mock_client
-
-            from opensearch_mcp.server import case_host_fix
-
-            result = case_host_fix(raw="wkstn01", new_canonical="admin01")
-
-        assert "error" not in result, f"unexpected error: {result.get('error')}"
-
-        # Reload the persisted dict and verify the collapse actually took.
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        d = HostDictionary.load(tmp_path / "INC-EDGE" / "host-dictionary.yaml")
-        assert "wkstn01" not in d.hosts, (
-            "wkstn01 canonical entry must be deleted when collapsed into admin01"
-        )
-        assert "wkstn01" in d.hosts["admin01"]["aliases"]
-        assert d.resolve("wkstn01") == "admin01", (
-            f"resolve('wkstn01') must return 'admin01', got {d.resolve('wkstn01')!r}"
-        )
-
-    def test_fix_uses_term_filter_not_query_string(self):
-        """Test 12 — case_host_fix builds a term-DSL query, NEVER query_string.
-
-        Source-text guard against Lucene-injection regression.
-        """
-        import inspect
-
-        from opensearch_mcp import server
-
-        src = inspect.getsource(server._case_host_fix_impl)
-        assert '"term": {"host.name": raw}' in src, (
-            "case_host_fix must use term-DSL filter; raw values may contain Lucene metacharacters."
-        )
-        # The quoted-string `"query_string"` is how the DSL key would appear
-        # if used as a filter. Plain-text references in comments are fine.
-        assert '"query_string"' not in src, "case_host_fix must NOT use query_string DSL clause."
-
-    def test_fix_saves_dict_before_reindex(self, tmp_path, monkeypatch):
-        """Test 18 — save() is invoked BEFORE update_by_query.
-
-        Order matters: a crash mid-call must leave the dict reflecting
-        operator intent, not the stale state.
-        """
-        from unittest.mock import patch
-
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        _seed_case_v1(tmp_path, "INC-18", dict_hosts={"admin01": {"aliases": ["admin01"]}})
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        # Redirect vhir_dir() to tmp_path so active_case can be written.
-        fake_vhir = tmp_path / "vhir"
-        fake_vhir.mkdir()
-        (fake_vhir / "active_case").write_text("INC-18\n")
-        monkeypatch.setattr("opensearch_mcp.paths.vhir_dir", lambda: fake_vhir)
-        monkeypatch.setattr("opensearch_mcp.server.vhir_dir", lambda: fake_vhir, raising=False)
-
-        call_order: list[str] = []
-        original_save = HostDictionary.save
-
-        def tracking_save(self):
-            call_order.append("save")
-            return original_save(self)
-
-        def fake_update_by_query(*args, **kwargs):
-            call_order.append("update_by_query")
-            return {"updated": 5, "took": 100}
-
-        with (
-            patch.object(HostDictionary, "save", tracking_save),
-            patch("opensearch_mcp.server._get_os") as mock_get_os,
-        ):
-            mock_client = MagicMock()
-            mock_client.update_by_query.side_effect = fake_update_by_query
-            mock_get_os.return_value = mock_client
-
-            from opensearch_mcp.server import case_host_fix
-
-            case_host_fix(raw="wksn01", new_canonical="wkstn01-new")
-
-        assert call_order == ["save", "update_by_query"], (
-            f"Expected save before update_by_query, got {call_order}"
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from opensearch_mcp import parse_csv, tools
+from opensearch_mcp import write_context as wc
 from opensearch_mcp.discover import DiscoveredHost, discover_artifacts
 from opensearch_mcp.parse_csv import _VOLATILE_KEYS, _doc_id
 
@@ -111,7 +112,7 @@ def test_the_same_row_in_two_users_hives_stays_two_documents(recmd, tmp_path):
         "Users/alice/NTUSER.DAT",
         "Users/bob/NTUSER.DAT",
     ]
-    assert {a["_index"] for a in recmd} == {"case-c1-registry-w"}
+    assert {a["_index"] for a in recmd} == {wc.index_name("registry")}  # no host in the name
 
 
 def test_a_system_hive_rows_id_is_unchanged(recmd, tmp_path):
@@ -122,4 +123,4 @@ def test_a_system_hive_rows_id_is_unchanged(recmd, tmp_path):
     assert "vhir.hive" not in action["_source"]
     row = {k: v for k, v in action["_source"].items() if not k.startswith(("vhir.", "pipeline"))}
     row["vhir.table"] = action["_source"]["vhir.table"]
-    assert action["_id"] == _doc_id("case-c1-registry-w", row, None, volatile_keys=_VOLATILE_KEYS)
+    assert action["_id"] == _doc_id(action["_index"], row, None, volatile_keys=_VOLATILE_KEYS)

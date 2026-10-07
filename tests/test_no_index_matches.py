@@ -51,6 +51,7 @@ AUDITED = []
 def tools(scratch, monkeypatch):
     client, tag = scratch
     monkeypatch.setattr(srv, "_get_os", lambda: client)
+    monkeypatch.setattr(srv, "_get_active_case", lambda: f"{tag}-a")
     AUDITED.clear()
 
     def log(**kw):
@@ -81,12 +82,15 @@ def _no_index(result, pattern):
 )
 @pytest.mark.parametrize("tool", ["idx_search", "idx_count"])
 def test_a_pattern_matching_no_open_index_is_an_error(tools, where, tool):
+    from opensearch_mcp.case_scope import case_read_scope
+
     kw = where(tools)
     result = getattr(srv, tool)(query="event.code:4624", **kw)
-    pattern = kw.get("index") or f"case-{kw['case_id']}-*"
+    pattern = kw.get("index") or case_read_scope(kw["case_id"], srv._get_os())
     assert _no_index(result, pattern), result
     (entry,) = AUDITED
-    assert entry["tool"] == tool and entry["params"]["index"] == pattern
+    assert entry["tool"] == tool and entry["params"]["scope"] == pattern
+    assert entry["params"]["index"] == kw.get("index", "")  # what was asked for
     assert entry["result_summary"] == "no open index matched"
 
 

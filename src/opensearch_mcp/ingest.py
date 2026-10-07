@@ -13,12 +13,11 @@ from opensearchpy import OpenSearch
 from sift_common.audit import AuditWriter
 
 from opensearch_mcp import __version__
+from opensearch_mcp import write_context as wc
 from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.parse_evtx import evtx_truncation, parse_and_index
-from opensearch_mcp.paths import build_index_name as _build_idx
-from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
 from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
@@ -194,6 +193,7 @@ def ingest(
     on_progress: object = None,
     host_dict=None,
     final_status: str = "complete",
+    case_dir: Path | None = None,
 ) -> IngestResult:
     """Ingest artifacts for discovered hosts.
 
@@ -205,6 +205,8 @@ def ingest(
     reduced_log_names: if set, only parse evtx files matching these names.
     final_status: the status of the last write; "running" when the caller
       has a later phase (hayabusa, triage) that writes the terminal one.
+    case_dir: the case the records belong to; each host is one evidence
+      unit in it (see host_context).
     """
     active_tools = get_active_tools(include=include, exclude=exclude, full=full)
     active_names = {t.cli_name for t in active_tools}
@@ -260,27 +262,29 @@ def ingest(
 
     _update_status()
 
-    _ingest_hosts(
-        hosts=hosts,
-        client=client,
-        audit=audit,
-        case_id=case_id,
-        active_names=active_names,
-        active_plaso=active_plaso,
-        active_custom=active_custom,
-        full=full,
-        time_from=time_from,
-        time_to=time_to,
-        reduced_ids=reduced_ids,
-        reduced_log_names=reduced_log_names,
-        status_hosts=status_hosts,
-        _progress=_progress,
-        _update_status=_update_status,
-        result=result,
-        start=start,
-        run_id=status_run_id,
-        host_dict=host_dict,
-    )
+    with wc.restoring():
+        _ingest_hosts(
+            hosts=hosts,
+            client=client,
+            audit=audit,
+            case_id=case_id,
+            active_names=active_names,
+            active_plaso=active_plaso,
+            active_custom=active_custom,
+            full=full,
+            time_from=time_from,
+            time_to=time_to,
+            reduced_ids=reduced_ids,
+            reduced_log_names=reduced_log_names,
+            status_hosts=status_hosts,
+            _progress=_progress,
+            _update_status=_update_status,
+            result=result,
+            start=start,
+            run_id=status_run_id,
+            host_dict=host_dict,
+            case_dir=case_dir,
+        )
 
     result.elapsed_seconds = time.monotonic() - start
 
@@ -360,6 +364,13 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
     return None
 
 
+def hayabusa_staging_stem(ctx) -> str:
+    """One Hayabusa output file per case, evidence unit and run: two runs
+    never share one, and neither do two hosts with one name."""
+    run = os.environ.get("VHIR_INGEST_RUN_ID") or str(os.getpid())
+    return f"hayabusa-{ctx.c12}-{ctx.unit}-{run}"
+
+
 def run_hayabusa_batch(
     hosts,
     client,
@@ -367,11 +378,17 @@ def run_hayabusa_batch(
     audit=None,
     on_progress=None,
     host_dict=None,
+    case_dir=None,
 ) -> dict:
     """Run Hayabusa on all hosts' evtx dirs, ingest CSV results.
 
     Called as a post-ingest phase — evtx data is already indexed.
     """
+    with wc.restoring():
+        return _run_hayabusa_batch(hosts, client, case_id, audit, on_progress, host_dict, case_dir)
+
+
+def _run_hayabusa_batch(hosts, client, case_id, audit, on_progress, host_dict, case_dir):
     import shutil
     import subprocess
 
@@ -426,9 +443,10 @@ def run_hayabusa_batch(
             }
             continue
 
-        _cid = _sanitize_index_component(case_id)
-        _hn = _sanitize_index_component(host.hostname)
-        csv_output = output_dir / f"hayabusa-{_cid}-{_hn}.csv"
+        ctx = wc.host_context(case_dir, case_id, host)
+        wc.set_current(ctx)
+        stem = hayabusa_staging_stem(ctx)
+        csv_output = output_dir / f"{stem}.csv"
         cmd = [
             hayabusa,
             timeline,
@@ -451,7 +469,7 @@ def run_hayabusa_batch(
             # exits 0), so move the previous run's CSV aside: a run that
             # writes nothing then fails the output check below.
             if csv_output.exists():
-                csv_output.replace(output_dir / f"hayabusa-{_cid}-{_hn}.prev.csv")
+                csv_output.replace(output_dir / f"{stem}.prev.csv")
             result = subprocess.run(cmd, capture_output=True, timeout=3600)
             if result.returncode != 0:
                 stderr = result.stderr.decode(errors="replace")[:200]
@@ -474,7 +492,7 @@ def run_hayabusa_batch(
                 on_progress("hayabusa_failed", hostname=host.hostname, error="no output")
             continue
 
-        index_name = _build_idx(case_id, "hayabusa", host.hostname)
+        index_name = wc.index_name("hayabusa")
         cnt = 0
         try:
             cnt, sk, bf, hr = ingest_delimited(
@@ -556,9 +574,12 @@ def _ingest_hosts(
     start,
     run_id="",
     host_dict=None,
+    case_dir=None,
 ):
     """Inner ingest loop — processes all hosts and artifacts."""
     for host_idx, host in enumerate(hosts):
+        ctx = wc.host_context(case_dir, case_id, host, run_id)
+        wc.set_current(ctx)
         host_result = HostResult(hostname=host.hostname, volume_root=str(host.volume_root))
         _progress("host_start", hostname=host.hostname)
 
@@ -597,10 +618,8 @@ def _ingest_hosts(
                 dropped.update(host_result.evtx_dropped)
 
             if evtx_files:
-                _cid = _sanitize_index_component(case_id)
-                _hn = _sanitize_index_component(host.hostname)
-                index_name = _build_idx(case_id, "evtx", host.hostname)
-                existing = _safe_count(client, index_name)
+                index_name = wc.index_name("evtx")
+                existing = _safe_count(client, index_name, ctx.unit)
                 ar = ArtifactResult(
                     artifact="evtx",
                     index=index_name,
@@ -795,10 +814,8 @@ def _ingest_hosts(
             seen_runs.add(run_key)
 
             cfg = TOOLS[tool_name]
-            _cid = _sanitize_index_component(case_id)
-            _hn = _sanitize_index_component(host.hostname)
-            index_name = _build_idx(case_id, cfg.index_suffix, host.hostname)
-            existing = _safe_count(client, index_name)
+            index_name = wc.index_name(cfg.index_suffix)
+            existing = _safe_count(client, index_name, wc.current().unit)
             file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
             aid = audit._next_audit_id()
 
@@ -925,6 +942,7 @@ def _ingest_hosts(
 
             host_result.artifacts.append(ar)
 
+        _add_second_copy_notes(host, host_idx, host_result, status_hosts)
         result.hosts.append(host_result)
 
 
@@ -958,11 +976,11 @@ def _ingest_plaso_volume(
     )
     from opensearch_mcp.paths import vhir_dir
 
-    index_name = _build_idx(case_id, "plaso", host.hostname)
+    index_name = wc.index_name("plaso")
     ar = ArtifactResult(
         artifact="plaso",
         index=index_name,
-        existing_before=_safe_count(client, index_name),
+        existing_before=_safe_count(client, index_name, wc.current().unit),
         source_files=[str(host.volume_root)],
     )
     tool_status = _find_artifact_status(status_hosts, host_idx, "plaso")
@@ -1071,10 +1089,8 @@ def _ingest_plaso_artifact(
     from opensearch_mcp.parse_prefetch import parse_prefetch
     from opensearch_mcp.parse_srum import parse_srum
 
-    _cid = _sanitize_index_component(case_id)
-    _hn = _sanitize_index_component(host.hostname)
-    index_name = _build_idx(case_id, tool_name, host.hostname)
-    existing = _safe_count(client, index_name)
+    index_name = wc.index_name(tool_name)
+    existing = _safe_count(client, index_name, wc.current().unit)
     plaso_hash = ""  # hashed in the try: an unreadable file fails its artifact only
     aid = audit._next_audit_id()
 
@@ -1208,10 +1224,8 @@ def _ingest_custom_artifact(
     host_dict=None,
 ) -> None:
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
-    _cid = _sanitize_index_component(case_id)
-    _hn = _sanitize_index_component(host.hostname)
-    index_name = _build_idx(case_id, tool_name, host.hostname)
-    existing = _safe_count(client, index_name)
+    index_name = wc.index_name(tool_name)
+    existing = _safe_count(client, index_name, wc.current().unit)
     file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
     aid = audit._next_audit_id()
 
@@ -1442,9 +1456,27 @@ def _run_custom_parser(
     raise ValueError(f"Unknown custom artifact: {tool_name}")
 
 
-def _safe_count(client: OpenSearch, index_name: str) -> int:
+def _add_second_copy_notes(host, host_idx, host_result, status_hosts) -> None:
+    """In a case from before 0.7: say on each artifact of the host that
+    already had pre-0.7 data of its type that this ingest added a second copy."""
+    for ar in host_result.artifacts:
+        note = wc.second_copy_note(host.hostname, wc.artifact_type_of(ar.index or ""))
+        if not note:
+            continue
+        ar.note = "; ".join(n for n in (ar.note, note) if n)
+        entry = _find_artifact_status(status_hosts, host_idx, ar.artifact)
+        if entry is not None:
+            entry["note"] = "; ".join(n for n in (entry.get("note"), note) if n)
+
+
+def _safe_count(client: OpenSearch, index_name: str, unit: str = "") -> int:
+    """Documents in `index_name`; with `unit`, only that evidence unit's."""
     try:
-        r = client.count(index=index_name)
+        if unit:
+            body = {"query": {"term": {"vhir.unit": unit}}}
+            r = client.count(index=index_name, body=body)
+        else:
+            r = client.count(index=index_name)
         return r["count"]
     except Exception:
         return 0

@@ -126,14 +126,17 @@ def parse_and_index(
                 skipped += 1
                 continue
 
-        # Deterministic ID: source_file + event_record_id.
+        # Deterministic ID: source_file + event_record_id + TimeCreated.
         # NOT content hash — Windows can log identical events with
         # different record IDs (all are real evidence, must be preserved).
         # Re-ingest from the SAME file deduplicates (same record IDs).
         # Re-ingest from a DIFFERENT file (e.g., KAPE vs disk image)
         # adds new docs (different source_file = different IDs).
+        # TimeCreated: a reinstalled machine restarts its record numbers,
+        # so the same path and number can be two different events.
         record_id = record.get("event_record_id", "")
-        id_input = f"{index_name}:{source_file}:{record_id}"
+        created = record.get("timestamp") or doc.get("@timestamp", "")
+        id_input = f"{index_name}:{source_file}:{record_id}:{created}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
 
         # Provenance fields — injected after ID computation

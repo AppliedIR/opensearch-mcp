@@ -19,7 +19,7 @@ import pytest
 
 from opensearch_mcp import triage_remote
 from opensearch_mcp.parse_csv import ingest_csv
-from opensearch_mcp.paths import build_index_name
+from opensearch_mcp.paths import legacy_index_name
 
 pytestmark = pytest.mark.integration
 
@@ -76,7 +76,7 @@ def triage(scratch, tmp_path, monkeypatch):
 
     def new_case(name, rows):
         case = f"{tag}-{name}"  # case-{tag}-* is what the scratch templates cover
-        index = build_index_name(case, "registry", "h1")
+        index = legacy_index_name(case, "registry", "h1")
         csv = tmp_path / f"{name}.csv"
         csv.write_text(HEADER + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
         _, _, failed = ingest_csv(csv, client, index, "h1")

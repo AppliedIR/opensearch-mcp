@@ -261,42 +261,42 @@ class TestValidateIndex:
 
 class TestSanitizeIndexComponent:
     def test_lowercase(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("WS05") == "ws05"
 
     def test_spaces_replaced(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("WS 05") == "ws-05"
 
     def test_slashes_replaced(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("host/name") == "host-name"
 
     def test_dots_preserved(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("host.domain.com") == "host.domain.com"
 
     def test_hyphens_preserved(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("inc-2026-001") == "inc-2026-001"
 
     def test_special_chars_replaced(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("host*name?") == "host-name-"
 
     def test_empty_string(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         assert _sanitize_index_component("") == ""
 
     def test_path_traversal_sanitized(self):
-        from opensearch_mcp.ingest import _sanitize_index_component
+        from opensearch_mcp.paths import sanitize_index_component as _sanitize_index_component
 
         result = _sanitize_index_component("../../etc/passwd")
         assert "/" not in result

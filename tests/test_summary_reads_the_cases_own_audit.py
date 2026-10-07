@@ -12,21 +12,22 @@ from pathlib import Path
 import pytest
 
 from opensearch_mcp import server
+from opensearch_mcp import write_context as wc
 
 DOCS = 1000
 
 
 def _warning(cid):
+    c12 = wc.case_identity(wc.case_dir_for(cid))[0]
     return (
-        f"case-{cid}-registry-host1 ({DOCS:,} docs) may be incomplete: the most recent"
+        f"case-{c12}-registry-0 ({DOCS:,} docs from host1) may be incomplete: the most recent"
         " ingest of registry on host1 failed (FAILED: line contains NUL)"
     )
 
 
 class _Cat:
-    def indices(self, index, format="json", **kw):
-        cid = index[len("case-") : -len("-*")]
-        return [{"index": f"case-{cid}-registry-host1", "docs.count": str(DOCS)}]
+    def indices(self, index, format="json", **kw):  # the case's case-<c12>-* scope
+        return [{"index": index.removesuffix("*") + "registry-0", "docs.count": str(DOCS)}]
 
 
 class _Client:
@@ -37,8 +38,8 @@ class _Client:
             return {"aggregations": {"hosts": {"buckets": [{"key": "host1"}]}}}
         return {"aggregations": {"min_ts": {}, "max_ts": {}}}
 
-    def count(self, index, body):
-        return {"count": 0}
+    def count(self, index, body):  # a failed host's own documents, for its warning
+        return {"count": DOCS if "host.name" in str(body) else 0}
 
 
 def _entry(case_id, result, ts="2026-10-03T20:23:26+00:00", run="r1"):

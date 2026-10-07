@@ -11,6 +11,13 @@ from opensearchpy import OpenSearch
 from opensearch_mcp.bulk import flush_bulk
 
 
+def _file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def parse_wer_file(file_path: Path) -> dict:
     """Parse a single Report.wer file."""
     doc: dict = {}
@@ -105,7 +112,8 @@ def parse_wer_dir(
         doc["vhir.parse_method"] = "wer-parser"
         if vss_id:
             doc["vhir.vss_id"] = vss_id
-        id_input = f"{index_name}:{rel}"
+        # The file's bytes too: a rebuilt machine can have a different file at the same path.
+        id_input = f"{index_name}:{rel}:{_file_sha256(wer_file)}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 

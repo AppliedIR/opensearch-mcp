@@ -75,7 +75,7 @@ def hb(tmp_path, monkeypatch):
         monkeypatch.setenv("HB_KNOWS", knows)
         if mode:
             monkeypatch.setenv("HB_MODE", mode)
-        host = SimpleNamespace(hostname="HOST1", evtx_dir=evtx)
+        host = SimpleNamespace(hostname="HOST1", evtx_dir=evtx, volume_root=evtx)
         results = ingest.run_hayabusa_batch([host], None, "case1")
         commands = ran.read_text().split() if ran.exists() else []
         return results, commands

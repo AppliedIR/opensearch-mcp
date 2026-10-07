@@ -19,7 +19,6 @@ from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
-from opensearch_mcp.host_dictionary import detect_host_id_mapping_type
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
 
@@ -225,14 +224,15 @@ def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
     if "*" not in index_pattern:
         return
     idx_names = _get_case_indices(index_pattern, client)
-    has_evtx = any("-evtx-" in n and "-evtxecmd-" not in n for n in idx_names)
-    has_evtxecmd = any("-evtxecmd-" in n for n in idx_names)
+    # per-file stems use "_" since 0.7 (delim-evtxecmd_<file>), "-" before
+    has_evtx = any("-evtx-" in n for n in idx_names)
+    has_evtxecmd = any(re.search(r"-delim-evtxecmd[-_]", n) for n in idx_names)
     if not (has_evtx and has_evtxecmd):
         return
     if _field_hint_delivered:
         resp["field_hint"] = (
             "Mixed evtx/EvtxECmd indices — use case-*-evtx-* for ECS fields "
-            "or case-*-delim-evtxecmd-* for CSV fields."
+            "or case-*-delim-evtxecmd* for CSV fields."
         )
     else:
         resp["field_hint"] = _FIELD_HINT_EVTX_EVTXECMD
@@ -405,27 +405,29 @@ def _strip_hits(
     return results
 
 
-def _resolve_index(index: str, case_id: str) -> str:
-    """Resolve index pattern from explicit index, case_id, or active case."""
-    if index:
-        return index
-    from opensearch_mcp.paths import sanitize_index_component
+def _resolve_index(index: str, case_id: str, client=None) -> tuple[str, str]:
+    """(index expression, error): the case's indices (`case_id`, or the
+    active case), or an explicit expression when it stays inside that case."""
+    from opensearch_mcp.case_scope import CaseScopeError, confine
 
-    cid = case_id or _get_active_case() or ""
-    if cid:
-        return f"case-{sanitize_index_component(cid)}-*"
-    return "case-*"
+    err = _validate_index(index) if index else None
+    if err:
+        return "", err
+    try:
+        return confine(index, case_id or _get_active_case() or "", client), ""
+    except CaseScopeError as e:
+        return "", str(e)
 
 
-def _search_index(index: str, case_id: str) -> tuple[str, dict | None]:
-    """The pattern a search tool queries, or a refusal when there is no case.
-    The active case is read once, so the check and the pattern agree."""
+def _search_index(index: str, case_id: str, client) -> tuple[str, str]:
+    """(index expression, error) a search tool queries: a refusal when there
+    is no case. The active case is read once, so the check and the
+    expression agree."""
     if not (index or case_id):
         case_id = _get_active_case() or ""
         if not case_id:
-            refusal = "No active case. Run 'vhir case activate' first, or pass case_id or index."
-            return "", {"error": refusal}
-    return _resolve_index(index, case_id), None
+            return "", "No active case. Run 'vhir case activate' first, or pass case_id or index."
+    return _resolve_index(index, case_id, client)
 
 
 def _mixed_type_refusal(client, index: str, field: str) -> dict | None:
@@ -443,11 +445,21 @@ def _mixed_type_refusal(client, index: str, field: str) -> dict | None:
     return None
 
 
-def _hayabusa_index(case_id: str = "") -> str:
-    """The Hayabusa alert indices of case_id, or of the active case; every
-    case's only when there's neither."""
-    base = _resolve_index("", case_id)
-    return "case-*-hayabusa-*" if base == "case-*" else base[:-1] + "hayabusa-*"
+def _hayabusa_index(case_id: str = "", client=None) -> str:
+    """The Hayabusa alert indices of case_id, or of the active case; ""
+    when there's no case."""
+    from opensearch_mcp.case_scope import CaseScopeError, case_read_scope
+
+    if client is None:  # a pre-0.7 case's alerts are named only with the cluster's answer
+        try:
+            client = _get_os()
+        except Exception:
+            client = None
+    try:
+        cid = case_id or _get_active_case() or ""
+        return case_read_scope(cid, client, artifact_type="hayabusa")
+    except CaseScopeError:
+        return ""
 
 
 def _detect_preparsed_csvs(path: Path) -> str | None:
@@ -640,13 +652,11 @@ def idx_search(
         time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
         time_to: End time (ISO 8601).
     """
-    index, refused = _search_index(index, case_id)
-    if refused:
-        return refused
-    err = _validate_index(index)
+    requested = index
+    client = _get_os()
+    index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
-    client = _get_os()
     limit = min(limit, 200)
 
     sort_field, _, sort_order = sort.partition(":")
@@ -681,7 +691,7 @@ def idx_search(
     if err := _no_index_matched(result, index):
         aid = audit.log(
             tool="idx_search",
-            params={"query": query, "index": index, "limit": limit},
+            params={"query": query, "index": requested, "scope": index, "limit": limit},
             result_summary="no open index matched",
         )
         if aid:
@@ -723,7 +733,7 @@ def idx_search(
     _add_shimcache_reminder(resp, index, docs)
     aid = audit.log(
         tool="idx_search",
-        params={"query": query, "index": index, "limit": limit},
+        params={"query": query, "index": requested, "scope": index, "limit": limit},
         result_summary=f"{total} total, {len(docs)} returned",
     )
     if aid:
@@ -745,13 +755,11 @@ def idx_count(
         case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
             active case; with no index, case_id or active case, it refuses.
     """
-    index, refused = _search_index(index, case_id)
-    if refused:
-        return refused
-    err = _validate_index(index)
+    requested = index
+    client = _get_os()
+    index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
-    client = _get_os()
     result = _os_call(
         client.count,
         index=index,
@@ -760,7 +768,7 @@ def idx_count(
     if err := _no_index_matched(result, index):
         aid = audit.log(
             tool="idx_count",
-            params={"query": query, "index": index},
+            params={"query": query, "index": requested, "scope": index},
             result_summary="no open index matched",
         )
         if aid:
@@ -769,7 +777,7 @@ def idx_count(
     resp = {"count": result["count"]}
     aid = audit.log(
         tool="idx_count",
-        params={"query": query, "index": index},
+        params={"query": query, "index": requested, "scope": index},
         result_summary=f"count={result['count']}",
     )
     if aid:
@@ -795,13 +803,11 @@ def idx_aggregate(
             active case; with no index, case_id or active case, it refuses.
         limit: Max buckets (default 50, max 500).
     """
-    index, refused = _search_index(index, case_id)
-    if refused:
-        return refused
-    err = _validate_index(index)
+    requested = index
+    client = _get_os()
+    index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
-    client = _get_os()
     limit = min(limit, 500)
     if refusal := _mixed_type_refusal(client, index, field):
         return refusal
@@ -830,7 +836,7 @@ def idx_aggregate(
     }
     aid = audit.log(
         tool="idx_aggregate",
-        params={"field": field, "query": query, "index": index},
+        params={"field": field, "query": query, "index": requested, "scope": index},
         result_summary=f"{len(buckets)} buckets",
     )
     if aid:
@@ -849,10 +855,12 @@ def idx_get_event(
         event_id: Document _id from search results.
         index: Exact index name (not a pattern).
     """
-    err = _validate_index(index)
+    if not index or not index.strip():
+        return {"error": "Index parameter must not be empty"}
+    client = _get_os()
+    _, err = _resolve_index(index, "", client)
     if err:
         return {"error": err}
-    client = _get_os()
     result = _os_call(client.get, index=index, id=event_id)
     doc = {"_id": result["_id"], "_index": result["_index"]}
     doc.update(result.get("_source", {}))
@@ -893,13 +901,11 @@ def idx_timeline(
 
     if not _re_mod.match(r"^\d+[smhd]$", interval):
         return {"error": f"Invalid interval '{interval}'. Use Ns/Nm/Nh/Nd (e.g., 1h, 30m)."}
-    index, refused = _search_index(index, case_id)
-    if refused:
-        return refused
-    err = _validate_index(index)
+    requested = index
+    client = _get_os()
+    index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
-    client = _get_os()
 
     query_body: dict = {"query_string": {"query": query}}
     if time_from or time_to:
@@ -943,7 +949,7 @@ def idx_timeline(
     }
     aid = audit.log(
         tool="idx_timeline",
-        params={"query": query, "index": index, "interval": interval},
+        params={"query": query, "index": requested, "scope": index, "interval": interval},
         result_summary=f"{len(buckets)} buckets",
     )
     if aid:
@@ -969,13 +975,11 @@ def idx_field_values(
             active case; with no index, case_id or active case, it refuses.
         limit: Max values (default 50, max 500).
     """
-    index, refused = _search_index(index, case_id)
-    if refused:
-        return refused
-    err = _validate_index(index)
+    requested = index
+    client = _get_os()
+    index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
-    client = _get_os()
     limit = min(limit, 500)
     if refusal := _mixed_type_refusal(client, index, field):
         return refusal
@@ -998,7 +1002,7 @@ def idx_field_values(
     resp = {"field": field, "values": values, "truncated": len(values) >= limit}
     aid = audit.log(
         tool="idx_field_values",
-        params={"field": field, "query": query, "index": index},
+        params={"field": field, "query": query, "index": requested, "scope": index},
         result_summary=f"{len(values)} values",
     )
     if aid:
@@ -1182,12 +1186,16 @@ def idx_install_pipelines() -> dict:
     return result
 
 
-def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[str]:
+def _failed_artifact_warnings(
+    cid: str, docs_by_index: dict[str, int], host_docs=None
+) -> list[str]:
     """One warning per (host, artifact) whose most recent ingest failed and left
     an index: it may hold only part of the artifact. Read from the case audit
     log, which outlives the ingest status files."""
+    from sift_common.host_identity import spelling
+
     from opensearch_mcp.ingest import _CUSTOM_ARTIFACTS, _PLASO_ARTIFACTS
-    from opensearch_mcp.paths import build_index_name
+    from opensearch_mcp.paths import build_index_name, legacy_index_name
     from opensearch_mcp.tools import TOOLS
 
     suffix = {n: c.index_suffix for n, c in TOOLS.items()}
@@ -1199,7 +1207,9 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
         own = Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases"))) / cid / "audit"
         if own.is_dir() and not any(own.samefile(d) for d in dirs):
             dirs.append(own)
-    last: dict[str, tuple[str, str, str, str, str]] = {}  # index -> (ts, result, tool, host, run)
+    c12 = _case_c12(cid)
+    # (index, host) -> (ts, result, tool, host, run)
+    last: dict[tuple[str, str], tuple[str, str, str, str, str]] = {}
     for f in [f for d in dirs for f in sorted(d.glob("opensearch-ingest-*.jsonl"))]:
         own_dir = f.parent.parent.name == cid
         for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -1220,18 +1230,24 @@ def _failed_artifact_warnings(cid: str, docs_by_index: dict[str, int]) -> list[s
             rs = e.get("result_summary")
             rs = str(rs.get("value", "") if isinstance(rs, dict) else rs or "")
             ts = str(e.get("ts", ""))
-            index = build_index_name(cid, suffix[tool], host)  # DEV01 and dev01 share one
+            # the shared index, or a pre-0.7 per-host one; DEV01 and dev01 are one host
+            index = build_index_name(c12, suffix[tool]) if c12 else ""
+            if index not in docs_by_index:
+                index = legacy_index_name(cid, suffix[tool], host)
             run = params.get("run_id") or ts  # an entry from before run ids is its own run
-            prev = last.get(index, ("", "", "", "", ""))
+            prev = last.get((index, spelling(host)), ("", "", "", "", ""))
             if prev[4] == run and prev[1].startswith("FAILED"):
                 continue  # one failed profile or directory fails its run
             if ts >= prev[0]:
-                last[index] = (ts, rs, tool, host, run)
+                last[(index, spelling(host))] = (ts, rs, tool, host, run)
     warnings = []
-    for index, (_ts, rs, tool, host, _run) in sorted(last.items()):
+    for (index, _h), (_ts, rs, tool, host, _run) in sorted(last.items()):
         if rs.startswith("FAILED") and index in docs_by_index:
+            # a shared index holds every host's records: count this host's
+            n = host_docs(index, host) if host_docs and index.endswith("-0") else None
+            docs = f"{docs_by_index[index]:,} docs" if n is None else f"{n:,} docs from {host}"
             warnings.append(
-                f"{index} ({docs_by_index[index]:,} docs) may be incomplete: the most"
+                f"{index} ({docs}) may be incomplete: the most"
                 f" recent ingest of {tool} on {host} failed ({rs[:200]})"
             )
     return warnings
@@ -1266,6 +1282,51 @@ def _intel_counts(client, pattern: str) -> dict:
     }
 
 
+def _case_c12(case_id: str) -> str:
+    """The index id of the case named `case_id`, or "" when it has no directory."""
+    from opensearch_mcp.write_context import case_dir_for, case_identity
+
+    case_dir = case_dir_for(case_id)
+    if case_dir is None or not (case_dir / "CASE.yaml").is_file():
+        return ""
+    return case_identity(case_dir)[0]
+
+
+def _existing_host_docs(client, case_id: str, artifact_type: str, hostname: str, out: dict):
+    """Record how many documents of `artifact_type` already carry `hostname`:
+    in the case's shared index, and, in a case from before 0.7, in its
+    pre-0.7 per-host index, with the notice that this ingest adds a second
+    copy (under the "notes" key)."""
+    from opensearch_mcp.case_scope import CaseScopeError, scope_of
+    from opensearch_mcp.paths import build_index_name, legacy_index_name
+    from opensearch_mcp.write_context import SECOND_COPY_NOTE
+
+    try:
+        scope = scope_of(case_id)
+    except CaseScopeError:
+        return
+    idx = build_index_name(scope.c12, artifact_type)
+    try:
+        n = client.count(index=idx, body={"query": {"term": {"host.name": hostname}}})["count"]
+        if n:
+            out[idx] = n
+    except Exception:
+        pass
+    if scope.naming_version != 1:
+        return
+    idx = legacy_index_name(scope.legacy_id, artifact_type, hostname)
+    try:
+        n = client.count(index=idx)["count"]
+    except Exception:
+        return
+    out[idx] = n
+    if n:
+        notes = out.setdefault("notes", [])
+        note = f"{artifact_type}: {SECOND_COPY_NOTE}"
+        if note not in notes:
+            notes.append(note)
+
+
 @server.tool()
 def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     """Get a complete overview of indexed evidence for a case.
@@ -1277,16 +1338,29 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         include_fields: Include field mappings per artifact type (large output).
             Default False to keep response compact.
     """
-    from opensearch_mcp.paths import sanitize_index_component
+    from opensearch_mcp.case_scope import (
+        CaseScopeError,
+        attach_legacy_alias,
+        case_read_scope,
+        scope_of,
+        unattributed_indices,
+    )
+    from opensearch_mcp.case_scope import (
+        artifact_type as _artifact_type,
+    )
 
-    cid = case_id or _get_active_case()
-    if not cid:
-        return {"error": "No active case. Run 'vhir case activate' first."}
-
+    try:
+        scope = scope_of(case_id or _get_active_case() or "")
+    except CaseScopeError as e:
+        return {"error": str(e)}
+    cid = scope.case_id
     client = _get_os()
-    safe = sanitize_index_component(cid)
-    pattern = f"case-{safe}-*"
     resp: dict = {}
+    try:
+        attach_legacy_alias(client, cid)
+    except Exception as e:
+        resp.setdefault("warnings", []).append(f"Could not attach the pre-0.7 indices: {e}")
+    pattern = case_read_scope(cid, client)
 
     # Get all indices for this case
     try:
@@ -1307,55 +1381,57 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         }
         return err
 
-    # Get hosts from document field (reliable — index name parsing
-    # breaks on hostnames with dashes)
+    # Hosts are machines: host.id, with the raw names their records carry,
+    # read from the documents (index names carry no host).
     hosts: set = set()
+    host_names: dict = {}
+    index_hosts: dict = {}
     try:
         host_agg = client.search(
             index=pattern,
             body={
                 "size": 0,
-                "aggs": {"hosts": {"terms": {"field": "host.name", "size": 500}}},
+                "aggs": {
+                    "hosts": {
+                        "terms": {"field": "host.id", "size": 5000},
+                        "aggs": {"names": {"terms": {"field": "host.name", "size": 50}}},
+                    },
+                    "by_index": {
+                        "terms": {"field": "_index", "size": 5000},
+                        "aggs": {"hosts": {"terms": {"field": "host.id", "size": 500}}},
+                    },
+                },
             },
         )
         for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
             hosts.add(bucket["key"])
+            host_names[bucket["key"]] = sorted(b["key"] for b in bucket["names"]["buckets"])
         cut = host_agg["aggregations"]["hosts"].get("sum_other_doc_count", 0)
         if cut:
             resp.setdefault("warnings", []).append(
-                f"Host list cut at 500 host.name values: {cut} documents carry host names "
-                "not listed, and their indices may be listed under their own artifact keys."
+                f"Host list cut at 5000 host.id values: {cut} documents carry hosts not listed."
             )
+        for bucket in host_agg["aggregations"]["by_index"]["buckets"]:
+            index_hosts[bucket["key"]] = [b["key"] for b in bucket["hosts"]["buckets"]]
     except Exception as e:
         resp.setdefault("warnings", []).append(f"Host detection query failed: {e}")
 
-    # Build artifact map — strip known hostnames from index suffixes
-    # to extract the artifact type. Index format: case-{id}-{type}-{host}
-    # where both type and host may contain dashes.
+    # Artifact type: the remainder after case-<c12>- with -0 removed; for a
+    # pre-0.7 index, its type with the host tail dropped.
     artifacts: dict = {}
     total_docs = 0
-    prefix = f"case-{safe}-"
-    host_suffixes = sorted(hosts, key=len, reverse=True)  # longest first
     for idx in indices:
         name = idx["index"]
         docs = int(idx.get("docs.count", 0))
         total_docs += docs
-        remainder = name[len(prefix) :] if name.startswith(prefix) else name
-        # Try stripping each known host suffix
-        artifact_type = remainder
-        matched_host = ""
-        for h in host_suffixes:
-            suffix = f"-{h}"
-            if remainder.endswith(suffix):
-                artifact_type = remainder[: -len(suffix)]
-                matched_host = h
-                break
-        if artifact_type not in artifacts:
-            artifacts[artifact_type] = {"docs": 0, "hosts": [], "indices": []}
-        artifacts[artifact_type]["docs"] += docs
-        if matched_host and matched_host not in artifacts[artifact_type]["hosts"]:
-            artifacts[artifact_type]["hosts"].append(matched_host)
-        artifacts[artifact_type]["indices"].append(name)
+        atype = _artifact_type(name, scope)
+        if atype not in artifacts:
+            artifacts[atype] = {"docs": 0, "hosts": [], "indices": []}
+        artifacts[atype]["docs"] += docs
+        for h in index_hosts.get(name, []):
+            if h not in artifacts[atype]["hosts"]:
+                artifacts[atype]["hosts"].append(h)
+        artifacts[atype]["indices"].append(name)
 
     # Aggregate sub-indices (e.g., delim-amcache-devicecontainers → delim-amcache)
     # to prevent 30 hosts × 6 sub-tables = 180 entries bloating the response.
@@ -1469,6 +1545,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         {
             "case_id": cid,
             "hosts": sorted(hosts),
+            "host_names": host_names,
             "artifacts": artifacts,
             "total_docs": total_docs,
             "time_range": time_range,
@@ -1477,14 +1554,29 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     )
     if fields_per_type:
         resp["fields_per_type"] = fields_per_type
+    unclaimed = unattributed_indices(client, scope)
+    if unclaimed:  # e.g. a case whose folder is gone: no case reads them
+        resp["unattributed_indices"] = unclaimed
+        resp.setdefault("warnings", []).append(
+            f"{len(unclaimed)} case indices belong to no case directory on this machine, "
+            "so no case reads them: " + ", ".join(unclaimed[:10])
+        )
     docs_by_index = {i["index"]: int(i.get("docs.count", 0)) for i in indices}
     try:
-        partial = _failed_artifact_warnings(cid, docs_by_index)
+
+        def host_docs(index, host):
+            try:
+                body = {"query": {"term": {"host.name": host}}}
+                return client.count(index=index, body=body)["count"]
+            except Exception:
+                return None
+
+        partial = _failed_artifact_warnings(cid, docs_by_index, host_docs)
     except OSError as e:
         partial = [f"Could not read the ingest audit log: {e}"]
     if partial:
         resp.setdefault("warnings", []).extend(partial)
-    _add_investigation_hints(resp, artifacts, safe)
+    _add_investigation_hints(resp, artifacts, scope.c12)
     aid = audit.log(
         tool="idx_case_summary",
         params={"case_id": cid},
@@ -1648,23 +1740,9 @@ def idx_ingest(
                 if suffix in checked_suffixes:
                     continue
                 checked_suffixes.add(suffix)
-                from opensearch_mcp.paths import build_index_name as _build_idx  # noqa: E402
-
-                idx = _build_idx(case_id, suffix, host.hostname)
-                try:
-                    r = client.count(index=idx)
-                    existing[idx] = r["count"]
-                except Exception:
-                    pass
+                _existing_host_docs(client, case_id, suffix, host.hostname, existing)
             if evtx_count:
-                from opensearch_mcp.paths import build_index_name as _build_idx  # noqa: E402
-
-                idx = _build_idx(case_id, "evtx", host.hostname)
-                try:
-                    r = client.count(index=idx)
-                    existing[idx] = r["count"]
-                except Exception:
-                    pass
+                _existing_host_docs(client, case_id, "evtx", host.hostname, existing)
 
             host_info = {
                 "hostname": host.hostname,
@@ -1672,6 +1750,9 @@ def idx_ingest(
             }
             if evtx_count:
                 host_info["evtx_files"] = evtx_count
+            notes = existing.pop("notes", None)
+            if notes:
+                host_info["second_copy"] = notes
             if existing:
                 host_info["existing"] = existing
             summary.append(host_info)
@@ -2345,7 +2426,6 @@ def idx_enrich_intel(
     tool. Enrichment runs appear alongside ingest runs with
     `artifact_name="intel"` — use that to disambiguate.
     """
-    from opensearch_mcp.paths import sanitize_index_component
     from opensearch_mcp.threat_intel import extract_unique_iocs
 
     cid = case_id or _get_active_case()
@@ -2353,10 +2433,15 @@ def idx_enrich_intel(
         return {"error": "No active case. Run 'vhir case activate' first."}
 
     if dry_run:
+        from opensearch_mcp.case_scope import CaseScopeError, case_read_scope
+
         client = _get_os()
-        safe_case = sanitize_index_component(cid)
+        try:
+            scope = case_read_scope(cid, client)
+        except CaseScopeError as e:
+            return {"error": str(e)}
         iocs = extract_unique_iocs(
-            client, f"case-{safe_case}-*", force=force, include_filesystem=include_filesystem
+            client, scope, force=force, include_filesystem=include_filesystem
         )
         return {
             "status": "preview",
@@ -3049,7 +3134,7 @@ def idx_list_detections(
     """
     limit = min(limit, 500)
     client = _get_os()
-    hb_index = _hayabusa_index()
+    hb_index = _hayabusa_index(client=client)
 
     # Fetch more than requested when filtering by severity (API doesn't support it)
     fetch_size = limit * 3 if severity else limit
@@ -3073,7 +3158,7 @@ def idx_list_detections(
             resp = {"error": "Security Analytics plugin not available", "findings": []}
             # Still suggest Hayabusa when SA is unavailable
             try:
-                hb_count = client.count(index=hb_index)["count"]
+                hb_count = client.count(index=hb_index)["count"] if hb_index else 0
                 if hb_count:
                     resp["suggestion"] = (
                         f"Sigma detectors unavailable. {hb_count:,} Hayabusa alerts available. "
@@ -3128,7 +3213,7 @@ def idx_list_detections(
     hayabusa_hint = ""
     if not findings:
         try:
-            hb_count = client.count(index=hb_index)["count"]
+            hb_count = client.count(index=hb_index)["count"] if hb_index else 0
             if hb_count:
                 hayabusa_hint = (
                     f"No Sigma detections. {hb_count:,} Hayabusa alerts available. "
@@ -3169,10 +3254,14 @@ def idx_list_detections(
 
 @server.tool()
 def case_host_fix(raw: str, new_canonical: str) -> dict:
-    """MCP tool entry — outer guard wraps the implementation so any
-    InvalidHostnameValue (or other structured error) returns an
-    isError-envelope dict rather than bubbling to FastMCP as an
-    unstructured tool error.
+    """Suggest that a host name belongs to another machine. Records the
+    suggestion for the examiner and changes no document: host.id values
+    change only when the examiner renames, merges or splits machines in the
+    portal's Hosts tab.
+
+    Args:
+        raw: The host name as found in the evidence (host.name).
+        new_canonical: The machine (host.id) you think it belongs to.
     """
     from opensearch_mcp.host_dictionary import InvalidHostnameValue
 
@@ -3201,239 +3290,48 @@ def case_host_fix(raw: str, new_canonical: str) -> dict:
 
 
 def _case_host_fix_impl(raw: str, new_canonical: str) -> dict:
-    """Correct a wrong host.id mapping in the active case.
+    """Record the suggestion; change nothing else."""
+    from sift_common import host_identity
 
-    Use this tool when an earlier `idx_ingest` auto-applied a wrong
-    decision (e.g., proposed `wkstn01` for raw `wksn01` but the operator
-    confirms `wksn01` is actually a separate host).
+    from opensearch_mcp.case_scope import CaseScopeError, scope_of
+    from opensearch_mcp.host_dictionary import _validate_hostname_for_storage
 
-    Behavior:
-      1. Edits the case host-dictionary in memory: removes `raw` from
-         any existing canonical's alias list, then either adds `raw` to
-         `new_canonical`'s alias list (if `new_canonical` exists) or
-         creates `new_canonical` with `raw` as its first alias.
-      2. **Saves the dictionary atomically to disk.** This happens
-         BEFORE the reindex so a crash mid-call leaves the dict
-         reflecting operator intent.
-      3. Runs `update_by_query` across the case indices with a term
-         filter on `host.name:<raw>`, scripting `host.id = new_canonical`.
-         host.name is never touched.
-
-    On large hosts (5M+ docs) the `update_by_query` may exceed the
-    sift-gateway 300s tool-call timeout. When that happens: the dict is
-    already saved, OpenSearch continues the reindex server-side, and a
-    re-call is idempotent (dict no-op + finishes the remaining reindex).
-
-    Returns:
-      {"raw": ..., "new_canonical": ..., "docs_updated": N, "dict_path": ...}
-    """
-    from opensearch_mcp.host_dictionary import HostDictionary
-
-    # Resolve active case → case dir → dict path.
-    from opensearch_mcp.paths import vhir_dir
-
-    active_case = vhir_dir() / "active_case"
-    if not active_case.exists():
-        return {"error": "No active case. Run 'vhir case activate' first."}
-    case_raw = active_case.read_text().strip()
-    if not case_raw:
-        return {"error": "No active case."}
-    case_id = Path(case_raw).name
-    if not case_id or Path(case_id).name != case_id:
-        # Defense against active_case containing path components.
-        return {
-            "status": "rejected",
-            "error": f"invalid case_id: {case_raw!r}",
-            "isError": True,
-        }
-    import os as _os
-
-    cases_root = Path(_os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases")))
-    case_dir = cases_root / case_id
-    if not case_dir.is_dir():
-        return {"error": f"Case directory not found: {case_dir}"}
-    dict_path = case_dir / "host-dictionary.yaml"
-    if not dict_path.exists():
-        return {
-            "error": (
-                f"host-dictionary.yaml not found at {dict_path}. "
-                "Run idx_ingest at least once to create it."
-            )
-        }
-
-    # 1. In-memory dict edits.
-    host_dict = HostDictionary.load(dict_path)
-
-    # Edge case: `raw` is itself a canonical name (operator wants to
-    # collapse it into another canonical). If we leave the orphan
-    # canonical entry in place, _rebuild_alias_map sets raw → raw via
-    # the canonical-self-mapping, which overrides the new alias and
-    # makes the fix invisible. Delete the canonical entry to ensure
-    # the new mapping wins.
-    if raw in host_dict.hosts and raw != new_canonical:
-        del host_dict.hosts[raw]
-
-    for canonical, entry in host_dict.hosts.items():
-        aliases = entry.get("aliases", []) or []
-        if raw in aliases and canonical != new_canonical:
-            aliases.remove(raw)
-
-    # Catch adversarial-input rejection from add_alias/add_canonical and
-    # return a structured error response. Without this, the exception
-    # propagates to MCP framework as a generic ToolError — the operator
-    # loses the dict-saved/retry context.
-    from opensearch_mcp.host_dictionary import InvalidHostnameValue
-
+    _validate_hostname_for_storage(raw, "case_host_fix raw")
+    _validate_hostname_for_storage(new_canonical, "case_host_fix new_canonical")
     try:
-        if new_canonical in host_dict.hosts:
-            host_dict.add_alias(raw, new_canonical)
-        else:
-            host_dict.add_canonical(new_canonical)
-            if raw != new_canonical:
-                host_dict.add_alias(raw, new_canonical)
-        host_dict._rebuild_alias_map()
-    except InvalidHostnameValue as e:
-        return {
-            "status": "rejected",
-            "error": f"InvalidHostnameValue: {e}",
-            "raw": raw,
-            "new_canonical": new_canonical,
-            "dict_saved": False,
-            "isError": True,
-        }
-
-    # 2. Save BEFORE reindex.
-    host_dict.save()
-
-    # 3. update_by_query with term-DSL filter (NOT query_string — raw
-    # values may contain Lucene metacharacters; term filter treats them
-    # as exact-value).
-    client = _get_os()
-    index_pattern = f"case-{case_id.lower()}-*"
-
-    # H1 defensive: refuse to write through indices where host.id is
-    # non-keyword (pre-v1 upgrade path). Uses the shared detector
-    # imported at module top so a long-running gateway picks it up via
-    # the host_dictionary module path, not lazy through ingest_cli.
-    try:
-        _mappings = client.indices.get_mapping(index=index_pattern, allow_no_indices=True)
-        _bad_indices = []
-        for _idx_name, _body in (_mappings or {}).items():
-            _props = _body.get("mappings", {}).get("properties", {})
-            _ht = detect_host_id_mapping_type(_props)
-            if _ht is not None and _ht != "keyword":
-                _bad_indices.append(_idx_name)
-        if _bad_indices:
-            return {
-                "status": "mapping_upgrade_required",
-                "error": (
-                    f"{len(_bad_indices)} indices have host.id as non-keyword "
-                    "from a pre-v1 ingest. case_host_fix would silently leave "
-                    "host.id unqueryable on those indices. Reindex or delete "
-                    "before retrying."
-                ),
-                "indices_text": _bad_indices,
+        scope = scope_of(_get_active_case() or "")
+    except CaseScopeError as e:
+        return {"error": str(e)}
+    host_identity.append_observations(
+        scope.case_dir,
+        [
+            {
+                "kind": "suggestion",
+                "origin": "ai",
+                "tool": "case_host_fix",
                 "raw": raw,
-                "new_canonical": new_canonical,
-                "dict_saved": True,
-                "dict_path": str(dict_path),
-                "isError": True,
+                "canonical": new_canonical,
             }
-    except Exception:
-        # Mapping check is best-effort; cluster errors fall through.
-        pass
-
-    # Scoped reindex: filter to docs where host.name matches raw AND
-    # host.id is not yet new_canonical. Retry-after-timeout only
-    # touches docs that still need flipping.
-    #
-    # Defense in depth (WSL2 R5): also gate inside the painless script
-    # with `ctx.op = 'noop'` when host.id is already at new_canonical.
-    # Reason: the must_not term query depends on host.id being a
-    # keyword-mapped field. On a pre-v1 text-mapped index the term
-    # query against host.id can match unexpectedly (analyzed text
-    # tokenization), so the bool filter alone isn't enough. The script
-    # guard works regardless of mapping type — the engine treats noop
-    # as "no write, no version bump" and the cost stays bounded.
-    body = {
-        "query": {
-            "bool": {
-                "must": [{"term": {"host.name": raw}}],
-                "must_not": [{"term": {"host.id": new_canonical}}],
-            }
-        },
-        "script": {
-            "source": (
-                "if (ctx._source['host.id'] == params.id) { ctx.op = 'noop'; return; } "
-                "ctx._source['host.id'] = params.id"
-            ),
-            "lang": "painless",
-            "params": {"id": new_canonical},
-        },
-    }
-    try:
-        # WSL2 R4 Test 3: default client read_timeout (~10s) fires
-        # false-negative on multi-hundred-thousand-doc hosts even when
-        # the cluster completes the work. Raise to 600s so v1 covers
-        # ~6M-doc hosts at typical 10K/sec throughput. v2 backlog has
-        # `wait_for_completion=false` + task polling for larger.
-        result = client.update_by_query(
-            index=index_pattern,
-            body=body,
-            refresh=True,
-            conflicts="proceed",
-            request_timeout=600,
-        )
-    except Exception as e:
-        err_resp = {
-            "status": "reindex_failed",
-            "error": f"update_by_query failed: {type(e).__name__}: {e}",
-            "raw": raw,
-            "new_canonical": new_canonical,
-            "dict_saved": True,
-            "dict_path": str(dict_path),
-            "retry_hint": (
-                "Dict is saved with the new mapping. Re-call case_host_fix "
-                "with the same args to retry the reindex."
-            ),
-            "isError": True,
-        }
-        try:
-            audit.log(
-                tool="case_host_fix",
-                params={
-                    "raw": raw,
-                    "new_canonical": new_canonical,
-                    "case_id": case_id,
-                },
-                result_summary=(f"dict saved at {dict_path}; reindex failed ({type(e).__name__})"),
-            )
-        except Exception:
-            pass
-        return err_resp
+        ],
+    )
+    aid = audit.log(
+        tool="case_host_fix",
+        params={"raw": raw, "new_canonical": new_canonical},
+        result_summary="suggestion recorded; no document or host decision changed",
+    )
     resp = {
+        "status": "suggested",
         "raw": raw,
         "new_canonical": new_canonical,
-        "docs_updated": result.get("updated", 0),
-        "took_ms": result.get("took", 0),
-        "dict_path": str(dict_path),
+        "docs_updated": 0,
+        "message": (
+            f"Recorded for the examiner: host name {raw!r} may belong to {new_canonical!r}. "
+            "Nothing was changed. Only the examiner confirms, renames, merges or splits "
+            "machines, in the portal's Hosts tab: ask them to review it there."
+        ),
     }
-    try:
-        aid = audit.log(
-            tool="case_host_fix",
-            params={
-                "raw": raw,
-                "new_canonical": new_canonical,
-                "case_id": case_id,
-            },
-            result_summary=(
-                f"dict updated, {resp['docs_updated']} docs reindexed on host.name={raw!r}"
-            ),
-        )
-        if aid:
-            resp["audit_id"] = aid
-    except Exception:
-        pass
+    if aid:
+        resp["audit_id"] = aid
     return resp
 
 

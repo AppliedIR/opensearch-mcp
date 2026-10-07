@@ -354,9 +354,8 @@ def _dual_boot(root: Path) -> list[Path]:
     return [_volume(root, n, w) for n, w in (("vol0", False), ("vol1", True), ("vol2", True))]
 
 
-def test_two_dual_boot_images_in_one_case_keep_four_hosts_and_indices(tmp_path):
+def test_two_dual_boot_images_in_one_case_keep_four_hosts(tmp_path):
     from opensearch_mcp import ingest_cli
-    from opensearch_mcp.paths import build_index_name
 
     first = ingest_cli._image_id("lab-pc", tmp_path / "lab-pc.raw")
     second = ingest_cli._image_id("kiosk 7", tmp_path / "kiosk 7.E01")
@@ -369,7 +368,6 @@ def test_two_dual_boot_images_in_one_case_keep_four_hosts_and_indices(tmp_path):
         "kiosk-7-*-vol1",
         "kiosk-7-*-vol2",
     ]
-    assert len({build_index_name("c1", "evtx", n) for n in names}) == 4
 
 
 def _names(tmp_path, image_id: str) -> list[str]:

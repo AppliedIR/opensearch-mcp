@@ -119,9 +119,9 @@ def tag(os_client):
     os_client.cluster.delete_component_template(name=f"{tag}-comp", ignore=[404])
 
 
-def _index_name(tag: str, run: str, suffix: str, host: str) -> str:
+def _index_name(tag: str, run: str, suffix: str) -> str:
     kind = "json" if suffix.startswith("json") else "delim"
-    return f"{tag}-{kind}-{run}-{suffix.split('-', 1)[1]}-{host}".lower()
+    return f"{tag}-{kind}-{run}-{suffix.split('-', 1)[1]}".lower()
 
 
 @pytest.fixture
@@ -150,11 +150,11 @@ def ingest(tag, status_dir, monkeypatch):
     monkeypatch.setattr(ingest_cli, "_warn_if_mapping_upgrade_required", lambda _c: None)
     monkeypatch.setattr(ingest_cli, "_preflight_shard_capacity", lambda *a, **k: None)
     monkeypatch.setattr(
-        paths, "build_index_name", lambda case, suffix, host: _index_name(tag, run, suffix, host)
+        paths, "build_index_name", lambda c12, suffix: _index_name(tag, run, suffix)
     )
 
     class Ingest:
-        name = staticmethod(lambda suffix, host="h1": _index_name(tag, run, suffix, host))
+        name = staticmethod(lambda suffix: _index_name(tag, run, suffix))
 
         @staticmethod
         def json(path: Path) -> None:
@@ -269,7 +269,7 @@ class TestRejectionsReachTheStatus:
         for host in ("hosta", "hostb"):
             _write_csv(root / f"flags-{host}.csv", ["flag", "n"], [["maybe", "1"]])
         os_client.indices.create(
-            index=ingest.name("delim-flags-hosta", host="hosta"),
+            index=ingest.name("delim-flags_hosta"),
             body={"mappings": {"properties": {"flag": {"type": "boolean"}}}},
         )
         ingest.delimited(root, auto_hosts="hosta,hostb")

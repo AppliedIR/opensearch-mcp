@@ -19,9 +19,10 @@ from opensearch_mcp import mappings
 PRIORITY_OFFSET = 1000
 
 
-def install(client, tag: str) -> dict[str, list[str]]:
-    """Install the tree's templates for `case-{tag}-*` indices. Returns what
-    was created, for `remove`."""
+def install(client, tag: str, c12: str = "") -> dict[str, list[str]]:
+    """Install the tree's templates for `case-{tag}-*` indices, or with
+    `c12`, for one case's `case-{c12}-<type>-*` indices (names built from a
+    case identity). Returns what was created, for `remove`."""
     created: dict[str, list[str]] = {"components": [], "pipelines": [], "templates": []}
     renamed = {}
     for name, filename in mappings._COMPONENT_TEMPLATES_REGISTRY:
@@ -37,9 +38,14 @@ def install(client, tag: str) -> dict[str, list[str]]:
     registry = [*mappings._TEMPLATES_REGISTRY]
     registry.append((mappings._TEMPLATE_NAME, mappings._EVTX_TEMPLATE_FILE.name))
     for name, filename in registry:
-        body = copy.deepcopy(mappings._load_json(mappings._MAPPINGS_DIR / filename))
+        body = mappings.with_host_key_fields(
+            copy.deepcopy(mappings._load_json(mappings._MAPPINGS_DIR / filename))
+        )  # as the installer adds them
         body["index_patterns"] = [
-            f"case-{tag}-{p.removeprefix('case-')}" for p in body["index_patterns"]
+            p.replace("case-*-", f"case-{c12}-", 1)
+            if c12
+            else f"case-{tag}-{p.removeprefix('case-')}"
+            for p in body["index_patterns"]
         ]
         body["priority"] = body.get("priority", 0) + PRIORITY_OFFSET
         if "composed_of" in body:

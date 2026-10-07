@@ -132,6 +132,12 @@ class DiscoveredHost:
     volume_label: str = ""  # its partition or volume, stamped as vhir.volume
     zone_note: str = ""  # the zone as Plaso finds it on the image
     os: str = "windows"  # windows | linux | macos
+    # The evidence source the records come from (a folder, an image path and
+    # volume). Empty: the volume root. A shadow copy shares its volume's, so
+    # its records replace the volume's own copies.
+    unit_locator: str = ""
+    # Where `hostname` came from: the folder name, an argument, or evidence.
+    name_origin: str = "folder"
 
 
 def find_volume_root(host_dir: Path) -> Path | None:

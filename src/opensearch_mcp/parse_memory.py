@@ -171,8 +171,13 @@ def _flatten_records(records: list[dict], _depth: int = 0) -> list[dict]:
 
 
 def _vol3_doc_id(index_name: str, plugin: str, record: dict, source_file: str) -> str:
-    """Deterministic ID — natural key or content hash."""
-    source_name = Path(source_file).name
+    """Deterministic ID — natural key or content hash, with the image's
+    evidence unit (its basename outside an ingest run), so two images with
+    one file name never share an id."""
+    from opensearch_mcp.write_context import current
+
+    ctx = current()
+    source_name = ctx.unit if ctx is not None else Path(source_file).name
 
     nk_fields = _NATURAL_KEYS.get(plugin)
     if nk_fields:
@@ -349,9 +354,9 @@ def ingest_memory(
 
     for plugin in plugin_list:
         suffix = _plugin_to_index_suffix(plugin)
-        from opensearch_mcp.paths import build_index_name as _build_idx
+        from opensearch_mcp.write_context import index_name as _index_name
 
-        index_name = _build_idx(case_id, suffix, hostname)
+        index_name = _index_name(suffix)
 
         if on_progress:
             on_progress("plugin_start", plugin=plugin, hostname=hostname)

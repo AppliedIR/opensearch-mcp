@@ -232,13 +232,42 @@ def sanitize_index_component(value: str) -> str:
     return re.sub(r"[^a-z0-9._-]", "-", value.lower())
 
 
-def build_index_name(case_id: str, artifact_type: str, hostname: str) -> str:
-    """Canonical index name: case-{case}-{type}-{host}. Always sanitized."""
+def legacy_index_name(case_id: str, artifact_type: str, hostname: str) -> str:
+    """A pre-0.7 index name, case-{case}-{type}-{host}: for reading old data only."""
     return (
         f"case-{sanitize_index_component(case_id)}"
         f"-{sanitize_index_component(artifact_type)}"
         f"-{sanitize_index_component(hostname)}"
     )
+
+
+def build_index_name(c12: str, artifact_type: str) -> str:
+    """The index every write of `artifact_type` in a case goes to:
+    case-{c12}-{type}-0. No host appears in it."""
+    return f"case-{c12}-{sanitize_index_component(artifact_type)}-0"
+
+
+_STEM_MAX = 100
+
+
+def stem_type(prefix: str, stem: str) -> str:
+    """The artifact type for a per-file index (`json-`, `delim-`, `zeek-`,
+    `bodyfile-`): `<prefix>-<stem>`, where the stem has `_` for `-` (so no
+    other template's `case-*-<type>-*` pattern can match), is cut to 92
+    bytes plus `_<hash>` past 100, and gets a trailing `_` when it equals a
+    template's type."""
+    import hashlib
+
+    from opensearch_mcp.mappings import template_type_tokens
+
+    s = sanitize_index_component(stem).replace("-", "_")
+    if s.startswith(prefix + "_"):
+        s = s[len(prefix) + 1 :]
+    if len(s.encode()) > _STEM_MAX:
+        s = s[:92] + "_" + hashlib.sha256(stem.encode()).hexdigest()[:7]
+    if s in template_type_tokens():
+        s += "_"
+    return f"{prefix}-{s}"
 
 
 def validate_index_name(index_name: str) -> str | None:

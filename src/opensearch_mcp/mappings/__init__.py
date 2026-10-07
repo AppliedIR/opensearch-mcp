@@ -72,6 +72,34 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+# Every case index records which machine and evidence unit each document
+# belongs to. Added to every template, so no index can map them otherwise.
+HOST_KEY_FIELDS: dict[str, dict] = {
+    "vhir.host_key": {"type": "keyword"},
+    "vhir.unit": {"type": "keyword"},
+    "vhir.prev_ids": {"type": "keyword"},
+    "vhir.rid": {"type": "keyword", "index": False},
+}
+
+
+def with_host_key_fields(body: dict) -> dict:
+    """`body` (an index template) with the machine and unit fields mapped."""
+    props = body.setdefault("template", {}).setdefault("mappings", {}).setdefault("properties", {})
+    props.update(HOST_KEY_FIELDS)
+    return body
+
+
+def template_type_tokens() -> frozenset[str]:
+    """The artifact type of every shipped template pattern (`case-*-<type>-*`)."""
+    tokens = set()
+    for path in [_EVTX_TEMPLATE_FILE] + [_MAPPINGS_DIR / f for _, f in _TEMPLATES_REGISTRY]:
+        for pattern in _load_json(path).get("index_patterns", []):
+            parts = pattern.split("-")
+            if len(parts) == 4 and parts[0] == "case" and parts[1] == "*" and parts[3] == "*":
+                tokens.add(parts[2])
+    return frozenset(tokens)
+
+
 def install_component_templates(client) -> dict[str, Any]:
     """Idempotent install of shared component templates.
 
@@ -137,7 +165,7 @@ def install_all_templates(client) -> dict[str, Any]:
             results["skipped"].append(tpl_name)
             continue
         try:
-            body = _load_json(path)
+            body = with_host_key_fields(_load_json(path))
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
@@ -374,7 +402,7 @@ def ensure_winlog_pipeline(client) -> dict[str, Any]:
             client.indices.delete_index_template(name=_LEGACY_TEMPLATE_NAME, ignore=[404])
         except Exception as _legacy_e:
             logger.debug("legacy evtx template delete non-fatal: %s", _legacy_e)
-        template_body = _load_json(_EVTX_TEMPLATE_FILE)
+        template_body = with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE))
         client.indices.put_index_template(name=_TEMPLATE_NAME, body=template_body)
 
         # 5. Legacy re-ingest guard (non-fatal).

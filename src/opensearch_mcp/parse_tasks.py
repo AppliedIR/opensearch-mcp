@@ -23,6 +23,13 @@ _OFFSET = re.compile(r"(?<=T)(.*)([+-]\d\d):?(\d\d)$")
 _SYSTEM_PREFIXES = {"Microsoft", "MicrosoftEdge", "GoogleUpdate", "Adobe", "OneDrive", "CCleaner"}
 
 
+def _file_sha256(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def parse_task_xml(file_path: Path) -> dict | None:
     """Parse a single scheduled task XML file. Returns doc or None on failure."""
     try:
@@ -173,7 +180,8 @@ def parse_tasks_dir(
         doc["vhir.parse_method"] = "task-xml"
         if vss_id:
             doc["vhir.vss_id"] = vss_id
-        id_input = f"{index_name}:{rel}"
+        # The file's bytes too: a rebuilt machine can have a different file at the same path.
+        id_input = f"{index_name}:{rel}:{_file_sha256(task_file)}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
         actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
 
