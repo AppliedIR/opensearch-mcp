@@ -9,6 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.parse_csv import ingest_csv
@@ -140,6 +141,32 @@ TOOLS: dict[str, ToolConfig] = {
 
 # RECmd batch file path
 _RECMD_BATCH = "/opt/zimmermantools/RECmd/BatchExamples/Kroll_Batch.reb"
+# The keys the registry triage rules read, which Kroll's batch doesn't extract
+_TRIAGE_KEYS = Path(__file__).with_name("recmd_triage_keys.reb")
+
+
+def _registry_batch(tmpdir: str) -> str:
+    """Kroll's batch plus the triage keys, as one batch file for one RECmd run.
+
+    Kroll's text is kept as it is and the keys' entries are appended to its
+    `Keys` list (a parse and dump would rewrite some of its values). The file
+    keeps Kroll's name, so the output CSV and every Kroll row's document id
+    stay the same. Kroll's batch alone when either can't be read or the
+    result isn't Kroll's keys followed by the triage keys."""
+    try:
+        kroll = Path(_RECMD_BATCH).read_text(encoding="utf-8")
+        triage = _TRIAGE_KEYS.read_text(encoding="utf-8")
+        entries = triage[triage.index("\nKeys:\n") + len("\nKeys:\n") :]
+        combined = kroll.rstrip("\n") + "\n" + entries
+        want = yaml.safe_load(kroll)["Keys"] + yaml.safe_load(triage)["Keys"]
+        if yaml.safe_load(combined)["Keys"] != want:
+            raise ValueError("Kroll's Keys list isn't the batch's last block")
+        out = Path(tmpdir) / "batch" / Path(_RECMD_BATCH).name
+        out.parent.mkdir()
+        out.write_text(combined, encoding="utf-8")
+        return str(out)
+    except (OSError, ValueError, yaml.YAMLError, KeyError, TypeError):
+        return _RECMD_BATCH  # Kroll alone, as before; triage then names the rules that saw no data
 
 
 _TOOL_TIMEOUT = 7200  # 2 hours — generous for MFT/large artifacts
@@ -411,7 +438,7 @@ def _build_command(cfg: ToolConfig, tool_name: str, artifact_path: Path, tmpdir:
             tmpdir,
             "--nl",
             "--bn",
-            _RECMD_BATCH,
+            _registry_batch(tmpdir),
         ]
 
     if tool_name == "registry_user":

@@ -323,7 +323,11 @@ def test_persistence_entries_only_flag(triage):
         ],
     )
     active_setup = "ROOT\\Microsoft\\Active Setup\\Installed Components\\{1}"
-    case.doc("registry", "as1", {"KeyPath": active_setup, "StubPath": S32 + "cmd.exe"})
+    case.doc(  # as RECmd writes it: the value's name, and its data
+        "registry",
+        "as1",
+        {"KeyPath": active_setup, "ValueName": "StubPath", "ValueData": S32 + "cmd.exe"},
+    )
     run(case)
     t1 = case.one("tasks", kv("_id", "t1"))
     assert (t1["verdict"], t1["lolbin"]) == ("UNKNOWN", True)

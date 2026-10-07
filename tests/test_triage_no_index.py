@@ -107,7 +107,7 @@ def test_a_registry_index_runs_persistence_as_before():
     class _WithUpdates(_OpenSearch):
         def update_by_query(self, index, body, **kw):
             calls.append(index)
-            return {"updated": 1}
+            return {"updated": 1, "total": 1}  # each rule matched a row
 
     res = tr._enrich_registry_persistence(_WithUpdates(["case-c1-registry-h"]), "c1")
     assert calls and set(calls) == {"case-c1-registry-*"}, calls

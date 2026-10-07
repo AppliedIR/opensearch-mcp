@@ -167,8 +167,15 @@ def enrich_remote(
     results["registry_activestub"] = _enrich_registry_check_file(
         client,
         safe_case,
-        query_body={"wildcard": {"KeyPath.keyword": "*Active Setup\\\\Installed Components*"}},
-        value_field="StubPath",
+        query_body={
+            "bool": {
+                "filter": [
+                    {"wildcard": {"KeyPath.keyword": "*Active Setup\\\\Installed Components*"}},
+                    {"term": {"ValueName.keyword": "StubPath"}},
+                ]
+            }
+        },
+        value_field="ValueData",
         artifact_name="registry_activestub",
         on_progress=on_progress,
     )
@@ -192,6 +199,12 @@ def enrich_remote(
         dll_filter=True,
     )
 
+    for name in ("registry_svcs", "registry_activestub", "registry_netsh"):
+        if results.get(name, {}).get("status") == "empty":
+            results[name]["reason"] = (
+                "no registry values to check: the key is absent, or the ingested registry "
+                "data doesn't include it"
+            )
     return results
 
 
@@ -975,6 +988,16 @@ def _enrich_registry_check_file(
 # Registry persistence R1-R17 (no gateway — pure update_by_query)
 # ---------------------------------------------------------------------------
 
+# The fields a persistence rule stamps
+_RULE_STAMP_FIELDS = ["triage.verdict", "triage.reason", "triage.checked"]
+# else-branch of a rule script: remove the rule's own earlier stamp, leave any other alone
+_UNSTAMP_OWN = """{
+    if (ctx._source['triage.reason'] instanceof String
+            && ctx._source['triage.reason'].startsWith(params.prefix)) {
+        for (String f : params.fields) { ctx._source.remove(f); }
+    } else { ctx.op = 'noop'; }
+}"""
+
 
 def _enrich_registry_persistence(client, safe_case, on_progress=None):
     """Flag registry persistence mechanisms via update_by_query.
@@ -988,6 +1011,12 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
     index = f"case-{safe_case}-registry-*"
     total_updated = 0
     rules_failed = 0
+    no_data: list[str] = []
+
+    def _seen(resp, name):  # a rule whose query matched no row had nothing to check
+        if not resp.get("total", 0):
+            no_data.append(name)
+
     try:  # no registry index: say so, not "complete, 0"
         client.search(index=index, body={"size": 0}, allow_no_indices=False)
     except Exception as e:
@@ -1059,6 +1088,15 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 }
             },
             "reason_prefix": "Print Monitor DLL: ",
+            # the monitors Windows itself registers (bare names, loaded from System32)
+            "known": [
+                "localspl.dll",
+                "tcpmon.dll",
+                "usbmon.dll",
+                "apmon.dll",
+                "appmon.dll",
+                "fxsmon.dll",
+            ],
         },
         # R12: Command Processor AutoRun (T1546)
         {
@@ -1101,7 +1139,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
         },
     ]
 
-    # Simple rules: any match with ValueData → SUSPICIOUS
+    # Simple rules: a non-empty value, not one Windows itself sets → SUSPICIOUS. A value
+    # that no longer qualifies loses this rule's earlier stamp (and only this rule's).
     for rule in rules:
         try:
             resp = client.update_by_query(
@@ -1109,20 +1148,28 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 body={
                     "query": rule["query"],
                     "script": {
-                        "source": (
-                            "ctx._source['triage.verdict'] = 'SUSPICIOUS'; "
-                            "ctx._source['triage.reason'] = params.prefix + "
-                            "ctx._source['ValueData']; "
-                            "ctx._source['triage.checked'] = true"
-                        ),
+                        "source": """
+                            String v = ctx._source['ValueData'].toString().trim();
+                            if (v.length() > 0 && !params.known.contains(v.toLowerCase())) {
+                                ctx._source['triage.verdict'] = 'SUSPICIOUS';
+                                ctx._source['triage.reason'] =
+                                    params.prefix + ctx._source['ValueData'];
+                                ctx._source['triage.checked'] = true;
+                            } else """
+                        + _UNSTAMP_OWN,
                         "lang": "painless",
-                        "params": {"prefix": rule["reason_prefix"]},
+                        "params": {
+                            "prefix": rule["reason_prefix"],
+                            "known": rule.get("known", []),
+                            "fields": _RULE_STAMP_FIELDS,
+                        },
                     },
                 },
                 conflicts="proceed",
                 requests_per_second=1000,
             )
             total_updated += resp.get("updated", 0)
+            _seen(resp, rule["reason_prefix"].removesuffix(": "))
         except Exception:
             rules_failed += 1
 
@@ -1150,7 +1197,8 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                     },
                     "script": {
                         "source": """
-                            String val = ctx._source['ValueData'].toLowerCase().trim();
+                            String val = ctx._source['ValueData'].toString().toLowerCase();
+                            val = val.replace('"', '').trim();
                             String[] entries = /[\\n| ]+/.split(val);
                             List unknown = new ArrayList();
                             for (String e : entries) {
@@ -1164,14 +1212,14 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                                 String r = params.label + ': ' + String.join(', ', unknown);
                                 ctx._source['triage.reason'] = r;
                                 ctx._source['triage.checked'] = true;
-                            } else {
-                                ctx.op = 'noop';
-                            }
-                        """,
+                            } else """
+                        + _UNSTAMP_OWN,
                         "lang": "painless",
                         "params": {
                             "known": _LSA_DEFAULTS,
                             "label": f"Non-default {lsa_label}",
+                            "prefix": f"Non-default {lsa_label}: ",
+                            "fields": _RULE_STAMP_FIELDS,
                         },
                     },
                 },
@@ -1179,6 +1227,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 requests_per_second=1000,
             )
             total_updated += resp.get("updated", 0)
+            _seen(resp, lsa_label)
         except Exception as exc:
             rules_failed += 1
             logger.debug("Registry rule failed: %s", exc)
@@ -1220,6 +1269,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
+        _seen(resp, "Winlogon Shell")
     except Exception as exc:
         rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
@@ -1260,11 +1310,12 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
+        _seen(resp, "Winlogon Userinit")
     except Exception as exc:
         rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
 
-    # R7: BootExecute — conditional (not "autocheck autochk *" → SUSPICIOUS)
+    # R7: BootExecute — conditional (anything but Windows' own autochk entries → SUSPICIOUS)
     try:
         resp = client.update_by_query(
             index=index,
@@ -1280,24 +1331,38 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
                 },
                 "script": {
                     "source": """
-                        String val = ctx._source['ValueData'].trim();
-                        if (val.length() == 0) { ctx.op = 'noop'; return; }
-                        if (!val.equals('autocheck autochk *')) {
+                        String val = ctx._source['ValueData'].toString().trim();
+                        // Windows' own entries, one or more: `autocheck autochk`, its
+                        // switches (/q, /k:C, /p), then all volumes (*) or one (\\??\\C:)
+                        String[] t = val.length() == 0 ? new String[0]
+                            : /\\s+/.split(val.toLowerCase());
+                        boolean dflt = true;
+                        int i = 0;
+                        while (dflt && i < t.length) {
+                            dflt = i + 2 < t.length
+                                && t[i] == 'autocheck' && t[i + 1] == 'autochk';
+                            i += 2;
+                            while (dflt && i < t.length && t[i].startsWith('/')) { i++; }
+                            dflt = dflt && i < t.length
+                                && (t[i] == '*' || (t[i].startsWith('\\\\??\\\\')
+                                    && t[i].length() > 4));
+                            i++;
+                        }
+                        if (!dflt) {
                             ctx._source['triage.verdict'] = 'SUSPICIOUS';
                             ctx._source['triage.reason'] = params.prefix + val;
                             ctx._source['triage.checked'] = true;
-                        } else {
-                            ctx.op = 'noop';
-                        }
-                    """,
+                        } else """
+                    + _UNSTAMP_OWN,
                     "lang": "painless",
-                    "params": {"prefix": "BootExecute: "},
+                    "params": {"prefix": "BootExecute: ", "fields": _RULE_STAMP_FIELDS},
                 },
             },
             conflicts="proceed",
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
+        _seen(resp, "BootExecute")
     except Exception as exc:
         rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
@@ -1345,6 +1410,7 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             requests_per_second=1000,
         )
         total_updated += resp.get("updated", 0)
+        _seen(resp, "Screensaver")
     except Exception as exc:
         rules_failed += 1
         logger.debug("Registry rule failed: %s", exc)
@@ -1356,12 +1422,18 @@ def _enrich_registry_persistence(client, safe_case, on_progress=None):
             checked=0,
             enriched=total_updated,
         )
+    result: dict = {"status": "complete", "enriched": total_updated}
+    if no_data:
+        result["rules_without_data"] = no_data
+        result["note"] = (
+            f"{len(no_data)} of 15 rules had no registry values to check "
+            f"({', '.join(no_data)}): the value is absent, or the ingested registry data "
+            "doesn't include it (the scan doesn't read user hives, NTUSER.DAT)"
+        )
     if rules_failed:
-        reason = f"{rules_failed} persistence rules could not be applied"
-        return {
-            "status": "failed",
-            "reason": reason,
-            "rules_failed": rules_failed,
-            "enriched": total_updated,
-        }
-    return {"status": "complete", "enriched": total_updated}
+        result.update(
+            status="failed",
+            reason=f"{rules_failed} persistence rules could not be applied",
+            rules_failed=rules_failed,
+        )
+    return result
