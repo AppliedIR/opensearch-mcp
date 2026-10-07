@@ -51,14 +51,18 @@ def evtx_ingest(tmp_path, monkeypatch):
     root = tmp_path / "evidence"
     make_windows_tree(root / "host-a")
 
-    def run() -> dict:
+    def run(skip_triage: bool = True) -> dict:
+        if not skip_triage:  # triage enrichment runs, and finds nothing to do
+            from opensearch_mcp import triage_remote
+
+            monkeypatch.setattr(triage_remote, "enrich_remote", lambda *a, **k: {})
         args = argparse.Namespace(
             path=str(root / "host-a"),
             case="c1",
             hostname="host-a",
             include="evtx",
             yes=True,
-            skip_triage=True,
+            skip_triage=skip_triage,
         )
         cli.cmd_ingest(args)
         (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
@@ -83,11 +87,13 @@ class TestTheIngestStatus:
         assert error.startswith("hayabusa/hayabusa-detection: detections skipped: hayabusa not")
         assert "Install hayabusa on the PATH" in error
 
-    def test_hayabusa_rules_missing(self, evtx_ingest, monkeypatch):
-        """Not done with 0 alerts."""
+    @pytest.mark.parametrize("skip_triage", [True, False], ids=["triage skipped", "triage run"])
+    def test_hayabusa_rules_missing(self, evtx_ingest, monkeypatch, skip_triage):
+        """Not done with 0 alerts: the evidence ingested, and the detection
+        step's error is in the status, whether or not triage runs after it."""
         _hayabusa(monkeypatch, installed=True)
         monkeypatch.setattr(ingest, "_resolve_hayabusa_rules_dir", lambda: None)
-        status = evtx_ingest()
+        status = evtx_ingest(skip_triage)
         assert status["message"].startswith("Ingest complete with "), status["message"]
         assert _hayabusa_errors(status) == ["hayabusa/hayabusa-detection: host-a: rules_not_found"]
 

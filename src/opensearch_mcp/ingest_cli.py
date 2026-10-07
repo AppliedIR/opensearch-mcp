@@ -1463,13 +1463,12 @@ def cmd_scan(args: argparse.Namespace) -> None:
         from opensearch_mcp.bulk import ShardCapacityExhausted
         from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
 
-        # A later phase (hayabusa after any evtx, then triage enrichment)
-        # writes the terminal status, so the writes before it stay `running`:
-        # a terminal status can't go back to `running`.
+        # The end of the run writes the terminal status, with its notes, so
+        # every write before it stays `running`: a terminal status can't go
+        # back to `running`.
         hayabusa_follows = not getattr(args, "no_hayabusa", False) and any(
             h.evtx_dir for h in hosts
         )
-        triage_follows = not getattr(args, "skip_triage", False)
         try:
             result = ingest(
                 hosts=hosts,
@@ -1487,7 +1486,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 reduced_log_names=reduced_log_names,
                 on_progress=_cli_progress,
                 host_dict=case_host_dict,
-                final_status="running" if hayabusa_follows or triage_follows else "complete",
+                final_status="running",  # finished below, with the run's notes
                 case_dir=_case_dir_for(case_id),
             )
         except ShardCapacityExhausted as _sce:
@@ -1653,7 +1652,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     case_id,
                     os.getpid(),
                     run_id,
-                    "running" if triage_follows else "complete",
+                    "running",  # finished below, with the run's notes
                     existing_hosts,
                     {
                         "indexed": result.total_indexed + total_alerts,
@@ -1709,12 +1708,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     print(f"Triage enrichment complete: {total_enriched} documents updated")
             except Exception as e:
                 print(f"  Triage enrichment failed: {e}")
-            from opensearch_mcp.ingest_status import finish_status
-
-            status_notes += [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
             if triage_note:
                 status_notes.insert(0, ("triage", triage_note))
-            finish_status(case_id, os.getpid(), notes=status_notes)
+
+        # The run's one terminal write, with its notes, whether or not triage ran
+        from opensearch_mcp.ingest_status import finish_status
+
+        status_notes += [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
+        finish_status(case_id, os.getpid(), notes=status_notes)
 
     finally:
         mount_ctx.cleanup()

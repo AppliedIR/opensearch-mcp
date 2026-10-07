@@ -541,32 +541,6 @@ def _run_hayabusa_batch(
                 result_summary=f"{cnt} alerts indexed",
             )
 
-    # Rev 6 halt-state hygiene: if every host failed with rules_not_found,
-    # the entire detection phase was systematically disabled — write a
-    # halt-status file so portal + idx_ingest_status surface the reason.
-    hosts_with_results = [h for h in hosts if h.evtx_dir]
-    if hosts_with_results and all(
-        isinstance(results.get(h.hostname), dict)
-        and results[h.hostname].get("error") == "rules_not_found"
-        for h in hosts_with_results
-    ):
-        from opensearch_mcp.ingest_status import HALT_HAYABUSA_NO_RULES, write_status
-
-        write_status(
-            case_id=case_id,
-            pid=os.getpid(),
-            run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
-            status="failed",
-            hosts=[{"hostname": h.hostname} for h in hosts_with_results],
-            totals={},
-            started=datetime.now(timezone.utc).isoformat(),
-            error=(
-                f"{HALT_HAYABUSA_NO_RULES}: Hayabusa rules directory not "
-                f"found for any host. Set HAYABUSA_RULES_DIR env var or "
-                f"install rules to a standard path."
-            ),
-        )
-
     return results
 
 
