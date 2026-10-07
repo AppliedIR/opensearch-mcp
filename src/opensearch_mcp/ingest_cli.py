@@ -44,6 +44,7 @@ def _case_dir_for(case_id: str) -> Path | None:
 
 
 _gated = threading.local()  # units a walk already took through the gate, on this thread
+_walking = threading.local()  # set while a walk's leaves run: they never end its run
 
 
 def _scan_unit(case_id: str, path, hostname: str, source: str, origin: str = "argument",
@@ -206,11 +207,13 @@ def _closes_write_context(fn):
         from opensearch_mcp import write_context as wc
 
         gated = getattr(_gated, "units", set())
+        walking = getattr(_walking, "active", False)
         try:
             with wc.restoring():
                 return fn(*args, **kwargs)
         finally:
             _gated.units = gated  # a walk's pass through the gate ends with it
+            _walking.active = walking
 
     return wrapper
 
@@ -326,6 +329,8 @@ def _write_bg_status(
     from opensearch_mcp.bulk import get_last_bulk_reason
     from opensearch_mcp.write_context import removed_note, second_copy_note
 
+    if getattr(_walking, "active", False) and status in ("complete", "failed"):
+        status = "running"  # a walk's leaf: the walk ends the run, once
     art = {"name": artifact_name, "status": status, "indexed": indexed, **(counts or {})}
     notes = [no_time_field_note()] if status != "running" else []
     notes.append(second_copy_note(hostname))
@@ -2137,12 +2142,14 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         missed: list[str] = []  # each sub-run starts its own list
         not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
-        if not is_recursive:  # (a recursive sub-run gates its own walk)
+        if not is_recursive and not getattr(args, "dry_run", False):
+            # (a recursive sub-run gates its own walk; a dry run writes nothing)
             _gate_walk(case_id, [
                 (input_path, h, _delim_files(input_path, [f for f in flat
                                                           if _filename_host(f) == h.lower()]))
                 for h in auto_hosts
             ], run_id or "")  # fmt: skip
+        was_walking, _walking.active = getattr(_walking, "active", False), True
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
@@ -2159,6 +2166,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 hosts_reason = hosts_reason or result[2]
                 host_counts.append((result[0], result[3]))
                 not_read.extend(result[4])
+        _walking.active = was_walking
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
@@ -2204,7 +2212,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_missed: list[str] = []  # each sub-run starts its own list
         walk_not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
-        _gate_walk(case_id, [(d, d.name, _delim_files(d)) for d in subdirs], run_id or "")
+        if not getattr(args, "dry_run", False):  # a dry run writes nothing: no gate
+            _gate_walk(case_id, [(d, d.name, _delim_files(d)) for d in subdirs], run_id or "")
+        was_walking, _walking.active = getattr(_walking, "active", False), True
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -2236,6 +2246,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 _failed_subdirs.append((str(d), str(e)[:200]))
                 not_read.append(f"{d} ({str(e)[:200]})")
                 print(f"  SUBDIR SKIPPED ({d.name}): {e}", file=sys.stderr)
+        _walking.active = was_walking
         if _failed_subdirs:
             print(f"\n*** {len(_failed_subdirs)} subdirs failed; walk continued: ***")
             for path, err in _failed_subdirs:

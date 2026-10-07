@@ -527,3 +527,41 @@ def test_a_cancelled_run_stays_cancelled(tmp_path, monkeypatch):
         ingest_status.write_status("c1", 4246, RUN, live, [], {}, "t0")
     (f,) = (tmp_path / "status").glob("*.json")
     assert json.loads(f.read_text())["status"] == "cancelled"
+
+
+def _three_hosts(gate):
+    root = gate.tmp / "hosts"
+    for h in ("H1", "H2", "H3"):
+        (root / h).mkdir(parents=True)
+        (root / h / "e.csv").write_text("when,what\n2026-01-01T00:00:00Z,a\n")
+    return root
+
+
+def test_a_walks_dry_run_never_waits_at_the_gate(gate):
+    args = argparse.Namespace(path=str(_three_hosts(gate)), case=None, hostname=None,
+                              time_field="when", recursive=True, dry_run=True)  # fmt: skip
+    t, out = gate.start(cli.cmd_ingest_delimited, args)
+    t.join(10)
+    assert not t.is_alive() and "error" not in out
+    assert RUN not in hi.load(gate.case_dir).waits and gate.writes == []
+
+
+def test_a_walks_leaves_never_end_its_run(gate, monkeypatch):
+    seen = []
+    real = cli.write_status
+
+    def spy(case_id, pid, run_id, status, *a, **k):
+        if run_id == RUN:
+            seen.append(status)
+        return real(case_id, pid, run_id, status, *a, **k)
+
+    monkeypatch.setattr(cli, "write_status", spy)
+    args = argparse.Namespace(path=str(_three_hosts(gate)), case=None, hostname=None,
+                              time_field="when", recursive=True)  # fmt: skip
+    t, out = gate.start(cli.cmd_ingest_delimited, args)
+    gate.waiting()
+    host_gate.start_now(gate.case_dir, RUN, "ex1")
+    t.join(15)
+    assert out == {"ok": True}
+    terminal = [i for i, st in enumerate(seen) if st in ("complete", "failed")]
+    assert terminal == [len(seen) - 1]  # the walk ends its run, once, last
