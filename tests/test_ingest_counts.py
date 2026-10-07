@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import uuid
 from pathlib import Path
 from unittest import mock
@@ -83,8 +84,16 @@ def case(os_client, tmp_path, monkeypatch):
         os_client.cluster.delete_component_template(name=f"{base}-comp", ignore=[404])
 
 
+def _status(case_id: str) -> dict:
+    """This run's status; each run keeps its own."""
+    run = os.environ["VHIR_INGEST_RUN_ID"]
+    ingests = srv.idx_ingest_status(case_id=case_id)["ingests"]
+    (status,) = [s for s in ingests if s.get("run_id") == run]
+    return status
+
+
 def _detail(case_id: str, artifact: str) -> str:
-    (status,) = srv.idx_ingest_status(case_id=case_id)["ingests"]
+    status = _status(case_id)
     (item,) = [i for i in status["checklist"] if i["artifact"] == artifact]
     return item["detail"]
 
@@ -155,8 +164,7 @@ class TestTheStatusSaysWhatWasStored:
             "31 docs submitted, 31 stored; 31 docs with unparsed fields (e.g. "
         )
         assert "@timestamp ×30" in detail, detail
-        (status,) = srv.idx_ingest_status(case_id=case)["ingests"]
-        assert "ignore_above" in status["counts_note"]
+        assert "ignore_above" in _status(case)["counts_note"]
 
     def test_only_this_runs_documents_count(self, case, tmp_path, monkeypatch):
         """The index already holds 3 documents from an earlier run."""

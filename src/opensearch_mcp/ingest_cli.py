@@ -467,6 +467,8 @@ def _set_units(
     are named by the archive and the image's name in it."""
     from sift_common.host_identity import unit_locator as _locator
 
+    from opensearch_mcp import names_scan
+
     case_dir = _case_dir_for(case_id)
     root, prefix = archive if archive else (input_path, "")
 
@@ -487,15 +489,22 @@ def _set_units(
             continue  # a folder: its own volume root
         if h.image_path is not None:  # read straight off the image
             where = inside(h.image_path, tmpdir) if tmpdir is not None else None
+            if archive and where == prefix:
+                where = None  # the extracted image itself: the archive's member already
+            if h.volume_offset is not None:  # a volume: as the dry run names it
+                pre = "/".join(x for x in (prefix, where) if x and x != ".")
+                h.unit_locator = names_scan.volume_locator(
+                    root, case_dir, h.volume_offset, h.volume_label, prefix=pre
+                )
+                continue
             member = "/".join(x for x in (where, h.volume_label) if x and x != ".")
             h.unit_locator = unit_locator(input_path, case_dir, member=member or ".")
             continue
         vol = next((v for v in (offsets or {}) if inside(h.volume_root, v) is not None), None)
         if vol is not None:
             rest = inside(h.volume_root, vol)
-            h.unit_locator = unit_locator(
-                input_path, case_dir, member="" if rest == "." else rest, offset=offsets[vol]
-            )
+            pre = "/".join(x for x in (prefix, "" if rest == "." else rest) if x)
+            h.unit_locator = names_scan.volume_locator(root, case_dir, offsets[vol], prefix=pre)
         else:
             h.unit_locator = unit_locator(
                 input_path, case_dir, member=inside(h.volume_root, tmpdir) or "."
@@ -519,7 +528,7 @@ def _kept_total(result) -> dict:
     return {"already_present": result.already_present} if result.already_present else {}
 
 def _record_scan(
-    case_id: str, input_path: Path, hosts: list, image_notes: list, extra=()
+    case_id: str, input_path: Path, hosts: list, image_notes: list, extra=(), archive=None
 ) -> list[dict]:
     """Record the scan's units and names in the case's host logs, print them,
     and return the summary. Volumes no reader covers are recorded as unnamed
@@ -529,9 +538,20 @@ def _record_scan(
     case_dir = _case_dir_for(case_id)
     if case_dir is None:
         return []
-    units = list(extra) + [names_scan.host_folder_unit(h, case_dir) for h in hosts]
+    units = list(extra)
+    for h in hosts:  # one host's unreadable evidence never stops the scan
+        try:
+            units.append(names_scan.host_folder_unit(h, case_dir))
+        except Exception as e:
+            unit = names_scan.Unit(
+                locator=h.unit_locator or str(h.volume_root), source="host folder"
+            )
+            unit.note = f"names couldn't be read: {type(e).__name__}: {e}"
+            units.append(unit)
+    # under the evidence it came from, never the run's temporary copy
+    image, prefix = archive if archive else (input_path, "")
     units += [
-        names_scan.noted_volume_unit(input_path, offset, note, case_dir)
+        names_scan.noted_volume_unit(image, offset, note, case_dir, prefix=prefix)
         for offset, note in image_notes
     ]
     summary = names_scan.record(case_dir, units)
@@ -546,14 +566,20 @@ def _ingest_each_extracted(command, args, archive: Path, images: list, examiner:
     evidence unit (the archive and the image's name in it) with its own run
     status, under the caller's run id plus the image's number."""
     import copy
+    from datetime import datetime, timezone
+
+    from opensearch_mcp.ingest_status import write_status
 
     base_run = os.environ.get("VHIR_INGEST_RUN_ID", "") or str(uuid.uuid4())
+    started = datetime.now(timezone.utc).isoformat()
     failed = []
+    outcome = []  # each image's run, for the archive's own status
     for n, image in enumerate(sorted(images), 1):
         sub = copy.copy(args)
         sub.path, sub.from_archive, sub.archive_member = str(image), str(archive), image.name
         print(f"\n--- {archive.name}: image {n} of {len(images)}: {image.name} ---")
         os.environ["VHIR_INGEST_RUN_ID"] = f"{base_run}-{n}"
+        before = len(failed)
         try:
             command(sub, examiner=examiner)
         except SystemExit as e:  # one image's failure doesn't stop the others
@@ -563,6 +589,22 @@ def _ingest_each_extracted(command, args, archive: Path, images: list, examiner:
             failed.append(f"{image.name} ({type(e).__name__}: {e})")
         finally:
             os.environ["VHIR_INGEST_RUN_ID"] = base_run
+        ok = len(failed) == before
+        art = {"name": "image run", "status": "complete" if ok else "failed",
+               "note": f"run {base_run}-{n}"}  # fmt: skip
+        if not ok:
+            art["error"] = failed[-1]
+        outcome.append({"hostname": image.name, "artifacts": [art]})
+    write_status(
+        _resolve_case_id(getattr(args, "case", None)),
+        os.getpid(),
+        base_run,
+        "failed" if failed else "complete",
+        outcome,
+        {"images": len(images), "images_failed": len(failed)},
+        started,
+        error=f"images that failed: {'; '.join(failed)}" if failed else "",
+    )
     if failed:
         print(f"Images that failed: {'; '.join(failed)}", file=sys.stderr)
         sys.exit(1)
@@ -679,6 +721,7 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
         host = DiscoveredHost(hostname=name, volume_root=image)
         host.os, host.image_path, host.image_args = run["os"], image, run["args"]
         host.volume_label = run["label"]
+        host.volume_offset = run["offset"]
         host.artifacts.append(("plaso", image))
         if run["localtime"] == "link" and _valid_zone(run["zone"]):
             host.system_timezone, host.timezone_source = run["zone"], "etc/localtime"
@@ -921,6 +964,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     return
                 if extracted_images:
                     img = extracted_images[0]
+                    # its units: the archive and the image's name in it, as for
+                    # an archive of several images
+                    from_archive = (input_path, img.name)
                     image_id = _image_id(img.stem, input_path / img.name, _case_dir_for(case_id))
                     print(f"  Found disk image: {img.name}")
                     # Archive-basename stamp removed per host-identity spec
@@ -1121,7 +1167,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
         unread = image_notes + [  # partitions that didn't mount and no image run read
             (off, why) for off, why in mount_ctx.failed_offsets.items() if off not in image_covered
         ]
-        _record_scan(case_id, input_path, hosts, unread, [velociraptor] if velociraptor else [])
+        _record_scan(
+            case_id,
+            input_path,
+            hosts,
+            unread,
+            [velociraptor] if velociraptor else [],
+            archive=from_archive,
+        )
 
         # For disk images with VSS, create additional hosts per shadow copy
         if vss_flag and tmpdir and vss_volumes:  # a disk image, or one from an archive
@@ -1544,7 +1597,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
         from opensearch_mcp.ingest_status import finish_status
 
         status_notes += [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
-        finish_status(case_id, os.getpid(), notes=status_notes)
+        finish_status(case_id, os.getpid(), notes=status_notes, run_id=run_id)
         finished = True
 
     finally:
@@ -2917,7 +2970,7 @@ def _install_terminal_status_guards() -> None:
             # Find our status file by PID — look for any JSON in
             # _STATUS_DIR with our PID (ingest can be on any case).
             pid = os.getpid()
-            for f in _STATUS_DIR.glob(f"*-{pid}.json"):
+            for f in [*_STATUS_DIR.glob(f"*-{pid}.json"), *_STATUS_DIR.glob(f"*-{pid}-*.json")]:
                 try:
                     data = json.loads(f.read_text())
                 except (json.JSONDecodeError, OSError):

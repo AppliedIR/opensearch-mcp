@@ -344,6 +344,8 @@ def mem_status(bg, mem, tmp_path, monkeypatch):
             timeout=60,
         )
         bg.cmd_ingest_memory(args)
+        if len(members) > 1:  # each image's run, and the archive's
+            return srv.idx_ingest_status(case_id="c1")["ingests"], seen[0]
         return _status(), seen[0]
 
     run.seen = seen
@@ -355,7 +357,8 @@ def test_every_image_an_archive_holds_is_ingested_as_its_own_unit(mem_status):
 
     from opensearch_mcp import write_context as wc
 
-    mem_status("hostA.raw", "hostB.vmem", "hostC.mem")
+    statuses, _ = mem_status("hostA.raw", "hostB.vmem", "hostC.mem")
+    assert len(statuses) == 4
     assert sorted(mem_status.seen) == ["hostA.raw", "hostB.vmem", "hostC.mem"]
     units = host_identity.load(wc.case_dir_for("c1")).units.values()
     locators = sorted(u["locator"] for u in units if u.get("source") == "memory image")

@@ -639,9 +639,13 @@ def make_ingest_tmpdir(case_id: str) -> Path:
     case_dir = vhir_dir() / "cases" / case_id
     import os
 
-    tmp = case_dir / "tmp" / f"ingest-{ts}-{os.getpid()}"
-    tmp.mkdir(parents=True, exist_ok=True)
-    return tmp
+    # Its own folder, every time: two runs in one process and one second (an
+    # archive's images) must never share one, or one run's cleanup takes the
+    # other's evidence with it
+    (case_dir / "tmp").mkdir(parents=True, exist_ok=True)
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix=f"ingest-{ts}-{os.getpid()}-", dir=case_dir / "tmp"))
 
 
 def cleanup_orphaned_mounts() -> None:

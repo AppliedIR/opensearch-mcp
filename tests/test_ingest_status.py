@@ -648,7 +648,7 @@ class TestWriteBgStatusErrorPropagation:
         )
         # Spurious later "running" write — monotonic guard must refuse.
         files = list(status_dir.glob("*.json"))
-        pid = int(files[0].stem.rsplit("-", 1)[1])
+        pid = json.loads(files[0].read_text())["pid"]
         write_status(
             case_id="INC-ENRICH",
             pid=pid,

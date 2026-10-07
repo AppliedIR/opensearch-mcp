@@ -130,6 +130,7 @@ class DiscoveredHost:
     image_path: Path | None = None  # set for a volume Plaso reads straight off the image
     image_args: list[str] = field(default_factory=list)  # its --partitions/--volumes
     volume_label: str = ""  # its partition or volume, stamped as vhir.volume
+    volume_offset: int | None = None  # that volume's byte offset in the image
     zone_note: str = ""  # the zone as Plaso finds it on the image
     os: str = "windows"  # windows | linux | macos
     # The evidence source the records come from (a folder, an image path and

@@ -159,8 +159,8 @@ def _scan_stub(monkeypatch, extract, seen, velociraptor=False, mount=None):
     class Stop(Exception):
         pass
 
-    def scan(case_id, input_path, hosts, image_notes, extra=()):
-        seen.update(hosts=hosts, notes=image_notes, extra=list(extra))
+    def scan(case_id, input_path, hosts, image_notes, extra=(), archive=None):
+        seen.update(hosts=hosts, notes=image_notes, extra=list(extra), archive=archive)
         raise Stop
 
     work = Path(seen["work"])
@@ -385,6 +385,7 @@ def test_a_partition_that_did_not_mount_is_an_unnamed_candidate(tmp_path, monkey
         )
     assert seen["notes"] == [(2097152, "partition type 'x' at offset 2097152 did not mount: "
                                        "bad superblock")]  # fmt: skip
+    assert seen["archive"] == (archive, "disk.raw")  # named by the archive, not the run's copy
 
 
 def test_a_memory_images_computer_name_variables_are_observed():

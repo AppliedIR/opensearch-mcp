@@ -36,6 +36,8 @@ from sift_common import host_identity
 logger = logging.getLogger(__name__)
 
 ROWS = 50  # first rows of each CSV/JSON file read for host columns
+SAMPLE_BYTES = 1 << 20  # of a JSON file read for them
+ROW_FILES = 200  # CSV/JSON files sampled under one host folder or volume
 EVTX_SAMPLE = 50  # records read from each event log for its Computer
 
 ARTIFACT = host_identity.ARTIFACT
@@ -215,8 +217,13 @@ def evtx_computers(evtx_dir: Path) -> list[tuple[str, str]]:
     return out
 
 
+class NotSampled(Exception):
+    """A file whose host columns couldn't be read, and why."""
+
+
 def row_names(path: Path) -> list[str]:
-    """Host-column values from the first rows of a CSV/TSV or JSON file."""
+    """Host-column values from the first rows of a CSV/TSV or JSON file.
+    Raises NotSampled for a file it couldn't read: never a silent skip."""
     from opensearch_mcp.hostname import extract_host_from_record
 
     out: list[str] = []
@@ -224,19 +231,23 @@ def row_names(path: Path) -> list[str]:
     try:
         with open(path, encoding="utf-8-sig", errors="replace", newline="") as f:
             if suffix in (".json", ".jsonl", ".ndjson"):
-                head = f.read(1 << 20)
+                head = f.read(SAMPLE_BYTES)
                 rows: list = []
                 stripped = head.lstrip()
                 if stripped.startswith("["):
                     try:
                         rows = json.loads(stripped)
+                    except RecursionError:
+                        raise NotSampled("nested too deeply to read") from None
                     except ValueError:
-                        rows = []
+                        if f.read(1):  # the array goes on past what's sampled
+                            raise NotSampled("file too large") from None
+                        raise NotSampled("not valid JSON") from None
                 else:
                     for line in head.splitlines()[:ROWS]:
                         try:
                             rows.append(json.loads(line))
-                        except ValueError:
+                        except (ValueError, RecursionError):
                             continue
             else:
                 dialect = "excel-tab" if suffix == ".tsv" else "excel"
@@ -245,8 +256,8 @@ def row_names(path: Path) -> list[str]:
                     if n >= ROWS:
                         break
                     rows.append(row)
-    except (OSError, csv.Error, UnicodeError):
-        return out
+    except (OSError, csv.Error, UnicodeError) as e:
+        raise NotSampled(f"unreadable ({e})") from None
     for row in rows[:ROWS]:
         if isinstance(row, dict):
             host = extract_host_from_record(row)
@@ -258,15 +269,30 @@ def row_names(path: Path) -> list[str]:
 _ROW_SUFFIXES = (".csv", ".tsv", ".json", ".jsonl", ".ndjson")
 
 
-def _row_files(root: Path) -> list[Path]:
-    try:
-        return sorted(
-            f
-            for f in Path(root).rglob("*")
-            if f.is_file() and f.suffix.lower() in _ROW_SUFFIXES and not f.name.endswith(".index")
-        )
-    except OSError:
-        return []
+def _row_files(root: Path) -> tuple[list[Path], bool]:
+    """CSV/JSON files under `root` to sample, shallowest first, at most
+    ROW_FILES of them (a mounted volume is never walked whole), and whether
+    more were left out."""
+    found: list[Path] = []
+    level = [Path(root)]
+    while level:
+        deeper = []
+        for d in sorted(level):
+            try:
+                entries = sorted(d.iterdir())
+            except OSError:
+                continue
+            for e in entries:
+                if e.is_symlink():
+                    continue
+                if e.is_dir():
+                    deeper.append(e)
+                elif e.suffix.lower() in _ROW_SUFFIXES and not e.name.endswith(".index"):
+                    if len(found) == ROW_FILES:
+                        return found, True
+                    found.append(e)
+        level = deeper
+    return found, False
 
 
 # --------------------------------------------------------------------------
@@ -288,10 +314,23 @@ def host_folder_unit(host, case_dir: Path | None) -> Unit:
     if getattr(host, "evtx_dir", None):
         for raw, where in evtx_computers(host.evtx_dir):
             unit.add(raw, where, ARTIFACT)
-    for f in _row_files(Path(host.volume_root)):
-        for raw in row_names(f):
-            unit.add(raw, f"{_rel(case_dir, f)} host column", file_origin(case_dir, f))
+    files, more = _row_files(Path(host.volume_root))
+    _add_row_names(unit, files, case_dir)
+    if more:
+        unit.attrs["names_sampled"] = f"host columns read from the first {ROW_FILES} files only"
     return unit
+
+
+def _add_row_names(unit: Unit, files, case_dir: Path | None) -> None:
+    """Each file's host columns; one that can't be read is listed on the unit."""
+    for f in files:
+        try:
+            raws = row_names(f)
+        except NotSampled as e:
+            unit.attrs.setdefault("names_not_sampled", []).append(f"{_rel(case_dir, f)}: {e}")
+            continue
+        for raw in raws:
+            unit.add(raw, f"{_rel(case_dir, f)} host column", file_origin(case_dir, f))
 
 
 def velociraptor_unit(collection: Path, archive: Path, case_dir: Path | None) -> Unit | None:
@@ -311,6 +350,18 @@ def velociraptor_unit(collection: Path, archive: Path, case_dir: Path | None) ->
     return unit
 
 
+def volume_locator(
+    image: Path, case_dir: Path | None, offset, label: str = "", prefix: str = ""
+) -> str:
+    """A disk image's volume as a unit: the image (or the archive it came in,
+    with `prefix` its name there), the volume's byte offset, and a sub-volume's
+    own name when several share it (APFS). The dry run and the ingest both
+    use this, so one volume is one unit in both."""
+    sub = label.split(":", 1)[1] if ":" in label else ""
+    member = "/".join(x for x in (prefix, sub) if x)
+    return host_identity.unit_locator(image, case_dir, member=member, offset=int(offset or 0))
+
+
 def image_candidates(image: Path, leaves: list[dict], case_dir: Path | None) -> list[Unit]:
     """A candidate unit for every volume of a disk image, from the volume
     list read without mounting. Names come once a reader gets to them."""
@@ -320,7 +371,7 @@ def image_candidates(image: Path, leaves: list[dict], case_dir: Path | None) -> 
         # the label an image run of this volume uses, so both name one unit
         label = ":".join(v for v in (sel.get("partitions"), sel.get("volumes")) if v) or "fs"
         unit = Unit(
-            locator=host_identity.unit_locator(image, case_dir, member=label),
+            locator=volume_locator(image, case_dir, leaf.get("offset", 0), label),
             source="disk image volume",
         )
         unit.attrs.update({"volume": label, **{k: leaf[k] for k in ("fs", "os") if leaf.get(k)}})
@@ -330,11 +381,14 @@ def image_candidates(image: Path, leaves: list[dict], case_dir: Path | None) -> 
     return units
 
 
-def noted_volume_unit(image: Path, offset, note: str, case_dir: Path | None) -> Unit:
+def noted_volume_unit(
+    image: Path, offset, note: str, case_dir: Path | None, prefix: str = ""
+) -> Unit:
     """A volume of a disk image that no reader covered (locked, unmountable,
-    or with no operating system): a candidate unit, unnamed, with why."""
+    or with no operating system): a candidate unit, unnamed, with why. An
+    image from an archive is named by the archive (`prefix`: its name in it)."""
     return Unit(
-        locator=host_identity.unit_locator(image, case_dir, offset=int(offset)),
+        locator=volume_locator(image, case_dir, offset, prefix=prefix),
         source="disk image volume",
         note=note,
     )
@@ -371,9 +425,7 @@ def files_unit(path: Path, hostname: str, files: list[Path], case_dir: Path | No
         named = filename_host(f)
         if named:
             unit.add(named, f"{f.name} file name", FILE_NAME)
-        if f.suffix.lower() in _ROW_SUFFIXES:
-            for raw in row_names(f):
-                unit.add(raw, f"{_rel(case_dir, f)} host column", file_origin(case_dir, f))
+    _add_row_names(unit, [f for f in files if f.suffix.lower() in _ROW_SUFFIXES], case_dir)
     return unit
 
 

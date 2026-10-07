@@ -272,7 +272,7 @@ def test_each_status_note_is_a_labelled_warning(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     ingest_status.write_status("c1", 7, "r", "running", [], {}, "2026-10-07T00:00:00Z")
-    ingest_status.finish_status("c1", 7, notes=[("triage", "t"), ("mount", "m")])
+    ingest_status.finish_status("c1", 7, notes=[("triage", "t"), ("mount", "m")], run_id="r")
     (path,) = (tmp_path / "status").glob("*.json")
     data = __import__("json").loads(path.read_text())
     assert data["status"] == "complete"
@@ -423,7 +423,9 @@ def test_a_disk_image_inside_an_archive_names_its_hosts_after_the_image(tmp_path
     class Stop(Exception):
         pass
 
-    def preflight(case_id, input_path, hosts, image_notes, extra=()):  # the names scan
+    def preflight(
+        case_id, input_path, hosts, image_notes, extra=(), archive=None
+    ):  # the names scan
         seen["hosts"] = [h.hostname for h in hosts]
         raise Stop
 

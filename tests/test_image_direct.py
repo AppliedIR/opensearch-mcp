@@ -155,6 +155,7 @@ def test_an_image_host_is_named_for_the_image_never_the_registry(inventory, tmp_
         "time zone America/New_York (the volume's etc/localtime, as Plaso read it)"
     )
     assert covered == {3145728: "dual-0a1b2c3d-p2-lvm1"}
+    assert host.volume_offset == 3145728  # its unit: as the dry run names that volume
     assert len(notes) == 1
 
 
@@ -701,7 +702,9 @@ def test_image_hosts_reach_the_names_scan_from_a_relative_path(tmp_path, monkeyp
 
     seen = {}
 
-    def preflight(case_id, input_path, hosts, image_notes, extra=()):  # the names scan
+    def preflight(
+        case_id, input_path, hosts, image_notes, extra=(), archive=None
+    ):  # the names scan
         seen["hosts"] = [(h.hostname, h.os) for h in hosts]
         raise Stop
 

@@ -192,7 +192,7 @@ def test_triage_that_finished_adds_no_warning(scan):
 def test_finishing_leaves_a_failed_run_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     ingest_status.write_status("c1", 7, "r", "failed", [], {}, "2026-10-02T00:00:00Z", error="x")
-    ingest_status.finish_status("c1", 7)
+    ingest_status.finish_status("c1", 7, run_id="r")
     (path,) = (tmp_path / "status").glob("*.json")
     assert '"status": "failed"' in path.read_text()
 
@@ -237,7 +237,9 @@ def test_a_live_pid_without_its_inherited_run_id_is_still_failed(tmp_path, monke
     """PID reuse: the pid is alive (this process), but it isn't the worker
     whose inherited run id the status names."""
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
-    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-y")  # recorded as inherited
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-y")
+    # recorded as inherited: the run id this process started with
+    monkeypatch.setattr(ingest_status, "_in_own_environ", lambda run_id: True)
     ingest_status.write_status(
         "c1", os.getpid(), "run-y", "running", [], {}, "2026-10-02T00:00:00Z"
     )
@@ -303,7 +305,7 @@ def test_a_sweep_during_the_workers_exec_leaves_it_running(tmp_path, monkeypatch
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-e")
     hosts = [{"hostname": "h", "artifacts": [{"name": "evtx", "status": "complete"}]}]
     ingest_status.write_status("c1", os.getpid(), "run-e", "running", hosts, {}, t0)
-    ingest_status.finish_status("c1", os.getpid())
+    ingest_status.finish_status("c1", os.getpid(), run_id="run-e")
     (path,) = (tmp_path / "status").glob("*.json")
     data = json.loads(path.read_text())
     assert (data["status"], data["hosts"]) == ("complete", hosts), data

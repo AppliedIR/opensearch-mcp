@@ -128,6 +128,9 @@ def test_a_worker_that_runs_still_goes_running_then_complete(case, monkeypatch, 
         time.sleep(0.1)
     assert "failed" not in seen, json.dumps(seen)
     assert seen[-1] == "complete" and "running" in seen, seen
+    assert sorted(f.name for f in ingest_status._STATUS_DIR.glob("*.json")) == [
+        f"c1-{ingests[0]['pid']}-{ingests[0]['run_id']}.json"
+    ]  # the launcher's pre-spawn record is gone
 
 
 def test_a_starting_record_never_replaces_the_workers(case):

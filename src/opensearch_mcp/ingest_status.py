@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +43,7 @@ def write_status(
     terminal write always survives.
     """
     _STATUS_DIR.mkdir(parents=True, exist_ok=True)
-    path = _status_path_safe(case_id, pid)
+    path = _status_path_safe(case_id, pid, run_id)
     # Monotonic transition guard: terminal → running/starting is not
     # a valid downgrade. Read-before-write is only best-effort (a
     # race between the read and the atomic replace still allows one
@@ -71,9 +72,10 @@ def write_status(
         "bulk_failed_reason": bulk_failed_reason,
         "elapsed_seconds": round(elapsed_seconds, 1),
     }
-    if run_id and pid == os.getpid() and os.environ.get("VHIR_INGEST_RUN_ID") != run_id:
-        # A run id the worker made itself (a CLI run) isn't in its
-        # /proc/<pid>/environ, so the sweep can't confirm it there.
+    if run_id and pid == os.getpid() and not _in_own_environ(run_id):
+        # A run id the worker made itself (a CLI run, or one image of an
+        # archive) isn't in its /proc/<pid>/environ, so the sweep can't
+        # confirm it there.
         data["run_id_from_env"] = False
     if not log_file and run_id:
         # The launcher writes the worker's log here; workers don't pass it.
@@ -97,13 +99,15 @@ def write_status(
         raise
 
 
-def finish_status(case_id: str, pid: int, notes: list[tuple[str, str]] | None = None) -> None:
+def finish_status(
+    case_id: str, pid: int, notes: list[tuple[str, str]] | None = None, run_id: str = ""
+) -> None:
     """Write a run's own last status again as `complete`: the terminal write
     after a last phase that kept it `running`. Leaves any other state.
     Each `(label, note)` in `notes` (triage that didn't finish, a partition
     that didn't mount) is shown as a warning, not an artifact."""
     try:
-        data = json.loads(_status_path_safe(case_id, pid).read_text())
+        data = json.loads(_status_path_safe(case_id, pid, run_id).read_text())
     except (OSError, json.JSONDecodeError):
         return
     if data.get("status") != "running":
@@ -225,10 +229,22 @@ def read_active_ingests() -> list[dict]:
     return results
 
 
-def _status_path_safe(case_id: str, pid: int) -> Path:
-    """Safe status path — sanitize case_id to prevent path traversal."""
+def _in_own_environ(run_id: str) -> bool:
+    """Whether this process started with `run_id`: what the sweep reads from
+    /proc/<pid>/environ, which a change to os.environ doesn't reach."""
+    try:
+        return f"VHIR_INGEST_RUN_ID={run_id}".encode() in Path("/proc/self/environ").read_bytes()
+    except OSError:
+        return os.environ.get("VHIR_INGEST_RUN_ID") == run_id
+
+
+def _status_path_safe(case_id: str, pid: int, run_id: str = "") -> Path:
+    """Safe status path — sanitize case_id to prevent path traversal. One
+    file per run: the runs one process makes (an archive's images) each
+    keep their own."""
     safe_id = case_id.replace("/", "_").replace("\\", "_").replace("..", "_")
-    return _STATUS_DIR / f"{safe_id}-{pid}.json"
+    run = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id).replace("..", "_")[:80]
+    return _STATUS_DIR / (f"{safe_id}-{pid}-{run}.json" if run else f"{safe_id}-{pid}.json")
 
 
 def _is_process_alive(pid: int, run_id: str) -> bool:
