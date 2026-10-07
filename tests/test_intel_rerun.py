@@ -114,5 +114,6 @@ class TestASecondRunKeepsEarlierAnswers:
         )
         assert status == "incomplete"
         outcome, records, checked_at = first[R]
-        assert (outcome, records) == ("UNAVAILABLE", 1)  # the earlier record kept
+        # OpenCTI's earlier record is kept, and the outcome is recomputed from it
+        assert (outcome, records) == ("MATCH", 1)
         assert checked_at > before[R][2]

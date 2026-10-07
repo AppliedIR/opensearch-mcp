@@ -149,6 +149,8 @@ def _load_coverage(path: Path) -> dict:
 # (2026-09-30): the evidence held its IOCs under them and nothing read them.
 _IP_FIELDS = [
     "source.ip",  # explicit ip type in evtx/accesslog/w3c templates
+    "destination.ip",  # ECS: w3c's server address; json indices as given
+    "destination.ip.keyword",
     "ForeignAddr",  # Volatility netscan CSV via idx_ingest_delimited (keyword)
     "ForeignAddr.keyword",  # dynamic in vol3_template
     "LocalAddr",  # keyword where a delimited or json index declares it
@@ -200,6 +202,10 @@ _FILESYSTEM_HASH_FIELDS = [
 _DOMAIN_FIELDS = [
     "dns.query",  # json
     "dns.query.keyword",
+    "dns.question.name",  # ECS DNS events
+    "dns.question.name.keyword",
+    "destination.domain",  # ECS
+    "destination.domain.keyword",
     "query",  # json, delimited
     "query.keyword",
     "source_host.keyword",  # B36 renamed field; often the collecting host
@@ -547,6 +553,16 @@ def _entry(ioc_type: str, value: str, outcome: str, reply: dict | None, reason: 
     return entry
 
 
+def _blocks(entry: dict) -> dict:
+    """An entry's per-provider answers (each under the provider's name)."""
+    return {k: v for k, v in entry.items() if isinstance(v, dict) and "outcome" in v}
+
+
+def _unanswered(entry: dict) -> list[str]:
+    """The providers whose block in `entry` isn't an answer (MATCH or NO_MATCH)."""
+    return [n for n, b in _blocks(entry).items() if b.get("outcome") not in _CONFIRMED]
+
+
 def _unconfirmed_why(resp: dict, value: str) -> str:
     if resp.get("error"):
         return f"error: {resp.get('message') or resp['error']}"
@@ -777,10 +793,24 @@ _LEGACY_KEYS = (
 )
 
 # One IOC's entry in `threat_intel.iocs`, keyed on its exact lookup form and
-# type. A confirmed answer replaces it whole and marks the document checked;
-# an unconfirmed one sets outcome, time and reason, and keeps the providers'
-# earlier answers (or adds a new entry). Nothing else on the document changes.
+# type, merged per provider: a provider's new answer (MATCH or NO_MATCH)
+# replaces its earlier block, and an earlier answer is kept when the new block
+# isn't one (an outage never erases what a platform said). The outcome is
+# then recomputed from the merged blocks (a reply has one per configured
+# provider). The document is `checked` only when every entry on it has an
+# answer in each of its blocks, so a later run asks again for the rest.
+# Nothing else on the document changes.
 _STAMP_SCRIPT = """
+boolean answered(def b, def ok) { return b instanceof Map && ok.contains(b.get('outcome')); }
+boolean isBlock(def b) { return b instanceof Map && b.containsKey('outcome'); }
+boolean complete(def e, def ok) {
+  boolean any = false;
+  for (def k : e.keySet()) {
+    def b = e.get(k);
+    if (isBlock(b)) { if (!answered(b, ok)) { return false; } any = true; }
+  }
+  return any;
+}
 def key = 'threat_intel.iocs';
 def entries = ctx._source[key];
 if (!(entries instanceof List)) { entries = new ArrayList(); }
@@ -790,18 +820,36 @@ for (int i = 0; i < entries.size(); i++) {
   if (e instanceof Map && params.entry.ioc_value.equals(e.get('ioc_value'))
       && params.entry.ioc_type.equals(e.get('ioc_type'))) { at = i; break; }
 }
-if (params.confirmed) {
-  if (at >= 0) { entries.set(at, params.entry); } else { entries.add(params.entry); }
-  ctx._source['threat_intel.checked'] = true;
-} else if (at >= 0) {
-  def e = entries.get(at);
-  e.put('outcome', params.entry.outcome);
-  e.put('checked_at', params.entry.checked_at);
-  e.put('reason', params.entry.reason);
-} else {
-  entries.add(params.entry);
+def merged = new HashMap(params.entry);
+if (at >= 0 && entries.get(at) instanceof Map) {
+  def old = entries.get(at);
+  for (def k : old.keySet()) {
+    if (answered(old.get(k), params.answered) && !answered(merged.get(k), params.answered)) {
+      merged.put(k, old.get(k));
+    }
+  }
 }
+def names = new HashSet();
+for (def k : merged.keySet()) { if (isBlock(merged.get(k))) { names.add(k); } }
+if (!names.isEmpty()) {
+  boolean match = false;
+  boolean open = false;
+  for (def n : names) {
+    def b = merged.get(n);
+    if (b instanceof Map && 'MATCH'.equals(b.get('outcome'))) { match = true; }
+    else if (!answered(b, params.answered)) { open = true; }
+  }
+  merged.put('outcome', match ? 'MATCH' : (open ? 'UNAVAILABLE' : 'NO_MATCH'));
+  if (!open) { merged.remove('reason'); }
+}
+if (at >= 0) { entries.set(at, merged); } else { entries.add(merged); }
 ctx._source[key] = entries;
+boolean done = true;
+for (def e : entries) {
+  if (!(e instanceof Map) || !complete(e, params.answered)) { done = false; }
+}
+if (done) { ctx._source['threat_intel.checked'] = true; }
+else { ctx._source.remove('threat_intel.checked'); }
 """
 
 
@@ -904,6 +952,8 @@ def stamp_documents(
 
         entry = dict(result["entry"])
         entry.setdefault("reason", "")
+        if not entry["reason"]:
+            entry.pop("reason")
         try:
             response = client.update_by_query(
                 index=index_pattern,
@@ -917,7 +967,10 @@ def stamp_documents(
                     "script": {
                         "source": _STAMP_SCRIPT,
                         "lang": "painless",
-                        "params": {"entry": entry, "confirmed": bool(result["confirmed"])},
+                        "params": {
+                            "entry": entry,
+                            "answered": list(_CONFIRMED),
+                        },
                     },
                 },
                 request_timeout=120,
@@ -973,6 +1026,25 @@ def _incomplete(
     if capped:
         parts.append(_capped_reason(capped))
     return "; ".join(parts) or None
+
+
+_PROVIDER_LABELS = {"opencti": "OpenCTI", "misp": "MISP"}
+
+
+def _not_answered(results: dict[str, dict]) -> dict[str, int]:
+    """How many of this run's IOCs each provider didn't answer."""
+    counts: dict[str, int] = {}
+    for r in results.values():
+        for name in _unanswered(r["entry"]):
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _not_answered_reason(counts: dict[str, int]) -> str:
+    return "; ".join(
+        f"{_PROVIDER_LABELS.get(name, name)}: {n} not answered"
+        for name, n in sorted(counts.items())
+    )
 
 
 def _capped_reason(capped: dict[str, int]) -> str:
@@ -1046,6 +1118,8 @@ def enrich_case(
     matched = outcomes.count(MATCH)
     not_found = outcomes.count(NO_MATCH)
     unavailable = outcomes.count(UNAVAILABLE)
+    # Per provider: an IOC another provider matched still lacks this one's answer
+    not_answered = _not_answered(results)
 
     if on_progress:
         on_progress("stamping", matched=matched)
@@ -1063,12 +1137,17 @@ def enrich_case(
         "documents_updated": updated,
         "version_conflicts": conflicts,
         "legacy_stamps_cleared": legacy_cleared,
+        "not_answered": not_answered,
     }
     # Complete only when every IOC had a confirmed lookup and every stamp
     # landed. A run that looked nothing up read "complete, 0 malicious".
     reason = "; ".join(
         r
-        for r in (_incomplete(iocs, coverage, conflicts, failed_stamps, capped), legacy_reason)
+        for r in (
+            _not_answered_reason(not_answered),
+            _incomplete(iocs, coverage, conflicts, failed_stamps, capped),
+            legacy_reason,
+        )
         if r
     )
     if reason:
