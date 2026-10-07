@@ -48,8 +48,8 @@ def register(subparsers, registered: set) -> None:
         p.add_argument("path", help="Path to memory image")
         p.add_argument(
             "--hostname",
-            required=True,
-            help="Source hostname (required)",
+            default="",
+            help="Source hostname, if known (else the examiner names it in the Hosts tab)",
         )
         p.add_argument("--case", help="Case ID")
         p.add_argument(

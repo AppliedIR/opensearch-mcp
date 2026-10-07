@@ -90,3 +90,52 @@ def test_start_now_then_an_unchanged_confirm_marks_then_unmarks_and_rewrites_not
     hits = srv.idx_search(query="*", limit=10)["results"]
     assert not any(h.get("host_unconfirmed") for h in hits)
     assert "host_unconfirmed" not in srv.idx_count(query="*")
+
+
+def test_a_run_whose_hosts_are_confirmed_answers_started_at_once(client, tmp_path, monkeypatch):
+    """A real worker: the launch waits for it to pass the gate, then says so."""
+    import os
+    import shutil
+    import time
+    from pathlib import Path
+
+    from _helpers import confirm_unit
+
+    from opensearch_mcp import ingest_status, shard_capacity
+
+    real_home = Path(os.environ["HOME"])
+    home = tmp_path / "home"
+    (home / ".vhir").mkdir(parents=True)
+    shutil.copy(real_home / ".vhir" / "opensearch.yaml", home / ".vhir")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", home / ".vhir" / "ingest-status")
+    cid = f"gate-run-{uuid.uuid4().hex[:8]}"
+    case_dir = home / "cases" / cid
+    (case_dir / "evidence").mkdir(parents=True)
+    (case_dir / "CASE.yaml").write_text(
+        f"case_id: {cid}\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"
+    )
+    (home / ".vhir" / "active_case").write_text(str(case_dir))
+    monkeypatch.setattr(shard_capacity, "check_shard_headroom", lambda *a, **k: (True, ""))
+    rows = case_dir / "evidence" / "events.csv"
+    rows.write_text("when,what\n2026-01-01T00:00:00Z,a\n")
+    confirm_unit(case_dir, rows, "h1")  # the examiner confirmed it already
+    c12 = wc.case_identity(case_dir)[0]
+    created = _scratch_templates.install(client, f"gr-{c12}", c12=c12)
+    try:
+        t0 = time.monotonic()
+        resp = srv.idx_ingest_delimited(
+            path=str(rows), hostname="h1", time_field="when", dry_run=False
+        )
+        assert resp["status"] == "started", resp
+        assert time.monotonic() - t0 < srv._GATE_ANSWER_SECONDS
+        assert "hosts_note" not in resp
+    finally:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:  # let the worker end before the cleanup
+            runs = [r for r in ingest_status.read_active_ingests() if r.get("case_id") == cid]
+            if not any(r.get("status") in ("running", "starting") for r in runs):
+                break
+            time.sleep(0.5)
+        client.indices.delete(index=f"case-{c12}-*", ignore=[404])
+        _scratch_templates.remove(client, created)

@@ -327,7 +327,17 @@ def test_a_pre_0_7_machine_keeps_its_host_id_and_its_merge_is_flagged(client, ca
         {"host.name": "WKS01", "host.id": "WKS01"},
         {"host.name": "wks01.corp.example.test", "host.id": "WKS01"},
     ])  # fmt: skip
-    write(client, case, "hosts/WKS01", "WKS01", evtx(1, host="WKS01"))  # imports first
+    assert ensure_v1_imported(client, case) is True
+    # a new unit's names wait for the examiner, who confirms them as the old host
+    (old,) = host_identity.load(case).machines.values()
+    u = host_identity.unit_key("hosts/WKS01")
+    host_identity.append_observations(
+        case, [{"kind": "unit", "unit": u, "locator": "hosts/WKS01"}]
+    )
+    host_identity.append_decision(case, {"action": "confirm", "args": {"machines": [
+        {"key": old.keys[0], "canonical": old.canonical, "pairs": [[u, "WKS01"]]}]}},
+        host_identity.load(case).obs_offset)  # fmt: skip
+    write(client, case, "hosts/WKS01", "WKS01", evtx(1, host="WKS01"))
     assert ensure_v1_imported(client, case) is False
     (machine,) = host_identity.load(case).machines.values()
     assert machine.canonical == "WKS01" and machine.state == host_identity.CONFIRMED

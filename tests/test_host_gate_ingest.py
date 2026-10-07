@@ -387,12 +387,15 @@ def test_every_result_says_a_host_rename_is_incomplete(monkeypatch):
     assert resp["host_note"] == "host rename incomplete: WKS01 → WKS02"
 
 
-def test_a_failed_count_of_unconfirmed_documents_leaves_the_answer_alone(monkeypatch):
+def test_a_failed_count_of_unconfirmed_documents_is_said_and_leaves_the_answer(monkeypatch):
     _review(monkeypatch, {"k-new"})
     client = mock.MagicMock()
     client.search.side_effect = RuntimeError("cluster down")
     resp = srv._annotate_hosts({"count": 3}, "c1", client, "case-x-*", {"match_all": {}})
-    assert resp == {"count": 3}
+    assert resp["count"] == 3
+    assert resp["host_unconfirmed_error"] == (
+        "documents from machines not yet confirmed couldn't be counted: RuntimeError: cluster down"
+    )
 
 
 def test_the_review_lists_machines_not_yet_confirmed(gate):
@@ -442,3 +445,67 @@ def test_names_a_forwarded_log_gives_past_the_scan_are_their_own_machines(gate):
     state = hi.load(gate.case_dir)
     for name in ("SRC2", "SRC3", "SRC4"):  # met while ingesting: new, awaiting the examiner
         assert state.machine_of_key(machines[name][1]).state == hi.NEW
+
+
+# -- admission, walks, and a waiting run's status
+
+
+def test_runs_waiting_for_their_hosts_count_at_admission_and_are_listed(gate, monkeypatch):
+    import os
+
+    for n in range(srv._MAX_CONCURRENT_INGESTS):
+        ingest_status.write_status(f"case-{n}", os.getpid(), f"run-w{n}", host_gate.AWAITING,
+                                   [], {"unresolved": 1}, "t0")  # fmt: skip
+    refused = srv._admission_refusal()
+    assert "3 of them wait for host confirmation" in refused["error"]
+    assert sorted(r["case_id"] for r in refused["running"]) == ["case-0", "case-1", "case-2"]
+    assert {r["status"] for r in refused["running"]} == {host_gate.AWAITING}
+
+
+def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate):
+    root = gate.tmp / "hosts"
+    for h in ("H1", "H2", "H3"):
+        (root / h).mkdir(parents=True)
+        (root / h / "e.csv").write_text("when,what\n2026-01-01T00:00:00Z,a\n")
+    args = argparse.Namespace(path=str(root), case=None, hostname=None, time_field="when",
+                              recursive=True)  # fmt: skip
+    t, out = gate.start(cli.cmd_ingest_delimited, args)
+    gate.waiting()
+    assert len(hi.load(gate.case_dir).waits[RUN]) == 3  # every host, in one wait
+    host_gate.start_now(gate.case_dir, RUN, "ex1")
+    t.join(15)
+    assert out == {"ok": True}
+    assert {w["host.name"] for w in gate.writes} == {"H1", "H2", "H3"}
+
+
+def test_a_waiting_runs_status_outlives_the_cleanup_by_age(gate):
+    import os
+
+    command, args = _delimited(gate)
+    t, out = gate.start(command, args)
+    gate.waiting()
+    (f,) = [f for f in (gate.tmp / "status").glob("*.json")]
+    old = time.time() - 25 * 3600
+    os.utime(f, (old, old))  # a day without a write
+    time.sleep(0.3)  # a few polls
+    ingest_status.cleanup_old()
+    assert f.exists() and json.loads(f.read_text())["status"] == host_gate.AWAITING
+    host_gate.cancel(gate.case_dir, RUN, "ex1")
+    t.join(15)
+
+
+def test_a_memory_ingest_from_the_vhir_cli_needs_no_hostname():
+    from opensearch_mcp import vhir_plugin
+
+    parser = argparse.ArgumentParser()
+    vhir_plugin.register(parser.add_subparsers(dest="cmd"), set())
+    args = parser.parse_args(["ingest-memory", "mem.raw"])
+    assert args.hostname == ""
+
+
+def test_a_launch_whose_run_was_cancelled_says_so(gate, monkeypatch):
+    monkeypatch.setattr(srv, "_GATE_ANSWER_SECONDS", 5.0)
+    ingest_status.write_status(gate.case_id, 4245, RUN, "cancelled", [], {}, "t0",
+                               error="run run-gate was cancelled in the Hosts tab")  # fmt: skip
+    out = srv._answer_after_gate({"status": "started"}, gate.case_id, 4245, RUN)
+    assert out["status"] == "cancelled" and "cancelled in the Hosts tab" in out["error"]

@@ -162,7 +162,7 @@ def test_a_renamed_machines_rows_keep_their_ids():
     key = client.actions[0]["_source"]["vhir.host_key"]
     host_identity.append_decision(
         case, {"action": "rename", "args": {"machine": key, "canonical": "FIN-WS-01"}},
-        (case / host_identity.OBSERVATIONS).stat().st_size,
+        (case / host_identity.OBSERVATIONS).stat().st_size, door="R",  # as a host rename
     )  # fmt: skip
     again = _Sent()
     ctx._resolved.clear()

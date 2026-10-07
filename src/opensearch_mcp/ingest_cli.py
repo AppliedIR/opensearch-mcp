@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -42,13 +43,14 @@ def _case_dir_for(case_id: str) -> Path | None:
     return case_dir_for(case_id)
 
 
-def _open_unit(
-    case_id: str, path, hostname: str, source: str, origin: str = "argument", files=None
-):
-    """Scan one evidence argument (a file or folder) for host names, record
-    them, and open its write context: every record written until the next one
-    belongs to this unit. Exits when the case has no directory, since no
-    record may be stored without its machine."""
+_gated = threading.local()  # units a walk already took through the gate, on this thread
+
+
+def _scan_unit(case_id: str, path, hostname: str, source: str, origin: str = "argument",
+               files=None):  # fmt: skip
+    """The scan half of opening a unit: its host names recorded, and its
+    write context opened (no write yet). Exits when the case has no
+    directory, since no record may be stored without its machine."""
     from sift_common.host_identity import unit_locator
 
     from opensearch_mcp import names_scan
@@ -64,7 +66,7 @@ def _open_unit(
     scanned = names_scan.files_unit(Path(path), hostname, list(files or []), case_dir)
     for u in names_scan.record(case_dir, [scanned]):
         print(f"  host names: {u['locator']}: {', '.join(u['names']) or '(none)'}")
-    ctx = wc.open_unit(
+    return wc.open_unit(
         case_dir,
         unit_locator(path, case_dir),
         hostname,
@@ -73,9 +75,44 @@ def _open_unit(
         run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
         input_path=path,
     )
+
+
+def _open_unit(
+    case_id: str, path, hostname: str, source: str, origin: str = "argument", files=None
+):
+    """Scan one evidence argument (a file or folder) for host names, record
+    them, open its write context, and hold the run at the gate until its
+    hosts are confirmed: every record written until the next one belongs to
+    this unit. A walk over several leaves gates them all at once first."""
+    from opensearch_mcp import write_context as wc
+
+    ctx = _scan_unit(case_id, path, hostname, source, origin, files)
     wc.set_current(ctx)
-    _gate(case_id, [ctx.unit])
+    if ctx.unit not in getattr(_gated, "units", ()):
+        _gate(case_id, [ctx.unit])
     return ctx
+
+
+def _gate_walk(case_id: str, leaves: list[tuple], run_id: str = "") -> None:
+    """A walk's leaves, (path, hostname, files) each: every one scanned, then
+    the run held at the gate once for all of them, so the examiner confirms
+    the whole walk together; the leaves then go through without waiting."""
+    units = [_scan_unit(case_id, p, h, "delimited", files=f).unit for p, h, f in leaves]
+    _gate(case_id, units, run_id)
+    _gated.units = set(units) | set(getattr(_gated, "units", ()))
+
+
+def _delim_files(input_path: Path, only_files=None) -> list:
+    """The files a delimited ingest of `input_path` reads."""
+    exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
+    files = (
+        [input_path]
+        if input_path.is_file()
+        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+    )
+    if only_files is not None:  # an auto-hosts sub-run: this host's files only
+        files = [f for f in files if f in only_files]
+    return files
 
 
 def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
@@ -95,14 +132,21 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
     run = run_id or os.environ.get("VHIR_INGEST_RUN_ID", "")
     started = datetime.now(timezone.utc).isoformat()
 
+    shown: list = []
+
     def on_wait(summary: dict) -> None:
-        print(
-            f"Waiting for host confirmation ({summary['unresolved']} host name(s)): "
-            f"{summary['message']}.",
-            file=sys.stderr,
-        )
-        for h in summary["hosts"]:
-            print(f"  {h['locator']}: {h['raw'] or '(none)'}: {h['reason']}", file=sys.stderr)
+        # said once per change; the status is written on every poll, so it
+        # stays fresh (a cleanup by age never takes it) and a launcher's
+        # write over it is repaired within one poll
+        if summary != (shown[-1] if shown else None):
+            shown.append(summary)
+            print(
+                f"Waiting for host confirmation ({summary['unresolved']} host name(s)): "
+                f"{summary['message']}.",
+                file=sys.stderr,
+            )
+            for h in summary["hosts"]:
+                print(f"  {h['locator']}: {h['raw'] or '(none)'}: {h['reason']}", file=sys.stderr)
         if run:
             hosts = [
                 {"hostname": h["raw"] or h["locator"],
@@ -161,8 +205,12 @@ def _closes_write_context(fn):
     def wrapper(*args, **kwargs):
         from opensearch_mcp import write_context as wc
 
-        with wc.restoring():
-            return fn(*args, **kwargs)
+        gated = getattr(_gated, "units", set())
+        try:
+            with wc.restoring():
+                return fn(*args, **kwargs)
+        finally:
+            _gated.units = gated  # a walk's pass through the gate ends with it
 
     return wrapper
 
@@ -2089,6 +2137,12 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         missed: list[str] = []  # each sub-run starts its own list
         not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
+        if not is_recursive:  # (a recursive sub-run gates its own walk)
+            _gate_walk(case_id, [
+                (input_path, h, _delim_files(input_path, [f for f in flat
+                                                          if _filename_host(f) == h.lower()]))
+                for h in auto_hosts
+            ], run_id or "")  # fmt: skip
         for h in auto_hosts:
             sub_args = copy.copy(args)
             sub_args.hostname = h
@@ -2150,6 +2204,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_missed: list[str] = []  # each sub-run starts its own list
         walk_not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
+        _gate_walk(case_id, [(d, d.name, _delim_files(d)) for d in subdirs], run_id or "")
         for d in subdirs:
             sub_args = copy.copy(args)
             sub_args.path = str(d)
@@ -2236,15 +2291,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     aid = audit._next_audit_id()
     case_host_dict = _load_case_host_dict(case_id)
 
-    exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
-    files = (
-        [input_path]
-        if input_path.is_file()
-        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
-    )
-    only_files = getattr(args, "only_files", None)
-    if only_files is not None:  # an auto-hosts sub-run: this host's files only
-        files = [f for f in files if f in only_files]
+    files = _delim_files(input_path, getattr(args, "only_files", None))
 
     from opensearch_mcp.parse_delimited import _detect_delimited_format
 

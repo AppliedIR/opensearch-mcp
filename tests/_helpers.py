@@ -92,3 +92,21 @@ def make_windows_tree(
     # Skipped profiles
     for skip in ("Public", "Default", "All Users"):
         (root / "Users" / skip).mkdir(parents=True, exist_ok=True)
+
+
+def confirm_unit(case_dir, path, *names) -> str:
+    """Confirm, as the examiner would in the Hosts tab, the names a run of
+    `path` gives (through the product's decision API), so a worker started as
+    its own process goes through the host gate. Returns the machine key."""
+    from sift_common import host_identity as hi
+
+    unit = hi.unit_key(hi.unit_locator(path, case_dir))
+    hi.ensure_host_files(case_dir)
+    hi.append_observations(case_dir, [{"kind": "unit", "unit": unit, "locator":
+                                        hi.unit_locator(path, case_dir)}])  # fmt: skip
+    key = hi.new_machine_key()
+    hi.append_decision(case_dir, {"action": "confirm", "examiner": "test", "args": {
+        "machines": [{"key": key, "canonical": names[0],
+                      "pairs": [[unit, n] for n in names]}]}},
+        hi.load(case_dir).obs_offset)  # fmt: skip
+    return key

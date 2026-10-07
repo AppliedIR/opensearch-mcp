@@ -267,6 +267,12 @@ def read_active_ingests() -> list[dict]:
     return results
 
 
+def active_runs() -> list[dict]:
+    """Every run a worker still owns: running, starting, or waiting for the
+    examiner to confirm its hosts (it holds devices and a place in the queue)."""
+    return [i for i in read_active_ingests() if i.get("status") in _LIVE]
+
+
 def _in_own_environ(run_id: str) -> bool:
     """Whether this process started with `run_id`: what the sweep reads from
     /proc/<pid>/environ, which a change to os.environ doesn't reach."""

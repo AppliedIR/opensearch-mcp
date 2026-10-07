@@ -414,7 +414,11 @@ def _annotate_hosts(resp: dict, case_id: str, client=None, index="", query_body=
         total = int(result["hits"]["total"]["value"])
         per = {b["key"]: int(b["doc_count"]) for b in result.get("aggregations", {})
                .get("agg", {}).get("buckets", [])} if field else {}  # fmt: skip
-    except Exception:
+    except Exception as e:  # said, never dropped: the answer above stands
+        resp["host_unconfirmed_error"] = (
+            f"documents from machines not yet confirmed couldn't be counted: "
+            f"{type(e).__name__}: {e}"
+        )
         return resp
     if total:
         resp["host_unconfirmed"] = total
@@ -584,11 +588,10 @@ def _answer_after_gate(resp: dict, case_id: str, pid: int, run_id: str) -> dict:
                 ),
             )
             return resp
-        if data.get("hosts_confirmed") or data.get("status") in (
-            "complete",
-            "failed",
-            "cancelled",
-        ):
+        if data.get("status") in ("failed", "cancelled"):  # what happened, not "started"
+            resp.update(status=data["status"], error=data.get("error", ""))
+            return resp
+        if data.get("hosts_confirmed") or data.get("status") == "complete":
             return resp
         if _time.monotonic() >= deadline:
             resp["hosts_note"] = (
@@ -2030,16 +2033,8 @@ def idx_ingest(
     import os as _os
     import uuid as _uuid
 
-    from opensearch_mcp.ingest_status import read_active_ingests as _read_active
-
-    _running = [i for i in _read_active() if i.get("status") == "running"]
-    if len(_running) >= _MAX_CONCURRENT_INGESTS:
-        return {
-            "error": (
-                f"Too many concurrent ingests ({len(_running)} running, "
-                f"max {_MAX_CONCURRENT_INGESTS}). Use idx_ingest_status()."
-            ),
-        }
+    if refused := _admission_refusal():
+        return refused
 
     run_id = str(_uuid.uuid4())
     env = _os.environ.copy()
@@ -2714,6 +2709,38 @@ def idx_enrich_triage(
 _MAX_CONCURRENT_INGESTS = 3
 
 
+def _admission_refusal() -> dict | None:
+    """The refusal of a new ingest while the most runs are already admitted:
+    running, starting, or waiting for host confirmation (listed, with their
+    cases, so the examiner can confirm or cancel them)."""
+    from opensearch_mcp.ingest_status import AWAITING, active_runs
+
+    runs = active_runs()
+    if len(runs) < _MAX_CONCURRENT_INGESTS:
+        return None
+    waiting = [r for r in runs if r.get("status") == AWAITING]
+    msg = f"Too many concurrent ingests ({len(runs)} admitted, max {_MAX_CONCURRENT_INGESTS})."
+    if waiting:
+        msg += (
+            f" {len(waiting)} of them wait for host confirmation: confirm their hosts "
+            "in the Hosts tab, or cancel them there."
+        )
+    else:
+        msg += " Wait for current ingests to complete."
+    return {
+        "error": msg + " Use idx_ingest_status() to check progress.",
+        "running": [
+            {
+                "case_id": r.get("case_id"),
+                "pid": r.get("pid"),
+                "run_id": r.get("run_id"),
+                "status": r.get("status"),
+            }
+            for r in runs
+        ],  # fmt: skip
+    }
+
+
 def _spawn_ingest(cmd, env, stdout, run_id):
     """Spawn ingest subprocess, isolated in its own cgroup when possible.
 
@@ -2822,7 +2849,7 @@ def _launch_background(
 
     # Defensive breaker reset — covers idx_ingest_json/delimited/accesslog.
     from opensearch_mcp.bulk import reset_circuit_breaker as _reset_cb
-    from opensearch_mcp.ingest_status import read_active_ingests, write_status
+    from opensearch_mcp.ingest_status import write_status
 
     _reset_cb()
 
@@ -2868,17 +2895,8 @@ def _launch_background(
         return {"error": "No active case. Run 'vhir case activate' first."}
 
     # Concurrency gate — prevent OpenSearch OOM from unbounded parallelism
-    active = read_active_ingests()
-    running = [i for i in active if i.get("status") in ("running", "starting")]
-    if len(running) >= _MAX_CONCURRENT_INGESTS:
-        return {
-            "error": (
-                f"Too many concurrent ingests ({len(running)} running, "
-                f"max {_MAX_CONCURRENT_INGESTS}). Wait for current ingests "
-                "to complete. Use idx_ingest_status() to check progress."
-            ),
-            "running": [{"case_id": r.get("case_id"), "pid": r.get("pid")} for r in running],
-        }
+    if refused := _admission_refusal():
+        return refused
 
     run_id = str(_uuid.uuid4())
     env = _os.environ.copy()
@@ -3186,22 +3204,13 @@ def idx_ingest_memory(
     import sys as _sys
     import uuid as _uuid
 
-    from opensearch_mcp.ingest_status import read_active_ingests as _read_mem
-
     active_case = _get_active_case()
     if not active_case:
         return {"error": "No active case. Run 'vhir case activate' first."}
 
     # Concurrency gate (same as _launch_background)
-    _running_mem = [i for i in _read_mem() if i.get("status") in ("running", "starting")]
-    if len(_running_mem) >= _MAX_CONCURRENT_INGESTS:
-        return {
-            "error": (
-                f"Too many concurrent ingests ({len(_running_mem)} running, "
-                f"max {_MAX_CONCURRENT_INGESTS}). Wait for current ingests "
-                "to complete. Use idx_ingest_status() to check progress."
-            ),
-        }
+    if refused := _admission_refusal():
+        return refused
 
     run_id = str(_uuid.uuid4())
     env = _os.environ.copy()

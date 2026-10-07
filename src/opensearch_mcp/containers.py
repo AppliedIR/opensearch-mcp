@@ -667,12 +667,11 @@ def cleanup_orphaned_mounts() -> None:
     """
     import sys
 
-    from opensearch_mcp.ingest_status import _is_process_alive, read_active_ingests
+    from opensearch_mcp.ingest_status import _is_process_alive, active_runs
     from opensearch_mcp.paths import vhir_dir
 
     try:
-        active = read_active_ingests()
-        if any(ing.get("status") == "running" for ing in active):
+        if active_runs():  # a run that waits for its hosts holds its devices too
             return
     except Exception:
         pass
