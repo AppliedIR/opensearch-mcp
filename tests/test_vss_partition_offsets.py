@@ -30,19 +30,25 @@ echo "$*" >> "$VSS_LOG"
 [ -n "$VSS_BROKEN" ] && { echo "Unable to open volume: read error at 4096" >&2; exit 1; }
 off=0; [ "$1" = "-o" ] && off="$2"
 for at in $VSS_AT; do
-  if [ "$at" = "$off" ]; then printf 'Volume\\n\\tNumber of stores:\\t2\\n'; exit 0; fi
+  if [ "$at" = "$off" ]; then
+    printf 'Volume\\n\\tNumber of stores:\\t%s\\n' "${VSS_STORES:-2}"; exit 0
+  fi
 done
 echo "No Volume Shadow Snapshots found."; exit 1
 """,
     "vshadowmount": """#!/bin/sh
 echo "vshadowmount $*" >> "$VSS_LOG"
 for last; do :; done
-touch "$last/vss1" "$last/vss2"
+i=1; while [ "$i" -le "${VSS_STORES:-2}" ]; do touch "$last/vss$i"; i=$((i + 1)); done
 """,
     # vshadowmount runs as root: run the stand-in; anything else does nothing
     "sudo": """#!/bin/sh
 echo "sudo $*" >> "$VSS_LOG"
 [ "$1" = vshadowmount ] && exec "$@"
+# a store listed in VSS_UNMOUNTABLE fails its loop mount, as with no loop device free
+for s in $VSS_UNMOUNTABLE; do
+  case "$4" in */"$s") echo "mount: $5: failed to setup loop device for $4." >&2; exit 32;; esac
+done
 exit 0
 """,
     "fusermount": '#!/bin/sh\necho "fusermount $*" >> "$VSS_LOG"\n',  # nothing really mounted
@@ -403,3 +409,27 @@ def test_cleanup_unmounts_the_stores_then_their_fuse_mount_as_root(vss, tmp_path
         f"sudo umount {mnt}/vss1",
         f"sudo umount {mnt}/_vss",
     ]  # the root-owned FUSE mount never goes to the examiner's fusermount
+
+
+def test_stores_that_didn_t_mount_are_counted_with_their_reason(vss, monkeypatch, capsys):
+    """dev01's shape: 10 stores, 8 of them out of loop devices."""
+    monkeypatch.setenv("VSS_STORES", "10")
+    monkeypatch.setenv("VSS_UNMOUNTABLE", " ".join(f"vss{i}" for i in range(3, 11)))
+    ctx = MountContext()
+    found, _, _ = vss([0], [0], None, ctx)
+    assert found == ["vss1", "vss2"]
+    stores = ", ".join(f"vss{i}" for i in range(3, 11))
+    note = (
+        "8 of 10 shadow copies on the image couldn't be mounted: "
+        f"{stores}: mount: <mount point>: failed to setup loop device for <store>."
+    )
+    assert ctx.failures == [note]  # the scan's status notes come from these
+    assert f"WARNING: {note}" in capsys.readouterr().err
+
+
+def test_anchor_when_every_store_mounts_nothing_is_said(vss, monkeypatch, capsys):
+    monkeypatch.setenv("VSS_STORES", "10")
+    ctx = MountContext()
+    found, _, _ = vss([0], [0], None, ctx)
+    assert len(found) == 10 and ctx.failures == []
+    assert "couldn't" not in capsys.readouterr().err

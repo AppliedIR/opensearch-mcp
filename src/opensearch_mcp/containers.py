@@ -456,12 +456,16 @@ def mount_vss(
                 print(f"  WARNING: {failure}", file=sys.stderr)
     results = []
     for name, offset in sorted(volumes.items(), key=lambda v: v[1]):
-        found, unread = _mount_vss_at(
+        found, unread, partial = _mount_vss_at(
             raw_path, dest, ctx, offset, name if len(volumes) > 1 else ""
         )
         where = f"{name} (offset {offset})" if name else "the image"
         if unread:  # tried and not read: unprocessed, never "none"
             failure = f"shadow copies on {where} couldn't be read: {unread}"
+            ctx.failures.append(failure)
+            print(f"  WARNING: {failure}", file=sys.stderr)
+        elif partial:  # some read, some not: say how many weren't
+            failure = partial.format(where=where)
             ctx.failures.append(failure)
             print(f"  WARNING: {failure}", file=sys.stderr)
         elif not found and notes is not None and name:
@@ -474,10 +478,11 @@ def mount_vss(
 
 def _mount_vss_at(
     raw_path: Path, dest: Path, ctx: MountContext, offset: int, prefix: str
-) -> tuple[list[tuple[str, Path]], str]:
+) -> tuple[list[tuple[str, Path]], str, str]:
     """The shadow copies of the NTFS volume `offset` bytes into the image,
-    mounted as `<prefix>-vssN` (`vssN` with no prefix), and why they
-    couldn't be read ("" when they could, or there are none)."""
+    mounted as `<prefix>-vssN` (`vssN` with no prefix); why none could be read
+    ("" when some could, or there are none); and, when only some could, a
+    note naming how many couldn't and why, with `{where}` for the volume."""
     at = ["-o", str(offset)] if offset else []
     try:
         result = subprocess.run(
@@ -486,12 +491,12 @@ def _mount_vss_at(
             text=True,
         )
     except OSError as e:
-        return [], f"vshadowinfo didn't run ({e.strerror or e})"
+        return [], f"vshadowinfo didn't run ({e.strerror or e})", ""
     if result.returncode != 0:
         said = (result.stdout + result.stderr).strip()
         if "No Volume Shadow Snapshots found" in said:
-            return [], ""
-        return [], said.splitlines()[-1] if said else f"vshadowinfo exit {result.returncode}"
+            return [], "", ""
+        return [], said.splitlines()[-1] if said else f"vshadowinfo exit {result.returncode}", ""
 
     # Parse number of stores
     num_stores = 0
@@ -501,7 +506,7 @@ def _mount_vss_at(
             num_stores = int(m.group(1))
             break
     if num_stores == 0:
-        return [], ""
+        return [], "", ""
 
     # Mount all stores via vshadowmount
     tag = f"{prefix}-" if prefix else ""
@@ -518,14 +523,16 @@ def _mount_vss_at(
     except subprocess.CalledProcessError as e:
         vss_mount.rmdir()
         why = (e.stderr or b"").decode(errors="replace").strip().splitlines()[-1:]
-        return [], f"vshadowmount failed: {why[0] if why else f'exit {e.returncode}'}"
+        return [], f"vshadowmount failed: {why[0] if why else f'exit {e.returncode}'}", ""
     ctx.add_mount(vss_mount)  # root's mount: unmounted by root, after its stores
 
     # Mount each vssN file as a filesystem
     results = []
+    failed: dict[str, list[str]] = {}  # why -> the stores that didn't mount
     for i in range(1, num_stores + 1):
         vss_file = vss_mount / f"vss{i}"
         if not vss_file.exists():
+            failed.setdefault("not presented by vshadowmount", []).append(f"vss{i}")
             continue
         vss_id = f"{tag}vss{i}"
         vss_mp = dest / vss_id
@@ -545,10 +552,22 @@ def _mount_vss_at(
             )
             ctx.add_mount(vss_mp)
             results.append((vss_id, vss_mp))
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
             vss_mp.rmdir()
+            said = (e.stderr or b"").decode(errors="replace").strip().splitlines()[-1:]
+            # One reason for every store it applies to: the paths in it are each store's own
+            why = said[0] if said else f"mount exit {e.returncode}"
+            why = why.replace(str(vss_file), "<store>").replace(str(vss_mp), "<mount point>")
+            failed.setdefault(why, []).append(f"vss{i}")
 
-    return results, "" if results else f"none of its {num_stores} stores mounted"
+    why = "; ".join(f"{', '.join(stores)}: {reason}" for reason, stores in failed.items())
+    if not results:
+        return [], f"none of its {num_stores} stores mounted ({why})", ""
+    if failed:
+        n = sum(len(stores) for stores in failed.values())
+        note = f"{n} of {num_stores} shadow copies on {{where}} couldn't be mounted: {why}"
+        return results, "", note
+    return results, "", ""
 
 
 # ---------------------------------------------------------------------------
