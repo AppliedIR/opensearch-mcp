@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1211,6 +1212,7 @@ def _ingest_custom_artifact(
 
     try:
         file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
+        notes: list[str] = []
         cnt, sk, bf = _run_custom_parser(
             tool_name,
             artifact_path,
@@ -1221,10 +1223,15 @@ def _ingest_custom_artifact(
             time_from,
             time_to,
             host_dict=host_dict,
+            notes=notes,
         )
         ar.indexed = cnt
         ar.skipped = sk
         ar.bulk_failed = bf
+        note = "; ".join(notes)
+        if note:  # appended, never replacing a note already there
+            ar.note = "; ".join(filter(None, [ar.note, note]))
+            print(f"  {host.hostname}: {tool_name}: {note}", file=sys.stderr)
         _write_ingest_manifest(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
         audit.log(
             tool=f"ingest_{tool_name}",
@@ -1237,12 +1244,15 @@ def _ingest_custom_artifact(
             },
             result_summary=f"{cnt} indexed"
             + (f", {sk} skipped" if sk else "")
-            + (f", {bf} bulk failed" if bf else ""),
+            + (f", {bf} bulk failed" if bf else "")
+            + (f"; {note}" if note else ""),
             input_files=[str(artifact_path)],
             input_sha256s=[file_hash] if file_hash else [],
             source_evidence=str(artifact_path),
         )
         if tool_status:
+            if note:
+                tool_status["note"] = "; ".join(filter(None, [tool_status.get("note"), note]))
             tool_status["status"] = "failed" if "error" in tool_status else "complete"
             tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
             tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
@@ -1288,8 +1298,12 @@ def _run_custom_parser(
     time_from,
     time_to,
     host_dict=None,
+    notes: list[str] | None = None,
 ):
-    """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed)."""
+    """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed).
+
+    A parser that has something to report (tasks) appends it to `notes`.
+    """
     from opensearch_mcp.paths import relative_evidence_path
 
     kw: dict = {
@@ -1372,6 +1386,7 @@ def _run_custom_parser(
             tasks_dir=artifact_path,
             system_timezone=host.system_timezone,
             volume_root=vr,
+            notes=notes,
             **kw,
         )
 

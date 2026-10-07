@@ -16,6 +16,9 @@ NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 # Task Scheduler writes 7 fraction digits; Python 3.10's fromisoformat takes
 # only 3 or 6. 3.11+ takes any count and keeps 6, which this matches.
 _FRACTION = re.compile(r"(?<=:\d\d)\.(\d+)")
+# A date with its own UTC offset (…T13:21:17-08:00): convertible without the
+# system's time zone. Python 3.10's fromisoformat needs the colon.
+_OFFSET = re.compile(r"(?<=T)(.*)([+-]\d\d):?(\d\d)$")
 
 _SYSTEM_PREFIXES = {"Microsoft", "MicrosoftEdge", "GoogleUpdate", "Adobe", "OneDrive", "CCleaner"}
 
@@ -102,11 +105,14 @@ def parse_tasks_dir(
     pipeline_version: str = "",
     vss_id: str = "",
     host_dict=None,
+    notes: list[str] | None = None,
 ) -> tuple[int, int, int]:
     """Parse all task XML files in the directory tree.
 
-    Task timestamps are local system time. Converts to UTC using
-    system_timezone. Skips if timezone is unknown.
+    Task timestamps are local system time unless they carry an offset. Local
+    times are converted to UTC with system_timezone; with the time zone
+    unknown they are indexed without @timestamp, and their count is added to
+    `notes`. A date with its own offset is converted either way.
     """
     from dateutil.tz import gettz, tzutc
 
@@ -114,6 +120,7 @@ def parse_tasks_dir(
     count = 0
     skipped = 0
     bulk_failed = 0
+    undated = 0  # local times with the time zone unknown
     actions: list[dict] = []
 
     for task_file in sorted(tasks_dir.rglob("*")):
@@ -128,11 +135,12 @@ def parse_tasks_dir(
         if "@timestamp" in doc:
             ts_str = doc["@timestamp"]
             if ts_str and not ts_str.endswith("Z") and "+" not in ts_str:
-                if tz_info:
+                if tz_info or _OFFSET.search(ts_str):
                     try:
                         from datetime import datetime
 
                         six = _FRACTION.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), ts_str)
+                        six = _OFFSET.sub(r"\1\2:\3", six)
                         naive = datetime.fromisoformat(six)
                         aware = naive if naive.tzinfo else naive.replace(tzinfo=tz_info)
                         doc["@timestamp"] = (
@@ -141,8 +149,9 @@ def parse_tasks_dir(
                     except ValueError:
                         del doc["@timestamp"]
                 else:
-                    # Timezone unknown — remove unreliable timestamp
+                    # Local time with the time zone unknown: no reliable time
                     del doc["@timestamp"]
+                    undated += 1
 
         from opensearch_mcp.paths import relative_evidence_path
 
@@ -177,4 +186,9 @@ def parse_tasks_dir(
         count += flushed
         bulk_failed += failed
 
+    if undated and notes is not None:
+        notes.append(
+            f"{undated} task(s) indexed without @timestamp: their dates are local "
+            "time and this system's time zone is unknown"
+        )
     return count, skipped, bulk_failed
