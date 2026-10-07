@@ -167,10 +167,14 @@ def mount_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
 
 def _mount_ewf(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     """Mount E01/Ex01 via ewfmount (FUSE)."""
+    check_sudo()
     ewf_mount = dest / "_ewf"
     ewf_mount.mkdir()
-    subprocess.run(["ewfmount", str(path), str(ewf_mount)], check=True)
-    ctx.add_fuse(ewf_mount)
+    # Mounted by root so root's loop mount of ewf1 can read it; allow_other
+    # keeps it readable by the examiner's own fdisk and VSS scan.
+    cmd = ["sudo", "ewfmount", "-X", "allow_other", str(path), str(ewf_mount)]
+    subprocess.run(cmd, check=True)
+    ctx.add_mount(ewf_mount)
     raw_path = ewf_mount / "ewf1"
     return _mount_raw_partitions(raw_path, dest, ctx)
 
@@ -195,7 +199,8 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
     mounted = []
     if partitions:
         for idx, part in enumerate(partitions):
-            if part["type"] not in ("NTFS", "Microsoft basic data", "7"):
+            # GPT gives the type name; MBR gives the Id and its name ("7 HPFS/NTFS/exFAT")
+            if part["type"] != "Microsoft basic data" and part["type"].split()[:1] != ["7"]:
                 continue
             mount_point = dest / f"vol{idx}"
             mount_point.mkdir()
