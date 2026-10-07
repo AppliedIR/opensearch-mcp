@@ -332,6 +332,8 @@ def run_and_ingest(
     host_dict=None,
     not_read: list | None = None,
     hives_read: list | None = None,
+    seen: dict | None = None,
+    collided: dict | None = None,
 ) -> tuple[int, int, int]:
     """Run an EZ tool against an artifact and ingest the CSV output.
 
@@ -456,6 +458,8 @@ def run_and_ingest(
                 host_dict=host_dict,
                 row_host=tool_name != "jumplists",
                 row_source=row_source if source_file else None,
+                seen=seen,
+                collided=collided,
             )
             total_count += count
             total_skipped += sk

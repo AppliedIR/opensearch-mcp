@@ -11,6 +11,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
+from opensearch_mcp import write_context as wc
 from opensearch_mcp.bulk import flush_bulk
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
@@ -144,6 +145,8 @@ def ingest_csv(
     row_host: bool = True,
     hive: str = "",
     row_source=None,
+    seen: dict | None = None,
+    collided: dict | None = None,
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -152,6 +155,13 @@ def ingest_csv(
 
     Returns (count_indexed, count_skipped, count_bulk_failed).
     count_skipped = rows dropped by time range filter.
+
+    `seen` ((machine key, document id) -> the file that last wrote it, one per
+    index for a run) and `collided` ((file that lost the row, file that
+    replaced it) -> rows): a row whose stored id another file of the run
+    already wrote replaces that row, and the loss is counted against the
+    earlier file. The machine key is the one the write stamps, so identical
+    rows of two machines (one case index) are two documents, never a loss.
     """
     count = 0
     skipped = 0
@@ -227,6 +237,14 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            if seen is not None and not natural_key:
+                ctx = wc.current()
+                machine = ctx.resolve(row.get("host.name"))[1] if ctx else row.get("host.id")
+                stored = (machine, _id)
+                earlier = seen.get(stored)
+                if earlier is not None and earlier != source_file and collided is not None:
+                    collided[(earlier, source_file)] = collided.get((earlier, source_file), 0) + 1
+                seen[stored] = source_file  # always the newest writer
 
             # Provenance fields (added after ID computation)
             if source_file:

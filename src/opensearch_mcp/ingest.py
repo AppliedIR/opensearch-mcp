@@ -562,6 +562,30 @@ def _run_hayabusa_batch(
 _MIN_EVTX_SIZE = 69632  # One 64KB chunk + header — files under this are empty
 
 
+def _indices_filled_by_several_files(hosts, active_names) -> set[str]:
+    """The EZ-tool artifact types (each one case index, every host's records
+    in it) this run fills from more than one evidence file (a content-hash
+    id; a natural key names its own row), after the registry's
+    one-run-per-folder dedup."""
+    from opensearch_mcp.paths import relative_evidence_path
+
+    sources: dict[str, set[str]] = {}
+    for host in hosts:
+        runs = set()
+        for artifact_name, artifact_path in host.artifacts:
+            tool_name = _artifact_to_tool(artifact_name)
+            cfg = TOOLS.get(tool_name) if tool_name else None
+            if cfg is None or tool_name not in active_names or cfg.natural_key:
+                continue
+            folder = artifact_path.parent if tool_name == "registry" else artifact_path
+            if (tool_name, str(folder)) in runs:
+                continue
+            runs.add((tool_name, str(folder)))
+            source = relative_evidence_path(artifact_path, host.volume_root)
+            sources.setdefault(cfg.index_suffix, set()).add(source)
+    return {index for index, files in sources.items() if len(files) > 1}
+
+
 def _ingest_hosts(
     hosts,
     client,
@@ -585,6 +609,10 @@ def _ingest_hosts(
     case_dir=None,
 ):
     """Inner ingest loop — processes all hosts and artifacts."""
+    # Rows two files of this run write under one id: the later replaces the
+    # earlier. Tracked only for an index more than one file fills.
+    shared = _indices_filled_by_several_files(hosts, active_names)
+    id_seen: dict[str, dict] = {}
     for host_idx, host in enumerate(hosts):
         ctx = wc.host_context(case_dir, case_id, host, run_id)
         wc.set_current(ctx)
@@ -857,6 +885,8 @@ def _ingest_hosts(
                     artifact_path.parent if tool_name == "registry" else artifact_path,
                     host.volume_root,
                 )
+                collided: dict = {}
+                seen = id_seen.setdefault(index_name, {}) if cfg.index_suffix in shared else None
                 cnt, sk, bf = run_and_ingest(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
@@ -873,12 +903,19 @@ def _ingest_hosts(
                     host_dict=host_dict,
                     not_read=unread,
                     hives_read=hives,
+                    seen=seen,
+                    collided=collided,
                 )
                 # The audit lists every hive RECmd read, each with its hash
                 inputs = hives or [str(artifact_path)]
                 hashes = [_sha256_or_empty(Path(p)) for p in hives] if hives else []
                 if not hives and file_hash:
                     hashes = [file_hash]
+                replaced = [
+                    f"{n} rows of {loser} were replaced by identical rows from a later "
+                    f"file in this run ({winner})"
+                    for (loser, winner), n in sorted(collided.items())
+                ]
                 ar.indexed = cnt
                 ar.not_read = unread
                 ar.skipped = sk
@@ -903,7 +940,8 @@ def _ingest_hosts(
                     result_summary=f"{cnt} indexed"
                     + (f", {len(unread)} not read" if unread else "")
                     + (f", {sk} skipped" if sk else "")
-                    + (f", {bf} bulk failed" if bf else ""),
+                    + (f", {bf} bulk failed" if bf else "")
+                    + "".join(f"; {r}" for r in replaced),
                     input_files=inputs,
                     input_sha256s=hashes,
                     source_evidence=str(artifact_path),
@@ -915,6 +953,10 @@ def _ingest_hosts(
                     tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
                     if unread:
                         tool_status.setdefault("not_read", []).extend(unread)
+                    if replaced:  # appended, never replacing a note already there
+                        tool_status["note"] = "; ".join(
+                            filter(None, [tool_status.get("note"), *replaced])
+                        )
                     _update_status()
                 _progress(
                     "artifact_done",
