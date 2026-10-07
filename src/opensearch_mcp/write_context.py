@@ -63,6 +63,7 @@ class WriteContext:
     origin: str = host_identity.ARTIFACT
     run_id: str = ""
     store: str = ""  # a shadow copy's id (vss1, p2-vss1); "" for live or no --vss
+    names_origin: str = host_identity.ARTIFACT  # of every name its records give
     _resolved: dict = field(default_factory=dict)
 
     def resolve(self, raw: str | None) -> tuple[str, str, str]:
@@ -71,7 +72,9 @@ class WriteContext:
         name = raw if isinstance(raw, str) and raw.strip() else self.unit_raw
         hit = self._resolved.get(name)
         if hit is None:
-            origin = self.origin if name == self.unit_raw else host_identity.ARTIFACT
+            # the unit's own name keeps how it was given; every other name is
+            # what the run's input is: the AI's when the AI wrote or registered it
+            origin = self.origin if name == self.unit_raw else self.names_origin
             key, canonical = host_identity.get_or_mint(
                 self.case_dir, self.unit, name, origin=origin
             )
@@ -135,8 +138,13 @@ def open_unit(
     source: str,
     origin: str = host_identity.FOLDER,
     run_id: str = "",
+    input_path=None,
 ) -> WriteContext:
-    """Record an evidence unit and its own host name, and return its context."""
+    """Record an evidence unit and its own host name, and return its context.
+    `input_path` is what the run reads: the names its records give count as
+    the AI's when the AI wrote or registered it."""
+    from opensearch_mcp.names_scan import file_origin
+
     root = Path(case_dir)
     host_identity.ensure_host_files(root)
     c12, _ = host_identity.ensure_case_uuid(root)  # the write's identity, minted if new
@@ -150,8 +158,10 @@ def open_unit(
     for key in [k for k in REMOVED if k[:2] == (c12, raw)]:
         del REMOVED[key]  # a run reports its own removals, not an earlier run's
     return WriteContext(
-        case_dir=root, c12=c12, unit=unit, unit_raw=raw, origin=origin, run_id=run_id
-    )
+        case_dir=root, c12=c12, unit=unit, unit_raw=raw, origin=origin, run_id=run_id,
+        names_origin=file_origin(root, input_path) if input_path is not None
+        else host_identity.ARTIFACT,
+    )  # fmt: skip
 
 
 def case_dir_for(case_id: str) -> Path | None:
@@ -170,7 +180,7 @@ def case_dir_for(case_id: str) -> Path | None:
     return case_dir if case_dir.is_dir() else None
 
 
-def host_context(case_dir, case_id: str, host, run_id: str = "") -> WriteContext:
+def host_context(case_dir, case_id: str, host, run_id: str = "", input_path=None) -> WriteContext:
     """The write context of a discovered host's evidence unit, opened once."""
     ctx = getattr(host, "write_ctx", None)
     if ctx is not None:
@@ -190,6 +200,7 @@ def host_context(case_dir, case_id: str, host, run_id: str = "") -> WriteContext
         source="evidence folder",
         origin=getattr(host, "name_origin", "") or host_identity.FOLDER,
         run_id=run_id,
+        input_path=input_path if input_path is not None else host.volume_root,
     )
     vss_id = getattr(host, "vss_id", "") or ""
     ctx.store = "" if vss_id == "live" else vss_id

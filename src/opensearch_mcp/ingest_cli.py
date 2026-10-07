@@ -71,6 +71,7 @@ def _open_unit(
         source=source,
         origin=origin,
         run_id=os.environ.get("VHIR_INGEST_RUN_ID", ""),
+        input_path=path,
     )
     wc.set_current(ctx)
     _gate(case_id, [ctx.unit])
@@ -618,7 +619,9 @@ def _record_scan(
     units = list(extra)
     for h in hosts:  # one host's unreadable evidence never stops the scan
         try:
-            units.append(names_scan.host_folder_unit(h, case_dir))
+            units.append(
+                names_scan.host_folder_unit(h, case_dir, archive[0] if archive else input_path)
+            )
         except Exception as e:
             unit = names_scan.Unit(
                 locator=h.unit_locator or str(h.volume_root), source="host folder"
@@ -635,6 +638,9 @@ def _record_scan(
     for u in summary:
         names = ", ".join(u["names"]) or "(no name yet)"
         print(f"  host names: {u['locator']}: {names}")
+        for key in ("note", "names_not_sampled", "names_sampled"):
+            if u.get(key):
+                print(f"    {u[key]}")
     return summary
 
 
@@ -1368,7 +1374,16 @@ def cmd_scan(args: argparse.Namespace) -> None:
         _scan_case_dir = _case_dir_for(case_id)
         _gate(
             case_id,
-            [wc.host_context(_scan_case_dir, case_id, h, run_id).unit for h in hosts],
+            [
+                wc.host_context(
+                    _scan_case_dir,
+                    case_id,
+                    h,
+                    run_id,
+                    input_path=from_archive[0] if from_archive else input_path,
+                ).unit
+                for h in hosts
+            ],
             run_id,
         )
 
@@ -2957,6 +2972,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             source="memory image",
             origin="argument",
             run_id=run_id or "",
+            input_path=given_path,
         )
     )
     _gate(case_id, [wc.current().unit], run_id or "")
@@ -3072,6 +3088,8 @@ def _install_terminal_status_guards() -> None:
                     continue
                 if data.get("status") not in ("running", "starting"):
                     continue  # Idempotent: don't overwrite terminal
+                if data.get("pid") != pid:
+                    continue  # the pid only matched a number in another run's name
                 data["status"] = "failed"
                 prev_err = data.get("error") or ""
                 data["error"] = f"{error_prefix}: {detail}" + (

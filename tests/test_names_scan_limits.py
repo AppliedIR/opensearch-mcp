@@ -36,9 +36,7 @@ def test_a_deeply_nested_json_file_is_listed_and_the_scan_goes_on(tmp_path):
     (host / "rows.csv").write_text("Computer,x\nWKS30,1\n")
     unit = names_scan.host_folder_unit(DiscoveredHost(hostname="WKS30", volume_root=host), d)
     assert "WKS30" in {n.raw for n in unit.names}
-    assert unit.attrs["names_not_sampled"] == [
-        "evidence/WKS30/deep.json: nested too deeply to read"
-    ]
+    assert unit.attrs["names_not_sampled"] == "evidence/WKS30/deep.json: nested too deeply to read"
 
 
 def test_a_json_array_past_the_sample_is_noted(tmp_path, monkeypatch):
@@ -60,10 +58,10 @@ def test_a_host_whose_scan_fails_is_recorded_and_the_others_still_scan(monkeypat
     bad = DiscoveredHost(hostname="WKS33", volume_root=d / "evidence" / "WKS33")
     real = names_scan.host_folder_unit
 
-    def scan(h, case_dir):
+    def scan(h, case_dir, input_path=None):
         if h is bad:
             raise RecursionError("maximum recursion depth exceeded")
-        return real(h, case_dir)
+        return real(h, case_dir, input_path)
 
     monkeypatch.setattr(names_scan, "host_folder_unit", scan)
     hosts = [bad, DiscoveredHost(hostname="WKS32", volume_root=good)]
@@ -125,7 +123,7 @@ def test_a_file_that_cannot_be_opened_is_listed():
         unit = names_scan.host_folder_unit(DiscoveredHost(hostname="WKS35", volume_root=host), d)
     finally:
         locked.chmod(0o600)
-    (note,) = unit.attrs["names_not_sampled"]
+    note = unit.attrs["names_not_sampled"]
     assert note.startswith("evidence/WKS35/locked.csv: unreadable ([Errno 13] Permission denied")
 
 

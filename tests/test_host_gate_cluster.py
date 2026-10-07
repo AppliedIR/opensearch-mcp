@@ -58,9 +58,7 @@ def _seq_nos(client, case_dir) -> dict:
     return {h["_id"]: (h["_seq_no"], h["_primary_term"]) for h in res["hits"]["hits"]}
 
 
-def test_start_now_then_an_unchanged_confirm_marks_then_unmarks_and_rewrites_nothing(
-    client, case
-):
+def test_start_now_then_an_unchanged_confirm_marks_then_unmarks_and_rewrites_nothing(client, case):
     u = hi.unit_key("evidence/WKS80")
     hi.append_observations(case, [
         {"kind": "unit", "unit": u, "locator": "evidence/WKS80"},

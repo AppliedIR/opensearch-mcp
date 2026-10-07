@@ -28,6 +28,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,8 +48,10 @@ ARGUMENT = "argument"
 FILE_NAME = "file-name"
 AI_WRITTEN = "ai"  # a file the AI can write: never confirms a machine
 
-# Case folders the AI's tools write into.
-_AI_WRITABLE = ("extractions",)
+# Case folders the AI's tools write into (what the case-data guard leaves
+# writable). A file directly in the case folder is the AI's too: evidence goes
+# in evidence/, which only takes new files, and those count by registration.
+_AI_WRITABLE = ("extractions", "work", "reports", ".outputs", "DELETE")
 
 
 @dataclass
@@ -92,34 +96,65 @@ class Unit:
         return out
 
 
-def file_origin(case_dir: Path | None, path: Path) -> str:
+def file_origin(case_dir: Path | None, path) -> str:
     """ARTIFACT for evidence the examiner put in the case; AI_WRITTEN for a
-    file in a folder the AI's tools write into, or one registered as
-    evidence through the AI's tools (`registered_via: mcp`)."""
-    if case_dir is None:
+    file registered as evidence through the AI's tools (`registered_via:
+    mcp`, wherever it is), or one in a folder the AI's tools write into (by
+    its own path or the one a link leads to)."""
+    if case_dir is None or path is None:
         return ARTIFACT
-    resolved = Path(path).resolve()
+    root = Path(case_dir)
     try:
-        rel = resolved.relative_to(Path(case_dir).resolve())
-    except ValueError:
-        return ARTIFACT
-    if rel.parts and rel.parts[0] in _AI_WRITABLE:
+        resolved = Path(path).resolve()
+        case_root = root.resolve()
+    except (OSError, RuntimeError):  # a looping link: nothing to read
         return AI_WRITTEN
-    return AI_WRITTEN if str(resolved) in _registered_by_ai(Path(case_dir)) else ARTIFACT
+    if str(resolved) in _registered_by_ai(root):
+        return AI_WRITTEN
+    given = Path(os.path.normpath(Path(path).absolute()))
+    for candidate, base in (
+        (resolved, case_root),
+        (given, Path(os.path.normpath(root.absolute()))),
+    ):
+        try:
+            rel = candidate.relative_to(base)
+        except ValueError:
+            continue
+        at_root = len(rel.parts) == 1 and candidate.is_file()  # directly in the case folder
+        if at_root or (rel.parts and rel.parts[0] in _AI_WRITABLE):
+            return AI_WRITTEN
+    return ARTIFACT
 
 
-def _registered_by_ai(case_dir: Path) -> set[str]:
-    """Evidence files the AI registered (through MCP), by resolved path."""
+_registry_cache: dict[str, tuple[tuple, frozenset]] = {}
+
+
+def _registered_by_ai(case_dir: Path) -> frozenset:
+    """Evidence files the AI registered (through MCP), by resolved path; read
+    again only when the registry changes."""
+    reg = case_dir / "evidence.json"
     try:
-        registry = json.loads((case_dir / "evidence.json").read_text())
+        st = reg.stat()
+        stamp = (st.st_ino, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return frozenset()
+    hit = _registry_cache.get(str(reg))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        registry = json.loads(reg.read_text())
     except (OSError, ValueError):
-        return set()
+        return frozenset()
     files = registry.get("files") if isinstance(registry, dict) else None
-    return {
-        str((case_dir / str(f["path"])).resolve())  # as file_origin compares it
-        for f in files or []
-        if isinstance(f, dict) and f.get("registered_via") == "mcp" and f.get("path")
-    }
+    found = set()
+    for f in files or []:
+        if isinstance(f, dict) and f.get("registered_via") == "mcp" and f.get("path"):
+            try:
+                found.add(str((case_dir / str(f["path"])).resolve()))  # as file_origin compares
+            except (OSError, RuntimeError):
+                continue
+    _registry_cache[str(reg)] = (stamp, frozenset(found))
+    return frozenset(found)
 
 
 def _rel(case_dir: Path | None, path: Path) -> str:
@@ -287,7 +322,11 @@ def _row_files(root: Path) -> tuple[list[Path], bool]:
                     continue
                 if e.is_dir():
                     deeper.append(e)
-                elif e.suffix.lower() in _ROW_SUFFIXES and not e.name.endswith(".index"):
+                elif (
+                    e.suffix.lower() in _ROW_SUFFIXES
+                    and not e.name.endswith(".index")
+                    and e.is_file()  # never a pipe: reading one would block the scan
+                ):
                     if len(found) == ROW_FILES:
                         return found, True
                     found.append(e)
@@ -299,38 +338,45 @@ def _row_files(root: Path) -> tuple[list[Path], bool]:
 # Units
 
 
-def host_folder_unit(host, case_dir: Path | None) -> Unit:
-    """A discovered host folder (or mounted volume)."""
+def host_folder_unit(host, case_dir: Path | None, input_path=None) -> Unit:
+    """A discovered host folder (or mounted volume). Its names are the AI's
+    when the run's input (`input_path`, else the folder) is."""
     locator = getattr(host, "unit_locator", "") or _rel(case_dir, host.volume_root)
     unit = Unit(locator=locator, source="host folder")
     origin = getattr(host, "name_origin", "") or FOLDER
     unit.add(
         host.hostname, "the ingest's host name" if origin != FOLDER else "folder name", origin
     )
+    found = file_origin(case_dir, input_path if input_path is not None else host.volume_root)
     names, attrs = registry_names(Path(host.volume_root))
     for raw, where in names:
-        unit.add(raw, where, ARTIFACT)
+        unit.add(raw, where, found)
     unit.attrs.update(attrs)
     if getattr(host, "evtx_dir", None):
         for raw, where in evtx_computers(host.evtx_dir):
-            unit.add(raw, where, ARTIFACT)
+            unit.add(raw, where, found)
     files, more = _row_files(Path(host.volume_root))
-    _add_row_names(unit, files, case_dir)
+    _add_row_names(unit, files, case_dir, ai=found == AI_WRITTEN)
     if more:
         unit.attrs["names_sampled"] = f"host columns read from the first {ROW_FILES} files only"
     return unit
 
 
-def _add_row_names(unit: Unit, files, case_dir: Path | None) -> None:
-    """Each file's host columns; one that can't be read is listed on the unit."""
+def _add_row_names(unit: Unit, files, case_dir: Path | None, ai: bool = False) -> None:
+    """Each file's host columns; one that can't be read is listed on the unit,
+    as one string the host log keeps ("<file>: <why>; …")."""
+    unread = []
     for f in files:
         try:
             raws = row_names(f)
         except NotSampled as e:
-            unit.attrs.setdefault("names_not_sampled", []).append(f"{_rel(case_dir, f)}: {e}")
+            unread.append(f"{_rel(case_dir, f)}: {e}")
             continue
+        origin = AI_WRITTEN if ai else file_origin(case_dir, f)
         for raw in raws:
-            unit.add(raw, f"{_rel(case_dir, f)} host column", file_origin(case_dir, f))
+            unit.add(raw, f"{_rel(case_dir, f)} host column", origin)
+    if unread:
+        unit.attrs["names_not_sampled"] = "; ".join(unread)
 
 
 def velociraptor_unit(collection: Path, archive: Path, case_dir: Path | None) -> Unit | None:
@@ -344,7 +390,7 @@ def velociraptor_unit(collection: Path, archive: Path, case_dir: Path | None) ->
         return None
     unit = Unit(locator=_rel(case_dir, archive), source="velociraptor collection")
     for key in ("fqdn", "hostname"):
-        unit.add(client.get(key), f"collection client {key}", ARTIFACT)
+        unit.add(client.get(key), f"collection client {key}", file_origin(case_dir, archive))
     if client.get("client_id"):
         unit.attrs["client_id"] = str(client["client_id"])
     return unit
@@ -357,7 +403,12 @@ def volume_locator(
     with `prefix` its name there), the volume's byte offset, and a sub-volume's
     own name when several share it (APFS). The dry run and the ingest both
     use this, so one volume is one unit in both."""
-    sub = label.split(":", 1)[1] if ":" in label else ""
+    # a volume inside a partition (APFS, LVM) has its own name; so does an LVM
+    # volume with no partition table, which shares offset 0 with its siblings
+    if ":" in label:
+        sub = label.split(":", 1)[1]
+    else:
+        sub = "" if label in ("", "fs") or re.fullmatch(r"p\d+", label) else label
     member = "/".join(x for x in (prefix, sub) if x)
     return host_identity.unit_locator(image, case_dir, member=member, offset=int(offset or 0))
 
@@ -470,5 +521,6 @@ def record(case_dir: Path, units: list[Unit]) -> list[dict]:
                 new.append((r["unit"], r["raw"]))
         records += host_proposal.near_hints(state, new)
         host_identity.append_observations(case_dir, records)
-        host_proposal.apply_host_list(case_dir)  # what the examiner's list names confirms now
+        # what the examiner's list names confirms now: this scan's units only
+        host_proposal.apply_host_list(case_dir, [u.key for u in units])
     return [u.summary() for u in units]
