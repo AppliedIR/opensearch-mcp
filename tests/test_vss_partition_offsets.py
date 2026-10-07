@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +26,7 @@ STUBS = {
     # Two stores only when read where a volume with shadow copies starts
     "vshadowinfo": """#!/bin/sh
 echo "$*" >> "$VSS_LOG"
+[ -n "$VSS_BROKEN" ] && { echo "Unable to open volume: read error at 4096" >&2; exit 1; }
 off=0; [ "$1" = "-o" ] && off="$2"
 for at in $VSS_AT; do
   if [ "$at" = "$off" ]; then printf 'Volume\\n\\tNumber of stores:\\t2\\n'; exit 0; fi
@@ -55,7 +57,7 @@ def vss(tmp_path, monkeypatch):
     with open(image, "wb") as f:
         f.truncate(GPT_DATA + 4096)
 
-    def run(ntfs_at, stores_at, offsets):
+    def run(ntfs_at, stores_at, offsets, ctx=None):
         with open(image, "r+b") as f:
             for off in ntfs_at:
                 f.seek(off + 3)
@@ -64,10 +66,11 @@ def vss(tmp_path, monkeypatch):
         dest = tmp_path / "mnt"
         dest.mkdir()
         notes: list = []
+        ctx = ctx or MountContext()
         if "offsets" in inspect.signature(mount_vss).parameters:
-            found = mount_vss(image, dest, MountContext(), offsets, notes)
+            found = mount_vss(image, dest, ctx, offsets, notes)
         else:  # a release before volumes were passed: the whole image
-            found = mount_vss(image, dest, MountContext())
+            found = mount_vss(image, dest, ctx)
         return [v for v, _ in found], notes, log.read_text()
 
     return run
@@ -126,3 +129,91 @@ def test_a_disk_image_scan_reads_shadow_copies_at_its_volumes(tmp_path, monkeypa
     with pytest.raises(SystemExit):  # nothing to ingest on the stand-in volume
         cli.cmd_scan(args)
     assert seen["offsets"] == {"vol1": GPT_DATA} and seen["notes"] is not None
+
+
+def test_shadow_copies_that_cannot_be_read_are_said_so_not_called_none(vss, monkeypatch):
+    monkeypatch.setenv("VSS_BROKEN", "1")
+    ctx = MountContext()
+    ids, notes, _ = vss([GPT_DATA], [GPT_DATA], {"vol0": 1048576, "vol1": GPT_DATA}, ctx)
+    assert ids == [] and notes == []  # never "no shadow copies found"
+    assert ctx.failures == [
+        f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: "
+        "Unable to open volume: read error at 4096"
+    ]
+
+
+def test_shadow_copies_that_wont_mount_are_said_so(vss, monkeypatch, tmp_path):
+    (tmp_path / "bin" / "vshadowmount").write_text(
+        "#!/bin/sh\necho 'fuse: no device' >&2\nexit 1\n"
+    )
+    ctx = MountContext()
+    ids, notes, _ = vss([GPT_DATA], [GPT_DATA], {"vol1": GPT_DATA}, ctx)
+    assert ids == [] and notes == []
+    assert ctx.failures == [
+        f"shadow copies on vol1 (offset {GPT_DATA}) couldn't be read: "
+        "vshadowmount failed: fuse: no device"
+    ]
+
+
+def test_each_shadow_copy_knows_the_volume_it_came_from(vss):
+    ctx = MountContext()
+    vss([1048576, GPT_DATA], [1048576, GPT_DATA], {"vol0": 1048576, "vol1": GPT_DATA}, ctx)
+    assert ctx.vss_sources == {
+        "vol0-vss1": "vol0",
+        "vol0-vss2": "vol0",
+        "vol1-vss1": "vol1",
+        "vol1-vss2": "vol1",
+    }
+
+
+def test_each_shadow_copy_is_attributed_to_its_own_volumes_host(tmp_path, monkeypatch):
+    from _helpers import make_windows_tree
+
+    image = tmp_path / "disk.raw"
+    image.write_bytes(b"\0" * 4096)
+    offsets = {"vol0": 1048576, "vol1": GPT_DATA}
+
+    def mount_image(path, dest, ctx):
+        mounted = []
+        for name, off in offsets.items():
+            make_windows_tree(dest / name)
+            ctx.offsets[dest / name] = off
+            mounted.append(dest / name)
+        return mounted
+
+    def vss(raw, dest, ctx, offsets=None, notes=None):
+        found = []
+        for name in ("vol0", "vol1"):
+            make_windows_tree(dest / f"{name}-vss1")
+            ctx.__dict__.setdefault("vss_sources", {})[f"{name}-vss1"] = name
+            found.append((f"{name}-vss1", dest / f"{name}-vss1"))
+        return found
+
+    seen = {}
+
+    def ingest(hosts, **kw):
+        seen["hosts"] = list(hosts)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(containers, "mount_image", mount_image)
+    monkeypatch.setattr(containers, "mount_vss", vss)
+    monkeypatch.setattr(containers, "check_sudo", lambda: None)
+    monkeypatch.setattr(cli, "ingest", ingest)
+    monkeypatch.setattr(cli, "_image_hosts", lambda *a, **k: ([], set(), []))
+    for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
+        monkeypatch.setattr(cli, name, MagicMock())
+    monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
+    args = argparse.Namespace(
+        path=str(image), case="c1", yes=True, hostname=None, all_logs=False,
+        no_hayabusa=True, skip_triage=True, vss=True,
+    )  # fmt: skip
+    with pytest.raises(SystemExit):
+        cli.cmd_scan(args)
+    by_vss = {h.vss_id: h for h in seen["hosts"]}
+    live = {Path(h.volume_root).name: h for h in seen["hosts"] if h.vss_id == "live"}
+    assert set(live) == {"vol0", "vol1"}
+    assert live["vol0"].unit_locator != live["vol1"].unit_locator  # two units to tell apart
+    for name in ("vol0", "vol1"):
+        shadow = by_vss[f"{name}-vss1"]
+        assert shadow.hostname == live[name].hostname
+        assert shadow.unit_locator == live[name].unit_locator

@@ -985,6 +985,14 @@ def _covered_names(mount_ctx, covered: dict) -> dict:
     return {v: covered[off] for v, off in mount_ctx.offsets.items() if off in covered}
 
 
+def _under(path, folder) -> bool:
+    try:
+        Path(path).relative_to(folder)
+    except ValueError:
+        return False
+    return True
+
+
 def _volume_offsets(mount_ctx) -> dict[str, int]:
     """Each mounted volume's name and byte offset in its image."""
     return {mp.name: off for mp, off in mount_ctx.offsets.items() if off is not None and off >= 0}
@@ -1360,11 +1368,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 vr = find_volume_root(vss_mp)
                 if vr is None:
                     continue
-                windows = [h.hostname for h in hosts if h.os == "windows"]
-                base_hostname = (
-                    windows or [h.hostname for h in hosts] or [hostname or "unknown"]
-                )[0]
-                base = next((h for h in hosts if h.hostname == base_hostname), None)
+                # The host and unit of the volume the shadow copy came from
+                source = mount_ctx.vss_sources.get(v_id)
+                live = [h for h in hosts if h.vss_id == "live"]
+                base = next(
+                    (h for h in live if source and _under(h.volume_root, tmpdir / source)),
+                    None,
+                )
+                if base is None:
+                    windows = [h for h in live if h.os == "windows"]
+                    base = (windows or live or [None])[0]
+                base_hostname = base.hostname if base else (hostname or "unknown")
                 vss_host = DiscoveredHost(
                     hostname=base_hostname,
                     volume_root=vr,
