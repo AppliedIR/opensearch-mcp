@@ -397,6 +397,30 @@ def test_a_check_that_couldn_t_finish_says_so(count):
     assert warnings[-1] == threat_intel._UNCHECKED_REMOVED
 
 
+class _CapsFail(_Cluster):
+    """field_caps raises, or answers for only part of the indices."""
+
+    def __init__(self, caps):
+        super().__init__({"count": 3, "_shards": {"total": 1, "failed": 0}})
+        self._caps = caps
+
+    def field_caps(self, **kw):
+        if isinstance(self._caps, Exception):
+            raise self._caps
+        return {**super().field_caps(), **self._caps}
+
+
+@pytest.mark.parametrize(
+    "caps",
+    [ConnectionError("cluster unreachable"), {"failures": [{"indices": ["case-x-b"]}]}],
+    ids=["field_caps error", "field_caps failures"],
+)
+def test_a_field_caps_check_that_couldn_t_finish_says_so(caps):
+    removed, unchecked = threat_intel._removed_providers(_CapsFail(caps), "case-x-*", {"opencti"})
+    warnings = threat_intel._removed_warnings(removed, unchecked)
+    assert warnings[-1] == threat_intel._UNCHECKED_REMOVED
+
+
 def test_a_removed_provider_with_no_documents_gives_no_warning():
     removed, unchecked = threat_intel._removed_providers(
         _Cluster({"count": 0, "_shards": {"total": 1, "failed": 0}}), "case-x-*", {"opencti"}
