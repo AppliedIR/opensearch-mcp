@@ -167,9 +167,10 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
                 yield dict(row)
 
 
-# An epoch written as text (Zeek's ts, a CSV column): the integer part's width
-# says the unit (10 digits: seconds from 2001; 13: ms; 16: µs). Digits of any
-# other width (20230129, 202301292357) get no @timestamp and are counted.
+# An epoch written as text (Zeek's ts, a CSV column): the integer part's width,
+# leading zeros aside, says the unit (10 digits: seconds from 2001; 13: ms; 16:
+# µs). Digits of any other width (20230129, 202301292357) get no @timestamp and
+# are counted; zero is no time and isn't counted.
 _EPOCH_TEXT = re.compile(r"(\d+)(\.\d+)?")
 _EPOCH_DIVISOR = {9: 1, 10: 1, 13: 1e3, 16: 1e6}
 
@@ -178,7 +179,7 @@ def _epoch_text(val: str) -> str | None:
     """The UTC ISO time of a seconds, milliseconds or microseconds epoch
     written as text, or None."""
     m = _EPOCH_TEXT.fullmatch(val.strip())
-    divisor = _EPOCH_DIVISOR.get(len(m.group(1))) if m else None
+    divisor = _EPOCH_DIVISOR.get(len(m.group(1).lstrip("0"))) if m else None
     if divisor is None:
         return None
     try:
@@ -186,6 +187,11 @@ def _epoch_text(val: str) -> str | None:
     except (OverflowError, OSError, ValueError):
         return None
     return when.isoformat()
+
+
+def _is_a_number_not_zero(val: str) -> bool:
+    """Digit text that isn't zero (00000000 is no time, as 0 isn't)."""
+    return float(val.strip()) != 0
 
 
 def ingest_delimited(
@@ -245,7 +251,7 @@ def ingest_delimited(
             elif isinstance(val, str) and _EPOCH_TEXT.fullmatch(val.strip()):
                 # Not an epoch's width: as @timestamp OpenSearch would read
                 # epoch milliseconds (20230129 → 1970). Kept in its own field.
-                not_understood += 1
+                not_understood += _is_a_number_not_zero(val)
             else:
                 # Hayabusa writes local time as "2022-11-28 18:48:24.526 +00:00",
                 # a form @timestamp rejects; as UTC ISO it's accepted.

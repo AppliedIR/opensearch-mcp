@@ -345,3 +345,169 @@ def test_both_walks_carry_the_digit_date_count(cluster_case, tmp_path, monkeypat
     (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
     (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
     assert "2 values in date not understood; not used as the timestamp" in note
+
+
+# JSON digit-text dates. The JSON path read any digit text as a number, and a
+# number by size, so "20230129" became seconds (1970-08-23) and "202301292357"
+# year 8380, with no note. Digit text now follows the delimited path's rule:
+# an integer part of 9-10, 13 or 16 digits (leading zeros aside) converts; any
+# other width gets no @timestamp, stays in its own field and is counted. Zero
+# is no time and isn't counted; signed text and JSON numbers read as before.
+
+
+@pytest.fixture
+def fresh_notes():
+    paths.NO_TIME_FIELD.clear()
+    paths.TIME_NOT_UNDERSTOOD.clear()
+    yield
+    paths.NO_TIME_FIELD.clear()
+    paths.TIME_NOT_UNDERSTOOD.clear()
+
+
+def _json_ingest(tmp_path, records, time_field=None):
+    data = tmp_path / "events.json"
+    data.write_text("".join(json.dumps(r) + "\n" for r in records))
+    client = _Client()
+    parse_json.ingest_json(data, client, "case-x-json-ev-h", "h", time_field=time_field)
+    return data, client.sent
+
+
+def _counted(data) -> int:
+    return sum(n for f, _, n in paths.TIME_NOT_UNDERSTOOD if f == str(data.absolute()))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["20230129", "202301292357", "999999999999", "167503667412345", " 20230129 "],
+    ids=["yyyymmdd", "yyyymmddHHMM", "12 digits", "15 digits", "spaced"],
+)
+def test_json_digit_text_of_no_epoch_width_gets_no_timestamp_and_is_counted(
+    tmp_path, fresh_notes, value
+):
+    data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": value, "n": 1}])
+    assert "@timestamp" not in doc, doc
+    assert doc["Timestamp"] == value  # its own field, as given
+    assert _counted(data) == 1
+    assert paths.no_time_field_note() == (
+        "1 values in Timestamp not understood; not used as the timestamp"
+    )
+
+
+@pytest.mark.parametrize(
+    "field, time_field", [("date", None), ("when", "when")], ids=["auto-detected", "chosen"]
+)
+def test_json_digit_dates_in_any_time_field(tmp_path, fresh_notes, field, time_field):
+    data, docs = _json_ingest(
+        tmp_path, [{field: "20230129", "m": "a"}, {field: "20230130", "m": "b"}], time_field
+    )
+    assert all("@timestamp" not in d for d in docs), docs
+    assert _counted(data) == 2
+
+
+@pytest.mark.integration
+def test_a_background_json_run_counts_digit_dates_and_files_none_in_1970(
+    cluster_case, tmp_path, monkeypatch
+):
+    data = tmp_path / "dated.jsonl"
+    data.write_text(
+        '{"date": "20230129", "m": "a"}\n'
+        '{"date": "202301292357", "m": "b"}\n'
+        '{"date": "2023-01-29T23:57:00Z", "m": "c"}\n'
+    )
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "json-digit-dates")
+    cli.cmd_ingest_json(argparse.Namespace(path=str(data), case=cluster_case, hostname="h1"))
+    (status,) = srv.idx_ingest_status(case_id=cluster_case)["ingests"]
+    (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
+    assert "2 values in date not understood; not used as the timestamp" in note
+    client = cli.get_client()
+    index = f"case-{cluster_case}-json-*"
+    client.indices.refresh(index=index)
+    early = {"range": {"@timestamp": {"lt": "1977-01-01"}}}
+    late = {"range": {"@timestamp": {"gt": "2100-01-01"}}}
+    assert client.count(index=index, body={"query": early})["count"] == 0
+    assert client.count(index=index, body={"query": late})["count"] == 0
+    assert client.count(index=index)["count"] == 3  # nothing dropped
+
+
+@pytest.mark.integration
+def test_a_foreground_json_run_prints_the_digit_date_note(
+    cluster_case, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("VHIR_INGEST_RUN_ID", raising=False)
+    data = tmp_path / "dated.jsonl"
+    data.write_text('{"date": "20230129", "m": "a"}\n')
+    cli.cmd_ingest_json(argparse.Namespace(path=str(data), case=cluster_case, hostname="h1"))
+    out = capsys.readouterr().out
+    assert "1 values in date not understood; not used as the timestamp" in out
+
+
+@pytest.mark.parametrize(
+    "value, want",
+    [
+        ("0001675036674", "2023-01-29T23:57:54"),
+        ("0001675036674324", "2023-01-29T23:57:54.324"),
+    ],
+    ids=["seconds", "milliseconds"],
+)
+def test_leading_zeros_don_t_count_toward_the_width(tmp_path, fresh_notes, value, want):
+    """In both paths: 0001675036674 is ten digits of seconds, not thirteen of ms."""
+    data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": value}])
+    assert doc["@timestamp"].startswith(want), doc
+    assert _counted(data) == 0
+    assert parse_delimited._epoch_text(value).startswith(want)
+
+
+@pytest.mark.parametrize("path", ["json", "delimited"])
+def test_all_zero_digits_are_no_time_and_not_counted(tmp_path, fresh_notes, monkeypatch, path):
+    if path == "json":
+        data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": "00000000"}])
+    else:
+        sent: list[dict] = []
+
+        def capture(client, actions, **kw):
+            sent.extend(actions)
+            return len(actions), 0
+
+        monkeypatch.setattr(parse_delimited, "flush_bulk", capture)
+        data = tmp_path / "events.csv"
+        data.write_text("Timestamp,n\n00000000,1\n")
+        parse_delimited.ingest_delimited(
+            data, None, "case-x-delim-ev-h", "h", time_field="Timestamp"
+        )
+        (doc,) = [a["_source"] for a in sent]
+    assert "@timestamp" not in doc
+    assert paths.TIME_NOT_UNDERSTOOD == []
+
+
+@pytest.mark.parametrize(
+    "value, want",
+    [
+        ("1675036674", "2023-01-29T23:57:54"),
+        ("1675036674324", "2023-01-29T23:57:54.324"),
+        ("1675036674324257", "2023-01-29T23:57:54.324257"),
+        ("1675036674.5", "2023-01-29T23:57:54.5"),
+        ("999999999", "2001-09-09T01:46:39"),
+        (1675036674, "2023-01-29T23:57:54"),
+        (1675036674.5, "2023-01-29T23:57:54.5"),
+        (1675036674324, "2023-01-29T23:57:54.324"),
+        ("2023-01-29T23:57:54Z", "2023-01-29T23:57:54Z"),
+    ],
+)
+def test_anchor_json_epochs_and_iso_times_are_unchanged(tmp_path, fresh_notes, value, want):
+    data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": value}])
+    assert doc["@timestamp"].startswith(want), doc
+    assert _counted(data) == 0
+
+
+@pytest.mark.parametrize("value", ["0", 0, "0.0"])
+def test_anchor_json_zero_is_skipped_and_not_counted(tmp_path, fresh_notes, value):
+    data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": value}])
+    assert "@timestamp" not in doc
+    assert _counted(data) == 0
+
+
+@pytest.mark.parametrize("value", ["-86400", -86400])
+def test_anchor_a_negative_json_epoch_reads_as_before(tmp_path, fresh_notes, value):
+    data, (doc,) = _json_ingest(tmp_path, [{"Timestamp": value}])
+    assert doc["@timestamp"].startswith("1969-12-31")
+    assert _counted(data) == 0

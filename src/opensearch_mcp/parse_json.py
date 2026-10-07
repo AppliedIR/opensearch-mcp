@@ -12,7 +12,9 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.parse_csv import _doc_id
-from opensearch_mcp.paths import NO_TIME_FIELD, auto_detect_time_field
+from opensearch_mcp.parse_delimited import _EPOCH_TEXT as _DIGITS
+from opensearch_mcp.parse_delimited import _epoch_text, _is_a_number_not_zero
+from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, auto_detect_time_field
 
 # Velociraptor's epoch-number time column. JSON only: in a CSV the same name
 # holds a string, which OpenSearch would read as epoch milliseconds (1970).
@@ -158,6 +160,7 @@ def ingest_json(
         raise ValueError(f"Cannot detect JSON format in {path.name}")
 
     count = skipped = bulk_failed = host_renamed = 0
+    not_understood = 0  # digit text of no epoch width
     actions: list[dict] = []
     ts_field = time_field
 
@@ -171,7 +174,17 @@ def ingest_json(
 
         if ts_field and ts_field != "@timestamp" and record.get(ts_field):
             val = record[ts_field]
-            if isinstance(val, str) and _EPOCH_TEXT.fullmatch(val):
+            if isinstance(val, str) and _DIGITS.fullmatch(val.strip()):
+                # Digit text: converted only at an epoch's width, as the
+                # delimited path does; any other (20230129) would read as
+                # seconds, in 1970, so it stays in its own field and is counted
+                epoch = _epoch_text(val)
+                if epoch:
+                    record["@timestamp"] = epoch
+                else:
+                    not_understood += _is_a_number_not_zero(val)
+                val = None
+            elif isinstance(val, str) and _EPOCH_TEXT.fullmatch(val):  # signed, as before
                 try:  # an epoch written as text: read like the number (0 skipped, as 0 is)
                     val = (float(val) if "." in val else int(val)) or None
                 except ValueError:  # more digits than int() reads: not a time
@@ -259,4 +272,6 @@ def ingest_json(
 
     if not ts_field and count and str(path.absolute()) not in NO_TIME_FIELD:
         NO_TIME_FIELD.append(str(path.absolute()))
+    if not_understood:
+        TIME_NOT_UNDERSTOOD.append((str(path.absolute()), ts_field, not_understood))
     return count, skipped, bulk_failed, host_renamed
