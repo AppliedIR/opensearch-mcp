@@ -739,6 +739,7 @@ def _rebuilt_status_host(h) -> dict:
             "indexed": a.indexed,
             **({"error": a.error} if a.error else {}),
             **({"not_read": a.not_read} if a.not_read else {}),
+            **({"note": a.note} if a.note else {}),
         }
         for a in h.artifacts
     ]
@@ -769,7 +770,7 @@ def _volume_host_name(image_id: str, volume: Path) -> str:
 
 
 def _hostname_from_volumes(
-    volumes: list[Path], notes: list[tuple[str, str]], image_id: str
+    volumes: list[Path], notes: list[tuple[str, str]], image_id: str, names: dict | None = None
 ) -> str | None:
     """The registry hostname, taken only when exactly one volume holds an OS
     install and it is Windows. With two or more installs of any OS (a dual
@@ -786,10 +787,13 @@ def _hostname_from_volumes(
 
     if len(installs) > 1:
         found = ", ".join(f"{v.name}: {kind} {native(v, kind)}" for v, kind in installs)
-        names = ", ".join(_volume_host_name(image_id, v) for v, _ in installs)
+        # a volume an image run reads is that run's host, not <image>-vol<N>
+        hosts = ", ".join(
+            (names or {}).get(v) or _volume_host_name(image_id, v) for v, _ in installs
+        )
         note = (
             f"{len(installs)} OS installs on this image ({found}); each is ingested "
-            f"as its own host ({names}). Pass --hostname only if they are one machine"
+            f"as its own host ({hosts}). Pass --hostname only if they are one machine"
         )
         notes.append(("hostname", note))
         print(f"  WARNING: {note}", file=sys.stderr)
@@ -811,10 +815,10 @@ def _hostname_from_volumes(
     return detected
 
 
-def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, set, list]:
+def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, dict, list]:
     """The Linux and macOS volumes Plaso reads straight off the image.
 
-    Returns the hosts, the byte offsets their runs cover, and (offset, note)
+    Returns the hosts, {byte offset a run covers: its host's name}, and (offset, note)
     pairs for the volumes no run covers. A host is named from the examiner's
     --hostname or else for the image and its volume, never from a registry.
     """
@@ -824,7 +828,7 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, s
     leaves, error = volume_inventory(image)
     if error:
         print(f"  WARNING: {error}", file=sys.stderr)
-        return [], set(), [(-1, error)]
+        return [], {}, [(-1, error)]
     runs, notes = plan_image_runs(leaves)
     hosts = []
     for run in runs:
@@ -847,7 +851,12 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, s
             host.zone_note = "time zone unknown: local-time events stored as recorded"
         hosts.append(host)
         print(f"  {name} ({run['os']}): {run['label']} read straight off the image")
-    return hosts, {run["offset"] for run in runs}, notes
+    return hosts, {run["offset"]: h.hostname for run, h in zip(runs, hosts)}, notes
+
+
+def _covered_names(mount_ctx, covered: dict) -> dict:
+    """{mounted volume: the image host that reads it instead}."""
+    return {v: covered[off] for v, off in mount_ctx.offsets.items() if off in covered}
 
 
 def _discover_volumes(
@@ -907,7 +916,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
         read_velociraptor_hostname,
     )
 
-    input_path = Path(args.path)
+    # Absolute: Plaso and the volume helper run in their own work folders
+    input_path = Path(args.path).resolve()
     case_id = _resolve_case_id(getattr(args, "case", None))
     _ensure_case_active(case_id)
 
@@ -966,7 +976,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     status_notes: list[tuple[str, str]] = []  # warnings for the run's status
     # Linux and macOS volumes Plaso reads straight off the image
     image_hosts: list = []
-    image_covered: set = set()  # their byte offsets
+    image_covered: dict = {}  # their byte offsets: host names
     image_notes: list = []  # (offset, note) for volumes no image run covers
     examiner_hostname = getattr(args, "hostname", None)  # never the registry's
 
@@ -1032,7 +1042,12 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # (silently-wrong of a different shape). C1 closes
                     # this via batch-discovery + host-unmapped.yaml.
                     if not hostname and volumes:
-                        hostname = _hostname_from_volumes(volumes, status_notes, image_id)
+                        hostname = _hostname_from_volumes(
+                            volumes,
+                            status_notes,
+                            image_id,
+                            _covered_names(mount_ctx, image_covered),
+                        )
 
                 scan_root = tmpdir
 
@@ -1057,7 +1072,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # disk images get the real ComputerName, not the filename.
             # Warn on miss — see the archive-path block above for why.
             if not hostname and volumes:
-                hostname = _hostname_from_volumes(volumes, status_notes, image_id)
+                hostname = _hostname_from_volumes(
+                    volumes, status_notes, image_id, _covered_names(mount_ctx, image_covered)
+                )
 
             # VSS handling
             if vss_flag:
@@ -1143,6 +1160,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
         # the case dictionary BEFORE parsers run. v1 always proceeds;
         # response carries the proposal block so AI/operator can review.
         # Replaces the prior fail-loud `_classify_or_fail`.
+        # Image hosts join before the host dictionary is consulted
+        hosts += image_hosts
         host_discovery_report, case_host_dict = _preflight_host_discovery(
             case_id, scan_root, hosts
         )
@@ -1194,8 +1213,6 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if vss_host.artifacts or vss_host.evtx_dir:
                     hosts.append(vss_host)
 
-        # After the VSS block, so shadow copies never take an image host's name
-        hosts += image_hosts
         for _, note in image_notes:
             status_notes.append(("volume", note))
             print(f"  WARNING: {note}", file=sys.stderr)
@@ -1231,9 +1248,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
         # Apply --source-timezone override to all hosts (priority 1)
         if tz_override:
+            from opensearch_mcp.discover import EXAMINER_ZONE
+
             print(f"  Source timezone: {tz_override}")
             for h in hosts:
-                h.system_timezone, h.timezone_source = tz_override, "examiner"
+                h.system_timezone, h.timezone_source = tz_override, EXAMINER_ZONE
 
         if not getattr(args, "yes", False):
             try:

@@ -124,11 +124,11 @@ def _ingest_jsonl(
             except json.JSONDecodeError:
                 continue
 
-            if prefix:
-                for key in ("filename", "display_name"):
+            if prefix:  # message too: filestat's names the file by its full path
+                for key in ("filename", "display_name", "message"):
                     value = record.get(key)
                     if isinstance(value, str) and prefix in value:
-                        record[key] = value.replace(prefix, "", 1)
+                        record[key] = value.replace(prefix, "")
             if volume is not None:
                 record["vhir.volume"] = volume
             record["host.name"] = hostname

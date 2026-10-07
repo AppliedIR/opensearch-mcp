@@ -929,7 +929,7 @@ def _ingest_plaso_volume(
     import shutil
     import tempfile
 
-    from opensearch_mcp.discover import _valid_zone
+    from opensearch_mcp.discover import EXAMINER_ZONE, _valid_zone
     from opensearch_mcp.parse_plaso import (
         _ingest_jsonl,
         can_sudo,
@@ -953,8 +953,12 @@ def _ingest_plaso_volume(
     _progress("artifact_start", hostname=host.hostname, artifact="plaso")
     aid = audit._next_audit_id()
     runs, run_note = plaso_runs(host)
-    image = host.image_path is not None  # read off the image: no root, no --timezone
-    zone = None if image else _valid_zone(host.system_timezone)
+    image = host.image_path is not None  # read off the image: no root
+    # Off an image, Plaso applies each volume's own zone, unless the examiner
+    # gave --source-timezone, which wins for every host.
+    override = host.timezone_source == EXAMINER_ZONE
+    zone = None if image and not override else _valid_zone(host.system_timezone)
+    zone_note = "" if override else host.zone_note
     # Linux and macOS: root's read capability when sudo is there, so files
     # only root can read (auth.log, /root) are parsed; else the examiner.
     read_as_root = not image and host.os != "windows" and can_sudo()
@@ -984,7 +988,7 @@ def _ingest_plaso_volume(
             ar.indexed += cnt
             ar.bulk_failed += bf
             unread, note = plaso_status(
-                pinfo, host.volume_root, host.os, zone, host.timezone_source, host.zone_note
+                pinfo, host.volume_root, host.os, zone, host.timezone_source, zone_note
             )
             ar.not_read += unread
             notes.append(note)

@@ -32,6 +32,10 @@ USER_ARTIFACTS: dict[str, str | list[str]] = {
     "timeline": "AppData/Local/ConnectedDevicesPlatform",
 }
 
+# timezone_source when the examiner's --source-timezone set the zone: it wins
+# for every host, a volume Plaso reads off an image included
+EXAMINER_ZONE = "examiner override"
+
 # Where Plaso's narrow Windows set looks, relative to the volume root
 PLASO_WINDOWS_DIRS = ("Users", "Windows/inf")
 

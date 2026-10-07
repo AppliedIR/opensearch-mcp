@@ -154,7 +154,7 @@ def test_an_image_host_is_named_for_the_image_never_the_registry(inventory, tmp_
     assert host.zone_note == (
         "time zone America/New_York (the volume's etc/localtime, as Plaso read it)"
     )
-    assert covered == {3145728}
+    assert covered == {3145728: "dual-0a1b2c3d-p2-lvm1"}
     assert len(notes) == 1
 
 
@@ -183,7 +183,7 @@ def test_a_zone_plaso_may_misread_is_said(inventory, tmp_path, extra, note):
 def test_a_failed_listing_keeps_the_mounts_and_says_so(inventory, tmp_path):
     why = "volumes not listed (missing chunk data); the image is parsed from its mounts only"
     inventory([], why)
-    assert ingest_cli._image_hosts(tmp_path / "x.E01", "x", None) == ([], set(), [(-1, why)])
+    assert ingest_cli._image_hosts(tmp_path / "x.E01", "x", None) == ([], {}, [(-1, why)])
 
 
 def test_the_helper_failing_to_start_is_a_note(monkeypatch, tmp_path):
@@ -423,3 +423,137 @@ def test_a_dmg_with_no_os_root_is_named_not_parsed():
     runs, notes = plan_image_runs(parse_plaso.volume_inventory(_image("hfsplus_zlib.dmg"))[0])
     assert runs == []
     assert notes == [(20480, "p1 at offset 20480: HFS with no OS root; not parsed from the image")]
+
+
+# Fixes after review
+
+
+def test_a_partition_numbered_exactly_10_is_reported_not_run():
+    leaf = {"selector": {"partitions": "p10"}, "offset": 10 * 1048576, "kind": "filesystem",
+            "fs": "EXT", "os": "linux"}  # fmt: skip
+    runs, notes = plan_image_runs([leaf])
+    assert runs == [] and "numbered 10 or higher" in notes[0][1]
+
+
+def test_the_folder_timeline_message_is_relative_so_ids_survive_a_move(tmp_path, sent):
+    """filestat names the file by its full path in `message`; two copies of
+    one folder (or an archive extracted again to a new temp folder) must
+    give the same documents."""
+    ids = []
+    for where in ("first/extract-1/srv01", "second/extract-2/srv01"):
+        root = tmp_path / where
+        root.mkdir(parents=True)
+        full = f"{root.resolve()}/etc/passwd"
+        record = {"data_type": "fs:stat", "parser": "filestat", "filename": full,
+                  "display_name": f"OS:{full}", "message": f"{full} Type: file",
+                  "timestamp": 1791280801000000}  # fmt: skip
+        jsonl = tmp_path / f"{len(ids)}.jsonl"
+        jsonl.write_text(json.dumps(record) + "\n")
+        start = len(sent)
+        _ingest_jsonl(jsonl, None, "case-c1-plaso-h", "h", volume_root=root)
+        ids += [d["_id"] for d in sent[start:]]
+    assert ids[0] == ids[1]
+    assert sent[0]["_source"]["message"] == "etc/passwd Type: file"
+
+
+def test_an_examiner_zone_wins_over_the_volumes_own(tmp_path, monkeypatch):
+    from opensearch_mcp import ingest
+    from opensearch_mcp.discover import EXAMINER_ZONE
+    from opensearch_mcp.results import HostResult
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    image = tmp_path / "dual.raw"
+    host = DiscoveredHost(hostname="img-p2-lvm1", volume_root=image)
+    host.os, host.image_path, host.volume_label = "linux", image, "p2:lvm1"
+    host.image_args = ["--partitions", "2", "--volumes", "1", "--vss_stores", "none"]
+    host.zone_note = "the volume's own zone"
+    host.system_timezone, host.timezone_source = "Europe/Berlin", EXAMINER_ZONE
+    seen = []
+
+    def run(parsers, source, workdir, read_as_root, zone, extra=()):
+        seen.append(zone)
+        jsonl = workdir / "out.jsonl"
+        jsonl.write_text("")
+        return jsonl, {}
+
+    monkeypatch.setattr(parse_plaso, "run_plaso_volume", run)
+    monkeypatch.setattr(ingest, "_safe_count", lambda c, i: 0)
+    status = [{"hostname": "h", "artifacts": [{"name": "plaso", "status": "pending"}]}]
+
+    class Audit:
+        def _next_audit_id(self):
+            return "aid-1"
+
+        def log(self, **kw):
+            pass
+
+    ingest._ingest_plaso_volume(
+        None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,
+        lambda: None,
+    )  # fmt: skip
+    assert seen == ["Europe/Berlin"]
+    (entry,) = status[0]["artifacts"]
+    assert "time zone Europe/Berlin (examiner override)" in entry["note"]
+    assert "the volume's own zone" not in entry["note"]
+
+
+def test_a_plaso_note_survives_the_rebuilt_status():
+    from opensearch_mcp.results import ArtifactResult, HostResult
+
+    h = HostResult(hostname="h")
+    h.artifacts.append(ArtifactResult(artifact="plaso", index="i", note="events by parser: x 1"))
+    (entry,) = ingest_cli._rebuilt_status_host(h)["artifacts"]
+    assert entry["note"] == "events by parser: x 1"
+
+
+def test_the_dual_boot_warning_names_the_image_host(tmp_path, monkeypatch):
+    import opensearch_mcp.hostname as hn
+
+    monkeypatch.setattr(hn, "detect_hostname_from_volume", lambda v: "WIN10A")
+    win = tmp_path / "vol1"
+    (win / "Windows/System32/config").mkdir(parents=True)
+    lnx = _linux_root(tmp_path / "vol2")
+    notes: list = []
+    ingest_cli._hostname_from_volumes([win, lnx], notes, "disk", {lnx: "disk-p2"})
+    assert "(disk-vol1, disk-p2)" in notes[0][1]
+
+
+def test_image_hosts_reach_the_host_dictionary_from_a_relative_path(tmp_path, monkeypatch):
+    import argparse
+
+    import opensearch_mcp.containers as C
+
+    folder = tmp_path / "evidence"
+    folder.mkdir()
+    (folder / "dual.raw").write_bytes(b"\0")
+    monkeypatch.chdir(folder)
+    given = []
+
+    def inventory(image):
+        given.append(image)
+        return DUAL, ""
+
+    class Stop(Exception):
+        pass
+
+    seen = {}
+
+    def preflight(case_id, scan_root, hosts):
+        seen["hosts"] = [(h.hostname, h.os) for h in hosts]
+        raise Stop
+
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(parse_plaso, "volume_inventory", inventory)
+    monkeypatch.setattr(C, "cleanup_orphaned_mounts", lambda: None)
+    monkeypatch.setattr(C, "make_ingest_tmpdir", lambda case_id: work)
+    monkeypatch.setattr(C, "mount_image", lambda img, dest, ctx: [])
+    monkeypatch.setattr(ingest_cli, "_preflight_host_discovery", preflight)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "c1")
+    monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda c: None)
+    args = argparse.Namespace(path="dual.raw", case="c1", yes=True, hostname=None)
+    with pytest.raises(Stop):
+        ingest_cli.cmd_scan(args)
+    assert given == [folder / "dual.raw"] and given[0].is_absolute()
+    image_id = ingest_cli._image_id("dual", folder / "dual.raw")
+    assert seen["hosts"] == [(f"{image_id}-p2-lvm1", "linux")]
