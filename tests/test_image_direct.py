@@ -440,20 +440,86 @@ def test_the_folder_timeline_message_is_relative_so_ids_survive_a_move(tmp_path,
     one folder (or an archive extracted again to a new temp folder) must
     give the same documents."""
     ids = []
-    for where in ("first/extract-1/srv01", "second/extract-2/srv01"):
+    for where, inode in (
+        ("first/extract-1/srv01", "31870798"),
+        ("second/extract-2/srv01", "40112233"),
+    ):
         root = tmp_path / where
         root.mkdir(parents=True)
         full = f"{root.resolve()}/etc/passwd"
-        record = {"data_type": "fs:stat", "parser": "filestat", "filename": full,
-                  "display_name": f"OS:{full}", "message": f"OS:{full} Type: file",
-                  "timestamp": 1791280801000000}  # fmt: skip
         jsonl = tmp_path / f"{len(ids)}.jsonl"
-        jsonl.write_text(json.dumps(record) + "\n")
+        jsonl.write_text(json.dumps(_psort_filestat(full, inode)) + "\n")
         start = len(sent)
         _ingest_jsonl(jsonl, None, "case-c1-plaso-h", "h", volume_root=root)
         ids += [d["_id"] for d in sent[start:]]
-    assert ids[0] == ids[1]
-    assert sent[0]["_source"]["message"] == "OS:etc/passwd Type: file"
+    assert ids[0] == ids[1]  # a copy has new inode numbers
+    assert sent[0]["_source"]["message"].startswith("OS:etc/passwd Type: file")
+    assert sent[0]["_source"]["inode"] == "31870798"  # kept in the document
+
+
+def _psort_filestat(full: str, inode: str) -> dict:
+    """One filestat event as psort 20240308's json_line writes it (recorded
+    from a folder run; the path and inode are this test's)."""
+    return {
+        "__container_type__": "event", "__type__": "AttributeContainer",
+        "_event_values_hash": f"{inode}0000000000000000000000"[:32],
+        "data_type": "fs:stat",
+        "date_time": {"__class_name__": "PosixTimeInNanoseconds", "__type__": "DateTimeValues",
+                      "timestamp": 1704164645123456000},
+        "display_name": f"OS:{full}", "file_entry_type": "file", "file_size": 2,
+        "file_system_type": "OS", "filename": full, "group_identifier": 1000,
+        "inode": inode, "is_allocated": True,
+        "message": f"OS:{full} Type: file Owner identifier: 1000 Group identifier: 1000 "
+                   "Mode: 0o664 Number of links: 1",
+        "mode": 436, "number_of_links": 1, "owner_identifier": 1000, "parser": "filestat",
+        "pathspec": {"__type__": "PathSpec", "location": full, "type_indicator": "OS"},
+        "sha256_hash": "73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac",
+        "timestamp": 1704164645123456, "timestamp_desc": "Content Modification Time",
+    }  # fmt: skip
+
+
+@needs_plaso
+def test_a_copied_or_re_extracted_folder_keeps_its_modification_time_ids(tmp_path, sent):
+    """cp -a and tar -x keep mtime and give new inodes; each copy's mtime
+    events are the same documents, except the root folder's own (its path
+    isn't under the root). Its ctime and atime are new values: new documents."""
+    import subprocess
+
+    tree = tmp_path / "orig" / "srv01"
+    for rel, text in {"etc/hosts": "h\n", "etc/passwd": "p\n", "var/log/a.log": "l\n"}.items():
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text(text)
+    os.link(tree / "etc/hosts", tree / "etc/hosts2")
+    os.symlink("hosts", tree / "etc/hosts-link")
+    (tree / "empty").mkdir()
+    subprocess.run(["cp", "-a", str(tree), str(tmp_path / "copy")], check=True)
+    (tmp_path / "x").mkdir()
+    tar = [
+        "tar",
+        "--format=posix",
+        "-cf",
+        str(tmp_path / "t.tar"),
+        "-C",
+        str(tree.parent),
+        "srv01",
+    ]
+    subprocess.run(tar, check=True)  # posix: the archive keeps sub-second times
+    subprocess.run(["tar", "-xf", str(tmp_path / "t.tar"), "-C", str(tmp_path / "x")], check=True)
+    mtime = []
+    for n, root in enumerate((tree, tmp_path / "copy", tmp_path / "x" / "srv01")):
+        jsonl, _ = parse_plaso.run_plaso_volume("filestat", root, tmp_path / f"wd{n}")
+        start = len(sent)
+        _ingest_jsonl(jsonl, None, "case-c1-plaso-h", "h", volume_root=root)
+        mtime.append({
+            d["_source"]["vhir.source_file"]: d["_id"]
+            for d in sent[start:]
+            if d["_source"].get("timestamp_desc") == "Content Modification Time"
+            and d["_source"].get("vhir.source_file") not in ("", ".")
+            and not str(d["_source"].get("filename", "")).startswith("/")
+        })  # fmt: skip
+    assert len(mtime[0]) >= 8, mtime[0]
+    assert mtime[1] == mtime[0], "cp -a"
+    assert mtime[2] == mtime[0], "tar -x"
 
 
 def _image_host(tmp_path, zone=None, localtime=""):

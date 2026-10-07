@@ -104,7 +104,8 @@ def _ingest_jsonl(
     volume_root (a run over a whole volume): filename and display_name are
     made relative to it, so vhir.source_file is the path on the evidence and
     the _id doesn't change with where the volume was mounted. Plaso reports
-    the resolved path, so the resolved root is stripped. _event_values_hash
+    the resolved path, so the resolved root is stripped. inode (a copy's new
+    one) is left out of the _id, and kept in the document. _event_values_hash
     carries the mount path too and is left out of the _id. @timestamp is set
     from the microsecond timestamp, so time-bounded searches find the events.
 
@@ -119,6 +120,8 @@ def _ingest_jsonl(
     prefix = ""
     if volume_root is not None or volume is not None:
         volatile = _PLASO_VOLATILE_KEYS | {"_event_values_hash"}
+    if volume_root is not None:  # a copied or re-extracted folder gets new inode numbers
+        volatile = volatile | {"inode"}
     if volume_root is not None:
         prefix = str(volume_root.resolve()).rstrip("/") + "/"
     count = 0
