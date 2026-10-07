@@ -811,21 +811,72 @@ def _hostname_from_volumes(
     return detected
 
 
+def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, set, list]:
+    """The Linux and macOS volumes Plaso reads straight off the image.
+
+    Returns the hosts, the byte offsets their runs cover, and (offset, note)
+    pairs for the volumes no run covers. A host is named from the examiner's
+    --hostname or else for the image and its volume, never from a registry.
+    """
+    from opensearch_mcp.discover import DiscoveredHost
+    from opensearch_mcp.parse_plaso import plan_image_runs, volume_inventory
+
+    leaves, error = volume_inventory(image)
+    if error:
+        print(f"  WARNING: {error}", file=sys.stderr)
+        return [], set(), [(-1, error)]
+    runs, notes = plan_image_runs(leaves)
+    hosts = []
+    for run in runs:
+        name = examiner_hostname or f"{image_id}-{run['label'].replace(':', '-')}"
+        host = DiscoveredHost(hostname=name, volume_root=image)
+        host.os, host.image_path, host.image_args = run["os"], image, run["args"]
+        host.volume_label = run["label"]
+        host.artifacts.append(("plaso", image))
+        if run["localtime"] == "link" and run["zone"]:
+            host.system_timezone, host.timezone_source = run["zone"], "etc/localtime"
+            host.zone_note = (
+                f"time zone {run['zone']} (the volume's etc/localtime, as Plaso read it)"
+            )
+        elif run["localtime"] == "file":
+            host.zone_note = (
+                "etc/localtime is not a link: Plaso may have used UTC or a "
+                "fixed-offset abbreviation"
+            )
+        else:
+            host.zone_note = "time zone unknown: local-time events stored as recorded"
+        hosts.append(host)
+        print(f"  {name} ({run['os']}): {run['label']} read straight off the image")
+    return hosts, {run["offset"] for run in runs}, notes
+
+
 def _discover_volumes(
     volumes: list[Path],
     hostname,
     force_hostname: bool,
     image_id: str,
     notes: list[tuple[str, str]] | None = None,
+    offsets: dict | None = None,
+    covered: set | None = None,
+    parsed_offsets: set | None = None,
 ) -> list:
     """Hosts on each mounted volume of a disk image, so every install is found
     (a scan of their shared parent finds only the first). With no hostname for
     the image, a host named after its volume (vol1) is named for the image too.
-    A volume with no host on it is noted: nothing on it is parsed."""
+    A volume with no host on it is noted: nothing on it is parsed.
+
+    A Linux or macOS host on a volume whose offset an image run covered
+    (`covered`) is left to that run. parsed_offsets gets the offset of every
+    volume a host is kept for."""
     hosts = []
     for v in volumes:
         found = discover(v, hostname=hostname, force_hostname=force_hostname)
-        if not found and notes is not None:
+        offset = (offsets or {}).get(v)
+        if covered and offset in covered:
+            found = [h for h in found if h.os == "windows"]
+        if found and parsed_offsets is not None and offset is not None:
+            parsed_offsets.add(offset)
+        if not found and notes is not None and not (covered and offset in covered):
             note = (
                 f"{v.name} mounted; no Windows, Linux or macOS root found; "
                 "nothing on it was parsed"
@@ -913,6 +964,11 @@ def cmd_scan(args: argparse.Namespace) -> None:
     volumes: list = []  # a disk image's mounted volumes
     image_id = ""  # the disk image's name for its volume hosts (_image_id)
     status_notes: list[tuple[str, str]] = []  # warnings for the run's status
+    # Linux and macOS volumes Plaso reads straight off the image
+    image_hosts: list = []
+    image_covered: set = set()  # their byte offsets
+    image_notes: list = []  # (offset, note) for volumes no image run covers
+    examiner_hostname = getattr(args, "hostname", None)  # never the registry's
 
     # Register cleanup for abnormal exit (OOM kill, unhandled exception)
     import atexit
@@ -936,6 +992,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             else:
                 # Check if extraction produced a disk image (e.g., VHDX.7z, E01.7z)
                 _IMAGE_EXTS = {".vhdx", ".vhd", ".vmdk", ".e01", ".ex01", ".dd", ".raw", ".img"}
+                _IMAGE_EXTS |= {".dmg", ".sparseimage"}  # read by Plaso, never mounted
                 extracted_images = [
                     f for f in tmpdir.iterdir() if f.is_file() and f.suffix.lower() in _IMAGE_EXTS
                 ]
@@ -946,16 +1003,21 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     # Archive-basename stamp removed per host-identity spec
                     # (silent "admin01-triage" pollution). Registry detect
                     # against the mounted volume happens below after mount.
-                    volumes = mount_image(img, tmpdir, mount_ctx)
-                    if not volumes:
+                    if detect_container(img) != "dmg":
+                        volumes = mount_image(img, tmpdir, mount_ctx)
+                    image_hosts, image_covered, image_notes = _image_hosts(
+                        img, image_id, examiner_hostname
+                    )
+                    if not volumes and not image_hosts:
                         print(
-                            "Error: no partition could be mounted from the extracted image.",
+                            "Error: no partition could be mounted or read from the extracted "
+                            "image.",
                             file=sys.stderr,
                         )
                         sys.exit(1)
                     print(f"  Mounted {len(volumes)} volume(s)")
 
-                    if vss_flag:
+                    if vss_flag and volumes:
                         vss_volumes = mount_vss(img, tmpdir, mount_ctx)
                         if vss_volumes:
                             print(f"  Found {len(vss_volumes)} volume shadow copies")
@@ -979,8 +1041,14 @@ def cmd_scan(args: argparse.Namespace) -> None:
             print(f"Mounting {input_path.name}...")
             image_id = _image_id(input_path.stem, input_path)
             volumes = mount_image(input_path, tmpdir, mount_ctx)
-            if not volumes:
-                print("Error: no partition could be mounted from the disk image.", file=sys.stderr)
+            image_hosts, image_covered, image_notes = _image_hosts(
+                input_path, image_id, examiner_hostname
+            )
+            if not volumes and not image_hosts:
+                print(
+                    "Error: no partition could be mounted or read from the disk image.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             print(f"  Mounted {len(volumes)} volume(s)")
 
@@ -988,7 +1056,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             # precedence over the previous input_path.stem fallback so
             # disk images get the real ComputerName, not the filename.
             # Warn on miss — see the archive-path block above for why.
-            if not hostname:
+            if not hostname and volumes:
                 hostname = _hostname_from_volumes(volumes, status_notes, image_id)
 
             # VSS handling
@@ -1009,6 +1077,19 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
             scan_root = tmpdir
 
+        elif container_type == "dmg":  # read by Plaso alone: no mount, no sudo
+            tmpdir = make_ingest_tmpdir(case_id)
+            image_id = _image_id(input_path.stem, input_path)
+            image_hosts, image_covered, image_notes = _image_hosts(
+                input_path, image_id, examiner_hostname
+            )
+            if not image_hosts:
+                for _, note in image_notes:
+                    print(f"  {note}", file=sys.stderr)
+                print("Error: no Linux or macOS volume could be read from the image.")
+                sys.exit(1)
+            scan_root = tmpdir
+
         elif container_type == "directory":
             scan_root = input_path
         elif container_type == "unknown" and input_path.is_dir():
@@ -1023,7 +1104,18 @@ def cmd_scan(args: argparse.Namespace) -> None:
             container_type == "archive" and hostname
         )
         if volumes:  # a disk image: each mounted volume is scanned on its own
-            hosts = _discover_volumes(volumes, hostname, force_hn, image_id, status_notes)
+            parsed_offsets: set = set()
+            hosts = _discover_volumes(
+                volumes,
+                hostname,
+                force_hn,
+                image_id,
+                status_notes,
+                offsets=mount_ctx.offsets,
+                covered=image_covered,
+                parsed_offsets=parsed_offsets,
+            )
+            image_notes = [(off, n) for off, n in image_notes if off not in parsed_offsets]
         else:
             hosts = discover(scan_root, hostname=hostname, force_hostname=force_hn)
 
@@ -1093,11 +1185,20 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 vr = find_volume_root(vss_mp)
                 if vr is None:
                     continue
-                base_hostname = hosts[0].hostname if hosts else (hostname or "unknown")
+                windows = [h.hostname for h in hosts if h.os == "windows"]
+                base_hostname = (
+                    windows or [h.hostname for h in hosts] or [hostname or "unknown"]
+                )[0]
                 vss_host = DiscoveredHost(hostname=base_hostname, volume_root=vr, vss_id=v_id)
                 discover_artifacts(vss_host)
                 if vss_host.artifacts or vss_host.evtx_dir:
                     hosts.append(vss_host)
+
+        # After the VSS block, so shadow copies never take an image host's name
+        hosts += image_hosts
+        for _, note in image_notes:
+            status_notes.append(("volume", note))
+            print(f"  WARNING: {note}", file=sys.stderr)
 
         if exclude and "evtx" in exclude:  # event logs (and hayabusa) skipped
             for h in hosts:
@@ -1447,7 +1548,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 print(f"  Triage enrichment failed: {e}")
             from opensearch_mcp.ingest_status import finish_status
 
-            status_notes += [("mount", f) for f in mount_ctx.failures]
+            status_notes += [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
             if triage_note:
                 status_notes.insert(0, ("triage", triage_note))
             finish_status(case_id, os.getpid(), notes=status_notes)

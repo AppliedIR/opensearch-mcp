@@ -1483,9 +1483,13 @@ def idx_ingest(
 
     # Container files (VHDX, E01, 7z, raw) — preview without mounting
     container_type = detect_container(evidence_path)
-    if container_type in ("ewf", "raw", "nbd", "archive"):
+    if container_type in ("ewf", "raw", "nbd", "archive", "dmg"):
         if dry_run:
-            sudo_ok = _check_sp.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+            # A .dmg is never mounted: Plaso reads it, with no sudo.
+            sudo_ok = (
+                container_type == "dmg"
+                or _check_sp.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+            )
             resp = {
                 "status": "preview",
                 "container": {

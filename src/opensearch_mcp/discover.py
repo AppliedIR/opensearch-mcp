@@ -123,6 +123,10 @@ class DiscoveredHost:
     system_timezone: str | None = None  # IANA zone: the SYSTEM hive, or the volume's etc
     timezone_source: str = ""  # where system_timezone came from
     from_image: bool = False  # found on a mounted disk-image volume, not a folder
+    image_path: Path | None = None  # set for a volume Plaso reads straight off the image
+    image_args: list[str] = field(default_factory=list)  # its --partitions/--volumes
+    volume_label: str = ""  # its partition or volume, stamped as vhir.volume
+    zone_note: str = ""  # the zone as Plaso finds it on the image
     os: str = "windows"  # windows | linux | macos
 
 

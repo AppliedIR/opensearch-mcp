@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 def detect_container(path: Path) -> str:
     """Detect container type from file extension.
 
-    Returns: "archive", "ewf", "nbd", "raw", "directory", or "unknown".
+    Returns: "archive", "ewf", "nbd", "raw", "dmg", "directory", or "unknown".
+    A "dmg" (or .sparseimage) is never mounted: Plaso reads it directly.
     """
     suffix = path.suffix.lower()
     suffixes = "".join(path.suffixes[-2:]).lower()
@@ -34,6 +35,8 @@ def detect_container(path: Path) -> str:
         return "nbd"
     if suffix in (".dd", ".raw", ".img", ".iso"):
         return "raw"
+    if suffix in (".dmg", ".sparseimage"):
+        return "dmg"
     if path.is_dir():
         return "directory"
     return "unknown"
@@ -93,6 +96,8 @@ class MountContext:
         self._nbd_devices: list[str] = []  # qemu-nbd -d
         self._loop_devices: list[str] = []  # losetup -d
         self.failures: list[str] = []  # partitions that were tried and didn't mount
+        self.not_mounted: list[str] = []  # partitions left unmounted on purpose (LVM)
+        self.offsets: dict[Path, int] = {}  # mount point -> byte offset in the image
 
     def add_mount(self, mount_point: Path) -> None:
         self._mounts.append(mount_point)
@@ -188,8 +193,21 @@ def _mount_raw(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
 
 # Partition types that hold no filesystem, as fdisk prints them: MBR Ids
 # (the first token) for extended containers and swap, and GPT names.
-_SKIP_MBR_IDS = {"5", "f", "85", "82"}
-_SKIP_GPT_TYPES = {"Microsoft reserved", "BIOS boot", "Linux swap"}
+# LVM is never loop-mounted either: the analysis host's udev/lvm2 could
+# activate the evidence's volume group. Plaso reads LVM from the image.
+_SKIP_MBR_IDS = {"5", "f", "85", "82", "8e"}
+_SKIP_GPT_TYPES = {"Microsoft reserved", "BIOS boot", "Linux swap", "Linux LVM"}
+_LVM_TYPES = ({"8e"}, {"Linux LVM"})
+
+
+def _is_lvm_pv(path: Path) -> bool:
+    """Whether the image starts with an LVM physical volume (LABELONE in sector 1)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(512)
+            return f.read(8) == b"LABELONE"
+    except OSError:
+        return False
 
 
 def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list[Path]:
@@ -209,11 +227,14 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
         for idx, part in enumerate(partitions):
             # GPT gives the type name; MBR gives the Id and its name ("7 HPFS/NTFS/exFAT")
             mbr_id = (part["type"].split() or [""])[0]
+            offset = part["start"] * part["sector_size"]
+            if mbr_id in _LVM_TYPES[0] or part["type"] in _LVM_TYPES[1]:
+                ctx.not_mounted.append(f"LVM partition at offset {offset}: read without mounting")
+                continue
             if part["type"] in _SKIP_GPT_TYPES or mbr_id in _SKIP_MBR_IDS:
                 continue
             mount_point = dest / f"vol{idx}"
             mount_point.mkdir()
-            offset = part["start"] * part["sector_size"]
             # Bound the loop device to the partition, or the next partition's
             # mount fails ("overlapping loop device exists").
             size = part["sectors"] * part["sector_size"]
@@ -231,6 +252,7 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
                     capture_output=True,
                 )
                 ctx.add_mount(mount_point)
+                ctx.offsets[mount_point] = offset
                 mounted.append(mount_point)
             except subprocess.CalledProcessError as e:
                 mount_point.rmdir()
@@ -243,7 +265,9 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
                 print(f"  WARNING: {failure}", file=sys.stderr)
 
     # Fallback: direct mount for volume images without partition table
-    if not mounted:
+    if not mounted and _is_lvm_pv(raw_path):
+        ctx.not_mounted.append("LVM physical volume (the whole image): read without mounting")
+    elif not mounted:
         mount_point = dest / "vol0"
         mount_point.mkdir(exist_ok=True)
         try:
@@ -260,6 +284,7 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
                 capture_output=True,
             )
             ctx.add_mount(mount_point)
+            ctx.offsets[mount_point] = 0
             mounted.append(mount_point)
         except subprocess.CalledProcessError:
             mount_point.rmdir()
@@ -357,11 +382,21 @@ def _mount_nbd(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
                 capture_output=True,
             )
             ctx.add_mount(mount_point)
+            ctx.offsets[mount_point] = _nbd_offset(part_dev)
             mounted.append(mount_point)
         except subprocess.CalledProcessError:
             mount_point.rmdir()
 
     return mounted
+
+
+def _nbd_offset(part_dev: str) -> int:
+    """A partition's byte offset in its nbd disk, from sysfs (in 512-byte
+    sectors whatever the disk's sector size); -1 when it can't be read."""
+    try:
+        return int(Path(f"/sys/class/block/{Path(part_dev).name}/start").read_text()) * 512
+    except (OSError, ValueError):
+        return -1
 
 
 def _find_free_nbd() -> str:

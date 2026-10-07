@@ -953,12 +953,14 @@ def _ingest_plaso_volume(
     _progress("artifact_start", hostname=host.hostname, artifact="plaso")
     aid = audit._next_audit_id()
     runs, run_note = plaso_runs(host)
-    zone = _valid_zone(host.system_timezone)
+    image = host.image_path is not None  # read off the image: no root, no --timezone
+    zone = None if image else _valid_zone(host.system_timezone)
     # Linux and macOS: root's read capability when sudo is there, so files
     # only root can read (auth.log, /root) are parsed; else the examiner.
-    read_as_root = host.os != "windows" and can_sudo()
+    read_as_root = not image and host.os != "windows" and can_sudo()
+    run_kw = {"extra": tuple(host.image_args)} if image else {}
     notes = [run_note] if run_note else []
-    if not read_as_root and host.os != "windows":
+    if not image and not read_as_root and host.os != "windows":
         notes.append("read as the examiner: files it can't read are listed as not read")
     errors: list[str] = []
     base = vhir_dir() / "cases" / case_id / "tmp"
@@ -966,7 +968,7 @@ def _ingest_plaso_volume(
     for parsers, source in runs:
         workdir = Path(tempfile.mkdtemp(prefix=f"plaso-{host.hostname}-", dir=base))
         try:
-            jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone)
+            jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone, **run_kw)
             cnt, bf = _ingest_jsonl(
                 jsonl,
                 client,
@@ -976,12 +978,13 @@ def _ingest_plaso_volume(
                 pipeline_version=_PIPELINE_VERSION,
                 vss_id=host.vss_id,
                 host_dict=host_dict,
-                volume_root=host.volume_root,
+                volume_root=None if image else host.volume_root,
+                volume=host.volume_label if image else None,
             )
             ar.indexed += cnt
             ar.bulk_failed += bf
             unread, note = plaso_status(
-                pinfo, host.volume_root, host.os, zone, host.timezone_source
+                pinfo, host.volume_root, host.os, zone, host.timezone_source, host.zone_note
             )
             ar.not_read += unread
             notes.append(note)

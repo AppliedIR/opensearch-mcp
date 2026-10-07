@@ -86,6 +86,7 @@ def _ingest_jsonl(
     vss_id: str = "",
     host_dict=None,
     volume_root: Path | None = None,
+    volume: str | None = None,
 ) -> tuple[int, int]:
     """Index Plaso JSONL records into OpenSearch.
 
@@ -96,12 +97,18 @@ def _ingest_jsonl(
     carries the mount path too and is left out of the _id. @timestamp is set
     from the microsecond timestamp, so time-bounded searches find the events.
 
+    volume (a run straight off a disk image): Plaso's paths are already
+    inside the file system; vhir.source_file drops the leading "/", and
+    vhir.volume (the run's partition or volume) is part of the _id, so two
+    volumes with the same files stay apart.
+
     Returns (count_indexed, count_bulk_failed).
     """
     volatile = _PLASO_VOLATILE_KEYS
     prefix = ""
-    if volume_root is not None:
+    if volume_root is not None or volume is not None:
         volatile = _PLASO_VOLATILE_KEYS | {"_event_values_hash"}
+    if volume_root is not None:
         prefix = str(volume_root.resolve()).rstrip("/") + "/"
     count = 0
     bulk_failed = 0
@@ -122,6 +129,8 @@ def _ingest_jsonl(
                     value = record.get(key)
                     if isinstance(value, str) and prefix in value:
                         record[key] = value.replace(prefix, "", 1)
+            if volume is not None:
+                record["vhir.volume"] = volume
             record["host.name"] = hostname
             if hostname:
                 if host_dict is not None:
@@ -139,6 +148,8 @@ def _ingest_jsonl(
             # Provenance fields (added AFTER ID computation — same pattern as
             # parse_csv.py and parse_evtx.py)
             source = record.get("filename") or record.get("display_name") or source_dir
+            if volume is not None and isinstance(source, str):
+                source = source.lstrip("/")
             record["vhir.source_file"] = source
             if ingest_audit_id:
                 record["vhir.ingest_audit_id"] = ingest_audit_id
@@ -148,7 +159,7 @@ def _ingest_jsonl(
                 record["vhir.vss_id"] = vss_id
             record["vhir.parse_method"] = "plaso"
             ts = record.get("timestamp")
-            if prefix and isinstance(ts, int) and ts:
+            if (prefix or volume is not None) and isinstance(ts, int) and ts:
                 try:  # exact to the microsecond; a value out of range is left unset
                     record["@timestamp"] = (_EPOCH + timedelta(microseconds=ts)).isoformat()
                 except OverflowError:
@@ -249,7 +260,12 @@ _KNOWN_GAPS = (
 
 
 def plaso_status(
-    pinfo: dict, volume_root: Path, os_name: str, zone: str | None, zone_source: str
+    pinfo: dict,
+    volume_root: Path,
+    os_name: str,
+    zone: str | None,
+    zone_source: str,
+    zone_note: str = "",
 ) -> tuple[list[str], str]:
     """The not_read list and the note for one host's Plaso status entry.
 
@@ -261,11 +277,24 @@ def plaso_status(
     prefix = str(volume_root.resolve()).rstrip("/") + "/"
     not_read = []
     for spec, n in sorted(counters.get("warnings_by_path_spec", {}).items()):
-        location = spec.strip().partition("location: ")[2] or spec.strip()
-        not_read.append(f"{location.replace(prefix, '', 1)} ({n} extraction warnings)")
+        # The innermost location: on an image, the outer ones are the image's
+        # own path and its partitions.
+        locations = [
+            line.partition("location: ")[2]  # last on its line; a path may hold ", "
+            for line in spec.strip().splitlines()
+            if "location: " in line
+        ]
+        location = locations[-1] if locations else spec.strip()
+        if location.startswith(prefix):
+            location = location[len(prefix) :]
+        elif location.startswith("/"):
+            location = location.lstrip("/")
+        not_read.append(f"{location} ({n} extraction warnings)")
     parsers = {k: v for k, v in counters.get("parsers", {}).items() if k != "total"}
     events = ", ".join(f"{k} {v}" for k, v in sorted(parsers.items())) or "none"
-    if zone:
+    if zone_note:  # a run off an image: Plaso applies the volume's own zone
+        tz = zone_note
+    elif zone:
         tz = f"time zone {zone} ({zone_source})"
     else:
         tz = "time zone unknown: local-time events (SetupAPI, syslog, apt) stored as recorded"
@@ -294,6 +323,8 @@ def plaso_runs(host) -> tuple[list[tuple[str, Path]], str]:
         return [(WINDOWS_PARSERS, d) for d in dirs if d is not None and d.is_dir()], ""
     # A Mac's unified logs (.tracev3) aren't in Plaso's macos preset.
     preset = "macos,unified_logging" if host.os == "macos" else host.os
+    if host.image_path is not None:  # Plaso reads the volume off the image
+        return [(preset, host.image_path)], ""
     if host.from_image:
         return [(preset, vr)], ""
     return [(preset, vr)], "file times may reflect the copy, not the original system"
@@ -375,6 +406,7 @@ def run_plaso_volume(
     read_as_root: bool = False,
     timezone_name: str | None = None,
     timeout: int = _PLASO_TIMEOUT,
+    extra: tuple[str, ...] = (),
 ) -> tuple[Path, dict]:
     """Run log2timeline over source, then psort and pinfo; return the JSONL
     path and pinfo's events and warnings sections.
@@ -399,7 +431,7 @@ def run_plaso_volume(
     cmd += ["--temporary_directory", str(tmp), "--storage_file", str(storage)]
     if timezone_name:
         cmd += ["--timezone", timezone_name]
-    cmd.append(str(source))
+    cmd += [*extra, str(source)]
     with open(workdir / "l2t.out", "wb") as out:
         proc = subprocess.Popen(cmd, cwd=workdir, stdout=out, stderr=out, start_new_session=True)
         try:
@@ -430,3 +462,124 @@ def run_plaso_volume(
     ):
         subprocess.run(tool_cmd, cwd=workdir, check=True, capture_output=True, timeout=timeout)
     return jsonl, json.loads((workdir / "pinfo.json").read_text())
+
+
+_INVENTORY = Path(__file__).with_name("volume_inventory.py")
+
+
+def plaso_python() -> str:
+    """The interpreter log2timeline.py runs under (its shebang), which has
+    the dfVFS Plaso uses; the product's own venv doesn't."""
+    path = shutil.which("log2timeline.py")
+    try:
+        first = Path(path).read_text(errors="replace").splitlines()[0] if path else ""
+    except (OSError, IndexError):
+        first = ""
+    if first.startswith("#!") and "python" in first:
+        return first[2:].split()[0]
+    return "/usr/bin/python3"
+
+
+def volume_inventory(image: Path, timeout: int = 300) -> tuple[list[dict], str]:
+    """The image's volumes as the helper lists them, or ([], why not)."""
+    try:
+        result = subprocess.run(
+            [plaso_python(), "-I", str(_INVENTORY), str(image)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return [], f"volumes not listed ({e}); the image is parsed from its mounts only"
+    if result.returncode != 0:
+        why = (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[-1]
+        return [], f"volumes not listed ({why}); the image is parsed from its mounts only"
+    leaves = []
+    for line in result.stdout.splitlines():
+        try:
+            leaves.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return leaves, ""
+
+
+def _selector_number(value: str) -> int | None:
+    digits = "".join(c for c in value if c.isdigit())
+    return int(digits) if digits else None
+
+
+def plan_image_runs(leaves: list[dict]) -> tuple[list[dict], list[tuple[int, str]]]:
+    """Plaso runs straight off the image for its Linux and macOS volumes,
+    and a note for each volume no run covers.
+
+    A run: {"label", "args", "os", "offset", "zone", "localtime"}. One per
+    Linux or macOS file system: a plain partition, an LVM volume, or a whole
+    APFS container (--volumes all; a container with a locked volume isn't
+    run). Plaso reads a selector one character at a time, so a partition or
+    volume numbered 10 or higher would select the wrong one: it isn't run.
+    Windows volumes are left to the mounts. Each note comes with its byte
+    offset, so a volume a mount went on to parse can be left out."""
+    runs: list[dict] = []
+    notes: list[tuple[int, str]] = []
+    apfs: dict[str, list[dict]] = {}
+    for leaf in leaves:
+        sel = leaf.get("selector", {})
+        if leaf.get("fs") == "APFS" or leaf.get("type") == "APFS_CONTAINER":
+            apfs.setdefault(sel.get("partitions", ""), []).append(leaf)
+            continue
+        where = "/".join(v for v in (sel.get("partitions"), sel.get("volumes")) if v) or "image"
+        off = leaf.get("offset", 0)
+        at = f"{where} at offset {off}"
+        if leaf.get("kind") == "locked":
+            notes.append((off, f"{at}: locked (encrypted); not parsed"))
+            continue
+        if leaf.get("kind") != "filesystem":
+            notes.append((off, f"{at}: no file system found; not parsed"))
+            continue
+        if leaf.get("os") == "windows":
+            continue
+        if leaf.get("os") not in ("linux", "macos"):
+            notes.append(
+                (off, f"{at}: {leaf.get('fs', '')} with no OS root; not parsed from the image")
+            )
+            continue
+        args, ok = [], True
+        for flag, key in (("--partitions", "partitions"), ("--volumes", "volumes")):
+            if key in sel:
+                n = _selector_number(sel[key])
+                if n is None or n >= 10:
+                    why = f"Plaso can't select {key} numbered 10 or higher; not parsed"
+                    notes.append((off, f"{at}: {why}"))
+                    ok = False
+                    break
+                args += [flag, str(n)]
+        if ok:
+            label = ":".join(v for v in (sel.get("partitions"), sel.get("volumes")) if v) or "fs"
+            runs.append(_run(label, args, leaf))
+    for part, group in apfs.items():
+        off = group[0].get("offset", 0)
+        at = f"APFS container {part or 'image'} at offset {off}"
+        if any(g.get("kind") == "locked" for g in group):
+            notes.append((off, f"{at}: a volume is locked (encrypted); not parsed"))
+            continue
+        n = _selector_number(part) if part else None
+        if part and (n is None or n >= 10):
+            notes.append(
+                (off, f"{at}: Plaso can't select partitions numbered 10 or higher; not parsed")
+            )
+            continue
+        args = (["--partitions", str(n)] if part else []) + ["--volumes", "all"]
+        os_leaf = next((g for g in group if g.get("os") == "macos"), group[0])
+        runs.append(_run(f"{part}:apfs" if part else "apfs", args, {**os_leaf, "os": "macos"}))
+    return runs, notes
+
+
+def _run(label: str, args: list[str], leaf: dict) -> dict:
+    return {
+        "label": label,
+        "args": args + ["--vss_stores", "none"],
+        "os": leaf["os"],
+        "offset": leaf.get("offset", 0),
+        "zone": leaf.get("zone"),
+        "localtime": leaf.get("localtime", ""),
+    }

@@ -210,11 +210,11 @@ def _tried(calls) -> list[tuple[int, int]]:
         # f and 85 extended containers skipped; c FAT32 and the logical 7 tried
         (MBR_EXTENDED_LBA, [(2048, 4096), (10240, 4096)]),
         (MBR_EXTENDED_LINUX, [(2048, 4096), (10240, 4096)]),
-        # BIOS boot, Microsoft reserved and Linux swap skipped; the rest tried
+        # BIOS boot, Microsoft reserved, Linux swap and Linux LVM skipped; the rest tried
         (
             GPT_SKIPS,
             [(4096, 4096), (12288, 8192), (20480, 4096)]
-            + [(s, 4096) for s in (28672, 32768, 36864, 40960, 45056, 49152, 53248)],
+            + [(s, 4096) for s in (28672, 36864, 40960, 45056, 49152, 53248)],
         ),
     ],
     ids=["mbr", "mbr extended f", "mbr extended 85", "gpt"],
@@ -483,3 +483,41 @@ def test_a_folder_that_cannot_be_searched_does_not_stop_discovery(tmp_path):
     finally:
         os.chmod(ext4 / "lost+found", 0o700)
     assert [(h.hostname, h.volume_root.name) for h in hosts] == [("disk-vol1", "vol1")]
+
+
+MBR_LVM = """\
+Disk /evidence/lvm.img: 64 MiB, 67108864 bytes, 131072 sectors
+Sector size (logical/physical): 512 bytes / 512 bytes
+Disklabel type: dos
+
+Device           Boot Start    End Sectors Size Id Type
+/evidence/lvm.img1 *   2048   4095    2048   1M 83 Linux
+/evidence/lvm.img2     4096 131071  126976  62M 8e Linux LVM
+"""
+
+
+def test_an_lvm_partition_is_never_loop_mounted(calls, tmp_path):
+    """The analysis host's udev/lvm2 could activate the evidence's volume
+    group; Plaso reads LVM from the image instead."""
+    calls.fdisk_text = MBR_LVM
+    ctx = containers.MountContext()
+    containers._mount_raw_partitions(Path("/evidence/lvm.img"), tmp_path, ctx)
+    assert _tried(calls) == [(2048 * 512, 2048 * 512)]
+    assert ctx.not_mounted == [f"LVM partition at offset {4096 * 512}: read without mounting"]
+
+
+def test_a_bare_lvm_physical_volume_is_never_loop_mounted(calls, tmp_path):
+    pv = tmp_path / "pv.img"
+    pv.write_bytes(b"\0" * 512 + b"LABELONE" + b"\0" * 1024)
+    calls.fdisk_text = "Disk pv.img: 1 MiB, 1544 bytes, 3 sectors\n"  # no table
+    ctx = containers.MountContext()
+    mounted = containers._mount_raw_partitions(pv, tmp_path / "mnt", ctx)
+    assert mounted == [] and not [c for c in calls if c[:2] == ["sudo", "mount"]]
+    assert ctx.not_mounted == ["LVM physical volume (the whole image): read without mounting"]
+
+
+def test_each_mount_records_its_offset(calls, tmp_path):
+    calls.fdisk_text = MBR_LVM
+    ctx = containers.MountContext()
+    (mounted,) = containers._mount_raw_partitions(Path("/evidence/lvm.img"), tmp_path, ctx)
+    assert ctx.offsets == {mounted: 2048 * 512}

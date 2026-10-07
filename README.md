@@ -259,7 +259,11 @@ any ingest subprocess.
 
 ## Plaso fallback: known gaps
 
-Linux and macOS hosts (a folder holding a root, or a disk-image volume) are parsed by Plaso with the OS preset; Windows hosts get Plaso's Chromium history, WebCache and SetupAPI parsers over `Users` and `Windows/inf`. Each host's `plaso` status entry lists the events per parser, the time zone used and where it came from (the registry, `etc/localtime` or `etc/timezone`, the examiner's `--source-timezone`, or unknown), and every file Plaso warned about. Plaso 20240308 also loses some input without any warning:
+Linux and macOS hosts are parsed by Plaso with the OS preset (`macos` adds `unified_logging`); Windows hosts get Plaso's Chromium history, WebCache and SetupAPI parsers over `Users` and `Windows/inf`.
+
+- **Folders** are read as the examiner, or, when `sudo -n` works, as the examiner with root's read capability only, so files only root can read are included.
+- **Disk images** (raw, E01, VMDK, VHD/VHDX, `.dmg`, `.sparseimage`): Plaso reads each Linux or macOS volume straight off the image, with no mount and no root, including LVM volumes and APFS containers. Plaso applies each volume's own time zone. A `.dmg` is never mounted. LVM is never loop-mounted, so the analysis host can't activate the evidence's volume group. Each volume is its own host, named `<image>-<partition>` (for example `disk-0a1b2c3d-p2-lvm1`) unless `--hostname` is given, and its documents carry `vhir.volume`. Windows volumes are mounted and parsed as before.
+- **Not parsed, and named in the status:** encrypted volumes (FileVault, LUKS) and APFS containers holding one, volumes with no file system or no OS root, and partitions or volumes numbered 10 or higher (Plaso selects those wrongly). A Linux root Plaso can't read off the image (btrfs, for example) is parsed from its mount instead. Each host's `plaso` status entry lists the events per parser, the time zone used and where it came from (the registry, `etc/localtime` or `etc/timezone`, the examiner's `--source-timezone`, or unknown), and every file Plaso warned about. Plaso 20240308 also loses some input without any warning:
 
 | File | OS | Expected parser | Gap |
 |------|----|-----------------|-----|
@@ -275,6 +279,7 @@ Also:
 - The per-event `hostname` field is Plaso's: the remote host for utmp, `_HOSTNAME` for the journal. The host the evidence came from is `host.name`.
 - filestat gives 3 times per file from a folder (no creation time) and 4 from a disk image. On a folder the times may reflect the copy, not the original system, and the status says so.
 - psort removes duplicate events, so the indexed count can be lower than the count Plaso reports (6,134 → 6,122 on one Windows host).
+- On an image, when `/etc/localtime` is a copy rather than a link, Plaso may use UTC or a fixed-offset abbreviation (an hour or more off); the status says so.
 - A dirty `NTUSER.DAT`'s transaction logs (`ntuser.dat.LOG1`) aren't found by RECmd on a case-sensitive file system, which looks for `NTUSER.DAT.LOG1`.
 - These were measured with Plaso 20240308; later releases may fix some.
 
