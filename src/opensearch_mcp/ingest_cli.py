@@ -856,7 +856,8 @@ def _image_hosts(image: Path, image_id: str, examiner_hostname) -> tuple[list, d
             host.zone_note = "time zone unknown: local-time events stored as recorded"
         if run.get("zone_volume") and host.timezone_source == "etc/localtime":
             host.zone_note += (
-                f"; zone from {run['zone_volume']}; applies to the whole container run"
+                f"; zone from {run['zone_volume']}: this volume's zone applies to that volume; "
+                "other volumes in the container without a zone file are stored as UTC"
             )
         hosts.append(host)
         print(f"  {name} ({run['os']}): {run['label']} read straight off the image")
@@ -872,10 +873,11 @@ def _apply_zone_override(hosts: list, zone: str) -> None:
 
     for h in hosts:
         if h.image_path is not None and h.timezone_source == "etc/localtime":
+            zone_from = h.zone_note.partition("; zone from ")[2]
             h.zone_note = (
                 "examiner time-zone override not applied: Plaso used this volume's own "
                 f"zone ({h.system_timezone}, from etc/localtime)"
-            )
+            ) + (f"; zone from {zone_from}" if zone_from else "")
             continue
         if h.image_path is not None:  # passed to Plaso; a copied etc/localtime may still win
             copy = h.zone_note.startswith("etc/localtime is not a link")

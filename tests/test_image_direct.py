@@ -679,4 +679,10 @@ def test_an_apfs_containers_zone_names_the_volume_it_came_from(inventory, tmp_pa
     inventory(leaves)
     (host,), _, _ = ingest_cli._image_hosts(tmp_path / "mac.dmg", "mac", None)
     assert host.system_timezone == "Europe/Paris"
-    assert host.zone_note.endswith("; zone from apfs1; applies to the whole container run")
+    assert host.zone_note.endswith(
+        "; zone from apfs1: this volume's zone applies to that volume; "
+        "other volumes in the container without a zone file are stored as UTC"
+    )
+    ingest_cli._apply_zone_override([host], "Europe/Berlin")
+    assert host.zone_note.startswith("examiner time-zone override not applied")
+    assert "; zone from apfs1: this volume's zone applies to that volume" in host.zone_note
