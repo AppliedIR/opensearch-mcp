@@ -851,7 +851,9 @@ def _ingest_hosts(
                 )
                 # The audit lists every hive RECmd read, each with its hash
                 inputs = hives or [str(artifact_path)]
-                hashes = [_sha256_or_empty(Path(p)) for p in hives] if hives else [file_hash]
+                hashes = [_sha256_or_empty(Path(p)) for p in hives] if hives else []
+                if not hives and file_hash:
+                    hashes = [file_hash]
                 ar.indexed = cnt
                 ar.not_read = unread
                 ar.skipped = sk
@@ -878,7 +880,7 @@ def _ingest_hosts(
                     + (f", {sk} skipped" if sk else "")
                     + (f", {bf} bulk failed" if bf else ""),
                     input_files=inputs,
-                    input_sha256s=hashes if any(hashes) else [],
+                    input_sha256s=hashes,
                     source_evidence=str(artifact_path),
                 )
                 if tool_status:

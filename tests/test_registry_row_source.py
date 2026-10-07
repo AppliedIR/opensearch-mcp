@@ -32,7 +32,7 @@ def _volume(tmp_path: Path) -> tuple[Path, Path]:
     return root, config
 
 
-def _recmd(config: Path, outside: Path, missing: Path):
+def _recmd(config: Path, outside: Path, missing: Path, listed=None):
     """RECmd's output: rows with HivePath, and a "Processing hive" line per hive."""
 
     def run(cmd, label):
@@ -49,13 +49,14 @@ def _recmd(config: Path, outside: Path, missing: Path):
             writer.writerow(["HivePath", "HiveType", "KeyPath", "ValueName", "ValueData"])
             for hive, kind, key in rows:
                 writer.writerow([str(hive), kind, key, "v", "d"])
-        lines = [f"Processing hive {p}" for p in (config / "SYSTEM", config / "SOFTWARE", missing)]
+        hives = listed if listed is not None else (config / "SYSTEM", config / "SOFTWARE", missing)
+        lines = [f"Processing hive {p}" for p in hives]
         return "\n".join(lines + ["Total hives found: 3"]), ""
 
     return run
 
 
-def _scan(tmp_path: Path):
+def _scan(tmp_path: Path, only_missing: bool = False):
     root, config = _volume(tmp_path)
     outside = tmp_path / "elsewhere" / "SOFTWARE"
     missing = config / "SECURITY"  # listed by RECmd, gone before it can be hashed
@@ -75,7 +76,10 @@ def _scan(tmp_path: Path):
         return len(actions), 0
 
     with (
-        patch("opensearch_mcp.tools._run_tool", side_effect=_recmd(config, outside, missing)),
+        patch(
+            "opensearch_mcp.tools._run_tool",
+            side_effect=_recmd(config, outside, missing, [missing] if only_missing else None),
+        ),
         patch("opensearch_mcp.parse_csv.flush_bulk", side_effect=capture),
         patch("opensearch_mcp.ingest._write_ingest_manifest"),
     ):
@@ -132,3 +136,12 @@ def test_anchor_the_csv_registry_path_keeps_the_csv_s_path(tmp_path):
             path, client=None, index_name="i", hostname="h", source_file="RegistryASEPs.csv"
         )
     assert [d["vhir.source_file"] for d in docs] == ["RegistryASEPs.csv"]
+
+
+def test_a_hive_that_cannot_be_hashed_is_still_listed(tmp_path, monkeypatch):
+    """Even when it's the only one: the list and its hashes stay the same length."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _, missing, docs, entry = _scan(tmp_path, only_missing=True)
+    assert entry["input_files"] == [str(missing)]
+    assert entry["input_sha256s"] == [""]
+    assert len(docs) == 5
