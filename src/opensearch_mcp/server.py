@@ -2251,25 +2251,6 @@ def idx_ingest_status(case_id: str = "") -> dict:
             )
             s["next_steps"] = next_steps
 
-        # Attach the preflight host-discovery report for THIS ingest's
-        # run_id. Per-run-id keying prevents concurrent ingests from
-        # overwriting each other's reports.
-        _hd_case = s.get("case_id") or filter_case
-        _hd_run_id = ing.get("run_id", "")
-        if _hd_case and _hd_case != "*" and _hd_run_id:
-            import json as _json
-            import os as _os
-
-            _cases_root = _os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases"))
-            _hd_path = (
-                Path(_cases_root) / _hd_case / "host-discovery-reports" / f"{_hd_run_id}.json"
-            )
-            if _hd_path.exists():
-                try:
-                    s["host_discovery"] = _json.loads(_hd_path.read_text(encoding="utf-8"))
-                except (OSError, _json.JSONDecodeError):
-                    pass  # Non-fatal — operator can read the file directly.
-
         summaries.append(s)
 
     return {"ingests": summaries}

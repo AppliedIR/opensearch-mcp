@@ -1,30 +1,50 @@
-"""A near-match never aliases two different hosts.
+"""A near-match never makes two different hosts one machine.
 
 Host names one character apart are usually siblings (wkstn01 / wkstn02),
-and FQDNs share a domain that hides how different their labels are, so a
-fuzzy match aliases only dotless names with the same digits. Exact matches
-after stripping a domain or a -triage suffix are unchanged. All names here
+and FQDNs share a domain that hides how different their labels are. A near
+spelling is only a hint for the examiner, computed once when the name is
+first scanned, and only between names with the same digits. Names that are
+equal once a domain or a collection token is set aside are proposed as one
+machine. Runs through the names scan, as every ingest does. All names here
 are synthetic.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import uuid
 
 import pytest
+from sift_common import host_identity as hi
+from sift_common import host_proposal as hp
 
-from opensearch_mcp import ingest_cli
-from opensearch_mcp.host_dictionary import HostDictionary, propose_canonical
+from opensearch_mcp import names_scan
+from opensearch_mcp import write_context as wc
 
 
-def _propose(canonical: str, raw: str, domains: list[str] | None = None):
-    host_dict = HostDictionary(domains=domains)
-    host_dict.add_canonical(canonical)
-    return propose_canonical(raw, host_dict)
+@pytest.fixture
+def case():
+    return wc.case_dir_for(f"alias-{uuid.uuid4().hex[:8]}")
+
+
+def scan(case, name, where=""):
+    """One ingest of a host folder named `name`."""
+    unit = names_scan.Unit(locator=where or f"evidence/{name}", source="host folder")
+    unit.add(name, "folder name", "folder")
+    names_scan.record(case, [unit])
+    return unit.key
+
+
+def hints(case, name):
+    return [h["near"] for h in hi.load(case).hints if h["raw"] == name]
+
+
+def group(case, name):
+    (g,) = [g for g in hp.propose(hi.load(case)) if any(p[1] == name for p in g.pairs)]
+    return {p[1] for p in g.pairs}, g
 
 
 @pytest.mark.parametrize(
-    "canonical, raw",
+    "first, second",
     [
         ("badhost", "badhost2"),
         ("lab1-pc01", "lab2-pc01"),  # the digits differ before the end
@@ -35,96 +55,70 @@ def _propose(canonical: str, raw: str, domains: list[str] | None = None):
         ("workstation-1203", "workstation-1230"),  # the same digits, in another order
     ],
 )
-def test_a_different_host_with_a_close_name_is_not_proposed(canonical, raw):
-    assert _propose(canonical, raw) == (None, 0.0)
+def test_a_different_host_with_a_close_name_is_neither_hinted_nor_grouped(case, first, second):
+    scan(case, first)
+    scan(case, second)
+    assert hints(case, second) == []
+    assert group(case, second)[0] == {second}
 
 
-@pytest.mark.parametrize(
-    "raw, domains", [("wksn01", None), ("wksn01.corp2.local", ["corp2.local"])]
-)
-def test_a_typo_with_the_same_digits_is_still_proposed(raw, domains):
+@pytest.mark.parametrize("second", ["wksn01", "wksn01.corp2.local"])
+def test_a_typo_with_the_same_digits_is_hinted(case, second):
     # the second is compared without its domain, whose digit doesn't count
-    canonical, score = _propose("wkstn01", raw, domains)
-    assert canonical == "wkstn01" and 0.85 <= score < 1.0
+    scan(case, "wkstn01")
+    scan(case, second)
+    assert hints(case, second) == ["wkstn01"]
 
 
-def test_an_exact_match_after_stripping_the_domain_is_unchanged():
+def test_a_name_equal_once_its_domain_is_set_aside_is_proposed_as_one_machine(case):
     # the domain's own digit doesn't count against the host
-    assert _propose("dev01", "dev01.corp2.local", domains=["corp2.local"]) == ("dev01", 1.0)
-
-
-# --- Through the ingest preflight: one call per ingest, as idx_ingest runs it ---
-
-
-@pytest.fixture
-def case(tmp_path, monkeypatch):
-    case_dir = tmp_path / "case-a"
-    case_dir.mkdir()
-    (case_dir / "CASE.yaml").write_text("case_id: case-a\n")
-    monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-    monkeypatch.setattr(ingest_cli, "_ensure_host_id_keyword_mapping", lambda case_id: {})
-    return tmp_path
-
-
-def _ingest(case, hostname):
-    scan_root = case / "evidence" / hostname
-    scan_root.mkdir(parents=True)
-    report, host_dict = ingest_cli._preflight_host_discovery(
-        "case-a", scan_root, [MagicMock(hostname=hostname)]
-    )
-    (decision,) = [d for d in report["decisions_applied"] if d["raw"] == hostname]
-    return decision, host_dict
+    scan(case, "dev01")
+    scan(case, "dev01.corp2.local")
+    names, g = group(case, "dev01")
+    assert names == {"dev01", "dev01.corp2.local"} and g.tier != hp.CERTAIN
 
 
 @pytest.mark.parametrize(
     "first, second",
     [("wkstn01", "wkstn02"), ("dc01.corp.example", "dev01.corp.example")],
 )
-def test_a_second_host_ingested_later_keeps_its_own_id(case, first, second):
-    _ingest(case, first)
-    decision, host_dict = _ingest(case, second)
-    assert decision["decision"] == "auto_new_canonical"
-    assert host_dict.resolve(second) == second
-    assert host_dict.resolve(first) == first
-    assert set(host_dict.hosts) == {first, second}
+def test_a_second_host_ingested_later_keeps_its_own_machine(case, first, second):
+    scan(case, first)
+    scan(case, second)
+    assert group(case, first)[0] == {first} and group(case, second)[0] == {second}
 
 
-def test_a_triage_copy_of_a_host_is_still_aliased_to_it(case):
-    _ingest(case, "wkstn01")
-    decision, host_dict = _ingest(case, "wkstn01-triage")
-    assert (decision["decision"], decision["confidence"]) == ("auto_alias", 1.0)
-    assert host_dict.resolve("wkstn01-triage") == "wkstn01"
+def test_a_triage_copy_of_a_host_is_proposed_with_it(case):
+    scan(case, "wkstn01")
+    scan(case, "wkstn01-triage")
+    assert group(case, "wkstn01")[0] == {"wkstn01", "wkstn01-triage"}
 
 
 NEAR_SPELLINGS = [("SQLPRODA01", "SQLPRODB01"), ("web-a01", "web-b01"), ("wkstn01", "wksn01")]
 
 
 @pytest.mark.parametrize("first, second", NEAR_SPELLINGS)
-def test_a_near_spelling_is_kept_as_its_own_host_with_a_note(case, first, second):
-    _ingest(case, first)
-    decision, host_dict = _ingest(case, second)
-    _, score = _propose(first, second)
-    assert 0.85 <= score < 1.0
-    assert {k: decision[k] for k in ("decision", "applied_canonical", "confidence")} == {
-        "decision": "possible_alias",
-        "applied_canonical": second,
-        "confidence": 0.0,
-    }
-    assert decision["rationale"] == (
-        f"Possible alias of '{first}' (similarity {score:.3f}), kept separate. "
-        f"If it is the same machine, merge it with "
-        f"case_host_fix(raw='{second}', new_canonical='{first}')"
-    )
-    assert host_dict.resolve(second) == second
-    assert host_dict.resolve(first) == first
-    assert set(host_dict.hosts) == {first, second}
+def test_a_near_spelling_is_its_own_machine_with_a_note(case, first, second):
+    scan(case, first)
+    scan(case, second)
+    names, g = group(case, second)
+    assert names == {second}
+    assert f"{hp.FLAG_NEAR}: {first.lower()}" in g.flags
 
 
 @pytest.mark.parametrize("first, second", NEAR_SPELLINGS[:1])
-def test_a_near_spelling_kept_separate_is_not_proposed_again(case, first, second):
-    _ingest(case, first)
-    _ingest(case, second)
-    (case / "evidence" / second).rename(case / "evidence" / f"{second}-earlier")
-    decision, host_dict = _ingest(case, second)
-    assert decision["decision"] == "already_mapped"
-    assert host_dict.resolve(second) == second
+def test_a_near_spelling_is_hinted_once_however_often_it_is_scanned(case, first, second):
+    scan(case, first)
+    scan(case, second)
+    scan(case, second, where=f"evidence/{second}-earlier")
+    assert len(hi.load(case).hints) == 1
+
+
+def test_a_scan_confirms_a_unit_the_examiners_host_list_names(case):
+    hp.upload_host_list(case, "WKS21\n", "ex1")
+    unit = names_scan.Unit(locator="evidence/WKS21", source="host folder")
+    unit.add("WKS21", "folder name", "folder")
+    unit.add("WKS21", "SYSTEM ComputerName", "artifact")
+    names_scan.record(case, [unit])
+    m = hi.load(case).machine_of_pair(unit.key, "WKS21")
+    assert m is not None and m.state == hi.CONFIRMED

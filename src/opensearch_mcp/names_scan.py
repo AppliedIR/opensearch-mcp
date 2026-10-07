@@ -92,14 +92,32 @@ class Unit:
 
 def file_origin(case_dir: Path | None, path: Path) -> str:
     """ARTIFACT for evidence the examiner put in the case; AI_WRITTEN for a
-    file in a folder the AI's tools write into."""
+    file in a folder the AI's tools write into, or one registered as
+    evidence through the AI's tools (`registered_via: mcp`)."""
     if case_dir is None:
         return ARTIFACT
+    resolved = Path(path).resolve()
     try:
-        rel = Path(path).resolve().relative_to(Path(case_dir).resolve())
+        rel = resolved.relative_to(Path(case_dir).resolve())
     except ValueError:
         return ARTIFACT
-    return AI_WRITTEN if rel.parts and rel.parts[0] in _AI_WRITABLE else ARTIFACT
+    if rel.parts and rel.parts[0] in _AI_WRITABLE:
+        return AI_WRITTEN
+    return AI_WRITTEN if str(resolved) in _registered_by_ai(Path(case_dir)) else ARTIFACT
+
+
+def _registered_by_ai(case_dir: Path) -> set[str]:
+    """Evidence files the AI registered (through MCP), by resolved path."""
+    try:
+        registry = json.loads((case_dir / "evidence.json").read_text())
+    except (OSError, ValueError):
+        return set()
+    files = registry.get("files") if isinstance(registry, dict) else None
+    return {
+        str((case_dir / str(f["path"])).resolve())  # as file_origin compares it
+        for f in files or []
+        if isinstance(f, dict) and f.get("registered_via") == "mcp" and f.get("path")
+    }
 
 
 def _rel(case_dir: Path | None, path: Path) -> str:
@@ -388,5 +406,17 @@ def record(case_dir: Path, units: list[Unit]) -> list[dict]:
                  "origin": n.origin}
             )  # fmt: skip
     if records:
+        from sift_common import host_proposal
+
+        state = host_identity.load(case_dir)
+        known = {host_identity.spelling(raw) for _, raw in state.names}
+        new = []  # each name once, the first time any unit gives it
+        for r in records:
+            spelled = host_identity.spelling(r.get("raw"))
+            if r["kind"] == "name" and spelled not in known:
+                known.add(spelled)
+                new.append((r["unit"], r["raw"]))
+        records += host_proposal.near_hints(state, new)
         host_identity.append_observations(case_dir, records)
+        host_proposal.apply_host_list(case_dir)  # what the examiner's list names confirms now
     return [u.summary() for u in units]

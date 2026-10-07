@@ -32,7 +32,6 @@ def scan(tmp_path, monkeypatch):
         "get_client",
         "_preflight_shard_capacity",
         "_ensure_case_active",
-        "_warn_if_mapping_upgrade_required",
         "AuditWriter",
     ):
         monkeypatch.setattr(cli, name, mock.MagicMock(), raising=False)

@@ -149,73 +149,6 @@ class TestParseJsonPerDocHostName:
 # ---------------------------------------------------------------------------
 
 
-class TestDiscoverHosts:
-    def test_discover_unions_sources_per_host(self, tmp_path):
-        """Test 4 — same host found via path-pattern AND content-peek:
-        ONE entry, BOTH sources captured (no double-entry, no source-drop)."""
-        import re
-
-        from opensearch_mcp.host_dictionary import HostDictionary
-        from opensearch_mcp.host_discovery import discover_hosts
-
-        host_dir = tmp_path / "admin01"
-        host_dir.mkdir()
-        with open(host_dir / "kansa.csv", "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["Host", "data"])
-            w.writerow(["admin01", "x"])
-
-        dict_obj = HostDictionary()
-        report = discover_hosts(
-            tmp_path,
-            dict_obj,
-            hostname_from_path_re=re.compile(r"/([^/]+)/kansa\.csv"),
-        )
-        # Exactly one entry for admin01 (no duplicates across sources).
-        entries_admin01 = [e for e in report.entries if e.raw == "admin01"]
-        assert len(entries_admin01) == 1, (
-            f"expected single entry for admin01, got {len(entries_admin01)}: "
-            f"{[e.raw for e in entries_admin01]}"
-        )
-        entry = entries_admin01[0]
-        methods = {s["method"] for s in entry.sources}
-        # BOTH from_path AND csv_peek must be captured — proves the
-        # orchestrator unions sources rather than first-wins.
-        assert "from_path" in methods, f"missing from_path in sources: {methods}"
-        assert "csv_peek" in methods, f"missing csv_peek in sources: {methods}"
-
-    def test_discover_classifies_per_dict_state(self, tmp_path):
-        """Test 5 — three hosts: mapped, near-match, novel."""
-        from opensearch_mcp.host_dictionary import HostDictionary
-        from opensearch_mcp.host_discovery import HostEntry, _classify
-
-        dict_obj = HostDictionary(
-            hosts={"admin01": {"aliases": ["admin01"]}, "wkstn01": {"aliases": ["wkstn01"]}}
-        )
-        e_mapped = HostEntry(raw="admin01")
-        e_near = HostEntry(raw="wksn01")
-        e_novel = HostEntry(raw="WIN-3BVS460J98U")
-        _classify(e_mapped, dict_obj)
-        _classify(e_near, dict_obj)
-        _classify(e_novel, dict_obj)
-
-        assert e_mapped.status == "mapped"
-        assert e_mapped.proposed_canonical == "admin01"
-        assert e_near.status == "propose_with_match"
-        assert e_near.proposed_canonical == "wkstn01"
-        assert e_near.confidence >= 0.85
-        assert e_novel.status == "propose_no_match"
-        assert e_novel.proposed_canonical == "WIN-3BVS460J98U"
-
-    def test_discover_empty_returns_empty_report(self, tmp_path):
-        """Test 6 — empty evidence root returns empty report (no crash)."""
-        from opensearch_mcp.host_dictionary import HostDictionary
-        from opensearch_mcp.host_discovery import discover_hosts
-
-        report = discover_hosts(tmp_path, HostDictionary())
-        assert report.entries == []
-
-
 # ---------------------------------------------------------------------------
 # v1 Tests 7 / 8 / 9 — preflight auto-apply (always-proceed)
 # ---------------------------------------------------------------------------
@@ -234,110 +167,6 @@ def _seed_case_v1(cases_dir: Path, case_id: str, dict_hosts: dict | None = None)
     }
     (case_dir / "host-dictionary.yaml").write_text(yaml.safe_dump(payload))
     return case_dir
-
-
-class TestPreflightAutoApply:
-    def test_preflight_auto_alias_on_exact_strip(self, tmp_path, monkeypatch):
-        """Test 7 — exact-strip confidence-1.00 → add_alias."""
-        from opensearch_mcp.ingest_cli import _preflight_host_discovery
-
-        _seed_case_v1(
-            tmp_path,
-            "INC-7",
-            dict_hosts={"admin01": {"aliases": ["admin01"]}},
-        )
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        host_dir = tmp_path / "evidence" / "admin01.shieldbase.com"
-        host_dir.mkdir(parents=True)
-
-        hosts = [MagicMock(hostname="admin01.shieldbase.com")]
-        report, _host_dict = _preflight_host_discovery("INC-7", host_dir, hosts)
-        applied = report["decisions_applied"]
-        assert any(
-            d["raw"] == "admin01.shieldbase.com"
-            and d["decision"] == "auto_alias"
-            and d["applied_canonical"] == "admin01"
-            and d["confidence"] == 1.00
-            for d in applied
-        )
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        d = HostDictionary.load(tmp_path / "INC-7" / "host-dictionary.yaml")
-        assert d.resolve("admin01.shieldbase.com") == "admin01"
-
-    def test_preflight_auto_new_canonical_on_no_match(self, tmp_path, monkeypatch):
-        """Test 8 — no close match → new canonical created from raw."""
-        from opensearch_mcp.ingest_cli import _preflight_host_discovery
-
-        _seed_case_v1(
-            tmp_path,
-            "INC-8",
-            dict_hosts={"admin01": {"aliases": ["admin01"]}},
-        )
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        host_dir = tmp_path / "evidence"
-        host_dir.mkdir()
-        hosts = [MagicMock(hostname="WIN-3BVS460J98U")]
-        report, _host_dict = _preflight_host_discovery("INC-8", host_dir, hosts)
-        applied = report["decisions_applied"]
-        assert any(
-            d["raw"] == "WIN-3BVS460J98U"
-            and d["decision"] == "auto_new_canonical"
-            and d["applied_canonical"] == "WIN-3BVS460J98U"
-            for d in applied
-        )
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        d = HostDictionary.load(tmp_path / "INC-8" / "host-dictionary.yaml")
-        assert "WIN-3BVS460J98U" in d.hosts
-
-    def test_preflight_decisions_appear_in_response(self, tmp_path, monkeypatch):
-        """Test 9 — every applied decision is in decisions_applied[]."""
-        from opensearch_mcp.ingest_cli import _preflight_host_discovery
-
-        _seed_case_v1(
-            tmp_path,
-            "INC-9",
-            dict_hosts={"admin01": {"aliases": ["admin01", "admin01.shieldbase.com"]}},
-        )
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        host_dir = tmp_path / "evidence"
-        host_dir.mkdir()
-        hosts = [
-            MagicMock(hostname="admin01"),
-            MagicMock(hostname="rd01"),
-        ]
-        report, _host_dict = _preflight_host_discovery("INC-9", host_dir, hosts)
-        raws = {d["raw"] for d in report["decisions_applied"]}
-        assert raws == {"admin01", "rd01"}
-
-    def test_preflight_creates_dict_when_absent(self, tmp_path, monkeypatch):
-        """Issue #2 fix — first-ever ingest on a case with no dict on disk
-        creates one with auto-applied decisions."""
-        from opensearch_mcp.ingest_cli import _preflight_host_discovery
-
-        case_dir = tmp_path / "INC-NEW"
-        case_dir.mkdir()
-        (case_dir / "CASE.yaml").write_text("case_id: INC-NEW\n")
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        host_dir = tmp_path / "evidence"
-        host_dir.mkdir()
-        hosts = [MagicMock(hostname="admin01")]
-
-        report, host_dict = _preflight_host_discovery("INC-NEW", host_dir, hosts)
-        # Dict file was created on disk.
-        dict_path = case_dir / "host-dictionary.yaml"
-        assert dict_path.exists(), "preflight must create dict when absent"
-        # Decision was auto-applied.
-        raws = {d["raw"] for d in report["decisions_applied"]}
-        assert "admin01" in raws
-        # Returned host_dict resolves the new canonical.
-        assert host_dict is not None
-        assert host_dict.resolve("admin01") == "admin01"
 
 
 # ---------------------------------------------------------------------------
@@ -386,62 +215,6 @@ class TestPreflightToParserIntegration:
         src = inspect.getsource(_parse_srum_plaso)
         assert "host_dict=host_dict" in src
 
-    def test_discover_hosts_drops_null_byte_via_fixture(self, tmp_path):
-        """CR follow-up 1 — drive the NULL-byte gate through discover_hosts
-        end-to-end with a fixture containing an adversarial raw. Proves
-        the `del raws[raw]` gate at host_discovery.py fires in production
-        flow, not just the helper unit test.
-        """
-        from opensearch_mcp.host_dictionary import HostDictionary
-        from opensearch_mcp.host_discovery import discover_hosts
-
-        host_dir = tmp_path / "evidence"
-        host_dir.mkdir()
-        # CSV with one row whose Host column carries a NULL byte —
-        # csv_peek will pull this raw, the gate must reject it.
-        (host_dir / "kansa.csv").write_text(
-            "Host,data\nadmin\x0001,x\n",
-            encoding="utf-8",
-        )
-
-        report = discover_hosts(host_dir, HostDictionary())
-        raws = [e.raw for e in report.entries]
-        assert "admin\x0001" not in raws, (
-            f"adversarial raw must be filtered out before classification; got {raws!r}"
-        )
-
-    def test_discover_hosts_rejects_null_byte_raws(self, tmp_path):
-        """Test Finding 3 (MEDIUM) — adversarial NULL byte / control char
-        raws are rejected at discover_hosts boundary, never reach the
-        dict. yaml.safe_dump escape-encodes them rather than raising, so
-        the only safe gate is at input."""
-        from opensearch_mcp.host_discovery import _is_safe_raw_hostname
-
-        # NULL byte rejected.
-        assert _is_safe_raw_hostname("admin\x0001") is False
-        # ASCII control char rejected.
-        assert _is_safe_raw_hostname("admin\x0101") is False
-        # Tab is allowed (covered by upstream strip()).
-        assert _is_safe_raw_hostname("admin\t01") is True
-        # Empty string rejected.
-        assert _is_safe_raw_hostname("") is False
-        # Lucene metacharacters NOT rejected (term-DSL filter handles).
-        assert _is_safe_raw_hostname('admin" OR *') is True
-        # Normal hostname accepted.
-        assert _is_safe_raw_hostname("admin01.shieldbase.com") is True
-
-    def test_add_canonical_dedups_case_variants(self):
-        """Arch Obs 3 — ADMIN01 and admin01 must not coexist as separate
-        canonicals; second add is a no-op."""
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        d = HostDictionary(hosts={"admin01": {"aliases": ["admin01"]}})
-        d.add_canonical("ADMIN01")
-        assert "ADMIN01" not in d.hosts, (
-            "ADMIN01 (case variant) must not create a second canonical when admin01 already exists"
-        )
-        assert d.resolve("ADMIN01") == "admin01"
-
     def test_h1_detection_handles_nested_mapping_form(self):
         """WSL2 Round-3 H1 detection bug — host.id can be stored in two
         shapes: flat-dotted (v1 template) or nested under host.properties
@@ -449,7 +222,9 @@ class TestPreflightToParserIntegration:
         both forms; the old code only checked flat and missed nested,
         then PUT _mapping silently failed.
         """
-        from opensearch_mcp.ingest_cli import _detect_host_id_mapping_type
+        from opensearch_mcp.host_dictionary import (
+            detect_host_id_mapping_type as _detect_host_id_mapping_type,
+        )
 
         # Flat-dotted form (v1 template).
         flat = {"host.id": {"type": "keyword"}}
@@ -477,32 +252,6 @@ class TestPreflightToParserIntegration:
         }
         assert _detect_host_id_mapping_type(both) == "keyword"
 
-    def test_standalone_entries_run_h1_back_patch(self):
-        """CR R4b — standalone entries (cmd_ingest_delimited/json/
-        accesslog/memory) skip preflight. The H1 mapping back-patch
-        must still fire from those entries so pre-v1 cases get
-        host.id=keyword on existing indices before parsers write."""
-        import inspect
-
-        from opensearch_mcp import ingest_cli
-
-        for entry_name in [
-            "cmd_csv",
-            "cmd_ingest_json",
-            "cmd_ingest_delimited",
-            "cmd_ingest_accesslog",
-            "cmd_ingest_memory",
-        ]:
-            fn = getattr(ingest_cli, entry_name, None)
-            assert fn is not None, f"{entry_name} missing from ingest_cli"
-            src = inspect.getsource(fn)
-            assert "_warn_if_mapping_upgrade_required" in src, (
-                f"{entry_name} must call _warn_if_mapping_upgrade_required "
-                f"after dict load so the H1 back-patch fires uniformly. "
-                f"Without it, the first v1 ingest into a pre-v1 case via "
-                f"this entry leaves text-mapped host.id silently."
-            )
-
     def test_case_host_fix_outer_envelope_catches_unexpected_exception(self):
         """WSL2 R5 — case_host_fix entry has an outer try/except that
         catches InvalidHostnameValue + generic Exception and returns
@@ -525,43 +274,6 @@ class TestPreflightToParserIntegration:
         assert _case_dir_for("/abs/path") is None
         assert _case_dir_for("foo/bar") is None
         assert _case_dir_for("") is None
-
-    def test_merge_preserves_disk_only_role(self, tmp_path):
-        """M3 — _merge_from_disk preserves disk-only non-list fields.
-
-        Process A sets role/notes on canonical. Process B saves
-        (merge=True) without those fields. After merge, the disk file
-        retains Process A's role/notes."""
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        p = tmp_path / "host-dictionary.yaml"
-        # Process A's state: admin01 with role and notes
-        HostDictionary(
-            hosts={
-                "admin01": {
-                    "aliases": ["admin01"],
-                    "role": "workstation",
-                    "notes": "operator-set",
-                }
-            },
-            path=p,
-        ).save()
-
-        # Process B loads, adds a new canonical, saves merge=True
-        b = HostDictionary.load(p)
-        b.add_canonical("rd01")
-        # B has admin01 but without role/notes (it loaded them, so they're there)
-        # Simulate a stale in-memory: drop the operator-set fields
-        b.hosts["admin01"].pop("role", None)
-        b.hosts["admin01"].pop("notes", None)
-        b.save(merge=True)
-
-        reloaded = HostDictionary.load(p)
-        assert reloaded.hosts["admin01"].get("role") == "workstation", (
-            "M3: disk's operator-set role was clobbered by Process B's save"
-        )
-        assert reloaded.hosts["admin01"].get("notes") == "operator-set"
-        assert "rd01" in reloaded.hosts  # B's add survived too
 
     def test_case_host_fix_rejection_response_shape(self, tmp_path, monkeypatch):
         """WSL2 minor — case_host_fix rejection returns a structured error
@@ -590,31 +302,21 @@ class TestPreflightToParserIntegration:
         assert "NULL byte" in result.get("error", "")
         assert result.get("dict_saved") is False
 
-    def test_dict_primitives_reject_adversarial_input(self):
-        """Fresh-eyes Issue 3 — gate is at the dict primitive, not just at
-        discover_hosts. Covers preflight + case_host_fix + future CLI paths."""
+    def test_host_names_from_a_caller_are_checked_before_use(self):
+        """case_host_fix's names go through the storage check."""
         import pytest
 
         from opensearch_mcp.host_dictionary import (
-            HostDictionary,
             InvalidHostnameValue,
+            _validate_hostname_for_storage,
         )
 
-        d = HostDictionary(hosts={"admin01": {"aliases": ["admin01"]}})
-
-        with pytest.raises(InvalidHostnameValue, match="NULL byte"):
-            d.add_alias("admin\x0001", "admin01")
-        with pytest.raises(InvalidHostnameValue, match="NULL byte"):
-            d.add_canonical("admin\x0002")
-        with pytest.raises(InvalidHostnameValue, match="control char"):
-            d.add_alias("admin\x0101", "admin01")
-        with pytest.raises(InvalidHostnameValue, match="empty"):
-            d.add_canonical("")
-        with pytest.raises(InvalidHostnameValue, match="must be a string"):
-            d.add_canonical(None)
-        # Lucene metacharacters pass through — handled by term-DSL filter.
-        d.add_canonical('admin01" OR *')
-        assert 'admin01" OR *' in d.hosts
+        for bad, why in (("admin\x0001", "NULL byte"), ("admin\x0101", "control char"),
+                         ("", "empty"), (None, "must be a string")):  # fmt: skip
+            with pytest.raises(InvalidHostnameValue, match=why):
+                _validate_hostname_for_storage(bad, "raw")
+        # Lucene metacharacters pass through — queries use term filters.
+        _validate_hostname_for_storage('admin01" OR *', "raw")
 
     def test_case_host_fix_writes_audit_log(self, tmp_path, monkeypatch):
         """Fresh-eyes Issue 2 — every other server.py tool calls audit.log;
@@ -725,101 +427,6 @@ class TestPreflightToParserIntegration:
             f"the seeded dict to flow through ingest() → _ingest_hosts → "
             f"parse_and_index. A forwarding point is dropping host_dict."
         )
-
-    def test_csv_resolve_canonical_after_preflight(self, tmp_path, monkeypatch):
-        from opensearch_mcp.ingest_cli import _preflight_host_discovery
-        from opensearch_mcp.parse_csv import ingest_csv
-
-        # Seed case with an existing canonical so preflight produces an
-        # auto_alias decision (raw FQDN strips to bare canonical).
-        _seed_case_v1(
-            tmp_path,
-            "INC-INT",
-            dict_hosts={"admin01": {"aliases": ["admin01"]}},
-        )
-        monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path))
-
-        host_dir = tmp_path / "evidence"
-        host_dir.mkdir()
-
-        # Discovered host carries the FQDN form.
-        hosts = [MagicMock(hostname="admin01.shieldbase.com")]
-        _report, case_host_dict = _preflight_host_discovery("INC-INT", host_dir, hosts)
-
-        # case_host_dict is what cmd_scan plumbs through ingest() →
-        # parse_and_index / ingest_csv. Pass it now via the same kwarg
-        # the production call sites use.
-        csv_path = tmp_path / "kansa.csv"
-        with open(csv_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["Host", "data"])
-            w.writerow(["admin01.shieldbase.com", "x"])
-
-        captured: list[dict] = []
-
-        def _stub(client, actions):
-            captured.extend(actions)
-            return len(actions), 0
-
-        with patch("opensearch_mcp.parse_csv.flush_bulk", side_effect=_stub):
-            ingest_csv(
-                csv_path=csv_path,
-                client=MagicMock(),
-                index_name="case-int-csv",
-                hostname="admin01.shieldbase.com",  # ingest-level fallback
-                host_dict=case_host_dict,
-            )
-
-        # The indexed doc must carry host.id = "admin01" (the canonical),
-        # NOT "admin01.shieldbase.com" (the raw). If host_dict didn't
-        # reach the parser, host.id would be the raw and this test fails.
-        assert captured, "no actions captured — bulk stub never called"
-        src = captured[0]["_source"]
-        assert src["host.name"] == "admin01.shieldbase.com"
-        assert src["host.id"] == "admin01", (
-            f"host.id must resolve to canonical 'admin01', got {src['host.id']!r}. "
-            "If equal to host.name, host_dict isn't reaching ingest_csv."
-        )
-
-
-# ---------------------------------------------------------------------------
-# v1 Tests 10 / 11 / 12 / 18 — case_host_fix correctness
-# ---------------------------------------------------------------------------
-
-
-class TestCaseHostFix:
-    def test_fix_changes_dictionary(self, tmp_path):
-        """Test 10 — alias moves from old canonical to new canonical.
-
-        Exercises the in-memory dict-edit half of case_host_fix.
-        """
-        from opensearch_mcp.host_dictionary import HostDictionary
-
-        p = tmp_path / "host-dictionary.yaml"
-        p.write_text(
-            yaml.safe_dump(
-                {
-                    "version": 1,
-                    "domains": [],
-                    "hosts": {
-                        "wkstn01": {"aliases": ["wkstn01", "wksn01"]},
-                    },
-                    "unmapped": [],
-                }
-            )
-        )
-        d = HostDictionary.load(p)
-        for canonical, entry in d.hosts.items():
-            if "wksn01" in (entry.get("aliases") or []) and canonical != "wksn01":
-                entry["aliases"].remove("wksn01")
-        d.add_canonical("wksn01")
-        d._rebuild_alias_map()
-        d.save()
-
-        reloaded = HostDictionary.load(p)
-        assert "wksn01" in reloaded.hosts
-        assert "wksn01" not in reloaded.hosts["wkstn01"]["aliases"]
-        assert reloaded.resolve("wksn01") == "wksn01"
 
 
 # ---------------------------------------------------------------------------

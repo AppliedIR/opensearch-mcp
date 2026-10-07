@@ -103,7 +103,6 @@ def test_the_ingest_status_says_how_many(tmp_path, monkeypatch):
     for name in (
         "_preflight_shard_capacity",
         "_ensure_case_active",
-        "_warn_if_mapping_upgrade_required",
     ):
         monkeypatch.setattr(cli, name, mock.MagicMock())
     audit = mock.MagicMock()

@@ -12,11 +12,9 @@ import sys
 import types
 from pathlib import Path
 
-from opensearch_mcp.host_dictionary import HostDictionary
 from opensearch_mcp.hostname import (
     _HOST_FIELD_PRIORITY,
     _dotted_get,
-    classify_host,
     detect_hostname_from_volume,
     extract_host_from_record,
 )
@@ -200,41 +198,6 @@ class TestHostFieldPrioritySourceAgnostic:
     def test_dotted_get_gap_returns_none(self):
         """Partial nesting — intermediate key missing → None."""
         assert _dotted_get({"ClientInfo": {"OtherField": 1}}, "ClientInfo.Hostname") is None
-
-
-# ---------------------------------------------------------------------------
-# classify_host
-# ---------------------------------------------------------------------------
-
-
-class TestClassifyHost:
-    def test_mapped_via_dict(self):
-        d = HostDictionary(hosts={"admin01": {"aliases": ["admin01", "ADMIN01"]}})
-        status, raw, proposed, conf = classify_host("ADMIN01", d)
-        assert status == "mapped"
-        assert proposed == "admin01"
-        assert conf == 1.0
-
-    def test_unmapped_with_proposal(self):
-        d = HostDictionary(
-            hosts={"wkstn01": {"aliases": ["wkstn01"]}},
-            domains=["shieldbase.com"],
-        )
-        status, raw, proposed, conf = classify_host("wksn01", d)
-        assert status == "unmapped-with-proposal"
-        assert proposed == "wkstn01"
-        assert conf >= 0.85
-
-    def test_unmapped_no_proposal(self):
-        d = HostDictionary(hosts={"admin01": {"aliases": ["admin01"]}})
-        status, raw, proposed, conf = classify_host("WIN-3BVS460J98U", d)
-        assert status == "unmapped-no-proposal"
-        assert proposed is None
-
-    def test_empty_input(self):
-        d = HostDictionary()
-        status, raw, proposed, conf = classify_host("", d)
-        assert status == "empty"
 
 
 # TestHostUnmappedYaml deleted — write_host_unmapped_yaml /

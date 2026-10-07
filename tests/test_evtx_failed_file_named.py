@@ -145,9 +145,6 @@ def test_the_final_status_through_the_worker_names_it(tmp_path, status_dir, monk
     _bad(host, "Security.evtx")
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-scan")
     monkeypatch.setattr(cli, "discover", lambda *a, **k: [host])
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a, **k: ({"decisions_applied": []}, None)
-    )
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")

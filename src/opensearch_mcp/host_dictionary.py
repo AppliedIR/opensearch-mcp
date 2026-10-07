@@ -1,37 +1,20 @@
-"""Case-scoped host identity dictionary.
+"""A case's pre-0.7 host dictionary (`host-dictionary.yaml`), read only.
 
-See `specs/host-identity-normalization-2026-04-24.md` Rev 5 for the full
-model. Key pins this file implements:
-
-- **SC-1:** `resolve()` is pure — no side-effect writes, no unmapped
-  append. Mutation is exclusive to batch-discovery (Commit B) and CLI
-  (Commit D). Makes per-parser concurrent calls safe on shared dicts.
-- **SC-2:** Levenshtein threshold 0.85 (covers wksn01/wkstn01 typo).
-- **SC-3:** Proposal ties broken alphabetically by canonical.
-- **SC-4:** `resolve("")` / `resolve(None)` / whitespace-only → None
-  no-op (empty Computer is a parse anomaly, not an identity).
-- **SC-5:** Trailing-dot FQDN normalized.
-- **SC-6:** Schema `version: 1` only; others raise UnsupportedHostDictVersion.
-- **SC-7:** yaml.safe_load exclusively.
-- **SC-8:** `save()`, `add_alias()`, and `add_canonical()` mutate the
-  dictionary. `save()` writes via atomic temp+rename. Callers decide
-  when to persist; mutation is sequenced before persistence.
-
-OD1 auto-accept (confidence=1.00) lives OUTSIDE `resolve()` — the flag is
-stored on the dict, but the auto-accept action happens in the preflight
-discovery phase.
+Host identity now lives in the case's host logs (sift_common.host_identity);
+this file is no longer written. It is read once, when a case from before
+0.7 is first opened, to seed those logs, and parsers still resolve a raw
+name through it. `resolve()` is a pure lookup: it lowercases, strips and
+drops a trailing dot, and returns the canonical or None.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 SCHEMA_VERSION = 1
-_TRIAGE_SUFFIXES = ("-triage", "_triage")
 
 
 class UnsupportedHostDictVersion(Exception):
@@ -119,54 +102,6 @@ def _normalize(raw: str | None) -> str:
     return s
 
 
-def _strip_for_proposal(raw: str, domains: list[str]) -> str:
-    """Strip domain + triage suffix + lowercase for propose_canonical matching."""
-    s = _normalize(raw)
-    if not s:
-        return ""
-    for suf in _TRIAGE_SUFFIXES:
-        if s.endswith(suf):
-            s = s[: -len(suf)]
-            break
-    for d in domains:
-        dn = d.lower().lstrip(".")
-        suf = "." + dn
-        if s.endswith(suf):
-            s = s[: -len(suf)]
-            break
-    return s
-
-
-def _levenshtein(a: str, b: str) -> int:
-    """Iterative DP Levenshtein. Small strings only (hostnames) — O(len(a)*len(b))."""
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        curr = [i] + [0] * len(b)
-        for j, cb in enumerate(b, 1):
-            curr[j] = min(
-                prev[j] + 1,
-                curr[j - 1] + 1,
-                prev[j - 1] + (ca != cb),
-            )
-        prev = curr
-    return prev[-1]
-
-
-def _similarity(a: str, b: str) -> float:
-    """0.0–1.0 similarity derived from Levenshtein. 1.0 = identical."""
-    if not a and not b:
-        return 1.0
-    d = _levenshtein(a, b)
-    longer = max(len(a), len(b))
-    return 1.0 - d / longer if longer else 1.0
-
-
 class HostDictionary:
     """Load / lookup / propose over a case's host-dictionary.yaml.
 
@@ -227,17 +162,6 @@ class HostDictionary:
             path=path,
         )
 
-    def to_yaml(self) -> str:
-        """Serialize to YAML matching load shape. Used by save() / tests."""
-        payload: dict[str, Any] = {
-            "version": SCHEMA_VERSION,
-            "auto_accept_high_confidence": self.auto_accept_high_confidence,
-            "domains": self.domains,
-            "hosts": self.hosts,
-            "unmapped": self.unmapped,
-        }
-        return yaml.safe_dump(payload, default_flow_style=False, sort_keys=False)
-
     def resolve(self, raw: str | None) -> str | None:
         """Pure lookup — NO side effects (SC-1 pin).
 
@@ -266,180 +190,3 @@ class HostDictionary:
 
     def __contains__(self, canonical: str) -> bool:
         return canonical in self.hosts
-
-    def save(self, *, merge: bool = False) -> None:
-        """Atomic temp+rename write to self.path, serialized under a
-        per-case `fcntl.LOCK_EX` file lock.
-
-        Two modes (closes WSL2 Test B2 — concurrent last-write-wins):
-
-        - **`merge=False` (default, replacing semantics)**: the
-          in-memory state IS the operator's intent. Save writes it
-          verbatim. Use for `case_host_fix` where deletions and
-          remappings must take effect (caller is responsible for
-          calling load() under the same lock if needed for atomicity).
-
-        - **`merge=True` (additive semantics)**: before write, re-read
-          the file from disk and union hosts/aliases. Use for preflight
-          where multiple concurrent ingests may have applied different
-          ADDITIONS to the same case dict. Union prevents Run A's adds
-          from being clobbered by Run B's save.
-
-        The lock is `fcntl.LOCK_EX` on `<path>.lock`. POSIX only.
-        Windows hosts never call save() directly.
-
-        Atomicity: write to `<path>.tmp`, then `os.replace`. A crash
-        between open and replace leaves the prior file intact.
-        """
-        if self.path is None:
-            raise ValueError("HostDictionary.save() requires path; got None")
-        import fcntl
-        import os
-
-        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        # M2: open in 'a+b' — atomic create-if-missing + append-mode, no
-        # TOCTOU race between touch() and open().
-        with open(lock_path, "a+b") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            try:
-                if merge and self.path.exists():
-                    self._merge_from_disk()
-                tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-                tmp.write_text(self.to_yaml(), encoding="utf-8")
-                os.replace(tmp, self.path)
-            finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-
-    def _merge_from_disk(self) -> None:
-        """Union hosts/aliases AND preserve disk-only non-list fields.
-
-        Called from save() under file lock. Other savers' changes get
-        preserved — in-memory copy is treated as the latest delta, not
-        as authoritative replacement.
-
-        Merge policy:
-          - canonical on disk but not in self.hosts → copy disk's entry verbatim.
-          - canonical in both → union aliases; for any non-list field
-            (role, notes, rename_history, ...) present on disk but
-            absent in in-memory → copy from disk. In-memory wins on
-            conflict (same key with different value).
-
-        This closes the M3 silent-overwrite gap: if Process A sets
-        `role: workstation` and Process B saves (with merge=True) at
-        the same time, Process B's save preserves Process A's role
-        rather than dropping it.
-        """
-        try:
-            other = HostDictionary.load(self.path)
-        except (OSError, UnsupportedHostDictVersion):
-            return  # Disk file unreadable; in-memory wins.
-        for canonical, entry in other.hosts.items():
-            if canonical not in self.hosts:
-                self.hosts[canonical] = entry
-                continue
-            mine = self.hosts[canonical]
-            mine_aliases = mine.setdefault("aliases", [])
-            for alias in entry.get("aliases", []) or []:
-                if alias not in mine_aliases:
-                    mine_aliases.append(alias)
-            # M3: preserve disk-only non-list fields (role, notes,
-            # rename_history, etc). In-memory wins on key conflict.
-            for key, value in entry.items():
-                if key == "aliases":
-                    continue
-                if key not in mine:
-                    mine[key] = value
-        self._rebuild_alias_map()
-
-    def add_alias(self, raw: str, canonical: str) -> None:
-        """Add `raw` as an alias of an existing `canonical`.
-
-        Mutates `self.hosts` and rebuilds the lookup map. Does NOT write
-        to disk — caller decides when to `save()`. If `canonical` is not
-        in `self.hosts`, raises ValueError; use `add_canonical` to create
-        a new canonical.
-
-        Idempotent: re-adding an existing alias is a no-op.
-        Inputs are validated via `_validate_hostname_for_storage` — gate
-        applies regardless of caller (preflight, case_host_fix, CLI).
-        """
-        _validate_hostname_for_storage(raw, "add_alias raw")
-        _validate_hostname_for_storage(canonical, "add_alias canonical")
-        if canonical not in self.hosts:
-            raise ValueError(
-                f"add_alias: canonical {canonical!r} not in dictionary; "
-                f"use add_canonical to create it"
-            )
-        aliases = self.hosts[canonical].setdefault("aliases", [])
-        if raw not in aliases:
-            aliases.append(raw)
-        self._rebuild_alias_map()
-
-    def add_canonical(self, raw: str) -> None:
-        """Create a new canonical entry with `raw` as its first alias.
-
-        Used when preflight discovers a host that has no close match in
-        the existing dictionary — `raw` becomes its own canonical. Also
-        used by `case_host_fix` when the operator targets a new
-        canonical that doesn't exist yet.
-
-        Mutates `self.hosts` and rebuilds the lookup map. Idempotent —
-        duplicate-check normalizes case to prevent `ADMIN01` from
-        creating a second canonical when `admin01` exists.
-
-        Inputs validated via `_validate_hostname_for_storage`.
-        """
-        _validate_hostname_for_storage(raw, "add_canonical raw")
-        if raw in self.hosts:
-            return
-        # Normalize duplicate check so case variants don't create
-        # redundant canonicals.
-        norm_raw = _normalize(raw)
-        if norm_raw and norm_raw in {_normalize(k) for k in self.hosts}:
-            return
-        self.hosts[raw] = {"aliases": [raw]}
-        self._rebuild_alias_map()
-
-
-def propose_canonical(raw: str | None, host_dict: HostDictionary) -> tuple[str | None, float]:
-    """Suggest a canonical id for an unmapped raw + a confidence score.
-
-    Algorithm:
-      - Strip trailing dot, domain, and -triage/_triage suffix; lowercase.
-      - If stripped form exactly matches a dict canonical or alias →
-        return (canonical, 1.00). Exact-strip equality is algebraic
-        identity; OD1 auto-accepts at this score.
-      - Else, highest Levenshtein similarity ≥ 0.85 (SC-2) against any
-        existing canonical wins. Ties broken alphabetically (SC-3). Never
-        between names with a dot, or whose digits differ.
-      - Else (None, 0.0).
-    """
-    if not raw or not _normalize(raw):
-        return None, 0.0
-
-    stripped = _strip_for_proposal(raw, host_dict.domains)
-
-    if host_dict.has_alias(stripped):
-        return host_dict.get_canonical_for_alias(stripped), 1.00
-
-    best_canonicals: list[str] = []
-    best_score = 0.0
-    for canonical in sorted(host_dict.hosts.keys()):
-        norm_can = _normalize(canonical)
-        if "." in stripped or "." in norm_can:
-            continue  # FQDNs differ in the label, not the shared domain
-        # Names whose numbers differ are different hosts (wkstn01 / wkstn02).
-        if re.sub(r"\D", "", stripped) != re.sub(r"\D", "", norm_can):
-            continue
-        score = _similarity(stripped, norm_can)
-        if score < 0.85:
-            continue
-        if score > best_score:
-            best_canonicals = [canonical]
-            best_score = score
-        elif score == best_score:
-            best_canonicals.append(canonical)
-
-    if best_canonicals:
-        return best_canonicals[0], best_score  # sorted → alphabetically earliest
-    return None, 0.0

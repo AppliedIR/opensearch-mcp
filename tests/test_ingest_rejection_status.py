@@ -147,7 +147,6 @@ def ingest(tag, status_dir, monkeypatch):
     monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: _CASE)
     monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
     monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda _c: None)
-    monkeypatch.setattr(ingest_cli, "_warn_if_mapping_upgrade_required", lambda _c: None)
     monkeypatch.setattr(ingest_cli, "_preflight_shard_capacity", lambda *a, **k: None)
     monkeypatch.setattr(
         paths, "build_index_name", lambda c12, suffix: _index_name(tag, run, suffix)

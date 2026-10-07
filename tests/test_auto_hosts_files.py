@@ -70,7 +70,6 @@ def ingest(tmp_path, monkeypatch):
     for n in (
         "_preflight_shard_capacity",
         "_ensure_case_active",
-        "_warn_if_mapping_upgrade_required",
     ):
         monkeypatch.setattr(cli, n, mock.MagicMock())
     monkeypatch.setattr(cli, "_load_case_host_dict", lambda *a, **k: None)

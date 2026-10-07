@@ -1,27 +1,13 @@
-"""Hostname extraction primitives consumed by the v1 host-identity preflight.
+"""Hostname extraction primitives used by the names scan.
 
-See `specs/host-identity-2026-05-11.md` v1. The discovery orchestrator
-(`host_discovery.discover_hosts`) calls these primitives once per
-ingest to populate the case host-dictionary with auto-applied
-decisions. Parsers then resolve `host.id` from that dictionary at
-parse time.
+  - `_HOST_FIELD_PRIORITY`: first-hit-wins field list for CSV/JSON.
+  - `extract_host_from_record`: walk the priority list on one record.
+  - `detect_hostname_from_volume`: read ComputerName+Domain from a mounted
+    volume's SYSTEM hive.
+  - `peek_hostname_from_evidence`: the first parseable CSV/JSON file in the
+    evidence root; the hostname from its first record.
 
-Exports:
-  - `_HOST_FIELD_PRIORITY` — first-hit-wins field list for CSV/JSON.
-  - `extract_host_from_record` — walk the priority list on one record.
-  - `detect_hostname_from_volume` — read ComputerName+Domain from a
-    mounted volume's SYSTEM hive.
-  - `peek_hostname_from_evidence` — first parseable CSV/JSON file in
-    the evidence root; extract the hostname from its first record.
-  - `classify_host` — `(status, raw, proposed, confidence)` against a
-    dictionary; used by both `host_discovery._classify` and downstream
-    consumers.
-
-Archive basename is NEVER used as host.name. The shipped Rev 8
-fail-loud surface (`write_host_unmapped_yaml`,
-`archive_resolved_unmapped_yaml`, `_classify_or_fail` in
-ingest_cli.py) is removed in v1; the always-proceed preflight in
-`ingest_cli._preflight_host_discovery` replaces it.
+Archive basename is NEVER used as host.name.
 
 IMPLEMENTATION CONTRACT (regipy leading-backslash):
   `regipy.RegistryHive.get_key()` requires a leading `\\` on the path.
@@ -36,12 +22,8 @@ from __future__ import annotations
 import functools
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from opensearch_mcp.paths import resolve_case_insensitive
-
-if TYPE_CHECKING:
-    from opensearch_mcp.host_dictionary import HostDictionary
 
 logger = logging.getLogger(__name__)
 
@@ -184,34 +166,6 @@ def detect_hostname_from_volume(volume_root: Path) -> str | None:
     if domain:
         return f"{computer_name}.{domain}"
     return computer_name
-
-
-def classify_host(
-    raw: str | None,
-    host_dict: HostDictionary | None,
-) -> tuple[str, str | None, str | None, float]:
-    """Classify a raw hostname against the dictionary.
-
-    Returns (status, raw, proposed_canonical, confidence):
-      - "mapped"                  : raw resolves directly → canonical is set
-      - "unmapped-with-proposal"  : resolve misses but propose_canonical
-                                    returns a suggestion at ≥0.85
-      - "unmapped-no-proposal"    : miss and no close match
-      - "empty"                   : raw was empty/None (caller decides)
-    """
-    from opensearch_mcp.host_dictionary import propose_canonical
-
-    if not raw or not raw.strip():
-        return "empty", raw, None, 0.0
-    canonical = host_dict.resolve(raw) if host_dict else None
-    if canonical is not None:
-        return "mapped", raw, canonical, 1.0
-    if not host_dict:
-        return "unmapped-no-proposal", raw, None, 0.0
-    suggestion, conf = propose_canonical(raw, host_dict)
-    if suggestion is not None:
-        return "unmapped-with-proposal", raw, suggestion, conf
-    return "unmapped-no-proposal", raw, None, 0.0
 
 
 def peek_hostname_from_evidence(scan_root: Path) -> str | None:

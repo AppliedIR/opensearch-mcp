@@ -70,7 +70,6 @@ def case(os_client, tmp_path, monkeypatch):
     for name in (
         "_preflight_shard_capacity",
         "_ensure_case_active",
-        "_warn_if_mapping_upgrade_required",
     ):
         monkeypatch.setattr(cli, name, mock.MagicMock())
     monkeypatch.setattr(cli, "_load_case_host_dict", lambda *a, **k: None)

@@ -445,3 +445,36 @@ def test_a_memory_ingest_at_tier_2_observes_the_computer_name_variables(monkeypa
         parse_memory.ingest_memory(d / "evidence" / "mem2.raw", None, d.name, "MEM2",
                                    plugins=["windows.envars"])  # fmt: skip
     assert (ctx.unit, "WKS95") in host_identity.load(d).names
+
+
+def test_a_file_the_ai_registered_as_evidence_gives_ai_names(tmp_path):
+    d = case()
+    f = d / "evidence" / "made.csv"
+    f.parent.mkdir(parents=True)
+    f.write_text("Computer,x\nDC01,1\n")
+    registry = {"files": [{"path": str(f.resolve()), "registered_via": "mcp"}]}
+    (d / "evidence.json").write_text(json.dumps(registry))
+    unit = names_scan.files_unit(f, "", [f], d)
+    assert {(n.raw, n.origin) for n in unit.names} == {("DC01", "ai")}
+
+
+def test_a_file_the_ai_registered_by_a_case_relative_path_gives_ai_names(tmp_path):
+    d = case()
+    f = d / "evidence" / "made2.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("Computer,x\nDC02,1\n")
+    registry = {"files": [{"path": "evidence/made2.csv", "registered_via": "mcp"}]}
+    (d / "evidence.json").write_text(json.dumps(registry))
+    unit = names_scan.files_unit(f, "", [f], d)
+    assert {(n.raw, n.origin) for n in unit.names} == {("DC02", "ai")}
+
+
+def test_a_file_the_examiner_registered_gives_artifact_names(tmp_path):
+    d = case()
+    f = d / "evidence" / "kept.csv"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("Computer,x\nDC03,1\n")
+    registry = {"files": [{"path": str(f.resolve()), "registered_via": "cli"}]}
+    (d / "evidence.json").write_text(json.dumps(registry))
+    unit = names_scan.files_unit(f, "", [f], d)
+    assert {(n.raw, n.origin) for n in unit.names} == {("DC03", "artifact")}
