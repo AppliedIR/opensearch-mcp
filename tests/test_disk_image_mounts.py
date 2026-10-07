@@ -74,6 +74,14 @@ def test_mbr_ntfs_partitions_are_mounted_and_others_are_not(calls, tmp_path):
         Path("/evidence/disk.raw"), tmp_path, containers.MountContext()
     )
     assert _mount_offsets(calls) == [f"offset={2048 * 512}", f"offset={104448 * 512}"]
+    # each loop device ends where its partition does, so the second can mount too
+    assert [
+        o
+        for c in calls
+        if c[:2] == ["sudo", "mount"]
+        for o in c[3].split(",")
+        if o.startswith("sizelimit=")
+    ] == ["sizelimit=52428800", "sizelimit=10485760"]
     assert f"offset={124928 * 512}" not in str(calls)  # 27 Hidden NTFS WinRE
     assert [p.name for p in mounted] == ["vol0", "vol1"]
 

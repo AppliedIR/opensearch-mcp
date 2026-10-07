@@ -205,13 +205,16 @@ def _mount_raw_partitions(raw_path: Path, dest: Path, ctx: MountContext) -> list
             mount_point = dest / f"vol{idx}"
             mount_point.mkdir()
             offset = part["start"] * part["sector_size"]
+            # Bound the loop device to the partition, or the next partition's
+            # mount fails ("overlapping loop device exists").
+            size = part["sectors"] * part["sector_size"]
             try:
                 subprocess.run(
                     [
                         "sudo",
                         "mount",
                         "-o",
-                        f"ro,loop,offset={offset},noexec",
+                        f"ro,loop,offset={offset},sizelimit={size},noexec",
                         str(raw_path),
                         str(mount_point),
                     ],
@@ -276,6 +279,7 @@ def _parse_fdisk_output(output: str) -> list[dict]:
             if parts[1] == "*":
                 start_idx = 2
             start = int(parts[start_idx])
+            sectors = int(parts[start_idx + 2])
         except (ValueError, IndexError):
             continue
 
@@ -284,7 +288,9 @@ def _parse_fdisk_output(output: str) -> list[dict]:
         # For GPT: just the name
         ptype = " ".join(parts[start_idx + 4 :])
 
-        partitions.append({"start": start, "sector_size": sector_size, "type": ptype})
+        partitions.append(
+            {"start": start, "sectors": sectors, "sector_size": sector_size, "type": ptype}
+        )
 
     return partitions
 
