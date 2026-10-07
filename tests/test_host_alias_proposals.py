@@ -94,3 +94,37 @@ def test_a_triage_copy_of_a_host_is_still_aliased_to_it(case):
     decision, host_dict = _ingest(case, "wkstn01-triage")
     assert (decision["decision"], decision["confidence"]) == ("auto_alias", 1.0)
     assert host_dict.resolve("wkstn01-triage") == "wkstn01"
+
+
+NEAR_SPELLINGS = [("SQLPRODA01", "SQLPRODB01"), ("web-a01", "web-b01"), ("wkstn01", "wksn01")]
+
+
+@pytest.mark.parametrize("first, second", NEAR_SPELLINGS)
+def test_a_near_spelling_is_kept_as_its_own_host_with_a_note(case, first, second):
+    _ingest(case, first)
+    decision, host_dict = _ingest(case, second)
+    _, score = _propose(first, second)
+    assert 0.85 <= score < 1.0
+    assert {k: decision[k] for k in ("decision", "applied_canonical", "confidence")} == {
+        "decision": "possible_alias",
+        "applied_canonical": second,
+        "confidence": 0.0,
+    }
+    assert decision["rationale"] == (
+        f"Possible alias of '{first}' (similarity {score:.3f}), kept separate. "
+        f"If it is the same machine, merge it with "
+        f"case_host_fix(raw='{second}', new_canonical='{first}')"
+    )
+    assert host_dict.resolve(second) == second
+    assert host_dict.resolve(first) == first
+    assert set(host_dict.hosts) == {first, second}
+
+
+@pytest.mark.parametrize("first, second", NEAR_SPELLINGS[:1])
+def test_a_near_spelling_kept_separate_is_not_proposed_again(case, first, second):
+    _ingest(case, first)
+    _ingest(case, second)
+    (case / "evidence" / second).rename(case / "evidence" / f"{second}-earlier")
+    decision, host_dict = _ingest(case, second)
+    assert decision["decision"] == "already_mapped"
+    assert host_dict.resolve(second) == second

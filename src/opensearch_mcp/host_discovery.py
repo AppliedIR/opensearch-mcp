@@ -12,7 +12,8 @@ Flow:
        - propose_no_match:       no close match — raw becomes own canonical
   3. _preflight_host_discovery (caller) applies decisions:
        - confidence=1.00 exact-strip → add_alias(raw, proposed)
-       - propose with confidence <1.00 → add_alias (best guess)
+       - propose with confidence <1.00 → add_canonical(raw), recorded as a
+         possible_alias (a near spelling is never merged automatically)
        - no match → add_canonical(raw)
        Then saves the dict atomically. Parsers see a complete dict.
 

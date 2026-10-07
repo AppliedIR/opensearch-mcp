@@ -191,7 +191,7 @@ def _warn_if_mapping_upgrade_required(case_id: str) -> None:
 def _preflight_host_discovery(
     case_id: str, scan_root: Path, hosts: list
 ) -> tuple[dict, "object | None"]:
-    """Discover hostnames, auto-apply best-guess decisions, save dict.
+    """Discover hostnames, auto-apply exact decisions, save dict.
 
     Replaces the prior fail-loud `_classify_or_fail`. v1 policy is
     always-proceed: every host the discovery sweep finds gets a
@@ -202,7 +202,8 @@ def _preflight_host_discovery(
       - confidence=1.00 (exact-strip match against existing canonical)
         → add_alias(raw, proposed)
       - confidence ≥ 0.85 (Levenshtein near-match)
-        → add_alias(raw, proposed)   (best guess; operator can fix later)
+        → add_canonical(raw)         (kept separate, recorded as a
+                                      possible_alias the examiner can merge)
       - no close match
         → add_canonical(raw)         (raw becomes own canonical)
 
@@ -258,7 +259,26 @@ def _preflight_host_discovery(
                 }
             )
             continue
-        if entry.status == "propose_with_match":
+        if entry.status == "propose_with_match" and entry.confidence < 1.00:
+            # A near spelling (SQLPRODA01 / SQLPRODB01) is not evidence of one
+            # machine: keep it separate and say how to merge it if it is.
+            host_dict.add_canonical(entry.raw)
+            decisions_applied.append(
+                {
+                    "raw": entry.raw,
+                    "applied_canonical": entry.raw,
+                    "decision": "possible_alias",
+                    "confidence": 0.0,
+                    "sources": entry.sources,
+                    "rationale": (
+                        f"Possible alias of '{entry.proposed_canonical}' (similarity "
+                        f"{entry.confidence:.3f}), kept separate. If it is the same "
+                        f"machine, merge it with case_host_fix(raw='{entry.raw}', "
+                        f"new_canonical='{entry.proposed_canonical}')"
+                    ),
+                }
+            )
+        elif entry.status == "propose_with_match":
             host_dict.add_alias(entry.raw, entry.proposed_canonical)
             decisions_applied.append(
                 {
@@ -268,11 +288,7 @@ def _preflight_host_discovery(
                     "confidence": entry.confidence,
                     "sources": entry.sources,
                     "rationale": (
-                        f"Levenshtein {entry.confidence:.3f} vs canonical "
-                        f"'{entry.proposed_canonical}' — best-guess applied; "
-                        f"review when convenient"
-                        if entry.confidence < 1.00
-                        else f"Exact-strip match against canonical '{entry.proposed_canonical}'"
+                        f"Exact-strip match against canonical '{entry.proposed_canonical}'"
                     ),
                 }
             )
@@ -1009,7 +1025,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     if not h.hostname or h.hostname.startswith("_"):
                         h.hostname = peeked
 
-        # Preflight host discovery — auto-apply best-guess decisions to
+        # Preflight host discovery — auto-apply exact decisions to
         # the case dictionary BEFORE parsers run. v1 always proceeds;
         # response carries the proposal block so AI/operator can review.
         # Replaces the prior fail-loud `_classify_or_fail`.
