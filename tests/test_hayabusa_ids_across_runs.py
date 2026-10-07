@@ -158,3 +158,19 @@ def test_an_archive_scan_gives_hayabusa_its_run_directory(tmp_path, monkeypatch)
     cli.cmd_scan(args)
     assert seen.get("run_tmpdir") is not None
     assert seen["evtx"].is_relative_to(seen["run_tmpdir"])
+
+
+def test_the_same_disk_image_in_another_nbd_slot_keeps_its_detection_ids(hayabusa, tmp_path):
+    runs = tmp_path / "case" / "tmp"
+    first = hayabusa(_logs(runs / "ingest-1" / "nbd0p2", "Security.evtx"), runs / "ingest-1", "r1")
+    second = hayabusa(
+        _logs(runs / "ingest-2" / "nbd3p2", "Security.evtx"), runs / "ingest-2", "r2"
+    )
+    assert first == second
+
+
+def test_two_partitions_of_one_image_keep_their_own_detections(hayabusa, tmp_path):
+    run = tmp_path / "case" / "tmp" / "ingest-1"
+    p2 = hayabusa(_logs(run / "nbd0p2", "Security.evtx"), run, "r1")
+    p3 = hayabusa(_logs(run / "nbd0p3", "Security.evtx"), run, "r2")
+    assert p2 != p3

@@ -194,6 +194,10 @@ def _is_a_number_not_zero(val: str) -> bool:
     return float(val.strip()) != 0
 
 
+# A volume of a VHD/VMDK is mounted as its nbd device's partition (nbd3p2)
+_NBD_SLOT = re.compile(r"^nbd\d+(p\d+)$")
+
+
 def _id_input(record: dict, id_root: Path | None) -> dict:
     """The record as its id hashes it: `EvtxFile` relative to `id_root` when
     it's under it, otherwise in full, as it always was."""
@@ -204,6 +208,10 @@ def _id_input(record: dict, id_root: Path | None) -> dict:
         relative = Path(evtx_file).relative_to(id_root)
     except ValueError:
         return record
+    parts = relative.parts
+    slot = _NBD_SLOT.match(parts[0]) if parts else None
+    if slot:  # a volume mounted under the nbd slot the run got: its partition alone
+        relative = Path(slot.group(1), *parts[1:])
     return {**record, "EvtxFile": relative.as_posix()}
 
 
