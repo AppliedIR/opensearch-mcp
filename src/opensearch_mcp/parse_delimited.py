@@ -168,9 +168,10 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
 
 
 # An epoch written as text (Zeek's ts, a CSV column): the integer part's width
-# says the unit. Any other width (20230129) is left for OpenSearch as before.
+# says the unit (10 digits: seconds from 2001; 13: ms; 16: µs). Any other width
+# (20230129, 202301292357) is left for OpenSearch as before.
 _EPOCH_TEXT = re.compile(r"(\d+)(\.\d+)?")
-_EPOCH_DIVISOR = {9: 1, 10: 1, 12: 1e3, 13: 1e3, 15: 1e6, 16: 1e6}
+_EPOCH_DIVISOR = {9: 1, 10: 1, 13: 1e3, 16: 1e6}
 
 
 def _epoch_text(val: str) -> str | None:

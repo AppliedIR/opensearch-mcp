@@ -3,9 +3,9 @@
 csv and Zeek give every value as text, and only real numbers were converted,
 so a Zeek `ts` of 1675036674.123456 or a CSV `ts` of 1675036674 went to
 @timestamp as digits, which OpenSearch reads as epoch milliseconds:
-1970-01-20. Digits whose integer part has 9-10, 12-13 or 15-16 digits are
-now read as seconds, milliseconds or microseconds; any other width (a
-`20230129` date) is left as it was.
+1970-01-20. Digits whose integer part has 9-10, 13 or 16 digits are now
+read as seconds, milliseconds or microseconds; any other width (a `20230129`
+date, `202301292357`, 12 or 15 digits) is left as it was.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def test_an_epoch_written_as_text_is_indexed_at_its_time(
 
 @pytest.mark.parametrize(
     "value, instant",
-    [("1675036674123", "2023-01-29T23:57:54.123"), ("999999999999", "2001-09-09T01:46:39.999")],
-    ids=["13 digits", "12 digits"],
+    [("1675036674123", "2023-01-29T23:57:54.123")],
+    ids=["13 digits"],
 )
 def test_anchor_a_millisecond_epoch_keeps_its_instant(tmp_path, monkeypatch, value, instant):
     # OpenSearch already read these digits as milliseconds: the same instant
@@ -65,8 +65,14 @@ def test_anchor_a_millisecond_epoch_keeps_its_instant(tmp_path, monkeypatch, val
 
 @pytest.mark.parametrize(
     "column, value",
-    [("time", "2023-01-29T23:57:54Z"), ("date", "20230129")],
-    ids=["iso", "yyyymmdd: another width, as before"],
+    [
+        ("time", "2023-01-29T23:57:54Z"),
+        ("date", "20230129"),
+        ("date", "202301292357"),
+        ("time", "999999999999"),
+        ("time", "167503667412345"),
+    ],
+    ids=["iso", "yyyymmdd", "yyyymmddHHMM", "12 digits", "15 digits"],
 )
 def test_anchor_other_values_reach_opensearch_as_before(tmp_path, monkeypatch, column, value):
     assert _stamp(tmp_path, monkeypatch, column, value) == value
