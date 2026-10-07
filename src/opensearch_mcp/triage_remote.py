@@ -952,7 +952,13 @@ def _enrich_registry_check_file(
                 client,
                 index=index,
                 body={
-                    "query": {"term": {f"{value_field}.keyword": value}},
+                    # Only the documents this loop selected: another rule's
+                    # verdict on a document holding the same value stays
+                    "query": {
+                        "bool": {
+                            "filter": [query_body, {"term": {f"{value_field}.keyword": value}}]
+                        }
+                    },
                     "script": {
                         "source": "; ".join(script_lines),
                         "lang": "painless",

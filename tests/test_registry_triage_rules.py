@@ -19,6 +19,7 @@ windows-triage stood in; values are synthetic.
 from __future__ import annotations
 
 import fnmatch
+import time
 import uuid
 from pathlib import Path
 
@@ -239,9 +240,17 @@ def scratch():
 @pytest.fixture
 def case(scratch, monkeypatch):
     client, tag = scratch
-    monkeypatch.setattr(
-        triage_remote, "call_tool", lambda tool, args, timeout=None: _check_file(args)
-    )
+    looked_up: list = []
+
+    def call_tool(tool, args, timeout=None):
+        # A real lookup takes longer than the 1 s refresh interval, so the
+        # rules' writes are visible to the lookup's stamp, as they are in a run
+        if not looked_up:
+            time.sleep(1.5)
+        looked_up.append(args)
+        return _check_file(args)
+
+    monkeypatch.setattr(triage_remote, "call_tool", call_tool)
     monkeypatch.setattr(triage_remote, "gateway_available", lambda: True)
     case_id = f"{tag}-{uuid.uuid4().hex[:6]}"
     index = build_index_name(case_id, "registry", "h1")
@@ -323,6 +332,30 @@ class TestTheRules:
         assert case.stamp("stub").get("triage.verdict") == "SUSPICIOUS"
         assert case.stamp("other") == {}
         assert result["registry_activestub"]["status"] != "empty", result["registry_activestub"]
+
+
+@pytest.mark.integration
+class TestNoRuleDowngradesAnother:
+    """A lookup's stamp lands only on the documents its loop selected."""
+
+    def test_an_ifeo_verdict_survives_active_setup_naming_the_same_exe(self, case):
+        exe = "C:\\Windows\\System32\\cmd.exe"  # check_file: EXPECTED → UNKNOWN (flags only)
+        case.add("ifeo", IFEO, "Debugger", exe)
+        case.add("stub", STUB, "StubPath", exe)
+        case.add("uninstall", STUB, "UninstallString", exe)
+        case.triage()
+        assert case.stamp("ifeo")["triage.verdict"] == "SUSPICIOUS"
+        assert case.stamp("ifeo")["triage.reason"].startswith("IFEO debugger: ")
+        assert case.stamp("stub")["triage.verdict"] == "UNKNOWN"
+        assert case.stamp("uninstall") == {}  # not a StubPath value
+
+    def test_an_appinit_verdict_survives_a_netsh_helper_with_the_same_dll(self, case):
+        dll = "C:\\ProgramData\\x.dll"
+        case.add("appinit", WIN, "AppInit_DLLs", dll)
+        case.add("netsh", "ROOT\\Microsoft\\NetSh", "helper", dll)
+        case.triage()
+        assert case.stamp("appinit")["triage.verdict"] == "SUSPICIOUS"
+        assert case.stamp("netsh")["triage.verdict"] == "UNKNOWN"
 
 
 @pytest.mark.integration
