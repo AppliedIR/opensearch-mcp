@@ -26,6 +26,13 @@ from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 
 
+def _sha256_or_empty(path: Path) -> str:
+    try:
+        return sha256_file(path)
+    except OSError:
+        return ""
+
+
 def _write_ingest_manifest(
     file_path: str, hostname: str, artifact_type: str, sha256: str = "", doc_count: int = 0
 ) -> None:
@@ -815,11 +822,16 @@ def _ingest_hosts(
             _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
             unread: list[str] = []
+            hives: list[str] = []
             try:
                 file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
                 from opensearch_mcp.paths import relative_evidence_path
 
-                _rel_src = relative_evidence_path(artifact_path, host.volume_root)
+                # RECmd reads the whole config folder; each row then names its own hive
+                _rel_src = relative_evidence_path(
+                    artifact_path.parent if tool_name == "registry" else artifact_path,
+                    host.volume_root,
+                )
                 cnt, sk, bf = run_and_ingest(
                     tool_name=tool_name,
                     artifact_path=artifact_path,
@@ -835,7 +847,11 @@ def _ingest_hosts(
                     natural_key_override=natural_key,
                     host_dict=host_dict,
                     not_read=unread,
+                    hives_read=hives,
                 )
+                # The audit lists every hive RECmd read, each with its hash
+                inputs = hives or [str(artifact_path)]
+                hashes = [_sha256_or_empty(Path(p)) for p in hives] if hives else [file_hash]
                 ar.indexed = cnt
                 ar.not_read = unread
                 ar.skipped = sk
@@ -861,8 +877,8 @@ def _ingest_hosts(
                     + (f", {len(unread)} not read" if unread else "")
                     + (f", {sk} skipped" if sk else "")
                     + (f", {bf} bulk failed" if bf else ""),
-                    input_files=[str(artifact_path)],
-                    input_sha256s=[file_hash] if file_hash else [],
+                    input_files=inputs,
+                    input_sha256s=hashes if any(hashes) else [],
                     source_evidence=str(artifact_path),
                 )
                 if tool_status:

@@ -134,6 +134,7 @@ def ingest_csv(
     host_dict=None,
     row_host: bool = True,
     hive: str = "",
+    row_source=None,
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -224,7 +225,8 @@ def ingest_csv(
 
             # Provenance fields (added after ID computation)
             if source_file:
-                row["vhir.source_file"] = source_file
+                # A tool that reads several files gives each row its own
+                row["vhir.source_file"] = (row_source and row_source(row)) or source_file
             if ingest_audit_id:
                 row["vhir.ingest_audit_id"] = ingest_audit_id
             if pipeline_version:

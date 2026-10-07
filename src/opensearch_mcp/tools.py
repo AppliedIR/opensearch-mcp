@@ -307,6 +307,7 @@ def run_and_ingest(
     natural_key_override: str | None = None,
     host_dict=None,
     not_read: list | None = None,
+    hives_read: list | None = None,
 ) -> tuple[int, int, int]:
     """Run an EZ tool against an artifact and ingest the CSV output.
 
@@ -331,6 +332,24 @@ def run_and_ingest(
         # Build command
         cmd = _build_command(cfg, tool_name, artifact_path, tmpdir)
         _stdout, _stderr = _run_tool(cmd, cfg.binary)
+        row_source = None
+        if tool_name == "registry":
+            # RECmd reads every hive under the folder: each row names its own
+            reg_dir = artifact_path if artifact_path.is_dir() else artifact_path.parent
+
+            def row_source(row):
+                try:
+                    hive = Path(row.get("HivePath") or "").relative_to(reg_dir)
+                except ValueError:
+                    return ""  # outside the folder (or none): the folder itself
+                return str(Path(source_file) / hive) if hive.parts else ""
+
+            if hives_read is not None:
+                hives_read.extend(
+                    ln.removeprefix("Processing hive ").strip()
+                    for ln in _stdout.splitlines()
+                    if ln.startswith("Processing hive ")
+                )
         if not_read is not None:
             not_read.extend(_failed_files(_stdout, tool_name))
             not_read.extend(_tool_errors(_stdout, artifact_path))
@@ -392,6 +411,7 @@ def run_and_ingest(
                 parse_method=cfg.cli_name,
                 host_dict=host_dict,
                 row_host=tool_name != "jumplists",
+                row_source=row_source if source_file else None,
             )
             total_count += count
             total_skipped += sk
