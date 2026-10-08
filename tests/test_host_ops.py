@@ -281,6 +281,13 @@ def test_the_worker_prints_a_refusal_as_json_and_exits_2(case, capsys):
         "state": "refused", "reason": "--op must be a JSON object"}  # fmt: skip
 
 
+def test_the_worker_refuses_an_expect_that_isnt_an_object(case, capsys):
+    code = host_ops.main(["--case-dir", str(case), "--examiner", "ex1",
+                          "--op", '{"kind": "rename"}', "--expect", "[1]"])  # fmt: skip
+    assert code == 2
+    assert json.loads(capsys.readouterr().out)["reason"] == "--expect must be a JSON object"
+
+
 # -- the journal
 
 

@@ -287,10 +287,10 @@ def test_a_worker_stopped_after_the_decision_is_resumed_to_done(client, case, mo
     }[kind]
     real = hi.record_op
 
-    def dies_on_done(root, op_id, fields):
+    def dies_on_done(root, op_id, fields, check=None):
         if fields.get("state") == "done":
             raise SystemExit("killed")
-        return real(root, op_id, fields)
+        return real(root, op_id, fields, check=check)
 
     monkeypatch.setattr(hi, "record_op", dies_on_done)
     with pytest.raises(SystemExit):
@@ -317,6 +317,33 @@ def test_docs_not_yet_visible_are_in_the_baseline(client, case):
                           client=client)  # fmt: skip
     assert result["state"] == "done", result
     assert result["relabelled"] == 3
+
+
+def test_an_operation_from_a_page_that_has_gone_stale_is_refused(client, case):
+    """Two tabs: one renamed the machine since the other was opened."""
+    a = machine(client, case, "WKS01", 2)
+    mid = hi.load(case).machine_of_key(a).id
+    host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                 client=client, expect={mid: "WKS01"})  # fmt: skip
+    before, ops = docs(client, case), dict(hi.read_ops(case)["ops"])
+    with pytest.raises(host_ops.HostOpRefused, match="refused: changed since you opened it"):
+        host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-2"}, "ex1",
+                     client=client, expect={mid: "WKS01"})  # fmt: skip
+    assert docs(client, case) == before and hi.read_ops(case)["ops"] == ops
+    assert canon(case, a) == "FIN-1"
+
+
+def test_a_resume_ignores_what_the_page_saw(client, case, monkeypatch):
+    a = machine(client, case, "WKS01", 2)
+    mid = hi.load(case).machine_of_key(a).id
+    real = host_ops.verify
+    monkeypatch.setattr(host_ops, "verify", lambda *a, **k: "a node went away")
+    first = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                         client=client, expect={mid: "WKS01"})  # fmt: skip
+    monkeypatch.setattr(host_ops, "verify", real)
+    done = host_ops.run(case, None, "ex1", resume=first["id"], client=client,
+                        expect={mid: "SOMETHING-ELSE"})  # fmt: skip
+    assert done["state"] == "done" and canon(case, a) == "FIN-1"
 
 
 def test_the_ais_host_fix_changes_no_doc_and_no_binding(client, case, monkeypatch):

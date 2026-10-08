@@ -350,7 +350,8 @@ def _busy_reason(case_dir: Path) -> str:
     return f"runs are writing into the case: {named}"
 
 
-def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, client=None) -> dict:
+def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, client=None,
+        expect: dict | None = None) -> dict:  # fmt: skip
     """Run a host operation, or resume an incomplete one. Returns its
     journal entry ({"id", "state", ...}). Raises HostOpRefused when it may
     not start."""
@@ -365,14 +366,28 @@ def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, cli
     except hi.CaseLockBusy:
         raise HostOpRefused(_busy_reason(root)) from None
     with held:
-        return _run_locked(root, op, examiner, resume, client, case_identity(root)[0])
+        return _run_locked(root, op, examiner, resume, client, case_identity(root)[0], expect)
+
+
+def _unchanged(expect: dict):
+    """A check that the machines are still named as the examiner saw them
+    ({machine id: canonical}), run with the journal's running entry under the
+    host-log lock: a change since the page was opened refuses the operation."""
+
+    def check(state: hi.HostState) -> None:
+        for mid, canonical in expect.items():
+            m = state.machines.get(str(mid))
+            if m is None or m.canonical != canonical:
+                raise HostOpRefused("refused: changed since you opened it")
+
+    return check
 
 
 def _entry(root: Path, op_id: str, **fields) -> dict:
     return {"id": op_id, **hi.record_op(root, op_id, fields)}
 
 
-def _run_locked(root: Path, op, examiner, resume, client, c12) -> dict:
+def _run_locked(root: Path, op, examiner, resume, client, c12, expect=None) -> dict:
     pending = hi.unfinished_op(root)
     if resume is not None:
         if pending is None or pending["id"] != resume:
@@ -405,7 +420,7 @@ def _run_locked(root: Path, op, examiner, resume, client, c12) -> dict:
         "canonical": p["canonical"], "v1": [list(x) for x in p["v1"]], "before": before,
         "examiner": examiner, "state": "running", "reason": "",
         **({} if resume is not None else {"started": _now()}),
-    })  # fmt: skip
+    }, check=_unchanged(expect) if resume is None and expect else None)  # fmt: skip
     try:
         updated = relabel(client, c12, p, forms)
         why = verify(client, c12, p, forms, before)
@@ -432,12 +447,16 @@ def main(argv: list[str] | None = None) -> int:
     which = ap.add_mutually_exclusive_group(required=True)
     which.add_argument("--op", help="the operation, as JSON")
     which.add_argument("--resume", help="the id of an incomplete operation")
+    ap.add_argument("--expect", help="the machines as the examiner saw them, as JSON {id: name}")
     args = ap.parse_args(argv)
     try:
         op = json.loads(args.op) if args.op else None
         if op is not None and not isinstance(op, dict):
             raise HostOpRefused("--op must be a JSON object")
-        result = run(args.case_dir, op, args.examiner, resume=args.resume)
+        expect = json.loads(args.expect) if args.expect else None
+        if expect is not None and not isinstance(expect, dict):
+            raise HostOpRefused("--expect must be a JSON object")
+        result = run(args.case_dir, op, args.examiner, resume=args.resume, expect=expect)
     except (HostOpRefused, hi.HostLogError, ValueError) as e:
         print(json.dumps({"state": "refused", "reason": str(e)}))
         return 2
