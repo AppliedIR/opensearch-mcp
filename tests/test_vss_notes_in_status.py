@@ -29,6 +29,7 @@ UNREAD = "shadow copies on vol0 (offset 1048576) couldn't be read: none of its 2
 def status_dir(tmp_path, monkeypatch):
     path = tmp_path / "status"
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", path)
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-1")  # the worker's run, as launched
     # the launcher's record, as idx_ingest writes it before the worker starts
     ingest_status.write_status(
         "c1", os.getpid(), "run-1", "starting", [], {}, "2026-10-08T00:00:00Z"
@@ -75,9 +76,6 @@ def _scan(tmp_path, monkeypatch, live_windows, ingest):
         monkeypatch.setattr(C, name, value)
     monkeypatch.setattr(cli, "ingest", ingest)
     monkeypatch.setattr(cli, "_image_hosts", lambda *a, **k: ([], set(), []))
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a: ({"decisions_applied": []}, None)
-    )
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")

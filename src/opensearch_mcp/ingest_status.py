@@ -137,14 +137,14 @@ def _note_hosts(notes: list[tuple[str, str]] | None) -> list[dict]:
     ]
 
 
-def add_notes(case_id: str, pid: int, notes: list[tuple[str, str]]) -> None:
+def add_notes(case_id: str, pid: int, notes: list[tuple[str, str]], run_id: str = "") -> None:
     """Add `notes` as warnings to a run's status that hasn't ended: a run that
     stops before its terminal write (an early exit or an exception) keeps
     them, and the terminal-status guard that then marks it failed leaves them.
     A run that has ended is left as it is."""
     if not notes:
         return
-    path = _status_path_safe(case_id, pid)
+    path = _status_path_safe(case_id, pid, run_id)
     try:
         data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):

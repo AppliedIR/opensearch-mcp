@@ -931,6 +931,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
     atexit.register(mount_ctx.cleanup)
     finished = False  # the run's terminal status write, with its notes
+    run_id = ""  # set when the ingest starts; a run stopped before then is the launcher's
 
     try:
         if container_type == "archive":
@@ -1607,7 +1608,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
             from opensearch_mcp.ingest_status import add_notes
 
             mounts = [("mount", f) for f in mount_ctx.failures + mount_ctx.not_mounted]
-            add_notes(case_id, _os.getpid(), status_notes + mounts)
+            rid = run_id or _os.environ.get("VHIR_INGEST_RUN_ID", "")
+            add_notes(case_id, _os.getpid(), status_notes + mounts, run_id=rid)
         mount_ctx.cleanup()
         if tmpdir:
             cleanup_tmpdir(tmpdir)
