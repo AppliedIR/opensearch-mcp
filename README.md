@@ -6,8 +6,6 @@
 
 Forensic evidence indexing for [Valhuntir](https://github.com/AppliedIR/Valhuntir) — parse, index, and query digital forensic artifacts at scale using OpenSearch.
 
-Built by [Applied IR](https://github.com/AppliedIR) with Claude Code.
-
 > **Important Note** — While extensively tested, this is a new platform.
 > ALWAYS verify results and guide the investigative process. If you just
 > tell Valhuntir to "Find Evil" it will more than likely hallucinate
@@ -304,6 +302,14 @@ pip install -e ".[test]"
 ruff check . && ruff format --check .
 pytest tests/
 ```
+
+## Acknowledgments
+
+Architecture and direction by Steve Anson. Implementation by Claude Code (Anthropic). Code review by Codex (OpenAI). Design inspiration drawn from Lenny Zeltser's [REMnux MCP](https://github.com/REMnux/remnux-mcp-server).
+
+## Clear Disclosure
+
+I do DFIR. I am not a developer. This project would not exist without Claude Code handling the implementation. While an immense amount of effort has gone into design, testing, and review, I fully acknowledge that I may have been working hard and not smart in places. My intent is to jumpstart discussion around ways this technology can be leveraged for efficiency in incident response while ensuring that the ultimate responsibility for accuracy remains with the human examiner.
 
 ## License
 
