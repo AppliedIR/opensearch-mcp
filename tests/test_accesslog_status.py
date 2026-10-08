@@ -103,3 +103,9 @@ def test_a_log_outside_the_time_window_says_so(run):
 def test_a_log_inside_the_time_window_has_no_warning(run):
     status, _ = run({"good.log": GOOD}, time_from="2026-01-01")
     assert not status.get("warnings")
+
+
+def test_an_empty_log_is_not_named_as_unindexed(run):
+    status, _ = run({"good.log": GOOD, "empty.log": ""})
+    assert not _warned(status, "empty.log"), status
+    assert not _warned(status, "no line indexed")

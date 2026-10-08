@@ -35,6 +35,7 @@ case "$HB_MODE" in
   empty) : > "$out" ;;
   none) ;;
   error) echo "[ERROR] Failed to load rules: no rule file found" >&2 ;;
+  prefixed) printf '2026-02-01 00:00:00 \033[31m[ERROR]\033[0m Failed to load rules\n' >&2 ;;
   *) printf '%s' "$HB_CSV" > "$out" ;;
 esac
 exit 0
@@ -151,3 +152,9 @@ def test_anchor_a_healthy_run_is_done_without_a_note(scan):
     status = scan()
     assert _row(status)["status"] == "done" and _row(status)["detail"].startswith("1 ")
     assert not any("Hayabusa" in w for w in status.get("warnings", []))
+
+
+def test_an_error_line_that_doesnt_start_with_it_fails_the_row_too(scan):
+    """A timestamped, coloured [ERROR] line."""
+    row = _row(scan("prefixed"))
+    assert row["status"] == "failed" and "Failed to load rules" in row["detail"], row
