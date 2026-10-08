@@ -72,7 +72,8 @@ def scan(tmp_path, monkeypatch, other_device):
     monkeypatch.setattr(ing, "vhir_dir", lambda: tmp_path / "vhir")
     monkeypatch.setattr(parse_delimited, "ingest_delimited", lambda *a, **k: (0, 0, 0, 0))
 
-    def run(layout="root", unmount=True, hayabusa=False):
+    def run(layout="root", unmount=True, hayabusa=False, second=False):
+        """`second`: dev02 on the same volume (M/dev02/C), after dev01."""
         mount = tmp_path / "M"
         root = mount if layout == "root" else mount / "dev01" / "C"
         evtx = root / "Windows/System32/winevt/Logs"
@@ -83,10 +84,23 @@ def scan(tmp_path, monkeypatch, other_device):
         for a in ARTIFACTS:
             (root / a).write_bytes(b"x")
             host.artifacts.append((a, root / a))
-        monkeypatch.setattr(cli, "discover", lambda *a, **k: [host])
+        hosts = [host]
+        if second:
+            other = DiscoveredHost(hostname="dev02", volume_root=mount / "dev02" / "C")
+            for a in ARTIFACTS:
+                (other.volume_root / a).parent.mkdir(parents=True, exist_ok=True)
+                (other.volume_root / a).write_bytes(b"x")
+                other.artifacts.append((a, other.volume_root / a))
+            hosts.append(other)
+        monkeypatch.setattr(cli, "discover", lambda *a, **k: hosts)
 
-        def tool(**kw):  # after amcache, the volume is unmounted
-            if kw["tool_name"] == "amcache" and unmount:
+        def tool(**kw):  # after dev01's amcache, the volume is unmounted
+            if (
+                kw["tool_name"] == "amcache"
+                and unmount
+                and mount.is_dir()
+                and not mount.is_symlink()
+            ):
                 shutil.rmtree(mount)
                 if layout == "root":
                     mount.symlink_to(other_device)  # an empty folder on another device
@@ -94,7 +108,8 @@ def scan(tmp_path, monkeypatch, other_device):
 
         monkeypatch.setattr(ing, "run_and_ingest", tool)
         bulk.reset_circuit_breaker()
-        cli.cmd_scan(argparse.Namespace(path=str(tmp_path), case="c1", yes=True, hostname="dev01",
+        cli.cmd_scan(argparse.Namespace(path=str(tmp_path), case="c1", yes=True,
+                                        hostname=None if second else "dev01",
                                         all_logs=False, no_hayabusa=not hayabusa,
                                         skip_triage=True))  # fmt: skip
         (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
@@ -122,3 +137,14 @@ def test_anchor_a_volume_that_stays_mounted_has_no_evidence_row(scan, hayabusa):
     status, _ = scan(unmount=False, hayabusa=hayabusa)
     assert _evidence(status) == []
     assert not status["message"].startswith("Ingest complete with"), status["message"]
+
+
+@pytest.mark.parametrize("hayabusa", [False, True], ids=["no hayabusa", "hayabusa"])
+def test_a_host_whose_shared_volume_was_lost_before_it_started_fails_too(scan, hayabusa):
+    """dev01 and dev02 on one volume, unmounted during dev01."""
+    status, _ = scan("inside", hayabusa=hayabusa, second=True)
+    rows = {c.get("host") or c.get("hostname"): c for c in _evidence(status)}
+    assert set(rows) == {"dev01", "dev02"}, status["checklist"]
+    assert rows["dev02"]["status"] == "failed"
+    assert "was gone when this host's ingest started" in rows["dev02"]["detail"]
+    assert status["message"].startswith("Ingest complete with 2 error(s)"), status["message"]

@@ -1634,15 +1634,18 @@ def _device(path) -> int | None:
 
 
 def _check_volume_still_there(host, device, host_idx, host_result, status_hosts, update) -> None:
-    """A volume root gone, or on another device, once a host's artifacts are
-    done (unmounted mid-ingest): the host gets a failed `evidence` row, in the
-    status file and its results, as what was read after it went is missing."""
-    if device is None:
-        return  # nothing to compare with
+    """A volume root gone when the host started (a volume several hosts share,
+    lost during an earlier one), or gone or on another device once its
+    artifacts are done (unmounted mid-ingest): the host gets a failed
+    `evidence` row, in the status file and its results, as what was read
+    after it went is missing."""
     now = _device(host.volume_root)
-    if now == device:
+    if device is not None and now == device:
         return
-    gone = "is gone" if now is None else "is now on another device"
+    if device is None:
+        gone = "was gone when this host's ingest started"
+    else:
+        gone = "is gone" if now is None else "is now on another device"
     error = (
         f"the evidence volume at {host.volume_root} {gone} (unmounted during the "
         "ingest?): artifacts read after that are missing or incomplete. Re-run the "

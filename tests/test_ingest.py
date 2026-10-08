@@ -138,7 +138,7 @@ class TestDiscover:
 class TestIngest:
     @patch("opensearch_mcp.ingest.run_and_ingest")
     @patch("opensearch_mcp.ingest.sha256_file", return_value="abc123")
-    def test_basic_ingest_populates_result(self, mock_sha, mock_rai):
+    def test_basic_ingest_populates_result(self, mock_sha, mock_rai, tmp_path):
         """ingest() calls run_and_ingest and populates ArtifactResult."""
         mock_rai.return_value = (100, 5, 0)
         client = MagicMock()
@@ -146,7 +146,7 @@ class TestIngest:
         audit = MagicMock()
         audit._next_audit_id.return_value = "aid-001"
 
-        host = DiscoveredHost(hostname="HOST1", volume_root=Path("/evidence/HOST1"))
+        host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)
         hive = Path("/evidence/HOST1/Windows/System32/config/SYSTEM")
         host.artifacts = [("shimcache", hive)]
 
@@ -197,7 +197,7 @@ class TestIngest:
 
     @patch("opensearch_mcp.ingest.run_and_ingest")
     @patch("opensearch_mcp.ingest.sha256_file", return_value="abc123")
-    def test_handles_tool_failure(self, mock_sha, mock_rai):
+    def test_handles_tool_failure(self, mock_sha, mock_rai, tmp_path):
         """ingest() catches RuntimeError from run_and_ingest and continues."""
         mock_rai.side_effect = RuntimeError("Tool crashed")
         client = MagicMock()
@@ -205,7 +205,7 @@ class TestIngest:
         audit = MagicMock()
         audit._next_audit_id.return_value = "aid-001"
 
-        host = DiscoveredHost(hostname="HOST1", volume_root=Path("/evidence/HOST1"))
+        host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)
         host.artifacts = [
             ("shimcache", Path("/evidence/SYSTEM")),
             ("amcache", Path("/evidence/Amcache.hve")),
@@ -257,7 +257,7 @@ class TestIngest:
 
     @patch("opensearch_mcp.ingest.run_and_ingest")
     @patch("opensearch_mcp.ingest.sha256_file", return_value="abc123")
-    def test_seen_runs_dedup(self, mock_sha, mock_rai):
+    def test_seen_runs_dedup(self, mock_sha, mock_rai, tmp_path):
         """Same tool+path (for registry) not run twice due to seen_runs dedup."""
         mock_rai.return_value = (50, 0, 0)
         client = MagicMock()
@@ -266,7 +266,7 @@ class TestIngest:
         audit._next_audit_id.return_value = "aid-001"
 
         config_dir = Path("/evidence/Windows/System32/config")
-        host = DiscoveredHost(hostname="HOST1", volume_root=Path("/evidence"))
+        host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)
         # 4 registry hive files that all map to "registry" tool
         # and all share the same parent directory
         host.artifacts = [
