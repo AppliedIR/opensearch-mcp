@@ -273,6 +273,10 @@ def _field_form(props: dict, field: str) -> str | None:
     return None
 
 
+class V1ReadIncomplete(RuntimeError):
+    """A pre-0.7 index answered for only some of its shards, or timed out."""
+
+
 def _v1_pairs(client, index: str) -> list[tuple[str, str, str]]:
     """(index, host.name, host.id) for every pair in one pre-0.7 index, read
     with that index's own field forms."""
@@ -289,6 +293,13 @@ def _v1_pairs(client, index: str) -> list[tuple[str, str, str]]:
         if after:
             comp["after"] = after
         resp = client.search(index=index, body={"size": 0, "aggs": {"p": {"composite": comp}}})
+        failed = (resp.get("_shards") or {}).get("failed") or 0
+        if resp.get("timed_out") or failed:  # a page of only some shards' pairs
+            why = "timed out" if resp.get("timed_out") else f"{failed} shard(s) failed"
+            raise V1ReadIncomplete(
+                f"pre-0.7 host names in {index} couldn't be read in full ({why}); "
+                "nothing was recorded, and the import runs again next time"
+            )
         agg = resp.get("aggregations", {}).get("p", {})
         for b in agg.get("buckets", []):
             pairs.append((index, b["key"]["name"], b["key"].get("id") or b["key"]["name"]))

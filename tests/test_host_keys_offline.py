@@ -642,3 +642,31 @@ def test_a_second_run_of_a_host_reports_only_its_own_removals():
     assert wc.removed_note("WKS12", "json-x", ctx.c12) == (
         "2 reserved identity fields removed from evidence"
     )
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"timed_out": True, "_shards": {"failed": 0}},
+        {"timed_out": False, "_shards": {"failed": 2}},
+    ],
+    ids=["timed out", "shards failed"],
+)
+def test_a_partial_read_leaves_the_pre_0_7_import_to_run_again(partial):
+    from opensearch_mcp.case_scope import V1ReadIncomplete, ensure_v1_imported
+
+    d = wc.case_dir_for(f"v1part-{uuid.uuid4().hex[:6]}")
+    (d / "CASE.yaml").write_text(f"case_id: {d.name}\n")
+    index = f"case-{d.name}-evtx-wks13"
+    client = MagicMock()
+    client.indices.get.return_value = {index: {}}
+    props = {"host": {"properties": {"name": {"type": "keyword"}, "id": {"type": "keyword"}}}}
+    client.indices.get_mapping.return_value = {index: {"mappings": {"properties": props}}}
+    page = {"aggregations": {"p": {"buckets": [{"key": {"name": "WKS13", "id": "WKS13"}}]}}}
+    client.search.return_value = {**page, **partial}
+    with pytest.raises(V1ReadIncomplete, match="runs again next time"):
+        ensure_v1_imported(client, d)
+    assert not host_identity.load(d).v1_imported  # not finalised on partial pairs
+    client.search.return_value = {**page, "timed_out": False, "_shards": {"failed": 0}}
+    assert ensure_v1_imported(client, d) is True  # the next run imports it
+    assert host_identity.load(d).v1_imported
