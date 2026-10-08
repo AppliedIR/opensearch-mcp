@@ -97,7 +97,10 @@ def test_an_image_that_cannot_be_mounted(case, monkeypatch, tmp_path):
         pytest.skip("fdisk is on /usr/bin or /bin here")
     monkeypatch.setenv("PATH", path)
     resp = srv.idx_ingest(path=str(case / "disk.raw"), hostname="h1", dry_run=False)
-    assert resp["status"] == "started", resp
+    # a worker that already failed when the launch answers is said to have
+    # failed there and then (it fails fast here, without fdisk): either way the
+    # run ends failed, and its log says why
+    assert resp["status"] in ("started", "failed"), resp
     status = _final()
     assert status["status"] == "failed", status
     assert status["log_tail"], status
