@@ -541,12 +541,16 @@ def _clear_stamps(client, case_ix):
             },
         ),
     ]
+    from opensearchpy.exceptions import NotFoundError
+
     cleared = 0
     for index, query in scopes:
         try:
             cleared += _ubq_to_completion(
                 client, index=index, body={"query": query, "script": script}
             )
+        except NotFoundError:
+            continue  # no such index: no stamps in it to clear
         except Exception as e:
             return {"status": "failed", "reason": f"retired stamps could not be cleared: {e}"}
     return {"status": "complete", "cleared": cleared}

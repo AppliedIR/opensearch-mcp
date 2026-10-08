@@ -32,22 +32,29 @@ ERRORS = {
 }
 
 
+def _artifacts(results):
+    """The artifacts' outcomes; `_cleared` is the step that clears retired stamps."""
+    return {k: v for k, v in results.items() if isinstance(v, dict) and not k.startswith("_")}
+
+
 @pytest.mark.parametrize("raises", ERRORS.values(), ids=ERRORS.keys())
 def test_every_failed_search_fails_its_artifact(gateway, raises):
     results = triage_remote.enrich_remote(_client(raises), "c1")
-    artifacts = {k: v for k, v in results.items() if isinstance(v, dict)}
+    artifacts = _artifacts(results)
     assert artifacts["registry_persistence"]["status"] == "failed"
     assert all(v["status"] == "failed" for v in artifacts.values()), artifacts
     assert all(v["reason"].startswith("search failed: ") for v in artifacts.values())
+    assert results["_cleared"]["status"] == "failed"  # the clear failed the same way
 
 
 def test_an_index_that_isnt_there_is_still_a_skip(gateway):
     results = triage_remote.enrich_remote(
         _client(NotFoundError(404, "index_not_found_exception", "no such index")), "c1"
     )
-    artifacts = {k: v for k, v in results.items() if isinstance(v, dict)}
+    artifacts = _artifacts(results)
     assert artifacts and all(v["status"] == "skipped" for v in artifacts.values()), artifacts
     assert not any("search failed" in v.get("reason", "") for v in artifacts.values())
+    assert results["_cleared"] == {"status": "complete", "cleared": 0}  # nothing to clear
 
 
 def test_a_mapping_error_on_one_index_fails_that_artifact_in_the_tool(gateway, monkeypatch):
