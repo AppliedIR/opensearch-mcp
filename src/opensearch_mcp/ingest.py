@@ -1115,16 +1115,13 @@ def _ingest_plaso_artifact(
         _update_status()
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
-    from opensearch_mcp.bulk import get_already_present
-
-    present_before = get_already_present()
     try:
         plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         from opensearch_mcp.paths import relative_evidence_path as _rel
 
         _plaso_src = _rel(artifact_path, host.volume_root)
         if tool_name == "prefetch":
-            cnt, bf, _note, outcome = parse_prefetch(
+            cnt, bf, _note, outcome, rows = parse_prefetch(
                 prefetch_dir=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -1136,7 +1133,7 @@ def _ingest_plaso_artifact(
                 host_dict=host_dict,
             )
         else:
-            cnt, bf, _note, outcome = parse_srum(
+            cnt, bf, _note, outcome, rows = parse_srum(
                 srum_path=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -1148,15 +1145,13 @@ def _ingest_plaso_artifact(
                 source_file=_plaso_src,
                 host_dict=host_dict,
             )
-        # A parser that failed fails its artifact, whatever it wrote first or
-        # was already in the case. One that ran but read nothing from inputs
-        # that are there failed too: Plaso exits 0 on a damaged file, and its
-        # errors return 0. Records already in the case (a shadow copy's, all
-        # on live) were read.
+        # The parser's final attempt decides: it failed, or it produced no
+        # rows from inputs that are there (Plaso exits 0 on a damaged file,
+        # and its errors return 0). Its rows count records already in the
+        # case (a shadow copy's, all on live); an earlier attempt's never do.
         from opensearch_mcp.results import PARSER_FAILED
 
-        nothing = not cnt and not bf and get_already_present() == present_before
-        if outcome == PARSER_FAILED or nothing:
+        if outcome == PARSER_FAILED or not rows:
             if artifact_path.is_dir():
                 n = sum(1 for f in artifact_path.iterdir() if f.suffix.lower() == ".pf")
                 what = f"{n} .pf file(s)"

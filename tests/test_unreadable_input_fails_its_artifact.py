@@ -63,7 +63,7 @@ def _run(tmp_path, unreadable=()):
         patch("opensearch_mcp.ingest.evtx_truncation", return_value=[]),
         patch("opensearch_mcp.ingest.parse_and_index", return_value=(5, 0, 0)),
         patch("opensearch_mcp.ingest.run_and_ingest", return_value=(7, 0, 0)),
-        patch("opensearch_mcp.parse_srum.parse_srum", return_value=(9, 0, "", "completed")),
+        patch("opensearch_mcp.parse_srum.parse_srum", return_value=(9, 0, "", "completed", 9)),
         patch("opensearch_mcp.ingest._run_custom_parser", return_value=(3, 0, 0)),
     ):
         ingest(

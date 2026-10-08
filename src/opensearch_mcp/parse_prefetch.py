@@ -8,6 +8,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
+from opensearch_mcp.bulk import counting_present
 from opensearch_mcp.results import PARSER_COMPLETED, PARSER_FAILED, PARSER_REDUCED
 
 
@@ -21,9 +22,11 @@ def parse_prefetch(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
-) -> tuple[int, int, str]:
+) -> tuple[int, int, str, str, int]:
     """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note,
-    outcome), outcome one of results.PARSER_COMPLETED/REDUCED/FAILED.
+    outcome, rows): outcome is one of results.PARSER_COMPLETED/REDUCED/FAILED,
+    and rows are what its final attempt produced, records already in the case
+    included.
 
     Strategy: wintools-first (PECmd on Windows), Plaso fallback.
     PECmd produces richer output than Plaso's prefetch parser.
@@ -38,7 +41,27 @@ def parse_prefetch(
 
     if wintools_available():
         try:
-            cnt, bf = _parse_prefetch_wintools(
+            with counting_present() as kept:  # this attempt's records already in the case
+                cnt, bf = _parse_prefetch_wintools(
+                    prefetch_dir,
+                    client,
+                    index_name,
+                    hostname,
+                    ingest_audit_id=ingest_audit_id,
+                    pipeline_version=pipeline_version,
+                    vss_id=vss_id,
+                    source_file=source_file,
+                    host_dict=host_dict,
+                )
+            return cnt, bf, "", PARSER_COMPLETED, cnt + bf + kept[0]
+        except Exception as e:
+            print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
+            if "connection" in str(e).lower() or "timeout" in str(e).lower():
+                mark_wintools_down()
+
+    try:
+        with counting_present() as kept:  # this attempt's records already in the case
+            cnt, bf = _parse_prefetch_plaso(
                 prefetch_dir,
                 client,
                 index_name,
@@ -49,31 +72,13 @@ def parse_prefetch(
                 source_file=source_file,
                 host_dict=host_dict,
             )
-            return cnt, bf, "", PARSER_COMPLETED
-        except Exception as e:
-            print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
-            if "connection" in str(e).lower() or "timeout" in str(e).lower():
-                mark_wintools_down()
-
-    try:
-        cnt, bf = _parse_prefetch_plaso(
-            prefetch_dir,
-            client,
-            index_name,
-            hostname,
-            ingest_audit_id=ingest_audit_id,
-            pipeline_version=pipeline_version,
-            vss_id=vss_id,
-            source_file=source_file,
-            host_dict=host_dict,
-        )
-        return cnt, bf, _fallback_note, PARSER_REDUCED
+        return cnt, bf, _fallback_note, PARSER_REDUCED, cnt + bf + kept[0]
     except subprocess.CalledProcessError as e:
         print(
             f"  prefetch: Plaso failed ({e})\n  NOTE: {_fallback_note}",
             file=sys.stderr,
         )
-        return 0, 0, _fallback_note, PARSER_FAILED
+        return 0, 0, _fallback_note, PARSER_FAILED, 0
 
 
 def _parse_prefetch_wintools(

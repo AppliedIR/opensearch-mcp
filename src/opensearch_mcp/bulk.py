@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 from opensearchpy import OpenSearch, helpers
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
@@ -56,6 +57,19 @@ def get_already_present() -> int:
     """Shadow-copy records not written because the record was already in the
     case (a 409 on `create`): the live volume's copy, or an earlier copy's, kept."""
     return getattr(_tls, "already_present", 0)
+
+
+@contextmanager
+def counting_present():
+    """The records kept as already present while the block runs (one parser
+    attempt's): yields a one-item list whose value is that count."""
+    outer = getattr(_tls, "present_scopes", ())
+    box = [0]
+    _tls.present_scopes = (*outer, box)
+    try:
+        yield box
+    finally:
+        _tls.present_scopes = outer
 
 
 def _split_present(errors) -> tuple[int, list | None]:
@@ -356,6 +370,8 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
         # A shadow copy's record already in the case is kept, never a failure.
         present, errors = _split_present(errors)
         _tls.already_present = get_already_present() + present
+        for box in getattr(_tls, "present_scopes", ()):
+            box[0] += present
         failed = len(actions) - success - present
 
         # Circuit breaker: detect systemic (cluster-wide) failures and

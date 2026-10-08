@@ -91,6 +91,12 @@ def _flush(success, errors, n):
         return bulk.flush_bulk(MagicMock(), actions)
 
 
+def _keep(n):
+    """A flush whose n records are all in the case already."""
+    if n:
+        assert _flush(0, [CONFLICT] * n, n) == (0, 0)
+
+
 def test_a_record_already_in_the_case_is_present_not_failed(capsys):
     bulk.reset_circuit_breaker()
     assert _flush(0, [CONFLICT], 1) == (0, 0)
@@ -160,9 +166,9 @@ def _scan(tmp_path, present, vss_id="vss1", before=0):
     host = DiscoveredHost(hostname="HOST1", volume_root=root, vss_id=vss_id)
     host.artifacts.append(("srum", srum))
 
-    def parse_srum(**kw):  # every row it read was in the case already
-        bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + present
-        return 0, 0, "", "completed"
+    def plaso(*a, **k):  # every row it read was in the case already
+        _keep(present)
+        return 0, 0
 
     audit = MagicMock()
     audit._next_audit_id.return_value = "aid-1"
@@ -172,7 +178,8 @@ def _scan(tmp_path, present, vss_id="vss1", before=0):
     bulk._tls.already_present = before  # what the thread counted before this run
     with (
         patch("opensearch_mcp.ingest.sha256_file", return_value="h"),
-        patch("opensearch_mcp.parse_srum.parse_srum", side_effect=parse_srum),
+        patch("opensearch_mcp.wintools.wintools_available", return_value=False),
+        patch("opensearch_mcp.parse_srum._parse_srum_plaso", side_effect=plaso),
     ):
         result = ingest(
             hosts=[host],
@@ -220,7 +227,9 @@ def test_a_run_counts_only_its_own(tmp_path, status_dir):
 
 def test_a_run_with_nothing_present_says_nothing_of_it(tmp_path, status_dir, monkeypatch):
     monkeypatch.setattr(
-        "opensearch_mcp.parse_srum.parse_srum", lambda **kw: (3, 0, "", "completed"), raising=True
+        "opensearch_mcp.parse_srum.parse_srum",
+        lambda **kw: (3, 0, "", "completed", 3),
+        raising=True,
     )
     root = tmp_path / "H"
     srum = root / "SRUDB.dat"
@@ -301,7 +310,7 @@ def _failing_parser(monkeypatch, module, primary, fallback):
     from opensearch_mcp import wintools
 
     def wrote_then_raised(*a, **k):
-        bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + 5
+        _keep(5)
         raise RuntimeError("PECmd crashed mid-run")
 
     def plaso_failed(*a, **k):
@@ -374,7 +383,7 @@ def test_a_fallback_that_worked_with_every_row_already_present_is_done(
     mod = importlib.import_module(f"opensearch_mcp.{module}")
 
     def plaso_all_present(*a, **k):
-        bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + 4
+        _keep(12)
         return 0, 0
 
     monkeypatch.setattr(wintools, "wintools_available", lambda: False)
@@ -382,3 +391,76 @@ def test_a_fallback_that_worked_with_every_row_already_present_is_done(
     monkeypatch.setattr(mod, fallback, plaso_all_present)
     row = _scan_artifact(tmp_path, artifact)
     assert row["status"] == "done", row
+
+
+@pytest.mark.parametrize(
+    "artifact, module, primary, fallback",
+    [
+        ("prefetch", "parse_prefetch", "_parse_prefetch_wintools", "_parse_prefetch_plaso"),
+        ("srum", "parse_srum", "_parse_srum_wintools", "_parse_srum_plaso"),
+    ],
+)
+def test_rows_an_earlier_attempt_kept_never_count_for_the_final_one(
+    tmp_path, status_dir, monkeypatch, artifact, module, primary, fallback
+):
+    """PECmd keeps 3 rows already in the case, then raises; Plaso then runs
+    and produces nothing."""
+    import importlib
+
+    from opensearch_mcp import wintools
+
+    mod = importlib.import_module(f"opensearch_mcp.{module}")
+
+    def wrote_then_raised(*a, **k):
+        _keep(3)
+        raise RuntimeError("PECmd crashed mid-run")
+
+    monkeypatch.setattr(wintools, "wintools_available", lambda: True)
+    monkeypatch.setattr(mod, primary, wrote_then_raised)
+    monkeypatch.setattr(mod, fallback, lambda *a, **k: (0, 0))
+    row = _scan_artifact(tmp_path, artifact)
+    assert row["status"] == "failed" and "no records read" in row["detail"], row
+
+
+def test_a_count_of_kept_records_covers_its_block_only():
+    bulk.reset_circuit_breaker()
+    _keep(2)
+    with bulk.counting_present() as outer:
+        _keep(3)
+        with bulk.counting_present() as inner:
+            _keep(4)
+        _keep(1)
+    _keep(5)
+    assert (outer[0], inner[0]) == (8, 4)
+
+
+@pytest.mark.parametrize(
+    "artifact, module, primary",
+    [("prefetch", "parse_prefetch", "_parse_prefetch_wintools"),
+     ("srum", "parse_srum", "_parse_srum_wintools")],
+)  # fmt: skip
+def test_a_wintools_parser_whose_rows_are_all_in_the_case_is_done(
+    tmp_path, status_dir, monkeypatch, artifact, module, primary
+):
+    import importlib
+
+    from opensearch_mcp import wintools
+
+    def all_present(*a, **k):
+        _keep(7)
+        return 0, 0
+
+    monkeypatch.setattr(wintools, "wintools_available", lambda: True)
+    monkeypatch.setattr(importlib.import_module(f"opensearch_mcp.{module}"), primary, all_present)
+    row = _scan_artifact(tmp_path, artifact)
+    assert row["status"] == "done", row
+
+
+def test_a_final_attempt_that_failed_fails_whatever_rows_it_reports(
+    tmp_path, status_dir, monkeypatch
+):
+    monkeypatch.setattr(
+        "opensearch_mcp.parse_srum.parse_srum", lambda **kw: (2, 0, "", "failed", 2)
+    )
+    row = _scan_artifact(tmp_path, "srum")
+    assert row["status"] == "failed", row
