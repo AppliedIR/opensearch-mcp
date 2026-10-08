@@ -311,6 +311,30 @@ def test_an_unfinished_host_rename_refuses_the_run(gate, capsys):
     assert gate.status()["status"] == "failed"
 
 
+def test_a_list_step_skipped_during_a_host_rename_is_applied_once_it_ends(gate, monkeypatch):
+    """The scan met a running rename and skipped the list's confirmations;
+    the rename ended before the gate. The gate applies the list, so the run
+    goes on without waiting for the examiner."""
+    command, args = _listed(gate)
+    op = {"kind": "rename", "canonical": "WKS02"}
+    (gate.case_dir / hi.OPS).write_text(json.dumps({"ops": {"op-1": {**op, "state": "running"}}}))
+    real = cli._gate
+
+    def the_rename_ends_first(*a, **k):
+        (gate.case_dir / hi.OPS).write_text(json.dumps({"ops": {"op-1": {**op, "state": "done"}}}))
+        return real(*a, **k)
+
+    monkeypatch.setattr(cli, "_gate", the_rename_ends_first)
+    t, out = gate.start(command, args)
+    t.join(15)
+    if t.is_alive():  # it waits: end it
+        host_gate.cancel(gate.case_dir, RUN, "ex1")
+        t.join(15)
+    assert out == {"ok": True}
+    assert RUN not in hi.load(gate.case_dir).waits
+    assert {w["host.id"] for w in gate.writes} == {"WKS71"}
+
+
 def test_the_case_lock_is_let_go_when_the_command_ends(gate):
     command, args = _listed(gate)
     command(args)
