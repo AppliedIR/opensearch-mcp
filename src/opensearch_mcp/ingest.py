@@ -1260,10 +1260,19 @@ def _ingest_plaso_artifact(
             input_sha256s=[plaso_hash] if plaso_hash else [],
             source_evidence=str(artifact_path),
         )
+        if bf:  # records OpenSearch rejected: the artifact is incomplete
+            from opensearch_mcp.bulk import get_last_bulk_reason
+
+            reason = get_last_bulk_reason()
+            ar.error = f"{bf:,} of {cnt + bf:,} records rejected by OpenSearch" + (
+                f" ({reason[:200]})" if reason else ""
+            )
         if tool_status:
-            tool_status["status"] = "complete"
+            tool_status["status"] = "failed" if ar.error else "complete"
             tool_status["indexed"] = cnt
             tool_status["bulk_failed"] = bf
+            if ar.error:
+                tool_status["error"] = ar.error
             _update_status()
         _progress(
             "artifact_done",

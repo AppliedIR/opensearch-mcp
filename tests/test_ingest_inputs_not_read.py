@@ -489,4 +489,6 @@ def test_prefetch_that_gives_records_is_complete(plaso):
 def test_records_all_rejected_are_not_read_as_no_records(plaso):
     host, st, _ = plaso("prefetch", PF, (0, 5))
     (row,) = st["checklist"]
-    assert row["status"] == "done", row  # the rejection count reports it
+    # failed for the rejection, which names it; never "no records read"
+    assert row["status"] == "failed" and "5 of 5 records rejected" in row["detail"], row
+    assert "no records read" not in row["detail"]
