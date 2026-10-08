@@ -301,8 +301,21 @@ def test_an_unfinished_host_rename_refuses_the_run(gate, capsys):
             {"ops": {"op-1": {"state": "incomplete", "kind": "rename", "canonical": "WKS02"}}}
         )
     )
-    with pytest.raises(SystemExit):
-        command(args)
+    # A refusal that regressed would wait at the gate for good: the run gets
+    # its own bound (a thread and a join, no pytest plugin), so it fails instead
+    ended = {}
+
+    def run():
+        try:
+            command(args)
+        except SystemExit as e:
+            ended["exit"] = e.code
+
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout=30)
+    assert not runner.is_alive(), "the run waited at the host gate instead of being refused"
+    assert ended.get("exit") == 1
     assert (
         "host operation op-1 (rename to 'WKS02') is incomplete: the examiner resumes it"
         in capsys.readouterr().err
