@@ -308,9 +308,9 @@ def test_each_template_maps_the_entry_fields_as_keyword(template):
         assert props[f"threat_intel.iocs.{field}"] == {"type": "keyword"}, (template, field)
 
 
-def test_there_are_fourteen_such_templates():
+def test_there_are_fifteen_such_templates():
     assert (
-        len([p for p in MAPPINGS.glob("*.json") if "threat_intel.verdict" in p.read_text()]) == 14
+        len([p for p in MAPPINGS.glob("*.json") if "threat_intel.verdict" in p.read_text()]) == 15
     )
 
 
