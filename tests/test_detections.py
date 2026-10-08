@@ -434,4 +434,5 @@ class TestDetectionsToolRegistration:
             if callable(obj) and name.startswith("idx_") and not name.startswith("_")
         ]
         # 17 original + idx_shard_status (shard-capacity) + idx_install_pipelines (Fix G)
-        assert len(tool_names) == 19
+        # + idx_host_inventory (the case's machines, read-only)
+        assert len(tool_names) == 20
