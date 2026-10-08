@@ -62,6 +62,7 @@ class WriteContext:
     unit_raw: str
     origin: str = host_identity.ARTIFACT
     run_id: str = ""
+    store: str = ""  # a shadow copy's id (vss1, p2-vss1); "" for live or no --vss
     _resolved: dict = field(default_factory=dict)
 
     def resolve(self, raw: str | None) -> tuple[str, str, str]:
@@ -174,6 +175,8 @@ def host_context(case_dir, case_id: str, host, run_id: str = "") -> WriteContext
         origin=getattr(host, "name_origin", "") or host_identity.FOLDER,
         run_id=run_id,
     )
+    vss_id = getattr(host, "vss_id", "") or ""
+    ctx.store = "" if vss_id == "live" else vss_id
     host.write_ctx = ctx
     return ctx
 
@@ -398,6 +401,10 @@ def stamp(ctx: WriteContext, actions: list[dict]) -> None:
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
+        if ctx.store and action.get("_op_type", "index") == "index":
+            # a shadow copy never replaces a record already in the case: the
+            # live volume's tag wins, and the first copy to hold it keeps its own
+            action["_op_type"] = "create"
 
 
 # What the stamp owns, dotted and nested: evidence that carries them is restamped.

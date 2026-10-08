@@ -45,6 +45,7 @@ class IngestResult:
     hosts: list[HostResult] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     pipeline_version: str = ""
+    already_present: int = 0  # shadow-copy records already in the case, kept
 
     @property
     def total_indexed(self) -> int:

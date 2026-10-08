@@ -52,6 +52,26 @@ def _set_counter(n: int) -> None:
     _tls.consecutive_systemic_failures = n
 
 
+def get_already_present() -> int:
+    """Shadow-copy records not written because the record was already in the
+    case (a 409 on `create`): the live volume's copy, or an earlier copy's, kept."""
+    return getattr(_tls, "already_present", 0)
+
+
+def _split_present(errors) -> tuple[int, list | None]:
+    """(409s on create, the other errors)."""
+    if not isinstance(errors, list):
+        return 0, None
+    present, rest = 0, []
+    for err in errors:
+        info = err.get("create") if isinstance(err, dict) else None
+        if isinstance(info, dict) and info.get("status") == 409:
+            present += 1
+        else:
+            rest.append(err)
+    return present, rest
+
+
 def get_last_bulk_reason() -> str:
     """Return the first-error reason from the most recent bulk failure
     (thread-local). Empty string when the last batch succeeded or no
@@ -77,8 +97,8 @@ class ShardCapacityExhausted(RuntimeError):
 def reset_circuit_breaker() -> None:
     """Call at ingest start to clear thread-local state from prior runs.
 
-    Clears BOTH the circuit-breaker counter AND the last-bulk-reason
-    tracker — both live on the same `_tls` and both need to be reset
+    Clears the circuit-breaker counter, the last-bulk-reason tracker and
+    the already-present count — all live on the same `_tls` and need to be reset
     per ingest so an in-process MCP tool (idx_ingest_json,
     idx_ingest_delimited, idx_ingest_accesslog, idx_ingest_memory,
     idx_ingest) running a second time in the same thread doesn't
@@ -88,6 +108,7 @@ def reset_circuit_breaker() -> None:
     """
     _set_counter(0)
     _tls.last_bulk_reason = ""
+    _tls.already_present = 0
 
 
 def _is_systemic_failure(success: int, total: int, errors: list | None) -> tuple[bool, str]:
@@ -332,15 +353,16 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
             raise_on_error=False,
             request_timeout=60,
         )
-        failed = len(actions) - success
+        # A shadow copy's record already in the case is kept, never a failure.
+        present, errors = _split_present(errors)
+        _tls.already_present = get_already_present() + present
+        failed = len(actions) - success - present
 
         # Circuit breaker: detect systemic (cluster-wide) failures and
         # halt ingest if they persist across multiple batches. State is
         # thread-local (Rev 6) so concurrent in-process tools don't
         # cross-halt each other.
-        is_sys, sys_reason = _is_systemic_failure(
-            success, len(actions), errors if isinstance(errors, list) else None
-        )
+        is_sys, sys_reason = _is_systemic_failure(success, len(actions), errors)
         if is_sys:
             _set_counter(_get_counter() + 1)
             if _get_counter() >= _CIRCUIT_BREAKER_THRESHOLD:

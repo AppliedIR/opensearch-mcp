@@ -1648,6 +1648,9 @@ def idx_ingest(
         all_logs: Parse all evtx files (default: forensic logs only).
         reduced_ids: Filter to ~78 high-value Event IDs.
         full: Include all tiers including MFT, USN, timeline.
+        vss: Also ingest the image's volume shadow copies. A record's
+            vhir.vss_id is "live" if the record exists on the live volume;
+            otherwise the earliest shadow copy that holds it (vss1 first).
         dry_run: Preview without indexing (default True). Set False to execute
             immediately if path and parameters are confirmed.
     """
@@ -2014,6 +2017,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
             "artifacts_total": totals.get("artifacts_total", 0),
             "log_file": ing.get("log_file", ""),
         }
+        if totals.get("already_present"):
+            s["already_present"] = totals["already_present"]
         # Warn the LLM/user when rejections occurred — makes silent
         # drops visible in the response payload, not only in stderr.
         if bf > 0:
@@ -2152,9 +2157,16 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 s["message"] = f"Ingest complete with {len(errors)} error(s)."
                 s["errors"] = errors
             else:
+                kept = totals.get("already_present", 0)
                 s["message"] = (
                     f"Ingest complete. {totals.get('indexed', 0):,} docs submitted "
                     f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
+                    + (
+                        f" {kept:,} shadow-copy records were already in the case "
+                        "(live or an earlier copy) and kept their tag."
+                        if kept
+                        else ""
+                    )
                 )
             # Layer 1: post-ingest next_steps
             artifacts_done = {item["artifact"] for item in checklist if item["status"] == "done"}

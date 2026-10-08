@@ -236,6 +236,16 @@ def ingest(
     start = time.monotonic()
     started_ts = datetime.now(timezone.utc).isoformat()
     result = IngestResult(pipeline_version=_PIPELINE_VERSION)
+    from opensearch_mcp.bulk import get_already_present
+
+    present_before = get_already_present()
+
+    def _totals() -> dict:
+        totals = _compute_totals(status_hosts)
+        kept = get_already_present() - present_before
+        if kept:
+            totals["already_present"] = kept
+        return totals
 
     # Build status host structure for tracking
     status_hosts = _build_status_hosts(hosts, active_names, active_plaso, active_custom)
@@ -249,7 +259,7 @@ def ingest(
             return
         from opensearch_mcp.bulk import get_last_bulk_reason
 
-        totals = _compute_totals(status_hosts)
+        totals = _totals()
         write_status(
             case_id=case_id,
             pid=status_pid,
@@ -291,12 +301,13 @@ def ingest(
         )
 
     result.elapsed_seconds = time.monotonic() - start
+    result.already_present = get_already_present() - present_before
 
     # Final status
     if status_pid:
         from opensearch_mcp.bulk import get_last_bulk_reason
 
-        totals = _compute_totals(status_hosts)
+        totals = _totals()
         has_errors = any(
             a.get("status") == "failed" for h in status_hosts for a in h.get("artifacts", [])
         )
@@ -1104,6 +1115,9 @@ def _ingest_plaso_artifact(
         _update_status()
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
+    from opensearch_mcp.bulk import get_already_present
+
+    present_before = get_already_present()
     try:
         plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         from opensearch_mcp.paths import relative_evidence_path as _rel
@@ -1136,7 +1150,8 @@ def _ingest_plaso_artifact(
             )
         # Nothing read from inputs that are there is a failure, not an empty
         # artifact: Plaso exits 0 on a damaged file, and its errors return 0.
-        if not cnt and not bf:
+        # A shadow copy's records that were all in the case already were read.
+        if not cnt and not bf and get_already_present() == present_before:
             if artifact_path.is_dir():
                 n = sum(1 for f in artifact_path.iterdir() if f.suffix.lower() == ".pf")
                 what = f"{n} .pf file(s)"

@@ -815,6 +815,23 @@ def _set_units(
             )
 
 
+def _run_summary(result) -> str:
+    """The scan's closing line: hosts, entries written, and the shadow-copy
+    entries kept because the case already held them."""
+    line = f"{len(result.hosts)} host(s), {result.total_indexed:,} entries indexed."
+    if result.already_present:
+        line += (
+            f" {result.already_present:,} shadow-copy entries were already in the case"
+            " (live or an earlier copy) and kept their tag."
+        )
+    return line
+
+
+def _kept_total(result) -> dict:
+    """The status totals' count of shadow-copy entries kept, when there are any."""
+    return {"already_present": result.already_present} if result.already_present else {}
+
+
 def _rebuilt_status_host(h) -> dict:
     """A host's status entry rebuilt from its result for the hayabusa phase,
     keeping the evtx files it dropped before parsing."""
@@ -1571,7 +1588,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     )
         minutes = result.elapsed_seconds / 60
         print(f"\nDone in {minutes:.1f} minutes. ", end="")
-        print(f"{len(result.hosts)} host(s), {result.total_indexed:,} entries indexed.")
+        print(_run_summary(result))
         if total_bulk_failed:
             # Primary action: presume loss until proven otherwise
             # (safer default — matches operator mental model that
@@ -1625,6 +1642,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     existing_hosts,
                     {
                         "indexed": result.total_indexed,
+                        **_kept_total(result),
                         "artifacts_total": n_arts,
                         "artifacts_complete": n_done,
                         "hosts_total": len(existing_hosts),
@@ -1706,6 +1724,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     existing_hosts,
                     {
                         "indexed": result.total_indexed + total_alerts,
+                        **_kept_total(result),
                         "artifacts_total": n_arts,
                         "artifacts_complete": n_arts - (1 if skipped or failed_hosts else 0),
                         "hosts_total": len(existing_hosts),
@@ -3316,7 +3335,14 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--exclude", help="Artifact types (comma-sep)")
     p.add_argument("--full", action="store_true", help="Include all tiers (MFT, USN, timeline)")
     p.add_argument("--config", help="YAML config file for complex filtering")
-    p.add_argument("--vss", action="store_true", help="Include volume shadow copies")
+    p.add_argument(
+        "--vss",
+        action="store_true",
+        help=(
+            "Include volume shadow copies. vhir.vss_id is 'live' if the record exists "
+            "on the live volume, otherwise the earliest shadow copy that holds it"
+        ),
+    )
     p.add_argument(
         "--parallel",
         type=int,
