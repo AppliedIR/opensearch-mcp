@@ -257,6 +257,7 @@ def test_the_access_log_source_is_case_relative(tmp_path, monkeypatch):
     for name in (
         "_preflight_shard_capacity",
         "_ensure_case_active",
+        "AuditWriter",
     ):
         monkeypatch.setattr(ingest_cli, name, MagicMock())
     monkeypatch.setattr(ingest_cli, "get_client", MagicMock())

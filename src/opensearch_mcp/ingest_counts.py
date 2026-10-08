@@ -14,11 +14,15 @@ import sys
 _SAMPLE = 20
 
 
-def stored_counts(client, index: str, audit_id: str) -> dict:
-    """{"stored": documents carrying this run's audit id, "ignored": {field:
-    documents where the mapping ignored that field}}, or {} if the cluster
-    couldn't be asked: counting never fails the ingest."""
-    run = {"term": {"vhir.ingest_audit_id": audit_id}}
+def stored_counts(client, index: str, audit_id: str | list[str]) -> dict:
+    """{"stored": documents carrying this run's audit id (or any of its
+    files' ids), "ignored": {field: documents where the mapping ignored that
+    field}}, or {} if the cluster couldn't be asked: counting never fails the
+    ingest."""
+    if isinstance(audit_id, list):
+        run = {"terms": {"vhir.ingest_audit_id": audit_id}}
+    else:
+        run = {"term": {"vhir.ingest_audit_id": audit_id}}
     with_ignored = {"bool": {"filter": [run, {"exists": {"field": "_ignored"}}]}}
     try:
         client.indices.refresh(index=index)

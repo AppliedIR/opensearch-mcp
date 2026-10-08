@@ -140,7 +140,7 @@ def ingest(tag, status_dir, monkeypatch):
             return "rejection-status-aid"
 
         def log(self, **k):
-            pass
+            return k.get("audit_id") or "rejection-status-aid"
 
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", f"run-{run}")
     monkeypatch.setattr(ingest_cli, "AuditWriter", _Audit)

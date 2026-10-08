@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -350,6 +350,7 @@ class TestDelimitedWrapperTerminalStatus:
         monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
         monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
         monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+        monkeypatch.setattr(ingest_cli, "AuditWriter", MagicMock())  # each file's entry
 
         args = argparse.Namespace(
             path=str(tmp_path),
@@ -390,6 +391,7 @@ class TestDelimitedWrapperTerminalStatus:
         monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
         monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
         monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+        monkeypatch.setattr(ingest_cli, "AuditWriter", MagicMock())  # each file's entry
 
         args = argparse.Namespace(
             path=str(tmp_path),
@@ -462,6 +464,7 @@ class TestDelimitedRecursiveIsOneLevel:
         monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
         monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
         monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+        monkeypatch.setattr(ingest_cli, "AuditWriter", MagicMock())  # each file's entry
 
         ingested: list[str] = []
 
@@ -529,6 +532,7 @@ class TestDelimitedRecursiveIsOneLevel:
         monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "TEST-CASE")
         monkeypatch.setattr(ingest_cli, "_ensure_case_active", lambda _c: None)
         monkeypatch.setattr(ingest_cli, "reset_circuit_breaker", lambda: None, raising=False)
+        monkeypatch.setattr(ingest_cli, "AuditWriter", MagicMock())  # each file's entry
 
         ingested: list[str] = []
 

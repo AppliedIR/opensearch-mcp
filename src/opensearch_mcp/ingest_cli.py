@@ -1793,6 +1793,36 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
 
 @_closes_write_context
+def _file_entry(audit, tool: str, f: Path, hostname: str, index_name: str, run_id) -> str:
+    """Mint this file's audit id and write its entry (the file, its sha256 and
+    the run) before any of its records is indexed, so every id a record
+    carries names the file it came from, even if the run stops part-way.
+    "" when the entry couldn't be written: the file is then not indexed."""
+    aid = audit._next_audit_id()
+    try:
+        sha = sha256_file(f)
+    except OSError:  # unreadable: its parse fails and names it
+        sha = ""
+    logged = audit.log(
+        tool=tool,
+        audit_id=aid,
+        params={
+            "hostname": hostname,
+            "index_name": index_name,
+            "file": str(f),
+            "run_id": run_id or "",
+        },  # fmt: skip
+        result_summary="recorded before its records were indexed",
+        input_files=[str(f)],
+        input_sha256s=[sha] if sha else [],
+        source_evidence=str(f),
+    )
+    return "" if logged is None else aid  # None: not written
+
+
+NO_ENTRY = "its audit entry couldn't be written, so it wasn't indexed"
+
+
 def cmd_csv(args: argparse.Namespace) -> None:
     """Ingest a pre-parsed CSV (examiner identifies the tool).
 
@@ -1932,7 +1962,6 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     client = get_client()
     _preflight_shard_capacity(client, "json", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
-    aid = audit._next_audit_id()
     case_host_dict = _load_case_host_dict(case_id)
 
     files = (
@@ -1987,6 +2016,11 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             suffix = stem_type("json", getattr(args, "index_suffix", None) or f.stem)
             index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
+            aid = _file_entry(audit, "ingest_json", f, hostname, index_name, run_id)
+            if not aid:
+                _json_failed_files.append((str(f), NO_ENTRY))
+                print(f"skipped ({NO_ENTRY})")
+                continue
             try:
                 cnt, sk, bf, hr = ingest_json(
                     f,
@@ -2062,10 +2096,10 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             print(f"  ... and {len(_json_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_json",
-        audit_id=aid,
         params={
             "path": str(input_path),
             "hostname": hostname,
+            "run_id": run_id or "",
             "bulk_failed": total_bf,
             "failed_files_count": len(_json_failed_files),
         },
@@ -2314,7 +2348,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
     client = get_client()
     _preflight_shard_capacity(client, "delimited", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
-    aid = audit._next_audit_id()
+    file_aids: list[str] = []
     case_host_dict = _load_case_host_dict(case_id)
 
     files = _delim_files(input_path, getattr(args, "only_files", None))
@@ -2375,6 +2409,12 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 print("skipped (unrecognized format)")
                 _delim_failed_files.append((str(f), "unrecognized format"))
                 continue
+            aid = _file_entry(audit, "ingest_delimited", f, hostname, index_name, run_id)
+            if not aid:
+                _delim_failed_files.append((str(f), NO_ENTRY))
+                print(f"skipped ({NO_ENTRY})")
+                continue
+            file_aids.append(aid)
             try:
                 cnt, sk, bf, hr = ingest_delimited(
                     f,
@@ -2442,7 +2482,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
         raise
 
-    counts = stored_counts(client, ",".join(sorted(touched)), aid) if touched else {}
+    counts = stored_counts(client, ",".join(sorted(touched)), file_aids) if touched else {}
     print(
         f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed{describe(counts)}."
     )
@@ -2456,10 +2496,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  ... and {len(_delim_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_delimited",
-        audit_id=aid,
         params={
             "path": str(input_path),
             "hostname": hostname,
+            "run_id": run_id or "",
             "bulk_failed": total_bf,
             "failed_files_count": len(_delim_failed_files),
         },
@@ -2535,7 +2575,6 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     client = get_client()
     _preflight_shard_capacity(client, "accesslog", case_id=case_id, run_id=run_id or "")
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
-    aid = audit._next_audit_id()
     case_host_dict = _load_case_host_dict(case_id)
     suffix = accesslog_suffix(getattr(args, "index_suffix", None))
 
@@ -2574,6 +2613,11 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         for idx, f in enumerate(files):
             index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
+            aid = _file_entry(audit, "ingest_accesslog", f, hostname, index_name, run_id)
+            if not aid:
+                _alog_failed_files.append((str(f), NO_ENTRY))
+                print(f"skipped ({NO_ENTRY})")
+                continue
             try:
                 cnt, sk, bf = ingest_accesslog(
                     f,
@@ -2642,10 +2686,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  ... and {len(_alog_failed_files) - 10} more")
     audit.log(
         tool="idx_ingest_accesslog",
-        audit_id=aid,
         params={
             "path": str(input_path),
             "hostname": hostname,
+            "run_id": run_id or "",
             "bulk_failed": total_bf,
             "failed_files_count": len(_alog_failed_files),
         },

@@ -255,6 +255,15 @@ class TestSubRunCountsAreSummed:
         )
         assert detail == "7 docs submitted, 7 stored", detail
 
+    def test_a_run_of_two_files_counts_both_files_ids(self, case, tmp_path, monkeypatch):
+        """Each file has its own audit id; the run's count covers them all."""
+        folder = tmp_path / "Netstat"
+        folder.mkdir()
+        _rows(folder / "Netstat-a.csv", 3, "h1")
+        _rows(folder / "Netstat-b.csv", 2, "h1")
+        detail = _wrapper(case, monkeypatch, "count-two", path=str(folder), hostname="h1")
+        assert detail == "5 docs submitted, 5 stored", detail
+
     def test_no_partial_total_when_a_sub_run_has_no_counts(self, case, tmp_path, monkeypatch):
         top = tmp_path / "Output"
         for host in ("h1", "h2"):
