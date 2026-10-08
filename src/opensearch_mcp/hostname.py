@@ -61,35 +61,31 @@ _HOST_FIELD_PRIORITY: tuple[str, ...] = (
 )
 
 
-def _get_any_case(doc: dict, key: str) -> object | None:
-    """`doc[key]`, or else the value of the first key equal to it ignoring case."""
-    if key in doc:
-        return doc[key]
-    lower = key.lower()
-    for k, v in doc.items():
-        if isinstance(k, str) and k.lower() == lower:
-            return v
-    return None
-
-
 def _dotted_get(doc: dict, dotted: str) -> object | None:
-    """Traverse `doc` by dotted key path, each key matched ignoring case.
-    Returns None on any gap."""
+    """Traverse `doc` by dotted key path. Returns None on any gap."""
     cur: object = doc
     for part in dotted.split("."):
         if not isinstance(cur, dict):
             return None
-        cur = _get_any_case(cur, part)
+        cur = cur.get(part)
         if cur is None:
             return None
     return cur
 
 
+# Names that only ever mean a machine, read whatever their case. `Host` stays
+# exact (Kansa's spelling): a lower-case `host` is the HTTP Host header in web
+# logs (Zeek http.log, nginx JSON), a website, not a machine. Dotted fields stay
+# exact too.
+_ANY_CASE = frozenset({"ComputerName", "Computer", "Hostname", "DeviceName", "PSComputerName"})
+
+
 @functools.lru_cache(maxsize=512)
 def _host_keys(keys: tuple) -> tuple[tuple[str, str], ...]:
     """For one set of record keys (a CSV's header, so one call per file), the
-    key each priority field reads, ignoring case (an exact match first), and
-    any dotted rest of the field. Fields the record lacks are left out."""
+    key each priority field reads, in priority order, and any dotted rest of
+    the field: an exact match, or for `_ANY_CASE` a match ignoring case.
+    Fields the record lacks are left out."""
     exact = set(keys)
     lowered: dict[str, str] = {}
     for k in keys:
@@ -98,19 +94,20 @@ def _host_keys(keys: tuple) -> tuple[tuple[str, str], ...]:
     plan = []
     for field in _HOST_FIELD_PRIORITY:
         head, _, rest = field.partition(".")
-        actual = head if head in exact else lowered.get(head.lower())
-        if actual is not None:
-            plan.append((actual, rest))
+        if head in exact:
+            plan.append((head, rest))
+        elif field in _ANY_CASE and head.lower() in lowered:
+            plan.append((lowered[head.lower()], rest))
     return tuple(plan)
 
 
 def extract_host_from_record(doc: dict) -> str | None:
     """Walk `_HOST_FIELD_PRIORITY` on a parsed CSV row / JSON doc.
 
-    Keys are matched ignoring case, in priority order, so `computername` and
-    `HOSTNAME` are read as `ComputerName` and `Hostname` are. First non-empty
-    string hit wins. Returns the raw value unchanged — normalization is
-    HostDictionary's job. None if no priority field resolves.
+    Machine-only names (`_ANY_CASE`) are matched ignoring case, so
+    `computername` and `HOSTNAME` are read; `Host` and dotted fields are
+    exact. First non-empty string hit wins. Returns the raw value unchanged —
+    normalization is HostDictionary's job. None if no priority field resolves.
     """
     for key, rest in _host_keys(tuple(doc)):
         val = doc[key]
