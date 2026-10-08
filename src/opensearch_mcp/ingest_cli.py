@@ -2483,7 +2483,6 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 # ---------------------------------------------------------------------------
 
 
-@_closes_write_context
 def accesslog_suffix(wanted: str | None) -> str:
     """An access-log index's type: `accesslog`, or a suffix of the caller's own
     kept under `accesslog-`, so the index always takes the access-log template
@@ -2495,6 +2494,7 @@ def accesslog_suffix(wanted: str | None) -> str:
     return stem_type("accesslog", wanted)
 
 
+@_closes_write_context
 def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__

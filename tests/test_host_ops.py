@@ -362,3 +362,40 @@ def test_intel_waits_for_an_unfinished_operation(case, monkeypatch, tmp_path):
     with pytest.raises(host_ops.HostOpRefused, match="op-7"):
         cli.cmd_enrich_intel(argparse.Namespace(case=case.name))
     assert ran == []
+
+
+def test_the_access_log_command_puts_back_the_callers_write_context(tmp_path, monkeypatch):
+    """What the command opens and holds (a unit's context, the case lock) ends
+    with it, even when it stops partway."""
+    import argparse
+    import contextlib
+    from unittest.mock import MagicMock
+
+    from opensearch_mcp import ingest_cli as cli
+
+    log = tmp_path / "access.log"
+    log.write_text("")
+    for name in ("_ensure_case_active", "get_client", "_preflight_shard_capacity",
+                 "AuditWriter", "_load_case_host_dict"):  # fmt: skip
+        monkeypatch.setattr(cli, name, MagicMock())
+    monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
+    released = []
+
+    @contextlib.contextmanager
+    def lock():
+        yield
+        released.append(True)
+
+    def open_unit(*a, **k):
+        wc._tls.ctx = "the unit's context"
+        wc.hold(lock())
+        raise RuntimeError("stopped partway")
+
+    monkeypatch.setattr(cli, "_open_unit", open_unit)
+    callers = object()
+    monkeypatch.setattr(wc._tls, "ctx", callers, raising=False)
+    with pytest.raises(RuntimeError, match="stopped partway"):
+        cli.cmd_ingest_accesslog(argparse.Namespace(
+            path=str(log), case="c1", hostname="web01", time_from=None, time_to=None,
+            dry_run=False, index_suffix="weblogs"))  # fmt: skip
+    assert wc.current() is callers and released == [True]
