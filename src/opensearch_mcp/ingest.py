@@ -407,21 +407,25 @@ def run_hayabusa_batch(
     host_dict=None,
     case_dir=None,
     run_tmpdir=None,
+    run_id: str = "",
 ) -> dict:
     """Run Hayabusa on all hosts' evtx dirs, ingest CSV results.
 
     Called as a post-ingest phase — evtx data is already indexed.
     run_tmpdir: the run's extract/mount directory, for an image or archive.
+    run_id: the ingest run's id, recorded on each host's Hayabusa entry.
     """
     with wc.restoring():
         return _run_hayabusa_batch(
-            hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir
-        )
+            hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir,
+            run_id,
+        )  # fmt: skip
 
 
 def _run_hayabusa_batch(
-    hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir=None
-):
+    hosts, client, case_id, audit, on_progress, host_dict, case_dir, run_tmpdir=None,
+    run_id="",
+):  # fmt: skip
     import shutil
     import subprocess
 
@@ -536,6 +540,9 @@ def _run_hayabusa_batch(
 
         index_name = wc.index_name("hayabusa")
         cnt = 0
+        # each detection carries this host's Hayabusa entry id, as every other
+        # parser's records carry theirs, so it traces to the logs it came from
+        aid = audit._next_audit_id() if audit is not None else ""
         try:
             cnt, sk, bf, hr = ingest_delimited(
                 csv_output,
@@ -544,6 +551,7 @@ def _run_hayabusa_batch(
                 host.hostname,
                 time_field="Timestamp",
                 source_file=str(csv_output),
+                ingest_audit_id=aid,
                 pipeline_version=_PIPELINE_VERSION,
                 host_dict=host_dict,
                 id_root=_run_root_of(host, run_tmpdir),
@@ -567,14 +575,27 @@ def _run_hayabusa_batch(
             failed(host, f"ingest failed: {e}"[:200])
         if audit and host.hostname in results:
             outcome = results[host.hostname]
+            try:
+                evtx_read = sorted(
+                    str(f) for f in Path(host.evtx_dir).iterdir()
+                    if f.is_file() and f.suffix.lower() == ".evtx"
+                )  # fmt: skip
+            except OSError:
+                evtx_read = []
             audit.log(
                 tool="ingest_hayabusa",
-                params={"hostname": host.hostname, "evtx_dir": str(host.evtx_dir)},
+                audit_id=aid or None,
+                params={
+                    "hostname": host.hostname,
+                    "evtx_dir": str(host.evtx_dir),
+                    "run_id": run_id,
+                },  # fmt: skip
                 result_summary=(
                     f"FAILED: {outcome['error']}"
                     if isinstance(outcome, dict)
                     else f"{cnt} alerts indexed"
                 ),
+                input_files=evtx_read,
             )
 
     return results

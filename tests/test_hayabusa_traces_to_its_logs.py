@@ -1,0 +1,48 @@
+"""Hayabusa detections trace to the logs they came from.
+
+Each detection carries `vhir.ingest_audit_id`, the id of its host's
+`ingest_hayabusa` audit entry, as every other parser's records carry theirs;
+that entry records the run's id and the evtx files Hayabusa read. A finding
+citing a search over detections then traces to those files.
+"""
+
+from types import SimpleNamespace
+
+import opensearch_mcp.ingest as ingest
+import opensearch_mcp.parse_delimited as parse_delimited
+
+from .test_hayabusa_stale_csv import hb  # noqa: F401
+
+
+class _Audit:
+    def __init__(self):
+        self.entries = []
+
+    def _next_audit_id(self, audit_dir=None):
+        return "opensearch-ex-20261009-042"
+
+    def log(self, **kw):
+        self.entries.append(kw)
+        return kw.get("audit_id")
+
+
+def test_detections_carry_their_entry_which_names_the_evtx_read(hb, tmp_path, monkeypatch):  # noqa: F811
+    evtx = tmp_path / "evtx"
+    for name in ("Security.evtx", "System.EVTX", "notes.txt"):
+        (evtx / name).write_text("x")
+    stamped = []
+
+    def ingest_delimited(path, client, index, hostname, **kw):
+        stamped.append(kw.get("ingest_audit_id"))
+        return len(path.read_text().splitlines()) - 1, 0, 0, 0
+
+    monkeypatch.setattr(parse_delimited, "ingest_delimited", ingest_delimited)
+    audit = _Audit()
+    host = SimpleNamespace(hostname="HOST1", evtx_dir=evtx, volume_root=evtx)
+    results = ingest.run_hayabusa_batch([host], None, "case1", audit=audit, run_id="run-9")
+    assert results == {"HOST1": 2}
+    assert stamped == ["opensearch-ex-20261009-042"]
+    (entry,) = [e for e in audit.entries if e["tool"] == "ingest_hayabusa"]
+    assert entry["audit_id"] == "opensearch-ex-20261009-042"
+    assert entry["params"]["run_id"] == "run-9"
+    assert entry["input_files"] == [str(evtx / "Security.evtx"), str(evtx / "System.EVTX")]

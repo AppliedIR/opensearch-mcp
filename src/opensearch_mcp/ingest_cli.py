@@ -1649,6 +1649,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     host_dict=case_host_dict,
                     case_dir=_case_dir_for(case_id),
                     run_tmpdir=tmpdir,
+                    run_id=run_id,
                 )
                 total_alerts = _sum_hayabusa_alerts(hb_results)
                 # Post-B84 visibility (UAT 2026-04-24): surface the
