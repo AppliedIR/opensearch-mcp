@@ -333,6 +333,89 @@ def test_an_operation_from_a_page_that_has_gone_stale_is_refused(client, case):
     assert canon(case, a) == "FIN-1"
 
 
+def _scan_only_unit(case):
+    """A unit the scan named OTHER, with no docs yet."""
+    u = hi.unit_key("evidence/scan-only")
+    hi.append_observations(case, [{"kind": "unit", "unit": u, "locator": "evidence/scan-only"}] + [
+        {"kind": "name", "unit": u, "raw": "OTHER", "evidence": ev, "origin": "artifact"}
+        for ev in ("SYSTEM ComputerName", "Security.evtx Computer")])  # fmt: skip
+    return u
+
+
+def _take_the_name(case, u, name):
+    return hi.append_decision_items(case, {"action": "confirm", "examiner": "ex2", "args": {
+        "machines": [{"key": hi.new_machine_key(), "canonical": name, "pairs": [[u, "OTHER"]]}]}},
+        hi.load(case).obs_offset)  # fmt: skip
+
+
+def test_a_name_taken_before_the_operation_starts_refuses_it_and_writes_nothing(
+    client, case, monkeypatch
+):
+    """Another machine is confirmed under the operation's new name after the
+    operation was planned, before its journal entry: it plans again under the
+    lock and refuses, so it never relabels into a name it can't record."""
+    a = machine(client, case, "WKS01", 2)
+    mid = hi.load(case).machine_of_key(a).id
+    u = _scan_only_unit(case)
+    real = host_ops.check_headroom
+
+    def then_another_takes_the_name(*args, **kw):
+        real(*args, **kw)
+        _take_the_name(case, u, "FIN-1")
+
+    monkeypatch.setattr(host_ops, "check_headroom", then_another_takes_the_name)
+    before = docs(client, case)
+    with pytest.raises(host_ops.HostOpRefused, match="already used by another machine"):
+        host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                     client=client, expect={mid: "WKS01"})  # fmt: skip
+    assert docs(client, case) == before and hi.read_ops(case)["ops"] == {}
+    assert canon(case, a) == "WKS01" and hi.unfinished_op(case) is None
+
+
+def test_a_name_taken_once_the_operation_is_running_is_refused_instead(client, case, monkeypatch):
+    a = machine(client, case, "WKS01", 2)
+    u = _scan_only_unit(case)
+    real, tried = host_ops.relabel, []
+
+    def while_relabelling(*args, **kw):
+        try:
+            _take_the_name(case, u, "FIN-1")
+        except hi.HostOpRunning as e:
+            tried.append(str(e))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(host_ops, "relabel", while_relabelling)
+    done = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                        client=client)  # fmt: skip
+    assert done["state"] == "done" and canon(case, a) == "FIN-1"
+    assert tried and "a host rename/merge is running" in tried[0]
+
+
+def test_a_list_upload_during_the_operation_is_refused_and_the_operation_finishes(
+    client, case, monkeypatch
+):
+    """The list would confirm a doc-less unit under the operation's new name."""
+    from sift_common import host_proposal as hp
+
+    a = machine(client, case, "WKS01", 2)
+    _scan_only_unit(case)
+    real, tried = host_ops.relabel, []
+
+    def while_relabelling(*args, **kw):
+        try:
+            hp.upload_host_list(case, "OTHER,FIN-1\n", "ex2")
+        except hi.HostOpRunning as e:
+            tried.append(str(e))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(host_ops, "relabel", while_relabelling)
+    done = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                        client=client)  # fmt: skip
+    assert done["state"] == "done" and canon(case, a) == "FIN-1"
+    assert tried and "a host rename/merge is running" in tried[0]
+    assert hi.unfinished_op(case) is None
+
+
 def test_a_resume_ignores_what_the_page_saw(client, case, monkeypatch):
     a = machine(client, case, "WKS01", 2)
     mid = hi.load(case).machine_of_key(a).id

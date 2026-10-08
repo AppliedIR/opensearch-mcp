@@ -521,6 +521,11 @@ def record(case_dir: Path, units: list[Unit]) -> list[dict]:
                 new.append((r["unit"], r["raw"]))
         records += host_proposal.near_hints(state, new)
         host_identity.append_observations(case_dir, records)
-        # what the examiner's list names confirms now: this scan's units only
-        host_proposal.apply_host_list(case_dir, [u.key for u in units])
+        # what the examiner's list names confirms now: this scan's units only,
+        # never while a host operation is unfinished (the gate then refuses
+        # the run, and a later scan applies the list)
+        try:
+            host_proposal.apply_host_list(case_dir, [u.key for u in units])
+        except host_identity.HostOpRunning:
+            pass
     return [u.summary() for u in units]

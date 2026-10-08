@@ -134,6 +134,23 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
     run = run_id or os.environ.get("VHIR_INGEST_RUN_ID", "")
     started = datetime.now(timezone.utc).isoformat()
 
+    def refused(why: str):
+        if run:
+            write_status(case_id, os.getpid(), run, "failed", [], {}, started, error=why)
+        print(f"Error: {why}; nothing was written.", file=sys.stderr)
+        sys.exit(1)
+
+    # an unfinished host operation refuses the run at once: its hosts can't be
+    # confirmed meanwhile, so it would only wait
+    try:
+        op = hi.unfinished_op(case_dir)
+    except hi.HostLogError as e:
+        op = {"error": str(e)}
+    if op:
+        from opensearch_mcp.host_ops import unfinished_note
+
+        refused(op.get("error") or unfinished_note(op))
+
     shown: list = []
 
     def on_wait(summary: dict) -> None:
@@ -175,11 +192,7 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
     if op:
         from opensearch_mcp.host_ops import unfinished_note
 
-        why = op.get("error") or unfinished_note(op)
-        if run:
-            write_status(case_id, os.getpid(), run, "failed", [], {}, started, error=why)
-        print(f"Error: {why}; nothing was written.", file=sys.stderr)
-        sys.exit(1)
+        refused(op.get("error") or unfinished_note(op))
     if run:  # the run goes on: the launcher answers "started"
         from opensearch_mcp.ingest_status import mark_hosts_confirmed
 

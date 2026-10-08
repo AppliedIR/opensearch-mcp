@@ -369,6 +369,21 @@ def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, cli
         return _run_locked(root, op, examiner, resume, client, case_identity(root)[0], expect)
 
 
+def _still(op: dict, p: dict, expect: dict | None):
+    """The check run with the journal's running entry, under the host-log
+    lock: the operation plans the same on the logs as they are now (nothing
+    landed since it was planned that would refuse its own decision), and,
+    on a fresh start, the machines are as the examiner saw them."""
+
+    def check(state: hi.HostState) -> None:
+        if plan(state, op) != p:  # plan() itself raises when it no longer fits
+            raise HostOpRefused("refused: changed since you opened it")
+        if expect:
+            _unchanged(expect)(state)
+
+    return check
+
+
 def _unchanged(expect: dict):
     """A check that the machines are still named as the examiner saw them
     ({machine id: canonical}), run with the journal's running entry under the
@@ -420,7 +435,7 @@ def _run_locked(root: Path, op, examiner, resume, client, c12, expect=None) -> d
         "canonical": p["canonical"], "v1": [list(x) for x in p["v1"]], "before": before,
         "examiner": examiner, "state": "running", "reason": "",
         **({} if resume is not None else {"started": _now()}),
-    }, check=_unchanged(expect) if resume is None and expect else None)  # fmt: skip
+    }, check=_still(op, p, expect if resume is None else None))  # fmt: skip
     try:
         updated = relabel(client, c12, p, forms)
         why = verify(client, c12, p, forms, before)
