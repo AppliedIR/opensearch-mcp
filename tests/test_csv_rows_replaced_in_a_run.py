@@ -13,6 +13,7 @@ the profiles are synthetic.
 from __future__ import annotations
 
 import csv
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -206,8 +207,10 @@ def test_one_host_name_on_two_units_that_are_two_machines_says_nothing(tmp_path,
 
 
 def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_path, status_dir):
-    """A pre-0.7 case holds WS02 as WS02-CANON: a scan's WS02 rows join that
-    machine, and counting replaced rows makes no machine of its own."""
+    """A pre-0.7 case holds WS02 as WS02-CANON: its hosts are imported before
+    any name of the scan binds, so counting replaced rows binds nothing first.
+    The scan's own WS02 is a name it holds: it waits for the examiner, who can
+    join it to WS02-CANON at the gate."""
     from sift_common import host_identity
 
     from opensearch_mcp import write_context as wc
@@ -234,6 +237,15 @@ def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_p
         client=client,
         written=written,
     )
-    machines = host_identity.load(wc.case_dir_for(case_id)).machines.values()
-    assert [m.canonical for m in machines] == ["WS02-CANON"]
-    assert {d["host.id"] for d in written} == {"WS02-CANON"}
+    case_dir = wc.case_dir_for(case_id)
+    log = [
+        json.loads(ln) for ln in (case_dir / host_identity.OBSERVATIONS).read_text().splitlines()
+    ]
+    kinds = [e["kind"] for e in log]
+    first_new = next(i for i, e in enumerate(log) if e["kind"] == "bind" and e["state"] == "new")
+    assert kinds.index("v1-import") < first_new  # nothing bound before the import
+    machines = host_identity.load(case_dir).machines.values()
+    assert sorted((m.canonical, m.state) for m in machines) == [
+        ("WS02", "new"),
+        ("WS02-CANON", "confirmed"),
+    ]
