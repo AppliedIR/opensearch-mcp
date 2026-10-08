@@ -773,7 +773,11 @@ def _ingest_hosts(
                         audit.log(
                             tool="ingest_evtx",
                             audit_id=aid,
-                            params={"file": str(evtx_file), "run_id": run_id},
+                            params={
+                                "hostname": host.hostname,
+                                "file": str(evtx_file),
+                                "run_id": run_id,
+                            },
                             result_summary=f"FAILED: {e}",
                             input_files=[str(evtx_file)],
                             input_sha256s=[file_hash] if file_hash else [],

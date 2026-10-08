@@ -1227,6 +1227,7 @@ def _failed_artifact_warnings(
 
     suffix = {n: c.index_suffix for n, c in TOOLS.items()}
     suffix.update({n: n for n in _PLASO_ARTIFACTS | _CUSTOM_ARTIFACTS})  # indexed by name
+    suffix["evtx"] = "evtx"  # the evtx parser's own entries (ingest_evtx)
     audit_dir = audit._get_audit_dir()  # where the ingest workers' entries go
     dirs = [audit_dir] if audit_dir else []
     # and the case's own audit dir when it isn't the active case's
