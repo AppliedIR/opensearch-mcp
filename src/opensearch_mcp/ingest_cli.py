@@ -1793,7 +1793,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
 
 
 @_closes_write_context
-def _file_entry(audit, tool: str, f: Path, hostname: str, index_name: str, run_id) -> str:
+def _file_entry(
+    audit, tool: str, f: Path, hostname: str, index_name: str, run_id, extra: dict | None = None
+) -> str:
     """Mint this file's audit id and write its entry (the file, its sha256 and
     the run) before any of its records is indexed, so every id a record
     carries names the file it came from, even if the run stops part-way.
@@ -1811,7 +1813,8 @@ def _file_entry(audit, tool: str, f: Path, hostname: str, index_name: str, run_i
             "index_name": index_name,
             "file": str(f),
             "run_id": run_id or "",
-        },  # fmt: skip
+            **(extra or {}),
+        },
         result_summary="recorded before its records were indexed",
         input_files=[str(f)],
         input_sha256s=[sha] if sha else [],
@@ -1858,10 +1861,13 @@ def cmd_csv(args: argparse.Namespace) -> None:
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     pipeline_version = f"opensearch-mcp-{__version__}"
 
-    file_hash = sha256_file(csv_path)
-    aid = audit._next_audit_id()
-
+    run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
     print(f"Ingesting {csv_path.name} as {tool_name} -> {index_name}")
+    entry = f"idx_ingest_csv_{tool_name}"
+    aid = _file_entry(audit, entry, csv_path, hostname, index_name, run_id, {"tool": tool_name})
+    if not aid:
+        print(f"Error: {csv_path}: {NO_ENTRY}.", file=sys.stderr)
+        sys.exit(1)
 
     case_host_dict = _load_case_host_dict(case_id)
 
@@ -1879,24 +1885,11 @@ def cmd_csv(args: argparse.Namespace) -> None:
         row_host=tool_name != "jumplists",
     )
 
-    audit.log(
-        tool=f"idx_ingest_csv_{tool_name}",
-        audit_id=aid,
-        params={
-            "hostname": hostname,
-            "tool": tool_name,
-            "file": str(csv_path),
-            "bulk_failed": bf,
-        },
-        result_summary=f"{count} indexed"
-        + (f", {sk} skipped" if sk else "")
-        + (f", {bf} bulk failed" if bf else ""),
-        input_files=[str(csv_path)],
-        input_sha256s=[file_hash],
-        source_evidence=str(csv_path),
+    print(
+        f"Indexed {count:,} entries"
+        + (f" ({sk} skipped)" if sk else "")
+        + (f", {bf} bulk failed" if bf else "")
     )
-
-    print(f"Indexed {count:,} entries" + (f" ({sk} skipped)" if sk else ""))
 
 
 # ---------------------------------------------------------------------------

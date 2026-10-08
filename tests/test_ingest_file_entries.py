@@ -1,4 +1,5 @@
-"""The delimited, JSON and access-log ingests record each file before indexing it.
+"""The delimited, JSON, access-log and tool-CSV ingests record each file before
+indexing it.
 
 Each file gets its own audit id, and its entry (the file, its sha256 and the
 run) is written before any of its records is indexed, so every id a record
@@ -157,3 +158,44 @@ def test_a_run_that_stops_part_way_leaves_an_entry_for_every_id(run, kind):
 
 def files_name(kind, n):
     return f"rd01-part{n}{KINDS[kind][3]}"
+
+
+def _csv(tmp_path, monkeypatch, fail=False):
+    f = tmp_path / "Amcache_UnassociatedFileEntries.csv"
+    f.write_text("a,b\n1,2\n")
+    seq: list = []
+    audit = _Audit(seq, {f.name} if fail else ())
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", RUN)
+    monkeypatch.setattr(ingest_cli, "AuditWriter", audit)
+    for name in ("get_client", "_open_unit", "_load_case_host_dict"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr("opensearch_mcp.write_context.index_name", lambda t: f"case-c-{t}-0")
+
+    def fake(csv_path, **kw):
+        seq.append(("record", csv_path.name, kw["ingest_audit_id"]))
+        return 1, 0, 0
+
+    monkeypatch.setattr(ingest_cli, "ingest_csv", fake)
+    args = argparse.Namespace(tool_name="amcache", csv_path=str(f), hostname="RD01", case=None)
+    return f, seq, lambda: ingest_cli.cmd_csv(args)
+
+
+def test_a_tool_csv_is_recorded_before_its_records(tmp_path, monkeypatch):
+    f, seq, go = _csv(tmp_path, monkeypatch)
+    go()
+    (entry,) = _entries(seq, "idx_ingest_csv_amcache")
+    assert seq.index(("entry", entry)) < seq.index(("record", f.name, entry["audit_id"]))
+    assert entry["input_files"] == [str(f)]
+    assert entry["input_sha256s"] == [hashlib.sha256(f.read_bytes()).hexdigest()]
+    assert entry["params"]["tool"] == "amcache" and entry["params"]["run_id"] == RUN
+
+
+def test_a_tool_csv_whose_entry_cant_be_written_is_not_indexed(tmp_path, monkeypatch, capsys):
+    f, seq, go = _csv(tmp_path, monkeypatch, fail=True)
+    with pytest.raises(SystemExit) as e:
+        go()
+    assert e.value.code == 1 and not seq
+    assert f"{f}: its audit entry couldn't be written, so it wasn't indexed." in (
+        capsys.readouterr().err
+    )
