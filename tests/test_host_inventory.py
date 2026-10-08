@@ -116,6 +116,26 @@ def test_the_inventory_shows_the_ais_suggestions_and_a_silent_cluster(case, monk
     assert inv["machines"][0]["docs"] is None and "unavailable" in inv["docs_note"]
 
 
+def test_only_runs_still_waiting_are_listed(case, monkeypatch):
+    """One run's host was confirmed since, one was cancelled, one still waits."""
+    monkeypatch.setattr(srv, "_get_os", lambda: Cluster({}))
+    done, gone, wait = (unit(case, f"evidence/{n}", n) for n in ("WKS01", "WKS02", "WKS03"))
+    confirm(case, done, "WKS01")
+    for run, u in (("run-done", done), ("run-cancelled", gone), ("run-waits", wait)):
+        host_gate.record_wait(case, run, [u])
+    hi.append_decision(case, {"action": "cancel_run", "examiner": "ex1",
+                              "args": {"run_id": "run-cancelled"}},
+                       hi.load(case).obs_offset)  # fmt: skip
+    runs = [r["run_id"] for r in srv.idx_host_inventory()["awaiting_host_confirmation"]]
+    assert runs == ["run-waits"]
+
+
+def test_a_page_is_at_most_200_machines(case, monkeypatch):
+    monkeypatch.setattr(srv, "_get_os", lambda: Cluster({}))
+    inv = srv.idx_host_inventory(limit=5000)
+    assert inv["limit"] == 200
+
+
 def test_with_no_case_it_says_so(monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
     assert "error" in srv.idx_host_inventory()
