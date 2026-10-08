@@ -136,6 +136,48 @@ def test_a_page_is_at_most_200_machines(case, monkeypatch):
     assert inv["limit"] == 200
 
 
+def test_names_without_a_machine_page_with_the_offset(case, monkeypatch):
+    monkeypatch.setattr(srv, "_get_os", lambda: Cluster({}))
+    unit(case, "evidence/x", "A1", "A2", "A3")
+    first = srv.idx_host_inventory(offset=0, limit=2)["names_without_machine"]
+    rest = srv.idx_host_inventory(offset=2, limit=2)["names_without_machine"]
+    assert len(first) == 2 and len(rest) == 1
+    assert {n["raw"] for n in first + rest} == {"A1", "A2", "A3"}
+
+
+@pytest.mark.parametrize("answer", [{"timed_out": True}, {"_shards": {"total": 4, "failed": 1}}],
+                         ids=["timed out", "a shard failed"])  # fmt: skip
+def test_an_incomplete_count_says_so(case, monkeypatch, answer):
+    key = confirm(case, unit(case, "evidence/a", "WKS01"), "WKS01")
+
+    class Partial(Cluster):
+        def search(self, index, body, **k):
+            return {**super().search(index, body, **k), **answer}
+
+    monkeypatch.setattr(srv, "_get_os", lambda: Partial({key: 7}))
+    inv = srv.idx_host_inventory()
+    assert inv["machines"][0]["docs"] == 7 and "incomplete" in inv["docs_note"]
+
+
+def test_a_case_without_a_readable_identity_has_no_counts_and_says_why(case, monkeypatch):
+    confirm(case, unit(case, "evidence/a", "WKS01"), "WKS01")
+    monkeypatch.setattr(srv, "_get_os", lambda: Cluster({}))
+
+    def broken(case_dir):
+        raise ValueError("case_uuid is not hex")
+
+    monkeypatch.setattr(wc, "case_identity", broken)
+    inv = srv.idx_host_inventory()
+    assert inv["machines"][0]["docs"] is None and "case_uuid is not hex" in inv["docs_note"]
+
+
+def test_the_result_names_the_case_by_its_own_id(case, monkeypatch):
+    monkeypatch.setattr(srv, "_get_os", lambda: Cluster({}))
+    meta = (case / "CASE.yaml").read_text().replace(f"case_id: {case.name}", "case_id: INC-2431")
+    (case / "CASE.yaml").write_text(meta)
+    assert srv.idx_host_inventory()["case_id"] == "INC-2431"
+
+
 def test_with_no_case_it_says_so(monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
     assert "error" in srv.idx_host_inventory()

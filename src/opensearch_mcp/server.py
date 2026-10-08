@@ -3524,8 +3524,10 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
 
     Args:
         case_id: The case (default: the active case).
-        offset: The first machine to return, in name order (default 0).
-        limit: Machines per page (default 50, max 200).
+        offset: The first machine, and the first name without a machine, to
+            return, in their order (default 0).
+        limit: Machines, and names without a machine, per page (default 50,
+            max 200).
     """
     from sift_common import host_gate
     from sift_common import host_identity as hi
@@ -3552,9 +3554,10 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
 
     try:
         c12 = case_identity(case_dir)[0]
-    except Exception:
-        c12 = None  # a case with no identity yet holds no v2 docs
-    docs = _docs_per_key(c12, [k for m in page for k in m.keys])
+    except Exception as e:
+        docs, docs_note = None, f"document counts unavailable: the case's identity: {e}"
+    else:
+        docs, docs_note = _docs_per_key(c12, [k for m in page for k in m.keys])
     units = sorted({p[0] for m in page for p in m.pairs})
     unbound = [p for p in state.names if p not in state.bindings]
     pending = []
@@ -3568,7 +3571,7 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
     for m in machines:
         states[m.state] = states.get(m.state, 0) + 1
     return {
-        "case_id": case_dir.name,
+        "case_id": _case_id_of(case_dir),
         "machines_total": len(machines),
         "machines_by_state": states,
         "offset": offset,
@@ -3588,25 +3591,22 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
         ],  # fmt: skip
         "units": {u: state.units.get(u) or {} for u in units},
         "names_without_machine_total": len(unbound),
-        "names_without_machine": [name(p) for p in unbound[:limit]],
+        "names_without_machine": [name(p) for p in unbound[offset : offset + limit]],
         "suggestions": list(state.suggestions),
         "awaiting_host_confirmation": pending,
         **(
             {"host_note": f"host operation {op.get('id', '?')} is {op.get('state')}"} if op else {}
         ),
-        **(
-            {"docs_note": "document counts unavailable: the cluster didn't answer"}
-            if docs is None
-            else {}
-        ),  # fmt: skip
+        **({"docs_note": docs_note} if docs_note else {}),
     }
 
 
-def _docs_per_key(c12, keys: list[str]) -> dict | None:
-    """Documents per machine key in the case's indices, or None when the
-    cluster can't be asked."""
-    if not keys or not c12:
-        return {}
+def _docs_per_key(c12, keys: list[str]) -> tuple[dict | None, str]:
+    """(documents per machine key in the case's indices, a note): None and why
+    when the cluster can't be asked; the counts and a note when they're
+    incomplete (timed out, or shards that didn't answer)."""
+    if not keys:
+        return {}, ""
     try:
         resp = _get_os().search(
             index=f"case-{c12}-*",
@@ -3615,8 +3615,25 @@ def _docs_per_key(c12, keys: list[str]) -> dict | None:
             allow_no_indices=True, ignore_unavailable=True,
         )  # fmt: skip
     except Exception:
-        return None
-    return {b["key"]: b["doc_count"] for b in resp["aggregations"]["k"]["buckets"]}
+        return None, "document counts unavailable: the cluster didn't answer"
+    counts = {b["key"]: b["doc_count"] for b in resp["aggregations"]["k"]["buckets"]}
+    failed = int((resp.get("_shards") or {}).get("failed") or 0)
+    if resp.get("timed_out") or failed:
+        why = "the count timed out" if resp.get("timed_out") else f"{failed} shard(s) failed"
+        return counts, f"document counts incomplete: {why}; they may be low"
+    return counts, ""
+
+
+def _case_id_of(case_dir) -> str:
+    """The case's id as its CASE.yaml gives it, else its folder's name."""
+    import yaml
+
+    try:
+        meta = yaml.safe_load((case_dir / "CASE.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        meta = {}
+    cid = meta.get("case_id") if isinstance(meta, dict) else None
+    return str(cid) if cid else case_dir.name
 
 
 @server.tool()
