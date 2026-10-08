@@ -835,6 +835,12 @@ def idx_search(
 ) -> dict:
     """Search indexed evidence using OpenSearch query_string syntax.
 
+    Hosts: filter and group by host.id, the machine's name (what comes from a
+    machine the examiner hasn't confirmed is marked host_unconfirmed);
+    host.name is the raw name a record carried (one machine can carry several).
+    Index names carry no host (case-<id>-<type>-…), so never pick an index for
+    a host. idx_host_inventory lists the machines.
+
     Results are compact by default -- bloat fields excluded, long values
     truncated to 500 chars. Use compact=False for full documents, or
     idx_get_event(id, index) to fetch individual full documents.
@@ -956,6 +962,12 @@ def idx_count(
 ) -> dict:
     """Count matching documents.
 
+    Hosts: filter and group by host.id, the machine's name (what comes from a
+    machine the examiner hasn't confirmed is marked host_unconfirmed);
+    host.name is the raw name a record carried (one machine can carry several).
+    Index names carry no host (case-<id>-<type>-…), so never pick an index for
+    a host. idx_host_inventory lists the machines.
+
     Args:
         query: OpenSearch query_string (default: all).
         index: Index pattern. Overrides case_id if provided.
@@ -1003,8 +1015,14 @@ def idx_aggregate(
 ) -> dict:
     """Aggregate (group by) a field with optional query filter.
 
+    Hosts: filter and group by host.id, the machine's name (what comes from a
+    machine the examiner hasn't confirmed is marked host_unconfirmed);
+    host.name is the raw name a record carried (one machine can carry several).
+    Index names carry no host (case-<id>-<type>-…), so never pick an index for
+    a host. idx_host_inventory lists the machines.
+
     Args:
-        field: Field to aggregate on (e.g., 'host.name', 'event.code').
+        field: Field to aggregate on (e.g., 'host.id', 'event.code').
         query: OpenSearch query_string filter (default: all).
         index: Index pattern. Overrides case_id if provided.
         case_id: Case ID — auto-constructs case-{id}-* pattern. Default: the
@@ -1095,6 +1113,12 @@ def idx_timeline(
     time_to: str = "",
 ) -> dict:
     """Show event count over time as a date histogram.
+
+    Hosts: filter and group by host.id, the machine's name (what comes from a
+    machine the examiner hasn't confirmed is marked host_unconfirmed);
+    host.name is the raw name a record carried (one machine can carry several).
+    Index names carry no host (case-<id>-<type>-…), so never pick an index for
+    a host. idx_host_inventory lists the machines.
 
     Args:
         query: OpenSearch query_string filter.
@@ -2158,6 +2182,11 @@ def idx_ingest_status(case_id: str = "") -> dict:
     """Check status of running or recent ingest operations.
 
     Defaults to active case. Pass case_id="*" to see all cases.
+
+    "awaiting host confirmation": the run has read its evidence's host names
+    and writes nothing until the examiner confirms them (or chooses Start
+    now) in the portal's Hosts tab; you can't confirm them. It then ingests
+    by itself. idx_host_inventory shows what it waits for.
 
     Args:
         case_id: Filter to this case (default: active case). "*" for all.
@@ -3480,6 +3509,114 @@ def idx_list_detections(
     if aid:
         resp["audit_id"] = aid
     return resp
+
+
+@server.tool()
+def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> dict:
+    """The case's machines as the examiner and the evidence have named them,
+    for reading only: each machine (host.id) with its state, the raw names
+    its records carry (host.name) with their evidence and flags, the units
+    (evidence sources) they came from and its document count; the names no
+    machine holds yet; your suggestions (case_host_fix); and the ingest runs
+    awaiting host confirmation (they write nothing until the examiner
+    confirms their hosts in the portal's Hosts tab). Changes nothing: the
+    examiner confirms, names and merges machines.
+
+    Args:
+        case_id: The case (default: the active case).
+        offset: The first machine to return, in name order (default 0).
+        limit: Machines per page (default 50, max 200).
+    """
+    from sift_common import host_gate
+    from sift_common import host_identity as hi
+
+    case_dir = _scan_case_dir(case_id)
+    if case_dir is None:
+        return {"error": "No case: give case_id, or activate a case first."}
+    try:
+        state = hi.load(case_dir)
+        op = hi.unfinished_op(case_dir)
+    except hi.HostLogError as e:
+        return {"error": f"host logs unreadable: {e}"}
+    offset, limit = max(0, int(offset)), max(1, min(int(limit), 200))
+    machines = sorted(state.machines.values(), key=lambda m: (hi.spelling(m.canonical), m.id))
+    page = machines[offset : offset + limit]
+
+    def name(p) -> dict:
+        info = state.names.get(p) or {}
+        return {"unit": p[0], "raw": p[1], "evidence": list(info.get("evidence") or []),
+                "origins": list(info.get("origins") or []),
+                "flags": list(state.pair_flags.get(p) or [])}  # fmt: skip
+
+    from opensearch_mcp.write_context import case_identity
+
+    try:
+        c12 = case_identity(case_dir)[0]
+    except Exception:
+        c12 = None  # a case with no identity yet holds no v2 docs
+    docs = _docs_per_key(c12, [k for m in page for k in m.keys])
+    units = sorted({p[0] for m in page for p in m.pairs})
+    unbound = [p for p in state.names if p not in state.bindings]
+    pending = []
+    for run, run_units in sorted(state.waits.items()):
+        if run in state.cancelled:
+            continue
+        held = host_gate.unresolved(state, run_units)
+        if held:
+            pending.append({"run_id": run, "units": list(run_units), "unresolved": held})
+    states: dict[str, int] = {}
+    for m in machines:
+        states[m.state] = states.get(m.state, 0) + 1
+    return {
+        "case_id": case_dir.name,
+        "machines_total": len(machines),
+        "machines_by_state": states,
+        "offset": offset,
+        "limit": limit,
+        "machines": [
+            {
+                "host.id": m.canonical,
+                "id": m.id,
+                "state": m.state,
+                "flags": list(m.flags),
+                "former_names": list(m.former),
+                "names": [name(p) for p in m.pairs],
+                "units": sorted({p[0] for p in m.pairs}),
+                "docs": None if docs is None else sum(docs.get(k, 0) for k in m.keys),
+            }
+            for m in page
+        ],  # fmt: skip
+        "units": {u: state.units.get(u) or {} for u in units},
+        "names_without_machine_total": len(unbound),
+        "names_without_machine": [name(p) for p in unbound[:limit]],
+        "suggestions": list(state.suggestions),
+        "awaiting_host_confirmation": pending,
+        **(
+            {"host_note": f"host operation {op.get('id', '?')} is {op.get('state')}"} if op else {}
+        ),
+        **(
+            {"docs_note": "document counts unavailable: the cluster didn't answer"}
+            if docs is None
+            else {}
+        ),  # fmt: skip
+    }
+
+
+def _docs_per_key(c12, keys: list[str]) -> dict | None:
+    """Documents per machine key in the case's indices, or None when the
+    cluster can't be asked."""
+    if not keys or not c12:
+        return {}
+    try:
+        resp = _get_os().search(
+            index=f"case-{c12}-*",
+            body={"size": 0, "query": {"terms": {"vhir.host_key": keys}},
+                  "aggs": {"k": {"terms": {"field": "vhir.host_key", "size": len(keys)}}}},
+            allow_no_indices=True, ignore_unavailable=True,
+        )  # fmt: skip
+    except Exception:
+        return None
+    return {b["key"]: b["doc_count"] for b in resp["aggregations"]["k"]["buckets"]}
 
 
 @server.tool()
