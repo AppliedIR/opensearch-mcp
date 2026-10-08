@@ -645,6 +645,7 @@ def _ingest_hosts(
         wc.set_current(ctx)
         host_result = HostResult(hostname=host.hostname, volume_root=str(host.volume_root))
         _progress("host_start", hostname=host.hostname)
+        device = _device(host.volume_root)  # still there, the same volume, when it's done?
 
         # Evtx files — filter by log name and size
         if host.evtx_dir:
@@ -1025,6 +1026,9 @@ def _ingest_hosts(
             host_result.artifacts.append(ar)
 
         _add_second_copy_notes(host, host_idx, host_result, status_hosts)
+        _check_volume_still_there(
+            host, device, host_idx, host_result, status_hosts, _update_status
+        )
         result.hosts.append(host_result)
 
 
@@ -1609,6 +1613,38 @@ def _build_status_hosts(
                 artifacts.append({"name": tool, "status": "pending"})
         status_hosts.append({"hostname": host.hostname, "artifacts": artifacts})
     return status_hosts
+
+
+def _device(path) -> int | None:
+    """The device a path is on, or None when it isn't there. A device, not an
+    inode: FUSE and some network mounts don't keep inode numbers stable."""
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+def _check_volume_still_there(host, device, host_idx, host_result, status_hosts, update) -> None:
+    """A volume root gone, or on another device, once a host's artifacts are
+    done (unmounted mid-ingest): the host gets a failed `evidence` row, in the
+    status file and its results, as what was read after it went is missing."""
+    if device is None:
+        return  # nothing to compare with
+    now = _device(host.volume_root)
+    if now == device:
+        return
+    gone = "is gone" if now is None else "is now on another device"
+    error = (
+        f"the evidence volume at {host.volume_root} {gone} (unmounted during the "
+        "ingest?): artifacts read after that are missing or incomplete. Re-run the "
+        "ingest once it is mounted again"
+    )
+    host_result.artifacts.append(ArtifactResult(artifact="evidence", index="", error=error))
+    if host_idx < len(status_hosts):
+        status_hosts[host_idx].setdefault("artifacts", []).append(
+            {"name": "evidence", "status": "failed", "error": error}
+        )
+        update()
 
 
 def _find_artifact_status(
