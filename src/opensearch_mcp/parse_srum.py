@@ -9,6 +9,8 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
+from opensearch_mcp.results import PARSER_COMPLETED, PARSER_FAILED, PARSER_REDUCED
+
 
 def parse_srum(
     srum_path: Path,
@@ -22,7 +24,8 @@ def parse_srum(
     source_file: str = "",
     host_dict=None,
 ) -> tuple[int, int, str]:
-    """Parse SRUM database. Returns (count_indexed, count_bulk_failed, note).
+    """Parse SRUM database. Returns (count_indexed, count_bulk_failed, note,
+    outcome), outcome one of results.PARSER_COMPLETED/REDUCED/FAILED.
 
     Strategy: wintools-first (SrumECmd on Windows), Plaso fallback.
     SRUDB.dat from KAPE triage is frequently dirty/locked — SrumECmd
@@ -49,7 +52,7 @@ def parse_srum(
                 source_file=source_file,
                 host_dict=host_dict,
             )
-            return cnt, bf, ""  # wintools succeeded — no note
+            return cnt, bf, "", PARSER_COMPLETED  # wintools succeeded — no note
         except Exception as e:
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
             if "connection" in str(e).lower() or "timeout" in str(e).lower():
@@ -67,14 +70,14 @@ def parse_srum(
             source_file=source_file,
             host_dict=host_dict,
         )
-        return cnt, bf, _fallback_note  # Plaso succeeded with reduced fidelity
+        return cnt, bf, _fallback_note, PARSER_REDUCED  # Plaso succeeded with reduced fidelity
     except subprocess.CalledProcessError:
         print(
             "  srum: skipped — dirty database, needs Windows workstation\n"
             f"  NOTE: {_fallback_note}",
             file=sys.stderr,
         )
-        return 0, 0, _fallback_note
+        return 0, 0, _fallback_note, PARSER_FAILED
 
 
 def _parse_srum_wintools(

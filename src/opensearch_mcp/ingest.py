@@ -1124,7 +1124,7 @@ def _ingest_plaso_artifact(
 
         _plaso_src = _rel(artifact_path, host.volume_root)
         if tool_name == "prefetch":
-            cnt, bf, _note = parse_prefetch(
+            cnt, bf, _note, outcome = parse_prefetch(
                 prefetch_dir=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -1136,7 +1136,7 @@ def _ingest_plaso_artifact(
                 host_dict=host_dict,
             )
         else:
-            cnt, bf, _note = parse_srum(
+            cnt, bf, _note, outcome = parse_srum(
                 srum_path=artifact_path,
                 client=client,
                 index_name=index_name,
@@ -1148,12 +1148,15 @@ def _ingest_plaso_artifact(
                 source_file=_plaso_src,
                 host_dict=host_dict,
             )
-        # Nothing read from inputs that are there is a failure, not an empty
-        # artifact: Plaso exits 0 on a damaged file, and its errors return 0.
-        # Records already in the case (a shadow copy's, all on live) count as
-        # read only when the parser completed: a fallback or failure note
-        # means it didn't, whatever it wrote first.
-        if not cnt and not bf and (_note or get_already_present() == present_before):
+        # A parser that failed fails its artifact, whatever it wrote first or
+        # was already in the case. One that ran but read nothing from inputs
+        # that are there failed too: Plaso exits 0 on a damaged file, and its
+        # errors return 0. Records already in the case (a shadow copy's, all
+        # on live) were read.
+        from opensearch_mcp.results import PARSER_FAILED
+
+        nothing = not cnt and not bf and get_already_present() == present_before
+        if outcome == PARSER_FAILED or nothing:
             if artifact_path.is_dir():
                 n = sum(1 for f in artifact_path.iterdir() if f.suffix.lower() == ".pf")
                 what = f"{n} .pf file(s)"

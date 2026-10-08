@@ -8,6 +8,8 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
+from opensearch_mcp.results import PARSER_COMPLETED, PARSER_FAILED, PARSER_REDUCED
+
 
 def parse_prefetch(
     prefetch_dir: Path,
@@ -20,7 +22,8 @@ def parse_prefetch(
     source_file: str = "",
     host_dict=None,
 ) -> tuple[int, int, str]:
-    """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note).
+    """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note,
+    outcome), outcome one of results.PARSER_COMPLETED/REDUCED/FAILED.
 
     Strategy: wintools-first (PECmd on Windows), Plaso fallback.
     PECmd produces richer output than Plaso's prefetch parser.
@@ -46,7 +49,7 @@ def parse_prefetch(
                 source_file=source_file,
                 host_dict=host_dict,
             )
-            return cnt, bf, ""
+            return cnt, bf, "", PARSER_COMPLETED
         except Exception as e:
             print(f"  prefetch: PECmd failed ({e}), trying Plaso...", file=sys.stderr)
             if "connection" in str(e).lower() or "timeout" in str(e).lower():
@@ -64,13 +67,13 @@ def parse_prefetch(
             source_file=source_file,
             host_dict=host_dict,
         )
-        return cnt, bf, _fallback_note
+        return cnt, bf, _fallback_note, PARSER_REDUCED
     except subprocess.CalledProcessError as e:
         print(
             f"  prefetch: Plaso failed ({e})\n  NOTE: {_fallback_note}",
             file=sys.stderr,
         )
-        return 0, 0, _fallback_note
+        return 0, 0, _fallback_note, PARSER_FAILED
 
 
 def _parse_prefetch_wintools(

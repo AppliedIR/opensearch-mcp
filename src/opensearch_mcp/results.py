@@ -38,6 +38,13 @@ class HostResult:
         return sum(a.indexed for a in self.artifacts)
 
 
+# How a wintools-first parser ended: by itself, through its reduced-fidelity
+# fallback, or not at all (both failed)
+PARSER_COMPLETED = "completed"
+PARSER_REDUCED = "reduced"
+PARSER_FAILED = "failed"
+
+
 @dataclass
 class IngestResult:
     """Result of a full ingest operation (one or more hosts)."""

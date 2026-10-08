@@ -162,7 +162,7 @@ def _scan(tmp_path, present, vss_id="vss1", before=0):
 
     def parse_srum(**kw):  # every row it read was in the case already
         bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + present
-        return 0, 0, ""
+        return 0, 0, "", "completed"
 
     audit = MagicMock()
     audit._next_audit_id.return_value = "aid-1"
@@ -220,7 +220,7 @@ def test_a_run_counts_only_its_own(tmp_path, status_dir):
 
 def test_a_run_with_nothing_present_says_nothing_of_it(tmp_path, status_dir, monkeypatch):
     monkeypatch.setattr(
-        "opensearch_mcp.parse_srum.parse_srum", lambda **kw: (3, 0, ""), raising=True
+        "opensearch_mcp.parse_srum.parse_srum", lambda **kw: (3, 0, "", "completed"), raising=True
     )
     root = tmp_path / "H"
     srum = root / "SRUDB.dat"
@@ -353,3 +353,32 @@ def test_a_parser_that_failed_is_failed_whatever_was_already_present(
                     primary, fallback)  # fmt: skip
     row = _scan_artifact(tmp_path, artifact)
     assert row["status"] == "failed" and "no records read" in row["detail"], row
+
+
+@pytest.mark.parametrize(
+    "artifact, module, primary, fallback",
+    [
+        ("prefetch", "parse_prefetch", "_parse_prefetch_wintools", "_parse_prefetch_plaso"),
+        ("srum", "parse_srum", "_parse_srum_wintools", "_parse_srum_plaso"),
+    ],
+)
+def test_a_fallback_that_worked_with_every_row_already_present_is_done(
+    tmp_path, status_dir, monkeypatch, artifact, module, primary, fallback
+):
+    """No wintools: Plaso parses the shadow copy's artifact, and every row it
+    wrote was in the case already. Its reduced-fidelity note doesn't fail it."""
+    import importlib
+
+    from opensearch_mcp import wintools
+
+    mod = importlib.import_module(f"opensearch_mcp.{module}")
+
+    def plaso_all_present(*a, **k):
+        bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + 4
+        return 0, 0
+
+    monkeypatch.setattr(wintools, "wintools_available", lambda: False)
+    monkeypatch.setattr(mod, primary, lambda *a, **k: pytest.fail("no wintools here"))
+    monkeypatch.setattr(mod, fallback, plaso_all_present)
+    row = _scan_artifact(tmp_path, artifact)
+    assert row["status"] == "done", row
