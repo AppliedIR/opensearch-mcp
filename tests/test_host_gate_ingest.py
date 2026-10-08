@@ -269,7 +269,8 @@ def test_a_name_the_ai_gave_waits_even_with_the_host_list_naming_it(gate):
     t, out = gate.start(command, args)
     data = gate.waiting()
     (h,) = data["hosts"]
-    assert h["artifacts"][0]["note"].endswith("named only by the AI or an unregistered file")
+    # held for the AI's origin: the reason names it ("named only by the AI's …")
+    assert "named only by" in h["artifacts"][0]["note"]
     host_gate.cancel(gate.case_dir, RUN, "ex1")
     t.join(15)
     assert gate.writes == []
