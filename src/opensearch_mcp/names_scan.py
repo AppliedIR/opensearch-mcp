@@ -266,8 +266,10 @@ def row_names(path: Path) -> list[str]:
     suffix = path.suffix.lower()
     try:
         # decoded as the ingest decodes it: PowerShell's Export-Csv (Kansa)
-        # writes UTF-16LE with a BOM
-        encoding = _detect_encoding(path)
+        # writes UTF-16LE with a BOM. JSON stays UTF-8, as its parser reads
+        # it: a name from a file the ingest then rejects would hold the gate
+        json_file = suffix in (".json", ".jsonl", ".ndjson")
+        encoding = "utf-8-sig" if json_file else _detect_encoding(path)
         with open(path, encoding=encoding, errors="replace", newline="") as f:
             if suffix in (".json", ".jsonl", ".ndjson"):
                 head = f.read(SAMPLE_BYTES)

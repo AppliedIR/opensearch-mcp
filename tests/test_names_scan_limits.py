@@ -261,3 +261,15 @@ def test_a_folder_of_utf16_kansa_files_proposes_each_rows_machine(tmp_path):
     named = {n.raw for n in unit.names}
     assert set(hosts) <= named
     assert "names_not_sampled" not in unit.attrs  # nothing left unread
+
+
+def test_a_utf16_json_file_gives_no_host_name_its_ingest_would_not_read(tmp_path):
+    """The JSON ingest reads UTF-8 only: a UTF-16 JSON file it rejects must not
+    give names that hold the gate."""
+    f = tmp_path / "events.jsonl"
+    f.write_text('{"Computer": "WKS77"}\n{"Computer": "WKS77"}\n', encoding="utf-16")
+    try:
+        names = names_scan.row_names(f)
+    except names_scan.NotSampled:
+        names = []
+    assert "WKS77" not in names
