@@ -111,7 +111,8 @@ def test_any_non_zero_exit_fails_the_host_with_hayabusas_error(hb):
 
 def test_a_host_with_no_detections_is_not_a_failure(hb):
     results, commands = hb("csv-timeline", mode="empty")
-    assert results == {}
+    (outcome,) = results.values()
+    assert outcome["status"] == "empty" and "no rule matched" in outcome["note"]
     assert commands == ["csv-timeline"]
 
 

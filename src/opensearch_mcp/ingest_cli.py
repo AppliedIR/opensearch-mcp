@@ -701,26 +701,27 @@ def _load_config(config_path: str | None) -> dict:
 
 
 def _sum_hayabusa_alerts(hb_results) -> int:
-    """Sum per-host Hayabusa alert counts, tolerating failed-host dict values.
-
-    `run_hayabusa_batch` (ingest.py:338) returns one of three shapes:
-
-    1. `{"skipped": "hayabusa not installed"}` — caller-wide skip marker.
-    2. `{hostname: <int>}` — happy path: per-host alert count.
-    3. `{hostname: {"status": "failed", "error": "rules_not_found"}}` —
-       per-host failure on missing rules (ingest.py:389-392).
-
-    Any of the three can land in the dict simultaneously on a multi-host
-    scan where some hosts succeed and others fail. Prior code summed
-    `hb_results.values()` directly, which raised `TypeError` on mixed
-    int+dict values and crashed `cmd_scan` *after* every parser had
-    already completed — UAT 2026-04-24 B84. Filtering to `int` values
-    treats per-host failures as zero-alert contributions rather than
-    fatal.
-    """
+    """The alerts Hayabusa indexed, over `run_hayabusa_batch`'s results:
+    `{"skipped": …}` for the whole run, else per host an int (its count), a
+    failed dict (`status`, `error`, and `indexed`/`bulk_failed` when its
+    alerts were rejected) or an empty dict (`status: empty`, `note`). A
+    failed host's indexed alerts still count."""
     if not isinstance(hb_results, dict) or "skipped" in hb_results:
         return 0
-    return sum(v for v in hb_results.values() if isinstance(v, int))
+    return sum(
+        v if isinstance(v, int) else int(v.get("indexed") or 0)
+        for v in hb_results.values()
+        if isinstance(v, (int, dict))
+    )
+
+
+def _hayabusa_failed(hb_results) -> dict:
+    """{host: outcome} of the hosts Hayabusa failed for."""
+    if not isinstance(hb_results, dict):
+        return {}
+    return {
+        h: v for h, v in hb_results.items() if isinstance(v, dict) and v.get("status") == "failed"
+    }
 
 
 def _merge_config(args: argparse.Namespace, config: dict) -> None:
@@ -1647,6 +1648,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         print(f"{kw['count']:,} alerts")
                     elif event == "hayabusa_failed":
                         print(f"failed ({kw.get('error', 'unknown')})")
+                    elif event == "hayabusa_empty":
+                        print("no detections written")
 
                 print("\nRunning Hayabusa detection...")
                 hb_results = run_hayabusa_batch(
@@ -1666,11 +1669,20 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 # had failures, not the silent "N alerts" post-B84-guard
                 # framing. Hayabusa failure dicts are values shaped
                 # {"status": "failed", "error": "..."} per ingest.py:389.
-                failed_hosts = (
-                    sum(1 for v in hb_results.values() if isinstance(v, dict))
-                    if isinstance(hb_results, dict)
-                    else 0
-                )
+                failed_by_host = _hayabusa_failed(hb_results)
+                failed_hosts = len(failed_by_host)
+                empty_notes = [
+                    v["note"]
+                    for v in (hb_results.values() if isinstance(hb_results, dict) else ())
+                    if isinstance(v, dict) and v.get("status") == "empty"
+                ]
+                hb_rejected = sum(int(v.get("bulk_failed") or 0) for v in failed_by_host.values())
+                if hb_rejected:  # the run's rejections include Hayabusa's alerts
+                    total_bulk_failed += hb_rejected
+                    if not ingest_bulk_reason:
+                        from opensearch_mcp.bulk import get_last_bulk_reason
+
+                        ingest_bulk_reason = get_last_bulk_reason()
                 if total_alerts or failed_hosts:
                     line = f"Hayabusa: {total_alerts:,} alerts indexed"
                     if failed_hosts:
@@ -1688,8 +1700,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         if skipped
                         else "; ".join(
                             f"{host}: {v.get('error', 'failed')}"
-                            for host, v in hb_results.items()
-                            if isinstance(v, dict)
+                            for host, v in failed_by_host.items()
                         )
                     )
                     existing_hosts[-1]["artifacts"][0].update(
@@ -1700,6 +1711,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                     existing_hosts[-1]["artifacts"][0].update(
                         {"status": "complete", "indexed": total_alerts}
                     )
+                if empty_notes:  # neither a failure nor "0 alerts": say what it may be
+                    existing_hosts[-1]["artifacts"][0]["note"] = "; ".join(empty_notes)
                 write_status(
                     case_id,
                     os.getpid(),

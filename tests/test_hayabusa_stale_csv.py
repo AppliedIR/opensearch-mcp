@@ -31,6 +31,10 @@ case "$HB_MODE" in
   *) cp "$HB_FIXTURE" "$out" ;;
 esac
 """
+EMPTY = {
+    "status": "empty",
+    "note": "HOST1: Hayabusa wrote no detections: no rule matched, or no event could be read",
+}
 HEADER = "Timestamp,RuleTitle,Level,Computer,Channel,EventID\n"
 OLD = HEADER + "2026-01-01 00:00:00,Old System alert,low,HOST1,System,7045\n"
 NEW = HEADER + (
@@ -100,12 +104,13 @@ def test_a_second_run_ingests_only_its_own_output(hb):
     assert hb.prev.read_text() == OLD
 
 
-def test_a_run_that_writes_nothing_fails_and_sends_nothing(hb):
+def test_a_run_that_writes_nothing_says_so_and_sends_nothing(hb):
+    """Neither a failure nor "0 alerts": the note names both causes."""
     hb.csv.write_text(OLD)
     hb.monkeypatch.setenv("HB_MODE", "untouched")
     results, events = hb.run()
-    assert hb.sent == [] and "HOST1" not in results
-    assert _failed(events) == [{"hostname": "HOST1", "error": "no output"}]
+    assert hb.sent == [] and results["HOST1"] == EMPTY
+    assert _failed(events) == []
     assert hb.prev.read_text() == OLD and not hb.csv.exists()
 
 
@@ -120,7 +125,7 @@ def test_a_failed_move_fails_the_host_and_sends_nothing(hb):
     hb.csv.write_text(OLD)
     hb.prev.mkdir()  # the rename can't replace a directory
     results, events = hb.run()
-    assert hb.sent == [] and "HOST1" not in results
+    assert hb.sent == [] and results["HOST1"]["status"] == "failed"
     assert len(_failed(events)) == 1 and hb.csv.read_text() == OLD
 
 
@@ -130,9 +135,8 @@ def test_anchor_a_first_run_is_unchanged(hb):
     assert not _failed(events) and not hb.prev.exists()
 
 
-def test_anchor_a_zero_detection_run_is_unchanged(hb):
-    """Reported as a failure today (pre-existing)."""
+def test_a_zero_detection_run_is_a_note_not_a_failure(hb):
     hb.monkeypatch.setenv("HB_MODE", "empty")
     results, events = hb.run()
-    assert hb.sent == [] and "HOST1" not in results
-    assert _failed(events) == [{"hostname": "HOST1", "error": "no output"}]
+    assert hb.sent == [] and results["HOST1"] == EMPTY
+    assert _failed(events) == []

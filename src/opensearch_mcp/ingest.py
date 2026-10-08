@@ -443,6 +443,11 @@ def _run_hayabusa_batch(
     except Exception:
         timeline = "csv-timeline"
 
+    def failed(host, error: str, **counts) -> None:
+        results[host.hostname] = {"status": "failed", "error": error, **counts}
+        if callable(on_progress):
+            on_progress("hayabusa_failed", hostname=host.hostname, error=error)
+
     for host in hosts:
         if not host.evtx_dir:
             continue
@@ -504,25 +509,29 @@ def _run_hayabusa_batch(
             if csv_output.exists():
                 csv_output.replace(output_dir / f"{stem}.prev.csv")
             result = subprocess.run(cmd, capture_output=True, timeout=3600)
+            stderr = result.stderr.decode(errors="replace")
             if result.returncode != 0:
-                stderr = result.stderr.decode(errors="replace")[:200]
-                error = f"exit {result.returncode}: {stderr}"
-                results[host.hostname] = {"status": "failed", "error": error}
-                if callable(on_progress):
-                    on_progress(
-                        "hayabusa_failed",
-                        hostname=host.hostname,
-                        error=error,
-                    )
+                failed(host, f"exit {result.returncode}: {stderr[:200]}")
                 continue
-        except Exception as e:
-            if callable(on_progress):
-                on_progress("hayabusa_failed", hostname=host.hostname, error=str(e))
+            # Hayabusa exits 0 on some errors; it says so on stderr
+            errors = [ln.strip() for ln in stderr.splitlines() if "[ERROR]" in ln]
+            if errors:
+                failed(host, errors[0][:200])
+                continue
+        except Exception as e:  # it couldn't run, timed out, or the move failed
+            failed(host, str(e)[:200])
             continue
 
         if not csv_output.exists() or csv_output.stat().st_size == 0:
+            # Not a failure, and not "0 alerts" either: Hayabusa writes nothing
+            # both when no rule matched and when no event could be read.
+            note = (
+                f"{host.hostname}: Hayabusa wrote no detections: no rule matched, "
+                "or no event could be read"
+            )
+            results[host.hostname] = {"status": "empty", "note": note}
             if callable(on_progress):
-                on_progress("hayabusa_failed", hostname=host.hostname, error="no output")
+                on_progress("hayabusa_empty", hostname=host.hostname, note=note)
             continue
 
         index_name = wc.index_name("hayabusa")
@@ -539,21 +548,33 @@ def _run_hayabusa_batch(
                 host_dict=host_dict,
                 id_root=_run_root_of(host, run_tmpdir),
             )
-            results[host.hostname] = cnt
-            if callable(on_progress):
-                on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
-        except Exception as e:
-            if callable(on_progress):
-                on_progress(
-                    "hayabusa_failed",
-                    hostname=host.hostname,
-                    error=f"ingest failed: {e}",
+            if bf:
+                from opensearch_mcp.bulk import get_last_bulk_reason
+
+                reason = get_last_bulk_reason()
+                failed(
+                    host,
+                    f"{bf:,} of {cnt + bf:,} alerts rejected by OpenSearch"
+                    + (f" ({reason[:200]})" if reason else ""),
+                    indexed=cnt,
+                    bulk_failed=bf,
                 )
+            else:
+                results[host.hostname] = cnt
+                if callable(on_progress):
+                    on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
+        except Exception as e:
+            failed(host, f"ingest failed: {e}"[:200])
         if audit and host.hostname in results:
+            outcome = results[host.hostname]
             audit.log(
                 tool="ingest_hayabusa",
                 params={"hostname": host.hostname, "evtx_dir": str(host.evtx_dir)},
-                result_summary=f"{cnt} alerts indexed",
+                result_summary=(
+                    f"FAILED: {outcome['error']}"
+                    if isinstance(outcome, dict)
+                    else f"{cnt} alerts indexed"
+                ),
             )
 
     return results
