@@ -17,6 +17,7 @@ from opensearch_mcp import ingest as ing
 from opensearch_mcp import ingest_cli as cli
 from opensearch_mcp import server as srv
 from opensearch_mcp.discover import DiscoveredHost
+from opensearch_mcp.results import PARSER_COMPLETED
 
 REASON = "failed to parse field [user_identifier] of type [long]"
 HAYABUSA = (
@@ -67,7 +68,7 @@ def scan(tmp_path, monkeypatch):
         def srum_parse(**kw):
             if rejected:
                 bulk._tls.last_bulk_reason = REASON
-            return 66505 - rejected, rejected, ""
+            return 66505 - rejected, rejected, "", PARSER_COMPLETED, 66505
 
         monkeypatch.setattr(parse_srum, "parse_srum", srum_parse)
         bulk.reset_circuit_breaker()
