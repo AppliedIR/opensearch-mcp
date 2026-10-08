@@ -486,13 +486,27 @@ def _resolve_index(index: str, case_id: str, client=None) -> tuple[str, str]:
 
 
 def _search_index(index: str, case_id: str, client) -> tuple[str, str]:
-    """(index expression, error) a search tool queries: a refusal when there
-    is no case. The active case is read once, so the check and the
-    expression agree."""
-    if not (index or case_id):
-        case_id = _get_active_case() or ""
-        if not case_id:
+    """(index expression, error) a search tool queries. Only an implicit
+    search is refused with no active case: an explicit `index` is then
+    searched as given, and a `case_id` names its indices from its case
+    folder. With an active case, an `index` stays inside it. The active case
+    is read once, so the check and the expression agree."""
+    if case_id:
+        from opensearch_mcp.write_context import case_dir_for
+
+        folder = case_dir_for(case_id)
+        if folder is None or not (folder / "CASE.yaml").is_file():
+            return "", (
+                f"Case {case_id!r} has no folder on this box, so its indices can't be "
+                "resolved; pass index= or activate it."
+            )
+        return _resolve_index(index, case_id, client)
+    case_id = _get_active_case() or ""
+    if not case_id:
+        if not index:
             return "", "No active case. Run 'vhir case activate' first, or pass case_id or index."
+        err = _validate_index(index)  # the examiner's own expression, as asked
+        return ("", err) if err else (index, "")
     return _resolve_index(index, case_id, client)
 
 

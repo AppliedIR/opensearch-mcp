@@ -3,8 +3,11 @@
 With no index, no case_id and no active case, idx_search, idx_count,
 idx_aggregate, idx_timeline and idx_field_values used to fall back to `case-*`
 and answer from every case on the cluster. They now refuse, as the case
-summary and enrichment already did. An explicit index (even `case-*`) or
-case_id works as before. The client is a mock that records what was asked.
+summary and enrichment already did. An explicit index (even `case-*`) is
+searched as given; a case_id names its indices from its case folder, and is
+refused, saying why, when this box has no folder for it. The Hayabusa alerts
+are an implicit fallback, so there are none to name with no case. The client
+is a mock that records what was asked.
 """
 
 from __future__ import annotations
@@ -60,21 +63,31 @@ def test_a_pointer_that_names_no_case_counts_as_no_case(client, tmp_path, monkey
 
 
 @pytest.mark.parametrize(
-    "kw, searched",
-    [
-        ({"index": "case-other-*"}, "case-other-*"),
-        ({"case_id": "other"}, "case-other-*"),
-        ({"index": "case-*"}, "case-*"),
-    ],
-    ids=["an index pattern", "a case id", "every case, asked for"],
+    "index", ["case-other-*", "case-*"], ids=["an index pattern", "every case, asked for"]
 )
-def test_with_no_case_an_explicit_index_or_case_id_still_counts(client, no_case, kw, searched):
-    assert srv.idx_count(**kw)["count"] == 6
-    assert client.count.call_args.kwargs["index"] == searched
+def test_with_no_case_an_explicit_index_is_searched_as_given(client, no_case, index):
+    assert srv.idx_count(index=index)["count"] == 6
+    assert client.count.call_args.kwargs["index"] == index
 
 
-def test_with_no_case_hayabusa_alerts_still_cover_every_case(no_case):
-    assert srv._hayabusa_index() == "case-*-hayabusa-*"
+def test_with_no_case_a_case_id_names_its_indices_from_its_folder(client, no_case):
+    from opensearch_mcp.case_scope import case_read_scope
+
+    assert srv.idx_count(case_id="other")["count"] == 6
+    assert client.count.call_args.kwargs["index"] == case_read_scope("other", client)
+
+
+@pytest.mark.no_case_dirs
+def test_a_case_id_with_no_folder_here_is_refused_saying_why(client, no_case):
+    assert srv.idx_count(case_id="elsewhere") == {
+        "error": "Case 'elsewhere' has no folder on this box, so its indices can't be "
+        "resolved; pass index= or activate it."
+    }
+    client.count.assert_not_called()
+
+
+def test_with_no_case_there_are_no_hayabusa_alerts_to_name(no_case):
+    assert srv._hayabusa_index() == ""
 
 
 def test_the_active_case_is_the_default(client, monkeypatch):
@@ -83,8 +96,10 @@ def test_the_active_case_is_the_default(client, monkeypatch):
     assert client.count.call_args.kwargs["index"] == "case-mix-*"
 
 
-def test_with_no_case_the_summary_refusal_is_unchanged(client, no_case):
-    assert srv.idx_case_summary() == {"error": "No active case. Run 'vhir case activate' first."}
+def test_with_no_case_the_summary_refuses(client, no_case):
+    assert srv.idx_case_summary() == {
+        "error": "No active case: activate a case (vhir case activate) or pass case_id."
+    }
 
 
 def test_the_active_case_is_read_once(client, monkeypatch):
