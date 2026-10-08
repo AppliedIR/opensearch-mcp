@@ -244,6 +244,35 @@ def test_a_stale_doc_left_by_the_relabel_leaves_the_operation_incomplete(
     assert canon(case, a) == "WKS01"
 
 
+def test_failures_the_update_reports_leave_the_operation_incomplete(client, case, monkeypatch):
+    a = machine(client, case, "WKS01", 2)
+    monkeypatch.setattr(host_ops, "_update", lambda *a, **k: {
+        "updated": 1, "failures": [{"cause": {"type": "x"}}]})  # fmt: skip
+    result = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                          client=client)  # fmt: skip
+    assert result["state"] == "incomplete" and "1 failure(s)" in result["reason"]
+    assert canon(case, a) == "WKS01" and "rename" not in decisions(case)
+
+
+def test_a_count_that_changes_during_the_operation_leaves_it_incomplete(client, case, monkeypatch):
+    """Something wrote a doc of the machine meanwhile."""
+    a = machine(client, case, "WKS01", 2)
+    real = host_ops.relabel
+
+    def and_one_more(client_, c12, p, forms):
+        n = real(client_, c12, p, forms)
+        hit = client_.search(index=f"case-{c12}-*", body={"size": 1})["hits"]["hits"][0]
+        late = {**hit["_source"], "event.code": "99999"}
+        client_.index(index=hit["_index"], id="late", body=late, refresh=True)
+        return n
+
+    monkeypatch.setattr(host_ops, "relabel", and_one_more)
+    result = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                          client=client)  # fmt: skip
+    assert result["state"] == "incomplete" and "doc counts changed" in result["reason"]
+    assert "rename" not in decisions(case)
+
+
 def test_the_ais_host_fix_changes_no_doc_and_no_binding(client, case, monkeypatch):
     from opensearch_mcp import case_scope
     from opensearch_mcp import server as srv

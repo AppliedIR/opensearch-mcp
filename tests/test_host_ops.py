@@ -173,6 +173,12 @@ def test_an_index_near_its_shard_limit_is_refused_before_the_journal(case):
     assert hi.read_ops(case)["ops"] == {}
 
 
+def test_a_pre_0_7_text_field_without_a_keyword_form_is_refused():
+    old = {"host": {"properties": {"name": {"type": "text"}, "id": KW}}}
+    with pytest.raises(host_ops.HostOpRefused, match="no keyword host.name or host.id"):
+        host_ops.check_indices(client({}, {"case-old-3": old}), "x", ["case-old-3"])
+
+
 # -- one at a time
 
 
@@ -212,6 +218,12 @@ def test_a_killed_lock_holder_lets_the_operation_take_the_case(case):
     time.sleep(0.1)
     with pytest.raises(host_ops.HostOpRefused, match="no machine"):  # past the lock
         host_ops.run(case, {"kind": "rename", "machine": "nope"}, "ex1", client=object())
+
+
+def test_resuming_names_the_incomplete_operation_itself(case):
+    hi.record_op(case, "op-1", {"state": "incomplete", "op": {"kind": "rename"}})
+    with pytest.raises(host_ops.HostOpRefused, match="no incomplete host operation 'op-2'"):
+        host_ops.run(case, None, "ex1", resume="op-2", client=object())
 
 
 def test_an_operation_needs_its_examiner(case):
