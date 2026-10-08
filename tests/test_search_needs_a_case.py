@@ -109,3 +109,9 @@ def test_the_active_case_is_read_once(client, monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: next(reads))
     assert srv.idx_count()["count"] == 6
     assert client.count.call_args.kwargs["index"] == "case-mix-*"
+
+
+def test_with_no_case_an_explicit_index_still_cant_reach_a_system_index(client, no_case):
+    out = srv.idx_count(index="case-x-*,.opendistro_security")
+    assert "must start with 'case-'" in out["error"]
+    client.count.assert_not_called()
