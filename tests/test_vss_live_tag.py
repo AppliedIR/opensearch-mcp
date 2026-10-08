@@ -288,3 +288,68 @@ def test_a_scan_says_how_many_were_kept_on_screen_and_in_its_status(
     (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
     assert status["status"] == "complete"
     assert status["already_present"] == 7
+
+
+# -- the parser decides: rows already in the case never hide a parser that failed
+
+
+def _failing_parser(monkeypatch, module, primary, fallback):
+    """The wintools parser writes rows that are all in the case already, then
+    raises; the Plaso fallback fails too."""
+    import subprocess
+
+    from opensearch_mcp import wintools
+
+    def wrote_then_raised(*a, **k):
+        bulk._tls.already_present = getattr(bulk._tls, "already_present", 0) + 5
+        raise RuntimeError("PECmd crashed mid-run")
+
+    def plaso_failed(*a, **k):
+        raise subprocess.CalledProcessError(1, ["log2timeline.py"])
+
+    monkeypatch.setattr(wintools, "wintools_available", lambda: True)
+    monkeypatch.setattr(module, primary, wrote_then_raised)
+    monkeypatch.setattr(module, fallback, plaso_failed)
+
+
+def _scan_artifact(tmp_path, artifact):
+    root = tmp_path / "HOST1"
+    if artifact == "prefetch":
+        path = root / "Windows/Prefetch"
+        path.mkdir(parents=True)
+        (path / "CALC.EXE-1234.pf").write_bytes(b"x")
+    else:
+        path = root / "Windows/System32/sru/SRUDB.dat"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"x")
+    host = DiscoveredHost(hostname="HOST1", volume_root=root, vss_id="vss1")
+    host.artifacts.append((artifact, path))
+    audit = MagicMock()
+    audit._next_audit_id.return_value = "aid-1"
+    client = MagicMock()
+    client.count.side_effect = Exception("no index")
+    bulk.reset_circuit_breaker()
+    with patch("opensearch_mcp.ingest.sha256_file", return_value="h"):
+        ingest(hosts=[host], client=client, audit=audit, case_id="c1", include={artifact},
+               status_pid=os.getpid(), status_run_id=f"run-{uuid.uuid4().hex[:6]}")  # fmt: skip
+    (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
+    (row,) = status["checklist"]
+    return row
+
+
+@pytest.mark.parametrize(
+    "artifact, module, primary, fallback",
+    [
+        ("prefetch", "parse_prefetch", "_parse_prefetch_wintools", "_parse_prefetch_plaso"),
+        ("srum", "parse_srum", "_parse_srum_wintools", "_parse_srum_plaso"),
+    ],
+)
+def test_a_parser_that_failed_is_failed_whatever_was_already_present(
+    tmp_path, status_dir, monkeypatch, artifact, module, primary, fallback
+):
+    import importlib
+
+    _failing_parser(monkeypatch, importlib.import_module(f"opensearch_mcp.{module}"),
+                    primary, fallback)  # fmt: skip
+    row = _scan_artifact(tmp_path, artifact)
+    assert row["status"] == "failed" and "no records read" in row["detail"], row

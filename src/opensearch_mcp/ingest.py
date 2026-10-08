@@ -1150,8 +1150,10 @@ def _ingest_plaso_artifact(
             )
         # Nothing read from inputs that are there is a failure, not an empty
         # artifact: Plaso exits 0 on a damaged file, and its errors return 0.
-        # A shadow copy's records that were all in the case already were read.
-        if not cnt and not bf and get_already_present() == present_before:
+        # Records already in the case (a shadow copy's, all on live) count as
+        # read only when the parser completed: a fallback or failure note
+        # means it didn't, whatever it wrote first.
+        if not cnt and not bf and (_note or get_already_present() == present_before):
             if artifact_path.is_dir():
                 n = sum(1 for f in artifact_path.iterdir() if f.suffix.lower() == ".pf")
                 what = f"{n} .pf file(s)"
