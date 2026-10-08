@@ -272,9 +272,6 @@ def test_a_scan_says_how_many_were_kept_on_screen_and_in_its_status(
     host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path / "ev", vss_id="vss1")
     host.evtx_dir = evtx
     monkeypatch.setattr(cli, "discover", lambda *a, **k: [host])
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a, **k: ({"decisions_applied": []}, None)
-    )
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")

@@ -43,9 +43,6 @@ def scan(tmp_path, monkeypatch):
     host.evtx_dir = evtx
     host.artifacts.append(("srum", srum))
     monkeypatch.setattr(cli, "discover", lambda *a, **k: [host])
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a, **k: ({"decisions_applied": []}, None)
-    )
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")

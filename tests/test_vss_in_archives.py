@@ -87,9 +87,6 @@ def _scan(tmp_path, monkeypatch, image_name, live_windows=True, decoy=False):
     ):
         monkeypatch.setattr(C, name, value)
     monkeypatch.setattr(cli, "ingest", ingest)
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a: ({"decisions_applied": []}, None)
-    )
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")

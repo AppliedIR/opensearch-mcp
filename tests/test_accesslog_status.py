@@ -27,7 +27,7 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-al")
     monkeypatch.setattr(ingest_status, "_is_process_alive", lambda pid, run_id: True)
     for name in ("_ensure_case_active", "_preflight_shard_capacity", "AuditWriter",
-                 "get_client", "_warn_if_mapping_upgrade_required"):  # fmt: skip
+                 "get_client"):  # fmt: skip
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
     monkeypatch.setattr(cli, "_load_case_host_dict", lambda *a, **k: None)

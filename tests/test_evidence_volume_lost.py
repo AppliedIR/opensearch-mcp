@@ -54,9 +54,6 @@ def scan(tmp_path, monkeypatch, other_device):
     for name in ("_preflight_shard_capacity", "_ensure_case_active", "AuditWriter", "get_client"):
         monkeypatch.setattr(cli, name, MagicMock())
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
-    monkeypatch.setattr(
-        cli, "_preflight_host_discovery", lambda *a, **k: ({"decisions_applied": []}, None)
-    )
     monkeypatch.setattr(ing, "sha256_file", lambda p: "h")
     monkeypatch.setattr(ing, "parse_and_index", MagicMock(return_value=(500, 0, 0)))
     hb = tmp_path / "bin" / "hayabusa"  # writes no CSV: a note, never a failure
