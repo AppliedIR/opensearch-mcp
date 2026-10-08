@@ -35,7 +35,7 @@ def status_dir(tmp_path, monkeypatch):
 
 
 def _volume(tmp_path, profiles) -> Path:
-    root = tmp_path / "evidence" / "RD01" / "C"
+    root = tmp_path / "evidence" / "WS01" / "C"
     for name in profiles:
         (root / "Users" / name).mkdir(parents=True)
     return root
@@ -87,28 +87,28 @@ def _scan(hosts, rows_for, case_id="c1"):
     return lines, status.get("warnings", [])
 
 
-def _host(root, profiles, vss_id="", hostname="RD01"):
+def _host(root, profiles, vss_id="", hostname="WS01"):
     host = DiscoveredHost(hostname=hostname, volume_root=root, vss_id=vss_id)
     host.artifacts = [("shellbags", root / "Users" / p) for p in profiles]
     return host
 
 
 def test_identical_profiles_name_the_profile_that_lost_its_rows(tmp_path, status_dir, capsys):
-    """rd01's shape: SRLAdmin and rsydow-a hold the same 37 shellbags."""
-    profiles = ["SRLAdmin", "rsydow-a", "tdungan"]
+    """Two profiles hold the same 37 shellbags; a third holds its own."""
+    profiles = ["alice", "bob-admin", "carol"]
     root = _volume(tmp_path, profiles)
     lines, warnings = _scan(
         [_host(root, profiles)],
-        lambda p: range(100, 120) if p == "tdungan" else range(37),
+        lambda p: range(100, 120) if p == "carol" else range(37),
     )
     message = (
-        "37 rows of Users/SRLAdmin were replaced by identical rows from a later file "
-        "in this run (Users/rsydow-a)"
+        "37 rows of Users/alice were replaced by identical rows from a later file "
+        "in this run (Users/bob-admin)"
     )
-    assert [w for w in warnings if "replaced" in w] == [f"RD01: {message}"]
-    assert lines[str(root / "Users/rsydow-a")] == f"37 indexed; {message}"
-    assert lines[str(root / "Users/SRLAdmin")] == "37 indexed"
-    assert lines[str(root / "Users/tdungan")] == "20 indexed"
+    assert [w for w in warnings if "replaced" in w] == [f"WS01: {message}"]
+    assert lines[str(root / "Users/bob-admin")] == f"37 indexed; {message}"
+    assert lines[str(root / "Users/alice")] == "37 indexed"
+    assert lines[str(root / "Users/carol")] == "20 indexed"
     assert "replaced" not in capsys.readouterr().out  # no console line
 
 
@@ -118,27 +118,27 @@ def test_three_identical_profiles_count_each_loss_against_its_own_file(tmp_path,
     _, warnings = _scan([_host(root, profiles)], lambda p: range(5))
     lost = "rows from a later file in this run"
     assert [w for w in warnings if "replaced" in w] == [
-        f"RD01: 5 rows of Users/a were replaced by identical {lost} (Users/b); "
+        f"WS01: 5 rows of Users/a were replaced by identical {lost} (Users/b); "
         f"5 rows of Users/b were replaced by identical {lost} (Users/c)"
     ]
 
 
 def test_anchor_a_shadow_copy_of_the_same_profile_is_silent(tmp_path, status_dir):
-    root = _volume(tmp_path, ["SRLAdmin", "rsydow-a"])
+    root = _volume(tmp_path, ["alice", "bob-admin"])
     hosts = [
-        _host(root, ["SRLAdmin", "rsydow-a"], vss_id="live"),
-        _host(root, ["SRLAdmin"], vss_id="vss1"),  # the same files, from a shadow copy
+        _host(root, ["alice", "bob-admin"], vss_id="live"),
+        _host(root, ["alice"], vss_id="vss1"),  # the same files, from a shadow copy
     ]
-    _, warnings = _scan(hosts, lambda p: range(10) if p == "SRLAdmin" else range(50, 60))
+    _, warnings = _scan(hosts, lambda p: range(10) if p == "alice" else range(50, 60))
     assert [w for w in warnings if "replaced" in w] == []
 
 
 def test_one_recmd_run_over_four_hives_isn_t_tracked(tmp_path):
     from opensearch_mcp.ingest import _indices_filled_by_several_files
 
-    root = tmp_path / "evidence" / "RD01" / "C"
+    root = tmp_path / "evidence" / "WS01" / "C"
     config = root / "Windows/System32/config"
-    host = DiscoveredHost(hostname="RD01", volume_root=root)
+    host = DiscoveredHost(hostname="WS01", volume_root=root)
     host.artifacts = [
         (f"registry_{h.lower()}", config / h) for h in ("SYSTEM", "SOFTWARE", "SAM", "SECURITY")
     ] + [("shellbags", root / "Users/one")]
@@ -150,7 +150,7 @@ def test_one_recmd_run_over_four_hives_isn_t_tracked(tmp_path):
 def test_two_machines_with_identical_rows_keep_both_and_say_nothing(tmp_path, status_dir):
     """Every machine's rows share one case index; a row's stored id carries its
     machine, so the same shellbags on two machines are two documents."""
-    profiles = {"RD01": "alice", "RD02": "bob"}  # different files, identical rows
+    profiles = {"WS01": "alice", "WS02": "bob"}  # different files, identical rows
     roots = {}
     for name, profile in profiles.items():
         roots[name] = tmp_path / "evidence" / name / "C"
