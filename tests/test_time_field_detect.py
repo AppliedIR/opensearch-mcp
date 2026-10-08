@@ -174,8 +174,9 @@ def cluster_case(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_a_walks_sub_runs_each_name_only_their_own_files(cluster_case, tmp_path, monkeypatch):
-    """host1's file has no time column, host2's has one: host2's own status
-    write names nothing, and the walk's final write names host1's file once."""
+    """host1's file has no time column, host2's has one. The leaves never end
+    the walk's run: its one terminal write, last, names host1's file once, and
+    nothing names host2's."""
     top = tmp_path / "walk"
     (top / "host1").mkdir(parents=True)
     (top / "host2").mkdir()
@@ -194,10 +195,12 @@ def test_a_walks_sub_runs_each_name_only_their_own_files(cluster_case, tmp_path,
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", "tf-walk")
     args = argparse.Namespace(path=str(top), case=cluster_case, hostname="", recursive=True)
     cli.cmd_ingest_delimited(args)
-    host2_final = [n for host, st, n in writes if host == "host2" and st != "running"]
-    assert host2_final == [""], writes
-    final_note = [n for host, st, n in writes if st != "running"][-1]
+    terminal = [(i, n) for i, (host, st, n) in enumerate(writes) if st != "running"]
+    assert [i for i, _ in terminal] == [len(writes) - 1], writes  # the walk's, last
+    final_note = terminal[0][1]
     assert final_note.startswith("No time field detected in 1 file(s), e.g. host1/procs.csv")
+    assert final_note.count("procs.csv") == 1 and "events.csv" not in final_note
+    assert not any("No time field" in n for host, st, n in writes if host == "host2"), writes
 
 
 @pytest.mark.integration
