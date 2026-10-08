@@ -28,7 +28,6 @@ import pytest
 import yaml
 
 from opensearch_mcp import tools, triage_remote
-from opensearch_mcp.paths import build_index_name
 
 # Kroll's file name and a few of its kinds of scalar (a capitalised boolean,
 # a YAML-1.1 "yes", an octal-looking string) whose text must survive
@@ -253,7 +252,7 @@ def case(scratch, monkeypatch):
     monkeypatch.setattr(triage_remote, "call_tool", call_tool)
     monkeypatch.setattr(triage_remote, "gateway_available", lambda: True)
     case_id = f"{tag}-{uuid.uuid4().hex[:6]}"
-    index = build_index_name(case_id, "registry", "h1")
+    index = f"case-{case_id}-registry-h1"
 
     class Case:
         id = case_id

@@ -83,7 +83,6 @@ def cluster(tmp_path_factory):
     from opensearchpy import helpers
 
     from opensearch_mcp import parse_delimited, parse_w3c
-    from opensearch_mcp.paths import build_index_name
 
     tag = f"pytest-tpl-{uuid.uuid4().hex[:8]}"
     d = tmp_path_factory.mktemp("evidence")
@@ -128,23 +127,20 @@ def cluster(tmp_path_factory):
             d / "conn.csv", client, f"case-{tag}-dst2-delim-conn-h1", "h1"
         )
 
+        # Hosts are machines (host.id) and the list is cut at 5000 of them
         actions = []
-        for n in range(90):  # 540 names, one document each
-            h = f"ws{n:03d}"
-            index = build_index_name(f"{tag}-big", "delim-netstat", h)
-            for form in (f"{h.upper()}.CORP.EXAMPLE", f"{h}.corp.example", h.upper(), h):
-                actions.append({"_index": index, "_source": {"host.name": form}})
-            for form in (f"10.20.0.{n}", f"fe80::{n:x}"):
-                actions.append({"_index": index, "_source": {"host.name": form}})
+        index = f"case-{tag}-big-delim-netstat-h1"
+        for n in range(5040):  # 5040 machines, one document each
+            src = {"host.id": f"ws{n:05d}", "host.name": f"WS{n:05d}.corp.example"}
+            actions.append({"_index": index, "_source": src})
         for case, extra in (("b500", False), ("b501", True)):
-            for n in range(100):  # 500 names, two documents each
-                h = f"pc{n:03d}"
-                index = build_index_name(f"{tag}-{case}", "delim-netstat", h)
-                for k in range(5):
-                    actions += [{"_index": index, "_source": {"host.name": f"{h}-{k}"}}] * 2
+            index = f"case-{tag}-{case}-delim-netstat-h1"
+            for n in range(5000):  # 5000 machines, two documents each
+                src = {"host.id": f"pc{n:05d}", "host.name": f"pc{n:05d}"}
+                actions += [{"_index": index, "_source": src}] * 2
             if extra:
-                index = build_index_name(f"{tag}-{case}", "delim-netstat", "zz-late")
-                actions.append({"_index": index, "_source": {"host.name": "zz-late"}})
+                src = {"host.id": "zz-late", "host.name": "zz-late"}
+                actions.append({"_index": index, "_source": src})
         helpers.bulk(client, actions)
         client.indices.refresh(index=f"case-{tag}-*")
 
@@ -215,8 +211,8 @@ def _cut(summary):
 
 @pytest.mark.parametrize(
     "case, hosts, cut",
-    [("big", 500, 40), ("b501", 500, 1), ("b500", 500, None), ("mix", 2, None)],
-    ids=["540 names", "501 names, one on one document", "exactly 500 names", "two hosts"],
+    [("big", 5000, 40), ("b501", 5000, 1), ("b500", 5000, None), ("mix", 2, None)],
+    ids=["5040 machines", "5001 machines, one on one document", "exactly 5000", "two hosts"],
 )
 def test_a_cut_host_list_says_how_many_documents_it_left_out(tools, case, hosts, cut):
     tag, _ = tools
@@ -233,15 +229,21 @@ def test_a_cut_host_list_says_how_many_documents_it_left_out(tools, case, hosts,
     [
         ("{tag}-nonexistent", "case-{tag}-nonexistent-*"),
         ("..", "case-..-*"),
-        ("../mix", "case-..-mix-*"),
     ],
-    ids=["a mistyped id", "dot-dot", "dot-dot then a case"],
+    ids=["a mistyped id", "dot-dot"],
 )
 def test_a_summary_of_a_case_id_matching_no_index_is_an_error(tools, case_id, pattern):
     tag, _ = tools
     summary = srv.idx_case_summary(case_id=case_id.format(tag=tag))
     assert repr(pattern.format(tag=tag)) in summary["error"]
     assert "nothing was summarized" in summary["error"]
+    assert "hosts" not in summary and "total_docs" not in summary
+    assert "audit_id" not in summary and AUDITED == []
+
+
+def test_a_case_id_that_is_a_path_names_no_case_and_summarizes_nothing(tools):
+    summary = srv.idx_case_summary(case_id="../mix")
+    assert "'../mix'" in summary["error"]  # not a case folder's name: no case at all
     assert "hosts" not in summary and "total_docs" not in summary
     assert "audit_id" not in summary and AUDITED == []
 

@@ -25,7 +25,6 @@ import pytest
 
 from opensearch_mcp import triage_remote
 from opensearch_mcp.parse_csv import ingest_csv
-from opensearch_mcp.paths import build_index_name
 
 pytestmark = pytest.mark.integration
 
@@ -121,14 +120,14 @@ class Case:
         self.client, self.id, self.tmp = client, f"{tag}-{name}", tmp_path
 
     def csv(self, kind, header, rows):
-        index = build_index_name(self.id, kind, "h1")
+        index = f"case-{self.id}-{kind}-h1"
         path = self.tmp / f"{kind}.csv"
         path.write_text(header + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
         _, _, failed = ingest_csv(path, self.client, index, "h1")
         assert failed == 0
 
     def doc(self, kind, doc_id, body):
-        self.client.index(index=build_index_name(self.id, kind, "h1"), id=doc_id, body=body)
+        self.client.index(index=f"case-{self.id}-{kind}-h1", id=doc_id, body=body)
 
     def stamp(self, kind, query):
         self.client.indices.refresh(index=f"case-{self.id}-*")
@@ -457,7 +456,7 @@ def test_a_large_clear_finishes_before_triage_goes_on(scratch):
 
     client, tag = scratch
     case_id = f"{tag}-big-{uuid.uuid4().hex[:6]}"
-    index = build_index_name(case_id, "evtx", "h1")
+    index = f"case-{case_id}-evtx-h1"
     client.indices.create(index=index, body={"settings": {"refresh_interval": "-1"}})
     n = 520_000
     stamped = {"event.code": "4624", "triage.checked": True, "triage.verdict": "EXPECTED"}
