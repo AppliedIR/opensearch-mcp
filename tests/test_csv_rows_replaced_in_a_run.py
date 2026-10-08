@@ -116,24 +116,27 @@ def test_identical_profiles_name_the_profile_that_lost_its_rows(tmp_path, status
         lambda p: range(100, 120) if p == "carol" else range(37),
     )
     message = (
-        "37 rows of Users/alice were replaced by identical rows from a later file "
-        "in this run (Users/bob-admin)"
+        "37 shellbag rows from Users/alice are identical to rows from Users/bob-admin "
+        "and are stored once, under Users/bob-admin; a search for Users/alice won't "
+        "find them"
     )
-    assert [w for w in warnings if "replaced" in w] == [f"WS01: {message}"]
+    assert [w for w in warnings if "stored once" in w] == [f"WS01: {message}"]
     assert lines[str(root / "Users/bob-admin")] == f"37 indexed; {message}"
     assert lines[str(root / "Users/alice")] == "37 indexed"
     assert lines[str(root / "Users/carol")] == "20 indexed"
-    assert "replaced" not in capsys.readouterr().out  # no console line
+    assert "stored once" not in capsys.readouterr().out  # no console line
 
 
 def test_three_identical_profiles_count_each_loss_against_its_own_file(tmp_path, status_dir):
     profiles = ["a", "b", "c"]
     root = _volume(tmp_path, profiles)
     _, warnings = _scan([_host(root, profiles)], lambda p: range(5))
-    lost = "rows from a later file in this run"
-    assert [w for w in warnings if "replaced" in w] == [
-        f"WS01: 5 rows of Users/a were replaced by identical {lost} (Users/b); "
-        f"5 rows of Users/b were replaced by identical {lost} (Users/c)"
+    lost = "and are stored once"
+    assert [w for w in warnings if "stored once" in w] == [
+        f"WS01: 5 shellbag rows from Users/a are identical to rows from Users/b {lost}, "
+        "under Users/b; a search for Users/a won't find them; "
+        f"5 shellbag rows from Users/b are identical to rows from Users/c {lost}, "
+        "under Users/c; a search for Users/b won't find them"
     ]
 
 
@@ -144,7 +147,7 @@ def test_anchor_a_shadow_copy_of_the_same_profile_is_silent(tmp_path, status_dir
         _host(root, ["alice"], vss_id="vss1"),  # the same files, from a shadow copy
     ]
     _, warnings = _scan(hosts, lambda p: range(10) if p == "alice" else range(50, 60))
-    assert [w for w in warnings if "replaced" in w] == []
+    assert [w for w in warnings if "stored once" in w] == []
 
 
 def test_one_recmd_run_over_four_hives_isn_t_tracked(tmp_path):
@@ -171,7 +174,7 @@ def test_two_machines_with_identical_rows_keep_both_and_say_nothing(tmp_path, st
         (roots[name] / "Users" / profile).mkdir(parents=True)
     hosts = [_host(roots[n], [profiles[n]], hostname=n) for n in roots]
     _, warnings = _scan(hosts, lambda p: range(37), case_id="c2-two-machines")
-    assert [w for w in warnings if "replaced" in w] == []
+    assert [w for w in warnings if "stored once" in w] == []
 
 
 def test_one_host_name_on_two_units_that_are_two_machines_says_nothing(tmp_path, status_dir):
@@ -187,7 +190,7 @@ def test_one_host_name_on_two_units_that_are_two_machines_says_nothing(tmp_path,
     written = []
     _, warnings = _scan(hosts, lambda p: range(37), case_id="c4-one-name", written=written)
     assert len({d["vhir.host_key"] for d in written}) == 2  # two machines
-    assert [w for w in warnings if "replaced" in w] == []
+    assert [w for w in warnings if "stored once" in w] == []
 
 
 def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_path, status_dir):

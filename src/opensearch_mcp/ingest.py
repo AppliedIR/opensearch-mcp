@@ -562,6 +562,12 @@ def _run_hayabusa_batch(
 _MIN_EVTX_SIZE = 69632  # One 64KB chunk + header — files under this are empty
 
 
+def _row_label(artifact_name: str) -> str:
+    """An artifact's rows in words: `shellbags` -> "shellbag"."""
+    label = artifact_name.replace("_", " ")
+    return label[:-1] if label.endswith("s") and not label.endswith("ss") else label
+
+
 def _indices_filled_by_several_files(hosts, active_names) -> set[str]:
     """The EZ-tool artifact types (each one case index, every host's records
     in it) this run fills from more than one evidence file (a content-hash
@@ -912,8 +918,9 @@ def _ingest_hosts(
                 if not hives and file_hash:
                     hashes = [file_hash]
                 replaced = [
-                    f"{n} rows of {loser} were replaced by identical rows from a later "
-                    f"file in this run ({winner})"
+                    f"{n} {_row_label(artifact_name)} rows from {loser} are identical to "
+                    f"rows from {winner} and are stored once, under {winner}; a search "
+                    f"for {loser} won't find them"
                     for (loser, winner), n in sorted(collided.items())
                 ]
                 ar.indexed = cnt
