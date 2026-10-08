@@ -32,7 +32,7 @@ CALLS = {
 @pytest.fixture
 def client(monkeypatch):
     c = MagicMock()
-    c.count.return_value = {"count": 6}
+    c.search.return_value = {"hits": {"total": {"value": 6}, "hits": []}}
     c.cat.indices.return_value = [{"index": "case-other-delim-netstat-h1", "status": "open"}]
     monkeypatch.setattr(srv, "_get_os", lambda: c)
     monkeypatch.setattr(srv.audit, "log", lambda **kw: "aid-1")
@@ -59,7 +59,7 @@ def test_a_pointer_that_names_no_case_counts_as_no_case(client, tmp_path, monkey
     (tmp_path / ".vhir" / "active_case").write_text(pointer)
     monkeypatch.setattr(paths, "vhir_home", lambda: tmp_path)
     assert srv.idx_count() == REFUSAL
-    client.count.assert_not_called()
+    client.search.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -67,14 +67,14 @@ def test_a_pointer_that_names_no_case_counts_as_no_case(client, tmp_path, monkey
 )
 def test_with_no_case_an_explicit_index_is_searched_as_given(client, no_case, index):
     assert srv.idx_count(index=index)["count"] == 6
-    assert client.count.call_args.kwargs["index"] == index
+    assert client.search.call_args.kwargs["index"] == index
 
 
 def test_with_no_case_a_case_id_names_its_indices_from_its_folder(client, no_case):
     from opensearch_mcp.case_scope import case_read_scope
 
     assert srv.idx_count(case_id="other")["count"] == 6
-    assert client.count.call_args.kwargs["index"] == case_read_scope("other", client)
+    assert client.search.call_args.kwargs["index"] == case_read_scope("other", client)
 
 
 @pytest.mark.no_case_dirs
@@ -83,7 +83,7 @@ def test_a_case_id_with_no_folder_here_is_refused_saying_why(client, no_case):
         "error": "Case 'elsewhere' has no folder on this box, so its indices can't be "
         "resolved; pass index= or activate it."
     }
-    client.count.assert_not_called()
+    client.search.assert_not_called()
 
 
 def test_with_no_case_there_are_no_hayabusa_alerts_to_name(no_case):
@@ -93,7 +93,7 @@ def test_with_no_case_there_are_no_hayabusa_alerts_to_name(no_case):
 def test_the_active_case_is_the_default(client, monkeypatch):
     monkeypatch.setattr(srv, "_get_active_case", lambda: "mix")
     assert srv.idx_count()["count"] == 6
-    assert client.count.call_args.kwargs["index"] == "case-mix-*"
+    assert client.search.call_args.kwargs["index"] == "case-mix-*"
 
 
 def test_with_no_case_the_summary_refuses(client, no_case):
@@ -108,10 +108,10 @@ def test_the_active_case_is_read_once(client, monkeypatch):
     reads = iter(["mix", None])
     monkeypatch.setattr(srv, "_get_active_case", lambda: next(reads))
     assert srv.idx_count()["count"] == 6
-    assert client.count.call_args.kwargs["index"] == "case-mix-*"
+    assert client.search.call_args.kwargs["index"] == "case-mix-*"
 
 
 def test_with_no_case_an_explicit_index_still_cant_reach_a_system_index(client, no_case):
     out = srv.idx_count(index="case-x-*,.opendistro_security")
     assert "must start with 'case-'" in out["error"]
-    client.count.assert_not_called()
+    client.search.assert_not_called()

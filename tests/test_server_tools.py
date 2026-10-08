@@ -239,12 +239,12 @@ class TestIdxSearch:
 
 class TestIdxCount:
     def test_returns_count(self, mock_client):
-        mock_client.count.return_value = {"count": 42}
+        mock_client.search.return_value = {"hits": {"total": {"value": 42}, "hits": []}}
         resp = idx_count(query="*")
         assert resp["count"] == 42
 
     def test_audit_id_in_response(self, mock_client):
-        mock_client.count.return_value = {"count": 0}
+        mock_client.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}}
         with patch.object(srv.audit, "log", return_value="audit-456"):
             resp = idx_count()
         assert resp["audit_id"] == "audit-456"

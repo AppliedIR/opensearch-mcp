@@ -4,12 +4,16 @@ Every indexed record carries `vhir.ingest_audit_id`, the audit id of the
 parser entry that wrote it. idx_search and idx_get_event add the distinct ids
 of the records they returned to their audit entry, as
 `params.result_ingests` (sorted), so a finding citing those results traces to
-the files and tools behind them. The reply is unchanged. The client is a mock;
-the audit log is captured.
+the files and tools behind them. idx_count, idx_aggregate, idx_timeline and
+idx_field_values summarise records, so the same request carries a sibling
+terms aggregation on the id; the records with no id and any past the cap are
+logged too, never dropped silently. The reply is unchanged. The client is a
+mock; the audit log is captured.
 """
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,3 +88,77 @@ def test_a_fetched_event_records_its_ingest(os_, monkeypatch):
     assert entry["tool"] == "idx_get_event"
     assert entry["params"]["result_ingests"] == ["opensearch-ex-20261008-004"]
     assert "result_ingests" not in doc
+
+
+def _summary(ids=(), missing=0, other=0, **own):
+    return {
+        "hits": {"total": {"value": 9}, "hits": []},
+        "aggregations": {
+            **own,
+            "result_ingests": {
+                "buckets": [{"key": k, "doc_count": 1} for k in ids],
+                "sum_other_doc_count": other,
+            },
+            "result_ingests_missing": {"doc_count": missing},
+        },
+    }
+
+
+SUMMARIES = {
+    "idx_count": (lambda: srv.idx_count(query="*", index=INDEX), {}),
+    "idx_aggregate": (
+        lambda: srv.idx_aggregate(field="host.name", index=INDEX),
+        {"agg": {"buckets": [{"key": "RD01", "doc_count": 9}]}},
+    ),
+    "idx_timeline": (
+        lambda: srv.idx_timeline(index=INDEX),
+        {"timeline": {"buckets": [{"key_as_string": "2026-10-08T00:00:00Z", "doc_count": 9}]}},
+    ),
+    "idx_field_values": (
+        lambda: srv.idx_field_values(field="host.name", index=INDEX),
+        {"values": {"buckets": [{"key": "RD01", "doc_count": 9}]}},
+    ),
+}
+
+
+@pytest.mark.parametrize("tool", sorted(SUMMARIES))
+def test_a_summary_records_the_ingests_of_the_records_it_counted(os_, tool):
+    c, logged = os_
+    call, own = SUMMARIES[tool]
+    ids = ["opensearch-ex-20261008-007", "opensearch-ex-20261008-003"]
+    c.search.return_value = _summary(ids, **own)
+    resp = call()
+    (entry,) = logged
+    assert entry["tool"] == tool
+    assert entry["params"]["result_ingests"] == sorted(ids)
+    assert "result_ingests_missing" not in entry["params"]
+    assert "result_ingests_overflow" not in entry["params"]
+    assert "result_ingests" not in json.dumps(resp)  # the reply is unchanged
+    aggs = c.search.call_args.kwargs["body"]["aggs"]  # top-level siblings
+    assert aggs["result_ingests"] == {
+        "terms": {"field": "vhir.ingest_audit_id", "size": srv._INGEST_AGG_CAP}
+    }
+    assert aggs["result_ingests_missing"] == {"missing": {"field": "vhir.ingest_audit_id"}}
+    assert set(aggs) == {"result_ingests", "result_ingests_missing", *own}
+
+
+@pytest.mark.parametrize("tool", sorted(SUMMARIES))
+def test_records_with_no_id_and_ids_past_the_cap_are_logged(os_, tool):
+    c, logged = os_
+    call, own = SUMMARIES[tool]
+    c.search.return_value = _summary(["opensearch-ex-20261008-001"], missing=4, other=12, **own)
+    call()
+    params = logged[0]["params"]
+    assert params["result_ingests"] == ["opensearch-ex-20261008-001"]
+    assert params["result_ingests_missing"] == 4
+    assert params["result_ingests_overflow"] == 12
+    assert params["result_ingests_cap"] == srv._INGEST_AGG_CAP
+
+
+def test_a_count_is_a_search_of_no_records_counting_every_match(os_):
+    c, _ = os_
+    c.search.return_value = {**_summary(), "hits": {"total": {"value": 12345}, "hits": []}}
+    assert srv.idx_count(query="*", index=INDEX)["count"] == 12345
+    body = c.search.call_args.kwargs["body"]
+    assert body["size"] == 0 and body["track_total_hits"] is True
+    c.count.assert_not_called()

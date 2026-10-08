@@ -835,6 +835,40 @@ _IP_WILDCARD_HINT = (
 )
 
 
+_INGEST_AGG_CAP = 1000
+
+
+def _ingest_aggs() -> dict:
+    """Sibling aggregations that record which ingests a query's records came
+    from: their distinct `vhir.ingest_audit_id` (capped) and how many carry
+    none."""
+    field = "vhir.ingest_audit_id"
+    return {
+        "result_ingests": {"terms": {"field": field, "size": _INGEST_AGG_CAP}},
+        "result_ingests_missing": {"missing": {"field": field}},
+    }
+
+
+def _ingest_params(result: dict) -> dict:
+    """The audit params from `_ingest_aggs`: the sorted ids, and, when not
+    zero, the records with no id and those past the cap: never dropped
+    silently."""
+    aggs = result.get("aggregations") or {}
+    terms = aggs.get("result_ingests") or {}
+    ids = sorted(
+        b["key"] for b in terms.get("buckets", []) if isinstance(b.get("key"), str) and b["key"]
+    )
+    out: dict = {"result_ingests": ids}
+    missing = (aggs.get("result_ingests_missing") or {}).get("doc_count", 0)
+    if missing:
+        out["result_ingests_missing"] = missing
+    overflow = terms.get("sum_other_doc_count", 0)
+    if overflow:
+        out["result_ingests_overflow"] = overflow
+        out["result_ingests_cap"] = _INGEST_AGG_CAP
+    return out
+
+
 def _result_ingests(sources: list) -> list[str]:
     """The distinct `vhir.ingest_audit_id` values of the returned records,
     sorted: the parser entries that wrote them, recorded in the audit entry so
@@ -1015,10 +1049,16 @@ def idx_count(
     index, err = _search_index(index, case_id, client)
     if err:
         return {"error": err}
+    # a search of no records, so the same request records the ingests counted
     result = _os_call(
-        client.count,
+        client.search,
         index=index,
-        body={"query": {"query_string": {"query": query}}},
+        body={
+            "query": {"query_string": {"query": query}},
+            "aggs": _ingest_aggs(),
+            "size": 0,
+            "track_total_hits": True,
+        },
     )
     if err := _no_index_matched(result, index):
         aid = audit.log(
@@ -1029,12 +1069,13 @@ def idx_count(
         if aid:
             err["audit_id"] = aid
         return err
-    resp = {"count": result["count"]}
+    count = result["hits"]["total"]["value"]
+    resp = {"count": count}
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
     aid = audit.log(
         tool="idx_count",
-        params={"query": query, "index": requested, "scope": index},
-        result_summary=f"count={result['count']}",
+        params={"query": query, "index": requested, "scope": index, **_ingest_params(result)},
+        result_summary=f"count={count}",
     )
     if aid:
         resp["audit_id"] = aid
@@ -1079,7 +1120,7 @@ def idx_aggregate(
         index=index,
         body={
             "query": {"query_string": {"query": query}},
-            "aggs": {"agg": {"terms": {"field": field, "size": limit}}},
+            "aggs": {"agg": {"terms": {"field": field, "size": limit}}, **_ingest_aggs()},
             "size": 0,
             "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
         },
@@ -1099,7 +1140,13 @@ def idx_aggregate(
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
     aid = audit.log(
         tool="idx_aggregate",
-        params={"field": field, "query": query, "index": requested, "scope": index},
+        params={
+            "field": field,
+            "query": query,
+            "index": requested,
+            "scope": index,
+            **_ingest_params(result),
+        },  # fmt: skip
         result_summary=f"{len(buckets)} buckets",
     )
     if aid:
@@ -1203,7 +1250,8 @@ def idx_timeline(
                         "fixed_interval": interval,
                         "min_doc_count": 1,
                     }
-                }
+                },
+                **_ingest_aggs(),
             },
             "size": 0,
             "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
@@ -1223,7 +1271,13 @@ def idx_timeline(
     _annotate_hosts(resp, case_id, client, index, query_body)
     aid = audit.log(
         tool="idx_timeline",
-        params={"query": query, "index": requested, "scope": index, "interval": interval},
+        params={
+            "query": query,
+            "index": requested,
+            "scope": index,
+            "interval": interval,
+            **_ingest_params(result),
+        },  # fmt: skip
         result_summary=f"{len(buckets)} buckets",
     )
     if aid:
@@ -1263,7 +1317,7 @@ def idx_field_values(
         index=index,
         body={
             "query": {"query_string": {"query": query}},
-            "aggs": {"values": {"terms": {"field": field, "size": limit}}},
+            "aggs": {"values": {"terms": {"field": field, "size": limit}}, **_ingest_aggs()},
             "size": 0,
         },
     )
@@ -1276,7 +1330,13 @@ def idx_field_values(
     resp = {"field": field, "values": values, "truncated": len(values) >= limit}
     aid = audit.log(
         tool="idx_field_values",
-        params={"field": field, "query": query, "index": requested, "scope": index},
+        params={
+            "field": field,
+            "query": query,
+            "index": requested,
+            "scope": index,
+            **_ingest_params(result),
+        },  # fmt: skip
         result_summary=f"{len(values)} values",
     )
     if aid:
