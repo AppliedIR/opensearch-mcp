@@ -11,7 +11,6 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp import write_context as wc
 from opensearch_mcp.bulk import flush_bulk
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
@@ -113,6 +112,18 @@ def _doc_id(
     return hashlib.sha256(f"{index_name}:{content}".encode()).hexdigest()[:20]
 
 
+def _track_replaced(actions: list[dict], seen: dict, collided: dict, source_file: str) -> None:
+    """After a write: count each row whose stored id (the stamped machine key
+    and the record id) an earlier file of the run wrote, against that file."""
+    for action in actions:
+        src = action.get("_source") or {}
+        stored = (src.get("vhir.host_key"), src.get("vhir.rid", action.get("_id")))
+        earlier = seen.get(stored)
+        if earlier is not None and earlier != source_file:
+            collided[(earlier, source_file)] = collided.get((earlier, source_file), 0) + 1
+        seen[stored] = source_file  # always the newest writer
+
+
 def _resolve_cached(host_dict, raw: str) -> str | None:
     """Per-batch resolve memoization (see parse_evtx._resolve_cached)."""
     cache = getattr(host_dict, "_resolve_cache", None)
@@ -156,13 +167,15 @@ def ingest_csv(
     Returns (count_indexed, count_skipped, count_bulk_failed).
     count_skipped = rows dropped by time range filter.
 
-    `seen` ((machine key, document id) -> the file that last wrote it, one per
+    `seen` ((machine key, record id) -> the file that last wrote it, one per
     index for a run) and `collided` ((file that lost the row, file that
     replaced it) -> rows): a row whose stored id another file of the run
     already wrote replaces that row, and the loss is counted against the
-    earlier file. The machine key is the one the write stamps, so identical
-    rows of two machines (one case index) are two documents, never a loss.
+    earlier file. Counted after each write, from the machine key the write
+    stamped: identical rows of two machines (one case index) are two
+    documents, never a loss, and counting resolves no host itself.
     """
+    track = seen is not None and collided is not None and not natural_key
     count = 0
     skipped = 0
     bulk_failed = 0
@@ -237,14 +250,6 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
-            if seen is not None and not natural_key:
-                ctx = wc.current()
-                machine = ctx.resolve(row.get("host.name"))[1] if ctx else row.get("host.id")
-                stored = (machine, _id)
-                earlier = seen.get(stored)
-                if earlier is not None and earlier != source_file and collided is not None:
-                    collided[(earlier, source_file)] = collided.get((earlier, source_file), 0) + 1
-                seen[stored] = source_file  # always the newest writer
 
             # Provenance fields (added after ID computation)
             if source_file:
@@ -263,11 +268,15 @@ def ingest_csv(
                 flushed, failed = flush_bulk(client, actions)
                 count += flushed
                 bulk_failed += failed
+                if track:
+                    _track_replaced(actions, seen, collided, source_file)
                 actions = []
 
     if actions:
         flushed, failed = flush_bulk(client, actions)
         count += flushed
         bulk_failed += failed
+        if track:
+            _track_replaced(actions, seen, collided, source_file)
 
     return count, skipped, bulk_failed

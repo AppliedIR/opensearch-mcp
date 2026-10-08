@@ -58,15 +58,29 @@ def _sbecmd(rows_for):
     return run
 
 
-def _scan(hosts, rows_for, case_id="c1"):
+def _scan(hosts, rows_for, case_id="c1", client=None, written=None):
+    """A scan whose writes are stamped as the real write stamps them (the
+    machine key, and the pre-0.7 import before the first name binds)."""
+    from opensearch_mcp import write_context as wc
+
     audit = MagicMock()
     ids = iter(f"aid-{n:03d}" for n in range(1, 100))
     audit._next_audit_id.side_effect = lambda: next(ids)
-    client = MagicMock()
+    if client is None:
+        client = MagicMock()
+        client.indices.get.return_value = {}  # no pre-0.7 indices
     client.count.side_effect = Exception("no index")
+
+    def write(c, actions, **k):
+        wc.stamp_or_refuse(actions, c)
+        if written is not None:
+            written.extend(a["_source"] for a in actions)
+        return len(actions), 0
+
     with (
         patch("opensearch_mcp.tools._run_tool", side_effect=_sbecmd(rows_for)),
-        patch("opensearch_mcp.parse_csv.flush_bulk", side_effect=lambda c, a, **k: (len(a), 0)),
+        patch("opensearch_mcp.parse_csv.flush_bulk", side_effect=write),
+        patch("opensearch_mcp.write_context.note_second_copy"),  # not this file's subject
         patch("opensearch_mcp.ingest._write_ingest_manifest"),
     ):
         ingest(
@@ -158,3 +172,53 @@ def test_two_machines_with_identical_rows_keep_both_and_say_nothing(tmp_path, st
     hosts = [_host(roots[n], [profiles[n]], hostname=n) for n in roots]
     _, warnings = _scan(hosts, lambda p: range(37), case_id="c2-two-machines")
     assert [w for w in warnings if "replaced" in w] == []
+
+
+def test_one_host_name_on_two_units_that_are_two_machines_says_nothing(tmp_path, status_dir):
+    """Machines are told apart by the key the write stamps, not the raw name."""
+    roots = {}
+    for folder, profile in (("WS01-a", "alice"), ("WS01-b", "bob")):
+        roots[folder] = tmp_path / "evidence" / folder / "C"
+        (roots[folder] / "Users" / profile).mkdir(parents=True)
+    hosts = [
+        _host(roots["WS01-a"], ["alice"], hostname="WS01"),
+        _host(roots["WS01-b"], ["bob"], hostname="WS01"),
+    ]
+    written = []
+    _, warnings = _scan(hosts, lambda p: range(37), case_id="c4-one-name", written=written)
+    assert len({d["vhir.host_key"] for d in written}) == 2  # two machines
+    assert [w for w in warnings if "replaced" in w] == []
+
+
+def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_path, status_dir):
+    """A pre-0.7 case holds WS02 as WS02-CANON: a scan's WS02 rows join that
+    machine, and counting replaced rows makes no machine of its own."""
+    from sift_common import host_identity
+
+    from opensearch_mcp import write_context as wc
+
+    case_id = "c5-pre-0-7"
+    old = f"case-{case_id}-shellbags-ws02"
+    client = MagicMock()
+    client.indices.get.return_value = {old: {}}
+    props = {"host": {"properties": {"name": {"type": "keyword"}, "id": {"type": "keyword"}}}}
+    client.indices.get_mapping.side_effect = lambda index: {
+        index: {"mappings": {"properties": props}}
+    }
+    client.search.return_value = {
+        "aggregations": {"p": {"buckets": [{"key": {"name": "WS02", "id": "WS02-CANON"}}]}}
+    }
+    root = tmp_path / "evidence" / "WS02" / "C"
+    for profile in ("alice", "bob"):
+        (root / "Users" / profile).mkdir(parents=True)
+    written = []
+    _scan(
+        [_host(root, ["alice", "bob"], hostname="WS02")],
+        lambda p: range(2),
+        case_id=case_id,
+        client=client,
+        written=written,
+    )
+    machines = host_identity.load(wc.case_dir_for(case_id)).machines.values()
+    assert [m.canonical for m in machines] == ["WS02-CANON"]
+    assert {d["host.id"] for d in written} == {"WS02-CANON"}
