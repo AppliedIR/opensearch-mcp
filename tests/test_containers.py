@@ -130,7 +130,9 @@ class TestExtractContainer:
         dest.mkdir()
         extract_container(src, dest, password="infected")
         call_args = mock_subprocess.run.call_args[0][0]
-        assert "-pinfected" in call_args
+        assert not any("infected" in a for a in call_args)  # never on the command line
+        assert mock_subprocess.run.call_args.kwargs["input"] == b"infected\n"
+        assert mock_subprocess.run.call_args.kwargs["start_new_session"] is True
 
     @patch("opensearch_mcp.containers.subprocess")
     def test_extract_7z_exit_1_is_warning(self, mock_subprocess, tmp_path):

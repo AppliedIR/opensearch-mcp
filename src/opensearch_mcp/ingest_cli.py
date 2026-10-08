@@ -2874,10 +2874,11 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         atexit.register(shutil.rmtree, _mem_extract_dir, True)  # every exit, not only success
         try:
             password = os.environ.get("VHIR_ARCHIVE_PASSWORD", "")
+            from opensearch_mcp.containers import seven_zip_password
+
             cmd = ["7z", "x", f"-o{_mem_extract_dir}", str(image_path)]
-            if password:
-                cmd.insert(2, f"-p{password}")
-            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=600,
+                           **seven_zip_password(password))  # fmt: skip
             memory_exts = {".img", ".raw", ".vmem", ".dmp", ".mem", ".bin", ".lime"}
             extracted = [f for f in _mem_extract_dir.iterdir() if f.suffix.lower() in memory_exts]
             if not extracted:

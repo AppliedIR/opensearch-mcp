@@ -58,16 +58,20 @@ def extract_container(path: Path, dest: Path, password: str | None = None) -> No
 def _extract_7z(path: Path, dest: Path, password: str | None = None) -> None:
     """Extract archive with 7z."""
     cmd = ["7z", "x", str(path), f"-o{dest}", "-y"]
-    if password:
-        cmd.append(f"-p{password}")
-    result = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL)
+    result = subprocess.run(cmd, capture_output=True, **seven_zip_password(password))
     # 7z exit codes: 0=ok, 1=warning (timestamps), 2+=error
     if result.returncode > 1:
-        # Sanitize command to strip password before including in error
-        safe_cmd = [c if not c.startswith("-p") else "-p***" for c in cmd]
-        raise subprocess.CalledProcessError(
-            result.returncode, safe_cmd, result.stdout, result.stderr
-        )
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+
+def seven_zip_password(password: str | None) -> dict:
+    """subprocess.run arguments giving 7z the archive password on its stdin,
+    never on its command line (any local user can read that). 7z asks for it
+    on its terminal when it has one: in a new session it has none, and reads
+    stdin. With no password, stdin is empty, so a prompt fails at once."""
+    if password:
+        return {"input": f"{password}\n".encode(), "start_new_session": True}
+    return {"stdin": subprocess.DEVNULL, "start_new_session": True}
 
 
 def _extract_tar(path: Path, dest: Path) -> None:

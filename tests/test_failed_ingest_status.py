@@ -172,7 +172,7 @@ def test_no_piece_of_the_password_survives_the_cut(case, monkeypatch, tmp_path):
     bindir.mkdir()
     (bindir / "7z").write_text(
         "#!/bin/sh\n"
-        'for a in "$@"; do case "$a" in -p*) pw="${a#-p}";; esac; done\n'
+        "IFS= read -r pw\n"  # the password, as 7z reads it: from stdin
         "printf 'ERROR %s' \"$pw\" >&2\n"
         "head -c 495 /dev/zero | tr '\\0' y >&2\n"
         "exit 2\n"
@@ -187,6 +187,55 @@ def test_no_piece_of_the_password_survives_the_cut(case, monkeypatch, tmp_path):
     seen = json.dumps(status) + Path(resp["log_file"]).read_text()
     assert [p for p in _pieces(secret) if p in seen] == []
     assert any("7z exited 2" in line for line in status["log_tail"]), status
+
+
+def test_a_memory_archives_password_goes_on_7zs_stdin_never_its_command_line(
+    case, monkeypatch, tmp_path
+):
+    secret = "s3cret-Pw-7f2a"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    seen = tmp_path / "seen"
+    (bindir / "7z").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" > {seen}.argv\ncat > {seen}.stdin\nexit 2\n'
+    )
+    (bindir / "7z").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
+    (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
+    assert _final()["status"] == "failed"
+    argv = Path(f"{seen}.argv").read_text()
+    assert argv.startswith("x ") and secret not in argv and "-p" not in argv.split(), argv
+    assert Path(f"{seen}.stdin").read_text() == secret + "\n"
+
+
+def test_the_memory_command_gives_7z_the_password_on_stdin_in_a_new_session(case, monkeypatch):
+    """In-process: the 7z call itself."""
+    import subprocess
+
+    from opensearch_mcp import ingest_cli
+
+    secret = "s3cret-Pw-7f2a"
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
+    calls, real_run = [], subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd and cmd[0] == "7z":
+            calls.append((cmd, k))
+            raise subprocess.CalledProcessError(2, cmd, b"", b"")
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    args = argparse.Namespace(
+        path=str(case / "mem.zip"), case="c1", hostname="h1", tier=1, plugins=None, yes=True
+    )
+    with pytest.raises(SystemExit):
+        ingest_cli.cmd_ingest_memory(args)
+    ((cmd, k),) = calls
+    assert not any(secret in c for c in cmd) and not any(c.startswith("-p") for c in cmd), cmd
+    assert k["input"] == (secret + "\n").encode() and k["start_new_session"] is True
 
 
 def test_a_7z_timeout_doesnt_print_the_password(case, monkeypatch, capsys):
