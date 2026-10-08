@@ -297,11 +297,16 @@ def test_a_memory_image_given_no_name_waits_until_the_examiner_names_it(gate):
 def test_an_unfinished_host_rename_refuses_the_run(gate, capsys):
     command, args = _listed(gate)
     (gate.case_dir / hi.OPS).write_text(
-        json.dumps({"ops": {"op-1": {"state": "incomplete", "from": "WKS01", "to": "WKS02"}}})
+        json.dumps(
+            {"ops": {"op-1": {"state": "incomplete", "kind": "rename", "canonical": "WKS02"}}}
+        )
     )
     with pytest.raises(SystemExit):
         command(args)
-    assert "host rename incomplete: WKS01 → WKS02" in capsys.readouterr().err
+    assert (
+        "host operation op-1 (rename to 'WKS02') is incomplete: the examiner resumes it"
+        in capsys.readouterr().err
+    )
     assert gate.writes == []
     assert gate.status()["status"] == "failed"
 
@@ -383,9 +388,10 @@ def test_counts_and_buckets_say_how_much_comes_from_unconfirmed_machines(monkeyp
 
 
 def test_every_result_says_a_host_rename_is_incomplete(monkeypatch):
-    _review(monkeypatch, set(), "host rename incomplete: WKS01 → WKS02")
+    note = "host operation op-1 (rename to 'WKS02') is incomplete: the examiner resumes it"
+    _review(monkeypatch, set(), note)
     resp = srv._annotate_hosts({"count": 3}, "c1")
-    assert resp["host_note"] == "host rename incomplete: WKS01 → WKS02"
+    assert resp["host_note"] == note
 
 
 def test_a_failed_count_of_unconfirmed_documents_is_said_and_leaves_the_answer(monkeypatch):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -172,9 +173,9 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
     except (hi.CaseLockBusy, hi.HostLogError) as e:
         op = {"error": str(e)}
     if op:
-        why = op.get("error") or (
-            f"host rename incomplete: {op.get('from', '?')} → {op.get('to', '?')}"
-        )
+        from opensearch_mcp.host_ops import unfinished_note
+
+        why = op.get("error") or unfinished_note(op)
         if run:
             write_status(case_id, os.getpid(), run, "failed", [], {}, started, error=why)
         print(f"Error: {why}; nothing was written.", file=sys.stderr)
@@ -2743,14 +2744,19 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
         elif event == "stamping":
             print(f"Stamping {kw['matched']} matched IOCs to documents...")
 
+    from opensearch_mcp.host_ops import case_writes
+    from opensearch_mcp.write_context import case_dir_for
+
+    case_dir = case_dir_for(case_id)
     try:
-        result = enrich_case(
-            client,
-            case_id,
-            force=force,
-            on_progress=_progress,
-            include_filesystem=include_filesystem,
-        )
+        with case_writes(case_dir) if case_dir is not None else contextlib.nullcontext():
+            result = enrich_case(
+                client,
+                case_id,
+                force=force,
+                on_progress=_progress,
+                include_filesystem=include_filesystem,
+            )
     except Exception as e:  # noqa: BLE001
         # Terminal failed write with the real exception text so
         # idx_ingest_status surfaces *why* enrichment failed without

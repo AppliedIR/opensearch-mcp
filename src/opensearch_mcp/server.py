@@ -382,7 +382,9 @@ def _host_review(case_id: str = "") -> tuple[set[str], str]:
     except hi.HostLogError as e:
         return set(), f"host logs unreadable: {e}"
     keys = {k for m in state.machines.values() if m.state != hi.CONFIRMED for k in m.keys}
-    note = f"host rename incomplete: {op.get('from', '?')} → {op.get('to', '?')}" if op else ""
+    from opensearch_mcp.host_ops import unfinished_note
+
+    note = unfinished_note(op) if op else ""
     return keys, note
 
 
@@ -2681,8 +2683,19 @@ def idx_enrich_triage(
     if not cid:
         return {"error": "No active case. Run 'vhir case activate' first."}
 
+    from opensearch_mcp.host_ops import HostOpRefused, case_writes
+    from opensearch_mcp.write_context import case_dir_for
+
     client = _get_os()
-    results = enrich_remote(client, cid)
+    case_dir = case_dir_for(cid)
+    try:
+        if case_dir is None:
+            results = enrich_remote(client, cid)
+        else:
+            with case_writes(case_dir):
+                results = enrich_remote(client, cid)
+    except HostOpRefused as e:
+        return {"error": f"Not enriched: {e}"}
 
     if "error" in results:
         return results
