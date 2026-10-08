@@ -2484,6 +2484,17 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
 
 @_closes_write_context
+def accesslog_suffix(wanted: str | None) -> str:
+    """An access-log index's type: `accesslog`, or a suffix of the caller's own
+    kept under `accesslog-`, so the index always takes the access-log template
+    (keyword identity fields)."""
+    from opensearch_mcp.paths import stem_type
+
+    if not wanted or wanted == "accesslog":
+        return "accesslog"
+    return stem_type("accesslog", wanted)
+
+
 def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__
@@ -2512,7 +2523,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
     aid = audit._next_audit_id()
     case_host_dict = _load_case_host_dict(case_id)
-    suffix = getattr(args, "index_suffix", None) or "accesslog"
+    suffix = accesslog_suffix(getattr(args, "index_suffix", None))
 
     files = (
         [input_path]

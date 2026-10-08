@@ -179,6 +179,38 @@ def test_a_pre_0_7_text_field_without_a_keyword_form_is_refused():
         host_ops.check_indices(client({}, {"case-old-3": old}), "x", ["case-old-3"])
 
 
+@pytest.mark.parametrize("wanted", [None, "accesslog", "weblogs", "evtx", "web-01"])
+def test_an_access_log_index_always_takes_the_access_log_template(wanted):
+    import fnmatch
+
+    from opensearch_mcp.ingest_cli import accesslog_suffix
+    from opensearch_mcp.mappings import template_type_tokens
+    from opensearch_mcp.paths import build_index_name
+
+    index = build_index_name("0123456789ab", accesslog_suffix(wanted))
+    assert fnmatch.fnmatch(index, "case-*-accesslog-*"), index
+    others = [t for t in template_type_tokens() if t != "accesslog"]
+    assert not [t for t in others if fnmatch.fnmatch(index, f"case-*-{t}-*")], index
+
+
+def test_an_index_without_keyword_identity_fields_names_the_way_out():
+    bad = {**GOOD, "host.name": {"type": "text"}}
+    with pytest.raises(host_ops.HostOpRefused, match="Delete and re-ingest that index"):
+        host_ops.check_indices(client({"case-x-odd-1": bad}), "x", [])
+
+
+def test_a_count_with_failed_shards_refuses_before_the_journal(case):
+    c12 = wc.case_identity(case)[0]
+    key = machine(case, "WKS01")
+    c = client({f"case-{c12}-evtx-1": GOOD})
+    c.count = lambda **k: {"count": 3, "_shards": {"total": 4, "failed": 1}}
+    c.update_by_query = lambda **k: pytest.fail("nothing may be written")
+    with pytest.raises(host_ops.HostOpRefused, match="1 shard.s. failed"):
+        host_ops.run(case, {"kind": "rename", "machine": key, "canonical": "WKS02"}, "ex1",
+                     client=c)  # fmt: skip
+    assert hi.read_ops(case)["ops"] == {}
+
+
 # -- one at a time
 
 

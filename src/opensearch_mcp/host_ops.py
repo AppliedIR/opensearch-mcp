@@ -156,7 +156,7 @@ def check_indices(client, c12: str, v1_indices: list[str]) -> dict:
         if bad:
             raise HostOpRefused(
                 f"index {index} doesn't map {', '.join(sorted(set(bad)))} as keyword; "
-                "nothing was changed"
+                "nothing was changed. Delete and re-ingest that index"
             )
         forms[index] = {f: f for f in _KEYWORD_FIELDS}
     for index in sorted(set(v1_indices)):
@@ -214,6 +214,9 @@ def _count(client, index: str, query: dict) -> int:
     resp = client.count(
         index=index, body={"query": query}, allow_no_indices=True, ignore_unavailable=True
     )
+    failed = int((resp.get("_shards") or {}).get("failed") or 0)
+    if failed:  # a count without them isn't the count
+        raise HostOpRefused(f"{index}: {failed} shard(s) failed to answer a count; try again")
     return int(resp.get("count", 0))
 
 
@@ -375,6 +378,8 @@ def _run_locked(root: Path, op, examiner, resume, client, c12) -> dict:
         if pending is None or pending["id"] != resume:
             raise HostOpRefused(f"there's no incomplete host operation {resume!r}")
         op_id, op = resume, pending["op"]
+        if hi.decided_op(root, op_id):  # it finished; the worker stopped before saying so
+            return _entry(root, op_id, state="done", finished=_now())
     elif pending is not None:
         raise HostOpRefused(
             f"host operation {pending['id']} is {pending.get('state')}: resume it first"
@@ -389,6 +394,11 @@ def _run_locked(root: Path, op, examiner, resume, client, c12) -> dict:
     p = plan(state, op)
     forms = check_indices(client, c12, [index for index, _ in p["v1"]])
     check_headroom(client, c12, p, forms)
+    if resume is None:  # the baseline: what the cluster holds now, every write visible
+        client.indices.refresh(
+            index=",".join([f"case-{c12}-*", *sorted({i for i, _ in p["v1"]})]),
+            allow_no_indices=True, ignore_unavailable=True,
+        )  # fmt: skip
     before = pending.get("before") if resume is not None else counts(client, c12, p, forms)
     hi.record_op(root, op_id, {
         "op": op, "kind": p["kind"], "args": p["args"], "keys": p["keys"],

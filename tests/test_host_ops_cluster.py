@@ -273,6 +273,52 @@ def test_a_count_that_changes_during_the_operation_leaves_it_incomplete(client, 
     assert "rename" not in decisions(case)
 
 
+@pytest.mark.parametrize("kind", ["rename", "merge", "split"])
+def test_a_worker_stopped_after_the_decision_is_resumed_to_done(client, case, monkeypatch, kind):
+    """The decision line is written, then the worker dies before the journal
+    says done: a resume finishes it, and the case takes new work again."""
+    a, b = machine(client, case, "WKS01", 2), machine(client, case, "WKS02", 2)
+    if kind == "split":
+        host_ops.run(case, {"kind": "merge", "into": a, "from": [b]}, "ex1", client=client)
+    op = {
+        "rename": {"kind": "rename", "machine": a, "canonical": "FIN-1"},
+        "merge": {"kind": "merge", "into": a, "from": [b]},
+        "split": {"kind": "split", "machine": a, "keys": [b], "canonical": "FIN-2"},
+    }[kind]
+    real = hi.record_op
+
+    def dies_on_done(root, op_id, fields):
+        if fields.get("state") == "done":
+            raise SystemExit("killed")
+        return real(root, op_id, fields)
+
+    monkeypatch.setattr(hi, "record_op", dies_on_done)
+    with pytest.raises(SystemExit):
+        host_ops.run(case, op, "ex1", client=client)
+    monkeypatch.setattr(hi, "record_op", real)
+    pending = hi.unfinished_op(case)
+    assert pending is not None and pending["state"] == "running"
+    done = host_ops.run(case, None, "ex1", resume=pending["id"], client=client)
+    assert done["state"] == "done" and hi.unfinished_op(case) is None
+    assert decisions(case).count(kind) == 1
+    nxt = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "NEXT-1"}, "ex1",
+                       client=client)  # fmt: skip
+    assert nxt["state"] == "done"
+
+
+def test_docs_not_yet_visible_are_in_the_baseline(client, case):
+    """A doc written without a refresh just before the operation."""
+    a = machine(client, case, "WKS01", 2)
+    hit = client.search(index=f"case-{wc.case_identity(case)[0]}-*",
+                        body={"size": 1})["hits"]["hits"][0]  # fmt: skip
+    client.index(index=hit["_index"], id="unrefreshed", refresh=False,
+                 body={**hit["_source"], "event.code": "99998"})  # fmt: skip
+    result = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-1"}, "ex1",
+                          client=client)  # fmt: skip
+    assert result["state"] == "done", result
+    assert result["relabelled"] == 3
+
+
 def test_the_ais_host_fix_changes_no_doc_and_no_binding(client, case, monkeypatch):
     from opensearch_mcp import case_scope
     from opensearch_mcp import server as srv
