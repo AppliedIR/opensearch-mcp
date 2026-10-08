@@ -130,6 +130,15 @@ def test_a_csv_timestamp_column_is_not_taken_as_the_time(tmp_path, monkeypatch):
 _MAPPINGS = Path(__file__).parent.parent / "src" / "opensearch_mcp" / "mappings"
 
 
+def _c12(case_id: str) -> str:
+    """The case's identity, minted as its first write mints it."""
+    from sift_common import host_identity
+
+    from opensearch_mcp import write_context as wc
+
+    return host_identity.ensure_case_uuid(wc.case_dir_for(case_id))[0]
+
+
 @pytest.fixture
 def cluster_case(tmp_path, monkeypatch):
     pytest.importorskip("opensearchpy")
@@ -141,7 +150,7 @@ def cluster_case(tmp_path, monkeypatch):
     except Exception as e:
         pytest.skip(f"OpenSearch not available: {e}")
     case_id = f"pytest-tf-{uuid.uuid4().hex[:8]}"
-    base = f"case-{case_id}"
+    base = f"case-{_c12(case_id)}"  # the case's indices, named from its identity
     comp = json.loads((_MAPPINGS / "json_type_stability.json").read_text())
     client.cluster.put_component_template(name=f"{base}-comp", body=comp)
     for kind, filename in (("delim", "delimited_template.json"), ("json", "json_template.json")):
@@ -312,7 +321,7 @@ def test_a_digit_date_is_counted_in_the_status_and_not_found_in_1970(
     (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
     assert "2 values in date not understood; not used as the timestamp" in note
     client = cli.get_client()
-    index = f"case-{cluster_case}-delim-*"
+    index = f"case-{_c12(cluster_case)}-delim-*"
     client.indices.refresh(index=index)
     early = {"range": {"@timestamp": {"gte": "1970-01-01", "lt": "1977-01-01"}}}
     assert client.count(index=index, body={"query": early})["count"] == 0
@@ -422,7 +431,7 @@ def test_a_background_json_run_counts_digit_dates_and_files_none_in_1970(
     (note,) = [w for w in status.get("warnings", []) if "not understood" in w]
     assert "2 values in date not understood; not used as the timestamp" in note
     client = cli.get_client()
-    index = f"case-{cluster_case}-json-*"
+    index = f"case-{_c12(cluster_case)}-json-*"
     client.indices.refresh(index=index)
     early = {"range": {"@timestamp": {"lt": "1977-01-01"}}}
     late = {"range": {"@timestamp": {"gt": "2100-01-01"}}}
