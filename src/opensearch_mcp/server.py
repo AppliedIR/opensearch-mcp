@@ -835,6 +835,22 @@ _IP_WILDCARD_HINT = (
 )
 
 
+def _result_ingests(sources: list) -> list[str]:
+    """The distinct `vhir.ingest_audit_id` values of the returned records,
+    sorted: the parser entries that wrote them, recorded in the audit entry so
+    a finding citing these results traces to the files they came from."""
+    ids = set()
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        aid = src.get("vhir.ingest_audit_id")
+        if aid is None and isinstance(src.get("vhir"), dict):
+            aid = src["vhir"].get("ingest_audit_id")
+        if isinstance(aid, str) and aid:
+            ids.add(aid)
+    return sorted(ids)
+
+
 @server.tool()
 def idx_search(
     query: str,
@@ -960,7 +976,13 @@ def idx_search(
     _annotate_hosts(resp, case_id, hits=result["hits"]["hits"])
     aid = audit.log(
         tool="idx_search",
-        params={"query": query, "index": requested, "scope": index, "limit": limit},
+        params={
+            "query": query,
+            "index": requested,
+            "scope": index,
+            "limit": limit,
+            "result_ingests": _result_ingests([h.get("_source") for h in result["hits"]["hits"]]),
+        },  # fmt: skip
         result_summary=f"{total} total, {len(docs)} returned",
     )
     if aid:
@@ -1108,7 +1130,11 @@ def idx_get_event(
     doc["_note"] = "Full document — all fields included, no truncation"
     aid = audit.log(
         tool="idx_get_event",
-        params={"event_id": event_id, "index": index},
+        params={
+            "event_id": event_id,
+            "index": index,
+            "result_ingests": _result_ingests([result.get("_source")]),
+        },  # fmt: skip
         result_summary=f"doc {event_id}",
     )
     if aid:
