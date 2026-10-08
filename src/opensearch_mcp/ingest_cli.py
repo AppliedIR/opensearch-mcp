@@ -2570,6 +2570,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
     ctx = _open_unit(case_id, input_path, hostname, source="access log")
     total = total_sk = total_bf = 0
     _alog_failed_files: list[tuple[str, str]] = []
+    _alog_unindexed: list[str] = []  # read, but no line of it indexed
     try:
         for idx, f in enumerate(files):
             index_name = _index_name(suffix)
@@ -2591,6 +2592,11 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
                 total += cnt
                 total_sk += sk
                 total_bf += bf
+                if not cnt and sk:  # read, and not one line indexed
+                    why = f"no line indexed: {sk} line(s) unrecognised"
+                    if time_from or time_to:
+                        why += " or outside the time window"
+                    _alog_unindexed.append(f"{f} ({why})")
             except ShardCapacityExhausted:
                 # Re-raise so the outer circuit-breaker handler fires.
                 raise
@@ -2650,9 +2656,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         input_files=[str(input_path)],
     )
     if run_id:
-        final_status = "complete"
-        if total_bf > 0 and total == 0:
-            final_status = "failed"
+        from opensearch_mcp.bulk import get_last_bulk_reason
+
+        reason = get_last_bulk_reason()
+        final_status, error = _terminal_status(total, total_bf, reason)
         _write_bg_status(
             case_id,
             run_id,
@@ -2662,6 +2669,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             started_ts,
             time.monotonic() - start_mono,
             indexed=total,
+            error=error,
+            bulk_failed=total_bf,
+            bulk_failed_reason=reason,
+            not_read=[f"{path} ({err})" for path, err in _alog_failed_files] + _alog_unindexed,
         )
 
 
