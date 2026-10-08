@@ -238,3 +238,24 @@ def test_an_orphan_under_a_home_that_is_not_utf8_is_unmounted_by_its_own_bytes(
     assert umount[:2] == ["sudo", "umount"]
     assert os.fsencode(umount[2]) in (os.fsencode(mountpoint), b"/dev/nbd0p1")
     assert b"\xe9t\xe9" in os.fsencode(mountpoint)
+
+
+def _made(host, pid: int) -> str:
+    """A mount point in the folder make_ingest_tmpdir makes for process `pid`
+    (its own random suffix after the pid)."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(os, "getpid", lambda: pid)
+        folder = containers.make_ingest_tmpdir("c1")
+    return str(folder.resolve() / "nbd0p1")
+
+
+def test_an_orphan_in_a_folder_ingest_really_makes_is_cleaned(host):
+    mountpoint = _made(host, DEAD)
+    assert f"-{DEAD}-" in mountpoint  # the pid, then the folder's own suffix
+    host.state({0: 2048}, [("/dev/nbd0p1", mountpoint)])
+    assert _cleaned(host.clean(), "/dev/nbd0")
+
+
+def test_a_live_ingest_in_a_folder_ingest_really_makes_is_left_alone(host):
+    host.state({0: 2048}, [("/dev/nbd0p1", _made(host, LIVE))])
+    assert host.clean() == []

@@ -678,7 +678,7 @@ def cleanup_orphaned_mounts() -> None:
 
     own = re.compile(
         re.escape(str((vhir_dir() / "cases").resolve()))
-        + r"/[^/]+/tmp/ingest-\d{8}T\d{6}-(\d+)/[^/]+"
+        + r"/[^/]+/tmp/ingest-\d{8}T\d{6}-(\d+)(?:-[^/]+)?/[^/]+"  # mkdtemp's suffix
     )
     try:
         table = Path("/proc/self/mounts").read_text(errors="surrogateescape").splitlines()
