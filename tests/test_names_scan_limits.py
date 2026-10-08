@@ -234,3 +234,30 @@ def test_an_images_run_is_not_taken_for_a_dead_worker(monkeypatch, tmp_path):
     ingest_status.read_active_ingests()  # the sweep, from any status poll
     (f,) = (tmp_path / "status").glob("*.json")
     assert json.loads(f.read_text())["status"] == "running"
+
+
+def _kansa_netstat(path, host):
+    """A Kansa Netstat CSV as PowerShell 5.1's Export-Csv writes it: UTF-16LE
+    with a BOM, the machine in each row's PSComputerName."""
+    path.write_text(
+        '"Protocol","LocalAddress","LocalPort","State","Process","PSComputerName"\r\n'
+        f'"TCP","0.0.0.0","135","LISTENING","[svchost.exe]","{host}"\r\n'
+        f'"TCP","0.0.0.0","445","LISTENING","System","{host}"\r\n',
+        encoding="utf-16",
+    )
+    assert path.read_bytes()[:2] == b"\xff\xfe"  # the BOM, little-endian
+    return path
+
+
+def test_a_utf16_csv_gives_its_rows_host_column(tmp_path):
+    f = _kansa_netstat(tmp_path / "rd01.shieldbase.com-Netstat.csv", "rd01.shieldbase.com")
+    assert names_scan.row_names(f) == ["rd01.shieldbase.com"]
+
+
+def test_a_folder_of_utf16_kansa_files_proposes_each_rows_machine(tmp_path):
+    hosts = ["dc01.shieldbase.com", "dev01.shieldbase.com", "rd01.shieldbase.com"]
+    files = [_kansa_netstat(tmp_path / f"{h}-Netstat.csv", h) for h in hosts]
+    unit = names_scan.files_unit(tmp_path, "netstat", files, None)
+    named = {n.raw for n in unit.names}
+    assert set(hosts) <= named
+    assert "names_not_sampled" not in unit.attrs  # nothing left unread

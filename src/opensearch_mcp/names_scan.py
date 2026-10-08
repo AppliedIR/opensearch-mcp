@@ -260,11 +260,15 @@ def row_names(path: Path) -> list[str]:
     """Host-column values from the first rows of a CSV/TSV or JSON file.
     Raises NotSampled for a file it couldn't read: never a silent skip."""
     from opensearch_mcp.hostname import extract_host_from_record
+    from opensearch_mcp.parse_csv import _detect_encoding
 
     out: list[str] = []
     suffix = path.suffix.lower()
     try:
-        with open(path, encoding="utf-8-sig", errors="replace", newline="") as f:
+        # decoded as the ingest decodes it: PowerShell's Export-Csv (Kansa)
+        # writes UTF-16LE with a BOM
+        encoding = _detect_encoding(path)
+        with open(path, encoding=encoding, errors="replace", newline="") as f:
             if suffix in (".json", ".jsonl", ".ndjson"):
                 head = f.read(SAMPLE_BYTES)
                 rows: list = []
