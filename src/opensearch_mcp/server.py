@@ -488,6 +488,7 @@ def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> st
         expr = ""
     return f"idx_search(query='{query}'" + (f", index='{expr}')" if expr else ")")
 
+
 def _scan_case_dir(case_id: str = ""):
     from opensearch_mcp.write_context import case_dir_for
 

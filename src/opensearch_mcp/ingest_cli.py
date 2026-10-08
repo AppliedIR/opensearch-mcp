@@ -527,6 +527,7 @@ def _kept_total(result) -> dict:
     """The status totals' count of shadow-copy entries kept, when there are any."""
     return {"already_present": result.already_present} if result.already_present else {}
 
+
 def _record_scan(
     case_id: str, input_path: Path, hosts: list, image_notes: list, extra=(), archive=None
 ) -> list[dict]:
