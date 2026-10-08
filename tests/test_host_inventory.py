@@ -7,6 +7,7 @@ The host logs are real; the cluster is a stand-in. Values are synthetic.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import inspect
@@ -194,8 +195,13 @@ def test_no_tool_confirms_starts_now_uploads_a_list_or_runs_a_host_operation():
     assert not [n for n in names if any(w in n for w in deciding)], names
     source = inspect.getsource(srv)
     for writer in ("append_decision(", "append_decision_items(", "start_now(",
-                   "upload_host_list(", "host_ops"):  # fmt: skip
+                   "upload_host_list("):  # fmt: skip
         assert writer not in source, writer
+    # host operations: a tool may report one or wait for it, never run one
+    used = {a.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.ImportFrom)
+            and (node.module or "").endswith("host_ops") for a in node.names}  # fmt: skip
+    assert used <= {"unfinished_note", "case_writes", "HostOpRefused"}, used
+    assert "host_ops." not in source
 
 
 # -- what the tool descriptions say
