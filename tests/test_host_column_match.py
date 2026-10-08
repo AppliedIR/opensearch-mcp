@@ -76,3 +76,61 @@ def test_an_exact_name_wins_over_another_case_of_it():
 def test_anchor_columns_of_unclear_meaning_still_give_no_host():
     record = {"MachineName": "M1", "Workstation": "W1", "computer_name": "C1", "host_name": "H1"}
     assert extract_host_from_record(record) is None
+
+
+# --- idx_ingest_delimited takes each row's machine by the same rule ----------------
+
+
+def _ingested(tmp_path, name, text):
+    """`ingest_delimited` on one file; the documents it would index."""
+    from unittest.mock import MagicMock, patch
+
+    from opensearch_mcp.parse_delimited import ingest_delimited
+
+    path = tmp_path / name
+    path.write_text(text)
+    sent = []
+
+    def flush(client, actions, **k):
+        sent.extend(a["_source"] for a in actions)
+        return len(actions), 0
+
+    with patch("opensearch_mcp.parse_delimited.flush_bulk", side_effect=flush):
+        ingest_delimited(path, MagicMock(), "case-x-delim-0", "CLI-HOST")
+    return sent
+
+
+def test_an_mde_device_name_export_files_each_row_under_its_device(tmp_path):
+    docs = _ingested(
+        tmp_path,
+        "DeviceProcessEvents.csv",
+        "Timestamp,DeviceName,FileName\n"
+        "2026-10-01T00:00:00Z,wks01.corp.example,cmd.exe\n"
+        "2026-10-01T00:01:00Z,wks02.corp.example,powershell.exe\n",
+    )
+    assert [d["host.name"] for d in docs] == ["wks01.corp.example", "wks02.corp.example"]
+
+
+def test_a_zeek_http_log_host_header_isn_t_the_machine(tmp_path):
+    docs = _ingested(
+        tmp_path,
+        "http.log",
+        "#separator \\x09\n"
+        "#fields\tts\tuid\tid.orig_h\thost\turi\n"
+        "#types\ttime\tstring\taddr\tstring\tstring\n"
+        "1700000000.0\tC1\t10.0.0.5\twww.example.com\t/\n",
+    )
+    assert docs and docs[0]["host.name"] == "CLI-HOST"
+    assert docs[0]["source_host"] == "www.example.com"
+
+
+def test_anchor_a_hayabusa_computer_column_is_read_as_before(tmp_path):
+    docs = _ingested(
+        tmp_path,
+        "hayabusa.csv",
+        "Timestamp,Level,Computer,RuleTitle\n"
+        "2026-10-01 00:00:00.000 +00:00,high,WKS01.corp.example,Rule A\n"
+        "2026-10-01 00:01:00.000 +00:00,low,WKS02.corp.example,Rule B\n",
+    )
+    assert [d["host.name"] for d in docs] == ["WKS01.corp.example", "WKS02.corp.example"]
+    assert all("Computer" not in d for d in docs)

@@ -11,6 +11,7 @@ from pathlib import Path
 from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.hostname import extract_host_from_record
 from opensearch_mcp.parse_csv import _detect_encoding, _doc_id
 from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, auto_detect_time_field
 
@@ -312,8 +313,12 @@ def ingest_delimited(
 
         doc_id = _doc_id(index_name, _id_input(record, id_root), volatile_keys=_DELIM_VOLATILE)
 
-        # Use per-row Computer field if present (Hayabusa, EvtxECmd), else CLI hostname
-        record["host.name"] = record.pop("Computer", None) or hostname
+        # The row's machine by the shared host-column rule (Hayabusa and EvtxECmd
+        # `Computer`, MDE `DeviceName`, any case of a machine-only name), else the
+        # CLI hostname. A web log's `host` was renamed to source_host above.
+        per_row_host = extract_host_from_record(record)
+        record.pop("Computer", None)  # stored as host.name, as before
+        record["host.name"] = per_row_host or hostname
         _raw_host = record.get("host.name")
         if _raw_host:
             if host_dict is not None:
