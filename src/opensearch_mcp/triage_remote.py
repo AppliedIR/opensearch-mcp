@@ -17,6 +17,17 @@ from opensearch_mcp.gateway import call_tool, gateway_available
 logger = logging.getLogger(__name__)
 
 
+def _search_outcome(e: Exception) -> dict:
+    """What a triage search that raised leaves: `skipped` (with the error's
+    own text) only when the index isn't there; any other error means the
+    artifact wasn't enriched, so `failed`."""
+    from opensearchpy.exceptions import NotFoundError
+
+    if isinstance(e, NotFoundError):
+        return {"status": "skipped", "reason": str(e)}
+    return {"status": "failed", "reason": f"search failed: {e}"}
+
+
 _MAX_CONSECUTIVE_FAILURES = 3
 
 
@@ -277,7 +288,7 @@ def _enrich_file_artifact(
             f"  WARNING: {artifact_name} aggregation failed: {e}",
             file=sys.stderr,
         )
-        return {"status": "skipped", "reason": str(e)}
+        return _search_outcome(e)
 
     paths_agg = agg_result.get("aggregations", {}).get("paths", {})
     buckets = paths_agg.get("buckets", [])
@@ -720,7 +731,7 @@ def _enrich_services(client, index, query, extract, artifact_name, on_progress=N
     except _PartialRead as e:
         return {"status": "failed", "reason": f"not every matching document could be read: {e}"}
     except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
+        return _search_outcome(e)
     if not hits:
         return {"status": "empty", "checked": 0}
     groups: dict = {}
@@ -813,7 +824,7 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
             },
         )
     except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
+        return _search_outcome(e)
 
     values_agg = result.get("aggregations", {}).get("values", {})
     buckets = values_agg.get("buckets", [])
@@ -932,7 +943,7 @@ def _enrich_registry_check_file(
             },
         )
     except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
+        return _search_outcome(e)
 
     values_agg = result.get("aggregations", {}).get("values", {})
     buckets = values_agg.get("buckets", [])
@@ -1048,7 +1059,7 @@ def _enrich_registry_persistence(client, case_ix, on_progress=None):
     try:  # no registry index: say so, not "complete, 0"
         client.search(index=index, body={"size": 0}, allow_no_indices=False)
     except Exception as e:
-        return {"status": "skipped", "reason": str(e)}
+        return _search_outcome(e)
 
     rules = [
         # R1: IFEO Debugger (T1546.012)

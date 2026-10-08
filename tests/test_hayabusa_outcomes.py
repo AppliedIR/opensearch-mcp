@@ -77,7 +77,7 @@ def scan(tmp_path, monkeypatch):
     monkeypatch.setattr(ing, "vhir_dir", lambda: tmp_path / "vhir")
     monkeypatch.setenv("HB_CSV", CSV)
 
-    def run(mode="ok", ingest=None, hayabusa_text=None):
+    def run(mode="ok", ingest=None, hayabusa_text=None, triage=False, client=None):
         monkeypatch.setenv("HB_MODE", mode)
         if hayabusa_text is not None:
             hb.write_text(hayabusa_text)
@@ -85,10 +85,12 @@ def scan(tmp_path, monkeypatch):
         monkeypatch.setattr(
             parse_delimited, "ingest_delimited", ingest or (lambda *a, **k: (1, 0, 0, 0))
         )
+        if client is not None:
+            monkeypatch.setattr(cli, "get_client", lambda: client)
         bulk.reset_circuit_breaker()
         cli.cmd_scan(argparse.Namespace(path=str(tmp_path / "ev"), case="c1", yes=True,
                                         hostname="DEV01", all_logs=False, no_hayabusa=False,
-                                        skip_triage=True))  # fmt: skip
+                                        skip_triage=not triage))  # fmt: skip
         (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
         return status
 
