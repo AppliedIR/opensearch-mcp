@@ -58,7 +58,7 @@ def _sbecmd(rows_for):
     return run
 
 
-def _scan(hosts, rows_for, case_id="c1", client=None, written=None):
+def _scan(hosts, rows_for, case_id="c1", client=None, written=None, stored=None):
     """A scan whose writes are stamped as the real write stamps them (the
     machine key, and the pre-0.7 import before the first name binds)."""
     from opensearch_mcp import write_context as wc
@@ -75,6 +75,8 @@ def _scan(hosts, rows_for, case_id="c1", client=None, written=None):
         wc.stamp_or_refuse(actions, c)
         if written is not None:
             written.extend(a["_source"] for a in actions)
+        for a in actions if stored is not None else ():
+            stored[a["_id"]] = a["_source"].get("vhir.source_file", "")
         return len(actions), 0
 
     with (
@@ -117,8 +119,8 @@ def test_identical_profiles_name_the_profile_that_lost_its_rows(tmp_path, status
     )
     message = (
         "37 shellbag rows from Users/alice are identical to rows from Users/bob-admin "
-        "and are stored once, under Users/bob-admin; a search for Users/alice won't "
-        "find them"
+        "(a later file in this run) and are stored once, under the last file that has "
+        "them; a search for Users/alice won't find them"
     )
     assert [w for w in warnings if "stored once" in w] == [f"WS01: {message}"]
     assert lines[str(root / "Users/bob-admin")] == f"37 indexed; {message}"
@@ -131,13 +133,23 @@ def test_three_identical_profiles_count_each_loss_against_its_own_file(tmp_path,
     profiles = ["a", "b", "c"]
     root = _volume(tmp_path, profiles)
     _, warnings = _scan([_host(root, profiles)], lambda p: range(5))
-    lost = "and are stored once"
+    once = ("(a later file in this run) and are stored once, under the last file that "
+            "has them")  # fmt: skip
     assert [w for w in warnings if "stored once" in w] == [
-        f"WS01: 5 shellbag rows from Users/a are identical to rows from Users/b {lost}, "
-        "under Users/b; a search for Users/a won't find them; "
-        f"5 shellbag rows from Users/b are identical to rows from Users/c {lost}, "
-        "under Users/c; a search for Users/b won't find them"
+        f"WS01: 5 shellbag rows from Users/a are identical to rows from Users/b {once}; "
+        "a search for Users/a won't find them; "
+        f"5 shellbag rows from Users/b are identical to rows from Users/c {once}; "
+        "a search for Users/b won't find them"
     ]
+
+
+def test_rows_three_files_hold_are_stored_under_the_last(tmp_path, status_dir):
+    profiles = ["a", "b", "c"]
+    root = _volume(tmp_path, profiles)
+    stored: dict = {}
+    _scan([_host(root, profiles)], lambda p: range(5), stored=stored)
+    assert len(stored) == 5  # one document per row
+    assert {Path(src).parent.name + "/" + Path(src).name for src in stored.values()} == {"Users/c"}
 
 
 def test_anchor_a_shadow_copy_of_the_same_profile_is_silent(tmp_path, status_dir):

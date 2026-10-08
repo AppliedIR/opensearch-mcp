@@ -919,8 +919,8 @@ def _ingest_hosts(
                     hashes = [file_hash]
                 replaced = [
                     f"{n} {_row_label(artifact_name)} rows from {loser} are identical to "
-                    f"rows from {winner} and are stored once, under {winner}; a search "
-                    f"for {loser} won't find them"
+                    f"rows from {winner} (a later file in this run) and are stored once, "
+                    f"under the last file that has them; a search for {loser} won't find them"
                     for (loser, winner), n in sorted(collided.items())
                 ]
                 ar.indexed = cnt
