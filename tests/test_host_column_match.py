@@ -134,3 +134,14 @@ def test_anchor_a_hayabusa_computer_column_is_read_as_before(tmp_path):
     )
     assert [d["host.name"] for d in docs] == ["WKS01.corp.example", "WKS02.corp.example"]
     assert all("Computer" not in d for d in docs)
+
+
+def test_a_computer_column_that_isn_t_the_chosen_host_is_kept(tmp_path):
+    docs = _ingested(
+        tmp_path,
+        "export.csv",
+        "Timestamp,ComputerName,Computer,Event\n"
+        "2026-10-01T00:00:00Z,WKS01,DC01.corp.example,4624\n",
+    )
+    assert docs[0]["host.name"] == "WKS01"
+    assert docs[0]["Computer"] == "DC01.corp.example"  # not lost

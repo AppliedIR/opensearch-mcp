@@ -317,7 +317,9 @@ def ingest_delimited(
         # `Computer`, MDE `DeviceName`, any case of a machine-only name), else the
         # CLI hostname. A web log's `host` was renamed to source_host above.
         per_row_host = extract_host_from_record(record)
-        record.pop("Computer", None)  # stored as host.name, as before
+        computer = record.get("Computer")
+        if isinstance(computer, str) and computer.strip() and computer.strip() == per_row_host:
+            del record["Computer"]  # the chosen host, stored as host.name as before
         record["host.name"] = per_row_host or hostname
         _raw_host = record.get("host.name")
         if _raw_host:
