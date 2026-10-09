@@ -43,7 +43,7 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 
 Every parser produces:
 - Deterministic content-based document IDs (re-ingest = zero duplicates)
-- Full provenance: `host.name`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.parse_method`, `pipeline_version`
+- Full provenance: `host.name`, `host.id`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.original.path` and `vhir.original.sha256`, `vhir.content_hash`, `vhir.parse_method`, `pipeline_version`
 - Proper `@timestamp` with timezone handling (local-time artifacts require `--source-timezone`)
 
 ### Query (17 MCP Tools)
@@ -69,6 +69,7 @@ The LLM gets these tools via the MCP protocol:
 | `idx_enrich_triage` | Baseline enrichment via windows-triage-mcp |
 | `idx_enrich_intel` | Threat intel enrichment via lookup_ioc (threat intel) |
 | `idx_list_detections` | Detection alerts (Hayabusa/Sigma) |
+| `idx_host_inventory` | A case's machines (`host.id`), the names and evidence units behind each, and ingests awaiting host confirmation |
 
 ### Enrich
 
@@ -113,7 +114,7 @@ cd opensearch-mcp
 ./scripts/setup-opensearch.sh
 ```
 
-This starts a Docker container with OpenSearch 3.5, registers all 15 index templates (including Hayabusa), and creates the GeoIP enrichment pipeline. Detection is handled by Hayabusa (3,700+ Sigma-based rules) which runs automatically after evtx ingest if installed.
+This starts a Docker container with OpenSearch 3.5, registers all 16 index templates (including Hayabusa and Plaso), and creates the GeoIP enrichment pipeline. Detection is handled by Hayabusa (3,700+ Sigma-based rules) which runs automatically after evtx ingest if installed.
 
 ### 2. Ingest evidence
 
@@ -151,7 +152,7 @@ idx_case_summary(case_id="incident-001")
 # Then query with full context
 idx_search(query="event.code:4688 AND process.parent.name:cmd.exe", index="case-incident-001-evtx-*")
 idx_aggregate(field="process.name", query="triage.verdict:SUSPICIOUS")
-idx_timeline(query="threat_intel.verdict:MALICIOUS", interval="1h")
+idx_timeline(query="threat_intel.iocs.outcome:MATCH", interval="1h")
 ```
 
 ### 4. Enrich
@@ -212,7 +213,7 @@ api_keys:
 | `VHIR_SHARD_BREAKER_THRESHOLD` | `3` | Consecutive shard-limit batch failures before the bulk-write circuit breaker halts ingest. |
 | `VHIR_INTEL_BREAKER_THRESHOLD` | `10` | Consecutive lookup errors, or consecutive UNAVAILABLE answers from every provider, before enrichment halts. Rate limits don't count. |
 | `VHIR_INTEL_RATE_LIMIT_RETRIES` | `5` | Per-IOC retry cap when a lookup is rate-limited. |
-| `VHIR_INTEL_MIN_INTERVAL_MS` | `100` | Minimum milliseconds between OpenCTI requests (default ~10 QPS). Prevents self-inflicted rate limits. Clamped to a 10ms floor. |
+| `VHIR_INTEL_MIN_INTERVAL_MS` | `100` | Minimum milliseconds between threat-intel lookups (default ~10 QPS). Prevents self-inflicted rate limits. Clamped to a 10ms floor. |
 
 All thresholds clamp to a sane lower bound (operator typo of `0` won't disable safety).
 
