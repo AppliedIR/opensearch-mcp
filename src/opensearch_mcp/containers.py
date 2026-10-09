@@ -508,6 +508,7 @@ def mount_vss(
                 ctx.failures.append(failure)
                 print(f"  WARNING: {failure}", file=sys.stderr)
     results = []
+    stores: list[tuple] = []
     for name, offset in sorted(volumes.items(), key=lambda v: v[1]):
         found, unread, partial = _mount_vss_at(
             raw_path, dest, ctx, offset, name if len(volumes) > 1 else ""
@@ -526,6 +527,11 @@ def mount_vss(
         for vss_id, _ in found:
             ctx.vss_sources[vss_id] = name
         results += found
+        stores += [(vss_id, path, offset) for vss_id, path in found]
+    from opensearch_mcp import ops
+
+    # one point per store, with the volume's offset and the store's id
+    ctx.record(raw_path, [ops.mount_point(p, off, store=v) for v, p, off in stores], "mount_vss")
     return results
 
 

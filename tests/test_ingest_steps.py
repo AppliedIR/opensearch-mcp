@@ -665,3 +665,38 @@ def test_a_mount_is_recorded_with_its_points_and_each_unmount_pairs_with_one(
         (p["realpath"], p["mnt_id"]) for p in points
     )
     assert not [e for e in _entries(case) if "umount" in e and "about" in e]  # paired by place
+
+
+def test_each_shadow_copy_store_is_a_mount_point_with_its_store(case, tmp_path, monkeypatch):
+    import opensearch_mcp.containers as C
+    from opensearch_mcp import ops
+
+    raw = tmp_path / "disk.raw"
+    raw.write_bytes(b"\0" * 512)
+    dest = tmp_path / "vss"
+
+    def at(raw_path, d, ctx, offset, name):
+        found = []
+        for n in (1, 2):
+            store = f"{name}-vss{n}" if name else f"vss{n}"  # as _mount_vss_at names them
+            p = d / store
+            p.mkdir(parents=True)
+            found.append((store, p))
+        return found, "", ""
+
+    monkeypatch.setattr(C, "_is_ntfs", lambda path, off: True)
+    monkeypatch.setattr(C, "_mount_vss_at", at)
+    ctx = C.MountContext()
+    ops.set_run(AuditWriter(mcp_name="opensearch-ingest-1"), case)
+    try:
+        C.mount_vss(raw, dest, ctx, offsets={"p2": 105906176})
+    finally:
+        ops.set_run(None, None)
+    (mount,) = [e for e in _entries(case) if "mount" in e]
+    points = mount["mount"]["points"]
+    assert [(p["store"], p["offset"]) for p in points] == [
+        ("vss1", 105906176),
+        ("vss2", 105906176),
+    ]
+    for p in points:
+        assert set(p) == {"target", "realpath", "st_dev", "mnt_id", "offset", "store"}
