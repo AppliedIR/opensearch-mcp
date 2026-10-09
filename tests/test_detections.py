@@ -308,9 +308,9 @@ class TestDetectionsResponseSchema:
 class TestDetectionsAudit:
     def test_audit_id_in_response(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()
-        with patch.object(srv.audit, "log", return_value="audit-789"):
+        with patch.object(srv.audit, "log", return_value="audit-789") as log:
             resp = idx_list_detections()
-        assert resp["audit_id"] == "audit-789"
+        assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 
     def test_no_audit_id_when_none(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()

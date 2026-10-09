@@ -193,3 +193,42 @@ def test_a_count_is_a_search_of_no_records_counting_every_match(os_):
     body = c.search.call_args.kwargs["body"]
     assert body["size"] == 0 and body["track_total_hits"] is True
     c.count.assert_not_called()
+
+
+QUERIES = {
+    "idx_search": lambda c: (_search_reply(c), srv.idx_search(query="*", index=INDEX))[1],
+    "idx_get_event": lambda c: srv.idx_get_event(event_id="d1", index=INDEX),
+    **{name: (lambda c, run=run: run()) for name, (run, _own) in SUMMARIES.items()},
+}
+
+
+def _search_reply(c):
+    c.search.return_value = {"hits": {"total": {"value": 1}, "hits": [_hit(1, "x-001")]}}
+
+
+@pytest.mark.parametrize("tool", sorted(QUERIES))
+def test_a_query_saves_its_response_as_returned_and_its_entry_holds_the_hash(
+    os_, tool, tmp_path, monkeypatch
+):
+    import hashlib
+
+    from sift_common.audit import AuditWriter
+
+    c, _ = os_
+    case = tmp_path / "case"
+    (case / "audit").mkdir(parents=True)
+    monkeypatch.setattr(srv, "audit", AuditWriter("opensearch-mcp", audit_dir=str(case / "audit")))
+    monkeypatch.setattr(srv, "_resolve_index", lambda *a, **k: (INDEX, None))
+    c.get.return_value = _hit(1, "x-001")
+    if tool in SUMMARIES:
+        c.search.return_value = _summary(["x-001"], **SUMMARIES[tool][1])
+    resp = QUERIES[tool](c)
+    lines = (case / "audit" / "opensearch-mcp.jsonl").read_text().splitlines()
+    (entry,) = [json.loads(line) for line in lines]
+    saved = case / "extractions" / entry["audit_id"] / "response.json"
+    assert entry["tool"] == tool and resp["audit_id"] == entry["audit_id"]
+    assert json.loads(saved.read_text()) == json.loads(json.dumps(resp, default=str))
+    assert entry["response"] == {
+        "path": str(saved),
+        "sha256": hashlib.sha256(saved.read_bytes()).hexdigest(),
+    }

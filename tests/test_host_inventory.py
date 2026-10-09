@@ -237,6 +237,6 @@ def test_the_inventory_records_the_ingests_of_the_records_it_counted(case, monke
     monkeypatch.setattr(srv.audit, "log", lambda **kw: logged.append(kw) or "aid-1")
     inv = srv.idx_host_inventory()
     (entry,) = logged
-    assert entry["tool"] == "idx_host_inventory" and inv["audit_id"] == "aid-1"
+    assert entry["tool"] == "idx_host_inventory" and inv["audit_id"] == entry["audit_id"]
     assert entry["params"]["result_ingests"] == ["opensearch-ingest-1-001"]
     assert entry["params"]["result_ingests_missing"] == 1

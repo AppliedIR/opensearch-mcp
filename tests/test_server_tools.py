@@ -191,9 +191,9 @@ class TestIdxSearch:
         mock_client.search.return_value = {
             "hits": {"total": {"value": 0}, "hits": []},
         }
-        with patch.object(srv.audit, "log", return_value="audit-123"):
+        with patch.object(srv.audit, "log", return_value="audit-123") as log:
             resp = idx_search(query="*")
-        assert resp["audit_id"] == "audit-123"
+        assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 
     def test_an_empty_ip_wildcard_search_is_pointed_to_cidr(self, mock_client):
         """On an IP-typed field a wildcard matches nothing and reports no
@@ -245,9 +245,9 @@ class TestIdxCount:
 
     def test_audit_id_in_response(self, mock_client):
         mock_client.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}}
-        with patch.object(srv.audit, "log", return_value="audit-456"):
+        with patch.object(srv.audit, "log", return_value="audit-456") as log:
             resp = idx_count()
-        assert resp["audit_id"] == "audit-456"
+        assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 
 
 # ---------------------------------------------------------------------------

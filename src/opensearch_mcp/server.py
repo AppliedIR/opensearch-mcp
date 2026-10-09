@@ -869,6 +869,37 @@ def _ingest_params(result: dict) -> dict:
     return out
 
 
+def _logged_query(resp: dict, **entry) -> dict:
+    """Write a query's audit entry, and save its response, as returned to the
+    AI, beside it: `extractions/<audit id>/response.json`, its SHA-256 on the
+    entry, so a quote of the response can be checked against what the AI was
+    given. Returns the response with its audit id; without an entry, the
+    response as it was and nothing saved."""
+    import hashlib
+
+    audit_dir = audit._get_audit_dir()
+    aid = audit._next_audit_id(audit_dir)
+    out = {**resp, "audit_id": aid}
+    saved = None
+    if audit_dir is not None:
+        folder = Path(audit_dir).parent / "extractions" / aid
+        try:
+            folder.mkdir(parents=True, exist_ok=False)
+            data = json.dumps(out, ensure_ascii=False, default=str).encode("utf-8")
+            (folder / "response.json").write_bytes(data)
+            saved = {"path": str(folder / "response.json"),
+                     "sha256": hashlib.sha256(data).hexdigest()}  # fmt: skip
+        except OSError as e:
+            logger.warning("query response not saved: %s", e)
+    logged = audit.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
+    if logged is None:
+        if saved:  # an entry that wasn't written leaves no file of its own
+            Path(saved["path"]).unlink(missing_ok=True)
+            Path(saved["path"]).parent.rmdir()
+        return resp
+    return out
+
+
 def _field(src: dict, dotted: str):
     """`dotted` in a record, given dotted or nested."""
     if dotted in src:
@@ -1032,7 +1063,8 @@ def idx_search(
 
     _add_shimcache_reminder(resp, index, docs)
     _annotate_hosts(resp, case_id, hits=result["hits"]["hits"])
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_search",
         params={
             "query": query,
@@ -1043,9 +1075,6 @@ def idx_search(
         },  # fmt: skip
         result_summary=f"{total} total, {len(docs)} returned",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -1096,14 +1125,12 @@ def idx_count(
     count = result["hits"]["total"]["value"]
     resp = {"count": count}
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_count",
         params={"query": query, "index": requested, "scope": index, **_ingest_params(result)},
         result_summary=f"count={count}",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -1162,7 +1189,8 @@ def idx_aggregate(
         "truncated": len(buckets) >= limit,
     }
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_aggregate",
         params={
             "field": field,
@@ -1173,9 +1201,6 @@ def idx_aggregate(
         },  # fmt: skip
         result_summary=f"{len(buckets)} buckets",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -1199,7 +1224,8 @@ def idx_get_event(
     doc = {"_id": result["_id"], "_index": result["_index"]}
     doc.update(result.get("_source", {}))
     doc["_note"] = "Full document — all fields included, no truncation"
-    aid = audit.log(
+    return _logged_query(
+        doc,
         tool="idx_get_event",
         params={
             "event_id": event_id,
@@ -1208,9 +1234,6 @@ def idx_get_event(
         },  # fmt: skip
         result_summary=f"doc {event_id}",
     )
-    if aid:
-        doc["audit_id"] = aid
-    return doc
 
 
 @server.tool()
@@ -1293,7 +1316,8 @@ def idx_timeline(
         "buckets": buckets,
     }
     _annotate_hosts(resp, case_id, client, index, query_body)
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_timeline",
         params={
             "query": query,
@@ -1304,9 +1328,6 @@ def idx_timeline(
         },  # fmt: skip
         result_summary=f"{len(buckets)} buckets",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -1352,7 +1373,8 @@ def idx_field_values(
     ]
 
     resp = {"field": field, "values": values, "truncated": len(values) >= limit}
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_field_values",
         params={
             "field": field,
@@ -1363,9 +1385,6 @@ def idx_field_values(
         },  # fmt: skip
         result_summary=f"{len(values)} values",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -1934,14 +1953,12 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     if partial:
         resp.setdefault("warnings", []).extend(partial)
     _add_investigation_hints(resp, artifacts, scope.c12)
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_case_summary",
         params={"case_id": cid, **_ingest_params(ingested)},
         result_summary=f"{len(hosts)} hosts, {len(artifacts)} artifact types, {total_docs} docs",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -3623,7 +3640,8 @@ def idx_list_detections(
     }
     if hayabusa_hint:
         resp["suggestion"] = hayabusa_hint
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_list_detections",
         params={
             "severity": severity,
@@ -3633,9 +3651,6 @@ def idx_list_detections(
         },
         result_summary=f"{len(findings)} findings",
     )
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 @server.tool()
@@ -3727,15 +3742,13 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
         ),
         **({"docs_note": docs_note} if docs_note else {}),
     }
-    aid = audit.log(
+    return _logged_query(
+        resp,
         tool="idx_host_inventory",
         params={"case_id": resp["case_id"], "offset": offset, "limit": limit,
                 **_ingest_params(ingested)},
         result_summary=f"{len(machines)} machines, {len(page)} listed",
     )  # fmt: skip
-    if aid:
-        resp["audit_id"] = aid
-    return resp
 
 
 def _docs_per_key(c12, keys: list[str], ingested: dict | None = None) -> tuple[dict | None, str]:
