@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
+
+from sift_common.file_identity import NotRegularFile, hash_file
 
 
 def sha256_file(path: Path) -> str:
-    """Compute SHA-256 of a file using 64KB chunks."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(65536)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
+    """SHA-256 of a regular file, through sift-common's file identity, so it
+    matches the registry's and run_command's hash of the same file. A FIFO,
+    device or directory is an OSError, without being read."""
+    try:
+        return hash_file(path).sha256
+    except NotRegularFile as e:
+        raise OSError(str(e)) from e
