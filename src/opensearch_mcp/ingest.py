@@ -453,6 +453,26 @@ def _run_hayabusa_batch(
         if callable(on_progress):
             on_progress("hayabusa_failed", hostname=host.hostname, error=error)
 
+    def evtx_inputs(host) -> tuple[list, list]:
+        """Each evtx Hayabusa read, with its place: by the registry, or the
+        manifest of the extraction that wrote it, or hashed."""
+        inputs, regs = [], []
+        try:
+            files = sorted(
+                f for f in Path(host.evtx_dir).iterdir()
+                if f.is_file() and f.suffix.lower() == ".evtx"
+            )  # fmt: skip
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                entry, reg = ops.file_input(case_dir, f)
+            except OSError:
+                entry, reg = ops.place(f), None  # unreadable: named, not hashed
+            inputs.append(entry)
+            regs += [reg] if reg else []
+        return inputs, regs
+
     for host in hosts:
         if not host.evtx_dir:
             continue
@@ -507,6 +527,19 @@ def _run_hayabusa_batch(
         ]
         if callable(on_progress):
             on_progress("hayabusa_start", hostname=host.hostname)
+        params = {"hostname": host.hostname, "evtx_dir": str(host.evtx_dir), "run_id": run_id,
+                  "rules_dir": str(rules_dir)}  # fmt: skip
+
+        def record(summary: str, outputs=None) -> str:
+            """The run's one step: the evtx it read and the CSV it wrote."""
+            if audit is None:
+                return ""
+            inputs, regs = evtx_inputs(host)
+            return ops.write(
+                audit, "ingest_hayabusa", params=params, summary=summary, inputs=inputs,
+                input_registered=regs or None, outputs=outputs,
+            )  # fmt: skip
+
         try:
             # Hayabusa won't overwrite an existing output (it says so and
             # exits 0), so move the previous run's CSV aside: a run that
@@ -517,14 +550,17 @@ def _run_hayabusa_batch(
             stderr = result.stderr.decode(errors="replace")
             if result.returncode != 0:
                 failed(host, f"exit {result.returncode}: {stderr[:200]}")
+                record(f"FAILED: exit {result.returncode}: {stderr[:200]}")
                 continue
             # Hayabusa exits 0 on some errors; it says so on stderr
             errors = [ln.strip() for ln in stderr.splitlines() if "[ERROR]" in ln]
             if errors:
                 failed(host, errors[0][:200])
+                record(f"FAILED: {errors[0][:200]}")
                 continue
         except Exception as e:  # it couldn't run, timed out, or the move failed
             failed(host, str(e)[:200])
+            record(f"FAILED: {str(e)[:200]}")
             continue
 
         if not csv_output.exists() or csv_output.stat().st_size == 0:
@@ -535,69 +571,58 @@ def _run_hayabusa_batch(
                 "or no event could be read"
             )
             results[host.hostname] = {"status": "empty", "note": note}
+            record("no detections written: no rule matched, or no event could be read")
             if callable(on_progress):
                 on_progress("hayabusa_empty", hostname=host.hostname, note=note)
             continue
 
         index_name = wc.index_name("hayabusa")
         cnt = 0
-        # each detection carries this host's Hayabusa entry id, as every other
-        # parser's records carry theirs, so it traces to the logs it came from
-        aid = audit._next_audit_id() if audit is not None else ""
+        # the run's step, before its detections: each carries its id, so it
+        # traces to the logs it came from and the CSV it was read from
+        aid = record("recorded before its detections were indexed", [ops.output(csv_output)])
+        if audit is not None and not aid:
+            failed(host, NO_ENTRY)
+            continue
         try:
-            cnt, sk, bf, hr = ingest_delimited(
-                csv_output,
-                client,
-                index_name,
-                host.hostname,
-                time_field="Timestamp",
-                source_file=str(csv_output),
-                ingest_audit_id=aid,
-                pipeline_version=_PIPELINE_VERSION,
-                host_dict=host_dict,
-                id_root=_run_root_of(host, run_tmpdir),
-            )
-            if bf:
-                from opensearch_mcp.bulk import get_last_bulk_reason
-
-                reason = get_last_bulk_reason()
-                failed(
-                    host,
-                    f"{bf:,} of {cnt + bf:,} alerts rejected by OpenSearch"
-                    + (f" ({reason[:200]})" if reason else ""),
-                    indexed=cnt,
-                    bulk_failed=bf,
+            with wc.op(aid):
+                cnt, sk, bf, hr = ingest_delimited(
+                    csv_output,
+                    client,
+                    index_name,
+                    host.hostname,
+                    time_field="Timestamp",
+                    source_file=str(csv_output),
+                    ingest_audit_id=aid,
+                    pipeline_version=_PIPELINE_VERSION,
+                    host_dict=host_dict,
+                    id_root=_run_root_of(host, run_tmpdir),
                 )
-            else:
-                results[host.hostname] = cnt
-                if callable(on_progress):
-                    on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
+                if bf:
+                    from opensearch_mcp.bulk import get_last_bulk_reason
+
+                    reason = get_last_bulk_reason()
+                    failed(
+                        host,
+                        f"{bf:,} of {cnt + bf:,} alerts rejected by OpenSearch"
+                        + (f" ({reason[:200]})" if reason else ""),
+                        indexed=cnt,
+                        bulk_failed=bf,
+                    )
+                else:
+                    results[host.hostname] = cnt
+                    if callable(on_progress):
+                        on_progress("hayabusa_done", hostname=host.hostname, count=cnt)
         except Exception as e:
             failed(host, f"ingest failed: {e}"[:200])
-        if audit and host.hostname in results:
+        if aid and host.hostname in results:  # what became of it: an entry of its own
             outcome = results[host.hostname]
-            try:
-                evtx_read = sorted(
-                    str(f) for f in Path(host.evtx_dir).iterdir()
-                    if f.is_file() and f.suffix.lower() == ".evtx"
-                )  # fmt: skip
-            except OSError:
-                evtx_read = []
-            audit.log(
-                tool="ingest_hayabusa",
-                audit_id=aid or None,
-                params={
-                    "hostname": host.hostname,
-                    "evtx_dir": str(host.evtx_dir),
-                    "run_id": run_id,
-                },  # fmt: skip
-                result_summary=(
-                    f"FAILED: {outcome['error']}"
-                    if isinstance(outcome, dict)
-                    else f"{cnt} alerts indexed"
-                ),
-                input_files=evtx_read,
-            )
+            ops.later(
+                audit, aid, "ingest_hayabusa",
+                f"FAILED: {outcome['error']}" if isinstance(outcome, dict)
+                else f"{cnt} alerts indexed",
+                params,
+            )  # fmt: skip
 
     return results
 
