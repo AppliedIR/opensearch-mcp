@@ -360,9 +360,16 @@ def image_input(case_dir, path) -> tuple[dict, dict | None]:
     return entry, reg
 
 
-def set_run(audit, case_dir) -> None:
-    """The run open on this thread: its writer and case (None, None closes)."""
+def set_run(audit, case_dir, roots: list[dict] | None = None) -> None:
+    """The run open on this thread: its writer, case and roots (the registered
+    evidence it was given, ``{path, sha256}``); None, None closes it."""
     _tls.run = (audit, case_dir) if audit is not None else None
+    _tls.roots = list(roots or []) if audit is not None else []
+
+
+def run_roots() -> list[dict]:
+    """The roots of the run open on this thread: what its records come from."""
+    return list(getattr(_tls, "roots", None) or [])
 
 
 def current_run():

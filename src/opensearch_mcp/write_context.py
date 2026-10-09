@@ -441,8 +441,11 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
     and the step each record was written under: its own when its parser
     batches several files (``steps``), else the step open on this thread,
     whatever id the parser gave it."""
+    from opensearch_mcp.ops import run_roots
+
     prefix = f"case-{ctx.c12}-"
     open_step = current_op()
+    roots = run_roots()  # the registered evidence the run was given
     for n, action in enumerate(actions):
         if not str(action.get("_index", "")).startswith(prefix):
             continue
@@ -450,6 +453,10 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         step = (steps[n] if steps and n < len(steps) else "") or open_step
         if step:  # the step that read the record's file
             src["vhir.ingest_audit_id"] = step
+        if roots:  # one value, or every root when the run has several
+            paths, shas = [r["path"] for r in roots], [r["sha256"] for r in roots]
+            src["vhir.original.path"] = paths[0] if len(paths) == 1 else paths
+            src["vhir.original.sha256"] = shas[0] if len(shas) == 1 else shas
         rid = action.get("_id")
         resent = rid is not None and _stamped_here(action, src)
         if resent:

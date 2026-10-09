@@ -734,3 +734,56 @@ def test_a_case_record_with_no_step_open_is_refused_and_nothing_is_sent(case, mo
         with pytest.raises(wc.NoWriteContext, match="no step is recorded"):
             flush_bulk(MagicMock(), actions)
     assert sent == []
+
+
+def _json_stored(case, monkeypatch, f) -> list[dict]:
+    """cmd_ingest_json over `f`, its unit and write context real, with a fake
+    parser sending two records through the real flush_bulk; the records as
+    stored."""
+    from opensearch_mcp import ingest_cli
+    from opensearch_mcp.bulk import flush_bulk
+
+    sent: list = []
+    _write_ctx(case, monkeypatch, sent)
+
+    def parse(path, client, index_name, hostname, **kw):
+        flush_bulk(client, [
+            {"_index": index_name, "_id": f"{path.name}:{n}",
+             "_source": {"row": n, "message": "café", "host.name": "RD01"}}
+            for n in (1, 2)
+        ])  # fmt: skip
+        return 2, 0, 0, False
+
+    for name in ("_ensure_case_active", "_preflight_shard_capacity", "_write_bg_status", "_gate"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda c: None)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(ingest_cli, "_case_dir_for", lambda c: case)
+    monkeypatch.setattr(ingest_cli, "get_client", MagicMock())
+    monkeypatch.setattr("opensearch_mcp.parse_json.ingest_json", parse)
+    args = argparse.Namespace(
+        path=str(f), hostname="RD01", case=None, time_field=None, time_from=None,
+        time_to=None, batch_size=1000, dry_run=False, index_suffix=None,
+    )  # fmt: skip
+    ingest_cli.cmd_ingest_json(args)
+    return [a["_source"] for a in sent]
+
+
+def test_each_record_carries_the_registered_evidence_its_run_was_given(case, monkeypatch):
+    f = case / "evidence" / "json" / "events.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text('{"a": 1}\n')
+    digest = _register(case, f)
+    stored = _json_stored(case, monkeypatch, f)
+    assert len(stored) == 2
+    for src in stored:
+        assert src["vhir.original.path"] == str(f.resolve())
+        assert src["vhir.original.sha256"] == digest
+
+
+def test_a_run_given_unregistered_evidence_stamps_no_original(case, monkeypatch):
+    f = case / "loose.jsonl"
+    f.write_text('{"a": 1}\n')
+    stored = _json_stored(case, monkeypatch, f)
+    assert len(stored) == 2
+    assert not [k for src in stored for k in src if k.startswith("vhir.original")]
