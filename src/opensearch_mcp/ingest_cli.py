@@ -1878,9 +1878,11 @@ def _file_entry(
     from opensearch_mcp import ops
 
     params = {"hostname": hostname, "index_name": index_name, "run_id": run_id or ""}
+    run = ops.current_run()  # the run's own case (active or not), as it started
+    case_dir = run[1] if run is not None else (resolve_case_dir() or None)
     try:
         aid, _sha = ops.read_step(
-            audit, tool, f, case_dir=resolve_case_dir() or None, params={**params, **(extra or {})}
+            audit, tool, f, case_dir=case_dir, params={**params, **(extra or {})}
         )
     except ops.NoEntry as e:  # unreadable (its failure recorded) or not recorded
         return "", str(e)

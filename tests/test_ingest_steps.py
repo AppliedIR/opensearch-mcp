@@ -1092,3 +1092,35 @@ def test_a_file_a_parser_couldnt_index_is_counted_and_named_in_the_status(
     else:
         assert ops.NO_ENTRY in row["note"]
 
+
+def test_a_file_s_step_reads_the_run_s_own_registry_when_another_case_is_active(
+    case, tmp_path, monkeypatch
+):
+    from opensearch_mcp import ingest_cli
+
+    other = tmp_path / "other"
+    (other / "audit").mkdir(parents=True)
+    (other / "CASE.yaml").write_text("case_id: other\n")
+    (other / "evidence.json").write_text(json.dumps({"files": []}))
+    folder = case / "evidence" / "json"
+    folder.mkdir(parents=True)
+    f = folder / "events.jsonl"
+    f.write_text('{"a": 1}\n')
+    digest = _register(case, f)
+    monkeypatch.setenv("VHIR_CASE_DIR", str(other))  # another case is active
+    for name in ("_ensure_case_active", "_preflight_shard_capacity", "_write_bg_status"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda c: None)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(ingest_cli, "_case_dir_for", lambda c: case)
+    monkeypatch.setattr(ingest_cli, "get_client", MagicMock())
+    monkeypatch.setattr(ingest_cli, "_open_unit", MagicMock())
+    monkeypatch.setattr("opensearch_mcp.parse_json.ingest_json", lambda *a, **k: (1, 0, 0, False))
+    monkeypatch.setattr("opensearch_mcp.write_context.index_name", lambda t: f"case-{C12}-{t}-0")
+    args = argparse.Namespace(
+        path=str(f), hostname="RD01", case="acme", time_field=None, time_from=None,
+        time_to=None, batch_size=1000, dry_run=False, index_suffix=None,
+    )  # fmt: skip
+    ingest_cli.cmd_ingest_json(args)
+    (step,) = _steps(case, "ingest_json")
+    assert step["input_registered"] == [{"path": str(f.resolve()), "sha256": digest}]
