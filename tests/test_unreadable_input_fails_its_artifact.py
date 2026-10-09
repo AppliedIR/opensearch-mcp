@@ -59,6 +59,7 @@ def _run(tmp_path, unreadable=()):
     audit.log.side_effect = lambda **kw: kw["audit_id"]  # written
     client = MagicMock()
     client.count.side_effect = Exception("no index")
+
     def plaso(parser, source, tmpdir):  # SRUM's Plaso fallback: its JSONL
         out = Path(tmpdir) / "out.jsonl"
         out.write_text("{}\n")
