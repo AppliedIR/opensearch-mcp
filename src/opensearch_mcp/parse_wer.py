@@ -92,6 +92,9 @@ def parse_wer_dir(
     for wer_file in sorted(wer_dir.rglob("Report.wer")):
         try:
             doc = parse_wer_file(wer_file)
+        except OSError as e:  # unreadable: named, never an ordinary skip
+            ops.not_indexed(notes, wer_file, ops.Unreadable(str(e)))
+            continue
         except Exception:
             skipped += 1
             continue

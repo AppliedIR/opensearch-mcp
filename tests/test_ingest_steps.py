@@ -1124,3 +1124,36 @@ def test_a_file_s_step_reads_the_run_s_own_registry_when_another_case_is_active(
     ingest_cli.cmd_ingest_json(args)
     (step,) = _steps(case, "ingest_json")
     assert step["input_registered"] == [{"path": str(f.resolve()), "sha256": digest}]
+
+
+def test_a_wer_file_that_cant_be_read_is_named_not_skipped(case, monkeypatch):
+    from opensearch_mcp import bulk, parse_wer
+    from opensearch_mcp.ingest import _ingest_custom_artifact
+    from opensearch_mcp.results import HostResult
+
+    root = case / "evidence" / "HOST1"
+    folder, f = _custom_file("wer", root, monkeypatch)
+
+    def unreadable(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(parse_wer, "parse_wer_file", unreadable)
+    monkeypatch.setattr(bulk.helpers, "bulk", _bulk_into([]))
+    monkeypatch.setattr(wc, "prepare_index", lambda client, index: None)
+    monkeypatch.setattr(wc, "note_second_copy", lambda client, ctx, index: None)
+    monkeypatch.setattr(wc, "_imported", {case})
+    monkeypatch.setattr(ingest, "_write_ingest_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(ingest, "_safe_count", lambda *a, **k: 0)
+    monkeypatch.setattr(wc, "index_name", lambda t: f"case-{C12}-{t}-0")
+    host = DiscoveredHost(hostname="HOST1", volume_root=root, system_timezone="UTC")
+    ctx = wc.WriteContext(case_dir=case, c12=C12, unit="u-host1", unit_raw="HOST1")
+    status = [{"hostname": "HOST1", "artifacts": [{"name": "wer", "status": "pending"}]}]
+    result = HostResult(hostname="HOST1")
+    with wc.writing(ctx):
+        _ingest_custom_artifact(
+            "wer", folder, MagicMock(), AuditWriter(mcp_name="opensearch-ingest-1"), "acme",
+            host, 0, result, status, lambda *a, **k: None, lambda: None,
+        )  # fmt: skip
+    (row,) = status[0]["artifacts"]
+    assert row["not_indexed"] == 1 and str(f) in row["note"]
+    assert "couldn't be read" in row["note"] and result.artifacts[-1].skipped == 0
