@@ -141,8 +141,10 @@ class TestAHaltedRunThatStamped:
         ]
         # the run's reference step, then what it did: an entry about that step
         (ref,) = [r for r in records if r["tool"] == "enrich_intel" and "reference" in r]
-        (record,) = [r for r in records if r["tool"] == "enrich_intel" and "about" in r]
-        assert record["about"] == ref["audit_id"]
+        later = [r for r in records if r["tool"] == "enrich_intel" and "about" in r]
+        (asked,) = [r for r in later if "lookups" in r]  # the providers that replied
+        (record,) = [r for r in later if "lookups" not in r]
+        assert asked["about"] == record["about"] == ref["audit_id"]
         assert record["params"]["case_id"] == case_id
         summary = record["result_summary"]["value"]
         # the unavailable IOC's document gets its UNAVAILABLE entry too
