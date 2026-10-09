@@ -154,3 +154,27 @@ def test_the_active_cases_log_is_read_once(root, monkeypatch):
     monkeypatch.setattr(Path, "read_text", spy)
     assert incomplete("a") == [_warning("a")]
     assert len(read) == len(set(read)) == 1
+
+
+def test_the_summary_records_the_ingests_of_the_records_it_summarised(root, monkeypatch):
+    activate(root, "a")
+
+    class Counted(_Client):
+        def search(self, index, body):
+            resp = super().search(index, body)
+            if "hosts" in body.get("aggs", {}):
+                assert "result_ingests" in body["aggs"]
+                resp["aggregations"]["result_ingests"] = {
+                    "buckets": [{"key": "opensearch-ingest-1-007", "doc_count": 9}],
+                    "sum_other_doc_count": 0,
+                }
+                resp["aggregations"]["result_ingests_missing"] = {"doc_count": 2}
+            return resp
+
+    logged = []
+    monkeypatch.setattr(server, "_get_os", lambda: Counted())
+    monkeypatch.setattr(server.audit, "log", lambda **kw: logged.append(kw) or "aid-1")
+    server.idx_case_summary(case_id="a")
+    (entry,) = [e for e in logged if e["tool"] == "idx_case_summary"]
+    assert entry["params"]["result_ingests"] == ["opensearch-ingest-1-007"]
+    assert entry["params"]["result_ingests_missing"] == 2

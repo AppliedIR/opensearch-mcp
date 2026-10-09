@@ -216,3 +216,27 @@ def test_the_query_tools_say_to_filter_by_host_id_and_that_index_names_carry_no_
     status = " ".join(tools["idx_ingest_status"].split())
     assert '"awaiting host confirmation": the run has read' in status
     assert "writes nothing until the examiner confirms them" in status
+
+
+def test_the_inventory_records_the_ingests_of_the_records_it_counted(case, monkeypatch):
+    key = confirm(case, unit(case, "evidence/a", "WKS01"), "WKS01")
+
+    class Counted(Cluster):
+        def search(self, index, body, **k):
+            resp = super().search(index, body, **k)
+            assert body["aggs"]["result_ingests"]["terms"]["field"] == "vhir.ingest_audit_id"
+            resp["aggregations"]["result_ingests"] = {
+                "buckets": [{"key": "opensearch-ingest-1-001", "doc_count": 6}],
+                "sum_other_doc_count": 0,
+            }
+            resp["aggregations"]["result_ingests_missing"] = {"doc_count": 1}
+            return resp
+
+    logged = []
+    monkeypatch.setattr(srv, "_get_os", lambda: Counted({key: 7}))
+    monkeypatch.setattr(srv.audit, "log", lambda **kw: logged.append(kw) or "aid-1")
+    inv = srv.idx_host_inventory()
+    (entry,) = logged
+    assert entry["tool"] == "idx_host_inventory" and inv["audit_id"] == "aid-1"
+    assert entry["params"]["result_ingests"] == ["opensearch-ingest-1-001"]
+    assert entry["params"]["result_ingests_missing"] == 1

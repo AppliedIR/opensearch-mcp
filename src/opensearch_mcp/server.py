@@ -1740,12 +1740,14 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     hosts: set = set()
     host_names: dict = {}
     index_hosts: dict = {}
+    ingested: dict = {}  # which ingests the summarised records came from
     try:
         host_agg = client.search(
             index=pattern,
             body={
                 "size": 0,
                 "aggs": {
+                    **_ingest_aggs(),
                     "hosts": {
                         "terms": {"field": "host.id", "size": 5000},
                         "aggs": {"names": {"terms": {"field": "host.name", "size": 50}}},
@@ -1757,6 +1759,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 },
             },
         )
+        ingested = host_agg
         for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
             hosts.add(bucket["key"])
             host_names[bucket["key"]] = sorted(b["key"] for b in bucket["names"]["buckets"])
@@ -1933,7 +1936,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     _add_investigation_hints(resp, artifacts, scope.c12)
     aid = audit.log(
         tool="idx_case_summary",
-        params={"case_id": cid},
+        params={"case_id": cid, **_ingest_params(ingested)},
         result_summary=f"{len(hosts)} hosts, {len(artifacts)} artifact types, {total_docs} docs",
     )
     if aid:
@@ -3676,12 +3679,13 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
 
     from opensearch_mcp.write_context import case_identity
 
+    ingested: dict = {}
     try:
         c12 = case_identity(case_dir)[0]
     except Exception as e:
         docs, docs_note = None, f"document counts unavailable: the case's identity: {e}"
     else:
-        docs, docs_note = _docs_per_key(c12, [k for m in page for k in m.keys])
+        docs, docs_note = _docs_per_key(c12, [k for m in page for k in m.keys], ingested)
     units = sorted({p[0] for m in page for p in m.pairs})
     unbound = [p for p in state.names if p not in state.bindings]
     pending = []
@@ -3694,7 +3698,7 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
     states: dict[str, int] = {}
     for m in machines:
         states[m.state] = states.get(m.state, 0) + 1
-    return {
+    resp = {
         "case_id": _case_id_of(case_dir),
         "machines_total": len(machines),
         "machines_by_state": states,
@@ -3723,23 +3727,36 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
         ),
         **({"docs_note": docs_note} if docs_note else {}),
     }
+    aid = audit.log(
+        tool="idx_host_inventory",
+        params={"case_id": resp["case_id"], "offset": offset, "limit": limit,
+                **_ingest_params(ingested)},
+        result_summary=f"{len(machines)} machines, {len(page)} listed",
+    )  # fmt: skip
+    if aid:
+        resp["audit_id"] = aid
+    return resp
 
 
-def _docs_per_key(c12, keys: list[str]) -> tuple[dict | None, str]:
+def _docs_per_key(c12, keys: list[str], ingested: dict | None = None) -> tuple[dict | None, str]:
     """(documents per machine key in the case's indices, a note): None and why
     when the cluster can't be asked; the counts and a note when they're
-    incomplete (timed out, or shards that didn't answer)."""
+    incomplete (timed out, or shards that didn't answer). `ingested` gets the
+    response, for the ingests the counted records came from."""
     if not keys:
         return {}, ""
     try:
         resp = _get_os().search(
             index=f"case-{c12}-*",
             body={"size": 0, "query": {"terms": {"vhir.host_key": keys}},
-                  "aggs": {"k": {"terms": {"field": "vhir.host_key", "size": len(keys)}}}},
+                  "aggs": {"k": {"terms": {"field": "vhir.host_key", "size": len(keys)}},
+                           **_ingest_aggs()}},
             allow_no_indices=True, ignore_unavailable=True,
         )  # fmt: skip
     except Exception:
         return None, "document counts unavailable: the cluster didn't answer"
+    if ingested is not None:
+        ingested.update(resp)
     counts = {b["key"]: b["doc_count"] for b in resp["aggregations"]["k"]["buckets"]}
     failed = int((resp.get("_shards") or {}).get("failed") or 0)
     if resp.get("timed_out") or failed:
