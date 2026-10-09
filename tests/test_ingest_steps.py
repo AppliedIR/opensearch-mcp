@@ -936,3 +936,46 @@ def test_a_returned_record_names_its_enrichment_groups_and_their_steps(monkeypat
     }}  # fmt: skip
     (doc,) = srv._hit_params([hit])["result_docs"]
     assert doc["enrichment"] == {"triage": "tri-1", "threat_intel": ["ti-2"]}
+
+
+def test_a_step_reading_an_extracted_file_takes_the_manifest_s_hash_and_names_the_extraction(
+    case, tmp_path
+):
+    from opensearch_mcp import ops
+
+    archive = tmp_path / "kape.zip"
+    archive.write_bytes(b"PK")
+    out = tmp_path / "x"
+    out.mkdir()
+    (out / "Security.evtx").write_bytes(b"as extracted")
+    audit = AuditWriter(mcp_name="opensearch-ingest-1")
+    try:
+        made = ops.extraction_step(audit, case, archive, out, ["7z", "x", str(archive)])
+        (out / "Security.evtx").write_bytes(b"changed since")  # the manifest's hash stands
+        entry, _reg = ops.file_input(case, out / "Security.evtx")
+    finally:
+        ops.reset_extracted()
+    assert entry["sha256"] == hashlib.sha256(b"as extracted").hexdigest()
+    assert entry["produced_by"] == made
+
+
+def test_the_evtx_parser_sends_a_non_object_data_as_data_raw(monkeypatch):
+    from opensearch_mcp import parse_evtx
+
+    when = {"#attributes": {"SystemTime": "2026-10-09T01:00:00Z"}}
+    event = {"Event": {"System": {"EventID": 7, "Computer": "WKS1", "TimeCreated": when},
+                       "EventData": {"Data": "plain text", "User": "bob"}}}  # fmt: skip
+
+    class Parser:
+        def __init__(self, path):
+            pass
+
+        def records_json(self):
+            yield {"data": json.dumps(event), "event_record_id": 1, "timestamp": "t"}
+
+    sent = []
+    monkeypatch.setattr(parse_evtx, "PyEvtxParser", Parser)
+    monkeypatch.setattr(parse_evtx, "flush_bulk", lambda c, a: sent.extend(a) or (len(a), 0))
+    parse_evtx.parse_and_index(Path("x.evtx"), MagicMock(), "case-x-evtx-0")
+    ed = sent[0]["_source"]["winlog.event_data"]
+    assert "Data" not in ed and ed["Data_raw"] == "plain text" and ed["User"] == "bob"
