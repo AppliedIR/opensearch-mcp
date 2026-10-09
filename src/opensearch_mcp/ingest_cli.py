@@ -280,10 +280,12 @@ def _run_step(tool: str, input_attr: str):
                 print(f"Error: {raw}: {ops.NO_ENTRY}.", file=sys.stderr)
                 sys.exit(1)
             _run.audit, _run.step = audit, step
+            ops.set_run(audit, case_dir)
             try:
                 return fn(args, *a, **kw)
             finally:
                 _run.audit = _run.step = None
+                ops.set_run(None, None)
                 ops.reset_extracted()
 
         return wrapper

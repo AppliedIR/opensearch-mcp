@@ -358,3 +358,60 @@ def image_input(case_dir, path) -> tuple[dict, dict | None]:
         if made is not None:
             entry["sha256"], entry["produced_by"] = made
     return entry, reg
+
+
+def set_run(audit, case_dir) -> None:
+    """The run open on this thread: its writer and case (None, None closes)."""
+    _tls.run = (audit, case_dir) if audit is not None else None
+
+
+def current_run():
+    """``(audit, case_dir)`` of the run open on this thread, or None."""
+    return getattr(_tls, "run", None)
+
+
+def mount_point(target, offset=None, store: str = "") -> dict:
+    """A mount point as the mount and umount records name it: never hashed."""
+    real = os.path.realpath(target)
+    point: dict = {"target": str(target), "realpath": real}
+    try:
+        point["st_dev"] = os.stat(real).st_dev
+    except OSError:
+        point["st_dev"] = None
+    point["mnt_id"] = mnt_id(real)
+    point["offset"] = offset
+    if store:
+        point["store"] = store
+    return point
+
+
+def mount_step(image, points: list[dict], tool: str = "mount_image") -> str:
+    """Record a mount of ``image`` under the open run: ``mount: {image,
+    points}``, the image as an input (by the registry when registered).
+    "" when no run is open or it couldn't be written."""
+    run = current_run()
+    if run is None or not points:
+        return ""
+    audit, case_dir = run
+    entry, reg = image_input(case_dir, image)
+    return write(
+        audit,
+        tool,
+        params={"image": str(image)},
+        summary=f"{len(points)} mount point(s)",
+        inputs=[entry],
+        input_registered=[reg] if reg else None,
+        extra={"mount": {"image": reg["path"] if reg else str(image), "points": points}},
+    )
+
+
+def umount_entry(audit, realpath: str, mount_id) -> str:
+    """Record an unmount, read before it ran: ``umount: {realpath, mnt_id}``.
+    Readers pair it with the mount point whose realpath and mnt_id match."""
+    return write(
+        audit,
+        "umount",
+        params={"realpath": realpath},
+        summary="unmounted",
+        extra={"umount": {"realpath": realpath, "mnt_id": mount_id}},
+    )

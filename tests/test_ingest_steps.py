@@ -610,3 +610,58 @@ def test_a_memory_ingest_registers_nothing(case, monkeypatch):
     _, called, code = _memory_run(case, image, monkeypatch, plugins="windows.pslist")
     assert code == 0 and "evidence_register" not in called
     assert (case / "evidence.json").read_text() == before
+
+
+def test_a_mount_is_recorded_with_its_points_and_each_unmount_pairs_with_one(
+    case, tmp_path, monkeypatch
+):
+    import subprocess as sp
+
+    import opensearch_mcp.containers as C
+    from opensearch_mcp import ops
+
+    image = case / "evidence" / "disk.raw"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"\0" * 512)
+    digest = _register(case, image)
+    dest = tmp_path / "mnt"
+
+    def mount_raw(path, d, ctx):  # a stand-in: two volumes, as _mount_raw finds them
+        vols = []
+        for n, off in ((1, 1048576), (2, 105906176)):
+            v = d / f"p{n}"
+            v.mkdir(parents=True)
+            ctx.add_mount(v)
+            ctx.offsets[v] = off
+            vols.append(v)
+        return vols
+
+    monkeypatch.setattr(C, "_mount_raw", mount_raw)
+    monkeypatch.setattr(
+        C.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, b"", b"")
+    )
+    ctx = C.MountContext()
+    ops.set_run(AuditWriter(mcp_name="opensearch-ingest-1"), case)
+    try:
+        vols = C.mount_image(image, dest, ctx)
+        (mount,) = [e for e in _entries(case) if "mount" in e]
+        assert mount["mount"]["image"] == str(image.resolve())
+        assert mount["input_registered"] == [{"path": str(image.resolve()), "sha256": digest}]
+        points = mount["mount"]["points"]
+        assert [(p["target"], p["offset"]) for p in points] == [
+            (str(vols[0]), 1048576),
+            (str(vols[1]), 105906176),
+        ]
+        for p in points:
+            real = os.path.realpath(p["target"])
+            assert p["realpath"] == real and p["st_dev"] == os.stat(real).st_dev
+            assert p["mnt_id"] == ops.mnt_id(real) and isinstance(p["mnt_id"], int)
+            assert "sha256" not in p  # a mount point is never hashed
+        ctx.cleanup()
+    finally:
+        ops.set_run(None, None)
+    unmounts = [e["umount"] for e in _entries(case) if "umount" in e]
+    assert sorted((u["realpath"], u["mnt_id"]) for u in unmounts) == sorted(
+        (p["realpath"], p["mnt_id"]) for p in points
+    )
+    assert not [e for e in _entries(case) if "umount" in e and "about" in e]  # paired by place

@@ -113,6 +113,32 @@ class MountContext:
         self.not_mounted: list[str] = []  # partitions left unmounted on purpose (LVM)
         self.offsets: dict[Path, int] = {}  # mount point -> byte offset in the image
         self.vss_sources: dict[str, str] = {}  # shadow copy id -> the volume it came from
+        self.audit = None  # the run's writer, which recorded the mounts
+        self.recorded: dict[str, object] = {}  # recorded mount point realpath -> mnt_id
+
+    def record(self, image, points: list[dict], tool: str = "mount_image") -> None:
+        """Record a mount (the run's writer), and remember its points, whose
+        unmounts cleanup records."""
+        from opensearch_mcp import ops
+
+        run = ops.current_run()
+        if run is None or not points:
+            return
+        if ops.mount_step(image, points, tool):
+            self.audit = run[0]
+            for p in points:
+                self.recorded[p["realpath"]] = p["mnt_id"]
+
+    def _unmounted(self, mp: Path, identity: tuple | None) -> None:
+        """Record the unmount of a recorded point, by what was read before it."""
+        if identity is not None and self.audit is not None:
+            from opensearch_mcp import ops
+
+            ops.umount_entry(self.audit, *identity)
+
+    def _identity(self, mp: Path) -> tuple | None:
+        real = os.path.realpath(mp)
+        return (real, self.recorded[real]) if real in self.recorded else None
 
     def add_mount(self, mount_point: Path) -> None:
         self._mounts.append(mount_point)
@@ -133,6 +159,7 @@ class MountContext:
         hook after the scan's own) retries only what failed.
         """
         for mp in reversed(list(self._mounts)):
+            identity = self._identity(mp)  # read before it unmounts
             result = subprocess.run(["sudo", "umount", str(mp)], capture_output=True)
             if result.returncode != 0:
                 logger.warning(
@@ -143,7 +170,9 @@ class MountContext:
                 result = subprocess.run(["sudo", "umount", "-l", str(mp)], capture_output=True)
             if result.returncode == 0:
                 self._mounts.remove(mp)
+                self._unmounted(mp, identity)
         for mp in reversed(list(self._fuse_mounts)):
+            identity = self._identity(mp)
             result = subprocess.run(["fusermount", "-u", str(mp)], capture_output=True)
             if result.returncode != 0:
                 logger.warning(
@@ -153,6 +182,7 @@ class MountContext:
                 )
             else:
                 self._fuse_mounts.remove(mp)
+                self._unmounted(mp, identity)
         for dev in list(self._nbd_devices):
             result = subprocess.run(["sudo", "qemu-nbd", "-d", dev], capture_output=True)
             if result.returncode == 0:
@@ -175,16 +205,24 @@ def check_sudo() -> None:
 
 
 def mount_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
-    """Mount a disk image read-only. Returns list of mounted volume paths."""
+    """Mount a disk image read-only. Returns list of mounted volume paths.
+
+    The mount is recorded under the open run: the image (by the registry when
+    registered) and each volume's mount point, with its st_dev, mount id and
+    byte offset; cleanup records each point's unmount."""
     suffix = path.suffix.lower()
     if suffix in (".e01", ".ex01"):
-        return _mount_ewf(path, dest, ctx)
+        volumes = _mount_ewf(path, dest, ctx)
     elif suffix in (".dd", ".raw", ".img", ".iso"):
-        return _mount_raw(path, dest, ctx)
+        volumes = _mount_raw(path, dest, ctx)
     elif suffix in (".vmdk", ".vhd", ".vhdx"):
-        return _mount_nbd(path, dest, ctx)
+        volumes = _mount_nbd(path, dest, ctx)
     else:
         raise ValueError(f"Unknown disk image format: {path.name}")
+    from opensearch_mcp import ops
+
+    ctx.record(path, [ops.mount_point(v, ctx.offsets.get(v)) for v in volumes])
+    return volumes
 
 
 def _mount_ewf(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
