@@ -232,6 +232,64 @@ def _closes_write_context(fn):
     return wrapper
 
 
+_run = threading.local()  # the run open on this thread: its writer and its step
+
+
+def _run_writer():
+    """The open run's audit writer, which wrote its step; a new one outside a run."""
+    audit = getattr(_run, "audit", None)
+    return audit if audit is not None else AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+
+
+def _run_step(tool: str, input_attr: str):
+    """A worker command's run: one entry, written before any of its steps or
+    records, naming the input it was given (by the registry when it is
+    registered evidence) and its place. A run inside a run (an archive's
+    images) is part of it; a dry run writes nothing."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(args, *a, **kw):
+            if getattr(_run, "audit", None) is not None or getattr(args, "dry_run", False):
+                return fn(args, *a, **kw)
+            from opensearch_mcp import ops
+
+            raw = getattr(args, input_attr, None)
+            case_id = _resolve_case_id(getattr(args, "case", None))
+            case_dir = _case_dir_for(case_id)
+            audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+            if case_dir is not None and hasattr(audit, "_case_dir_resolver"):
+                audit._case_dir_resolver = lambda: case_dir  # the run's case, active or not
+            reg = ops.registered(case_dir, raw) if raw else None
+            step = ops.write(
+                audit,
+                tool,
+                params={
+                    "case_id": case_id,
+                    "input": str(raw or ""),
+                    "hostname": getattr(args, "hostname", "") or "",
+                    "run_id": os.environ.get("VHIR_INGEST_RUN_ID", ""),
+                },
+                summary="the run, recorded before any of its steps",
+                inputs=[ops.place(raw)] if raw else None,
+                input_registered=[reg] if reg else None,
+                extra={"roots": [reg] if reg else []},
+            )
+            if not step:
+                print(f"Error: {raw}: {ops.NO_ENTRY}.", file=sys.stderr)
+                sys.exit(1)
+            _run.audit, _run.step = audit, step
+            try:
+                return fn(args, *a, **kw)
+            finally:
+                _run.audit = _run.step = None
+
+        return wrapper
+
+    return deco
+
+
 def _load_case_host_dict(case_id: str):
     """Load `<case>/host-dictionary.yaml` if it exists. Returns None if
     the case dir or file is absent — which keeps pre-C1 cases working
@@ -986,6 +1044,7 @@ def _discover_volumes(
 
 
 @_closes_write_context
+@_run_step("idx_ingest", "path")
 def cmd_scan(args: argparse.Namespace) -> None:
     """Scan a directory for artifacts, run EZ tools, index."""
     from opensearch_mcp.containers import (
@@ -1463,7 +1522,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             run_id=run_id,
         )
 
-        audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+        audit = _run_writer()
 
         def _cli_progress(event: str, **kw) -> None:
             if event == "host_start":
@@ -1822,6 +1881,7 @@ def _file_outcome(audit, aid: str, tool: str, summary: str, f: Path) -> None:
 
 
 @_closes_write_context
+@_run_step("idx_ingest_csv", "csv_path")
 def cmd_csv(args: argparse.Namespace) -> None:
     """Ingest a pre-parsed CSV (examiner identifies the tool).
 
@@ -1854,7 +1914,7 @@ def cmd_csv(args: argparse.Namespace) -> None:
     index_name = _index_name(cfg.index_suffix)
 
     client = get_client()
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     pipeline_version = f"opensearch-mcp-{__version__}"
 
     run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
@@ -1925,6 +1985,7 @@ def cmd_ingest(args: argparse.Namespace, examiner: str = "unknown") -> None:
 
 
 @_closes_write_context
+@_run_step("idx_ingest_json", "path")
 def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None:
     NO_TIME_FIELD.clear()  # this run's files only
     TIME_NOT_UNDERSTOOD.clear()
@@ -1954,7 +2015,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 
     client = get_client()
     _preflight_shard_capacity(client, "json", case_id=case_id, run_id=run_id or "")
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     case_host_dict = _load_case_host_dict(case_id)
 
     files = (
@@ -2092,20 +2153,6 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             print(f"  {path}: {err}")
         if len(_json_failed_files) > 10:
             print(f"  ... and {len(_json_failed_files) - 10} more")
-    audit.log(
-        tool="idx_ingest_json",
-        params={
-            "path": str(input_path),
-            "hostname": hostname,
-            "run_id": run_id or "",
-            "bulk_failed": total_bf,
-            "failed_files_count": len(_json_failed_files),
-        },
-        result_summary=f"{total} indexed"
-        + (f", {total_bf} bulk failed" if total_bf else "")
-        + (f", {len(_json_failed_files)} files skipped" if _json_failed_files else ""),
-        input_files=[str(input_path)],
-    )
     if run_id:
         from opensearch_mcp.bulk import get_last_bulk_reason
 
@@ -2131,6 +2178,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
 
 
 @_closes_write_context
+@_run_step("idx_ingest_delimited", "path")
 def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest delimited files."""
     from opensearch_mcp import __version__
@@ -2345,7 +2393,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     client = get_client()
     _preflight_shard_capacity(client, "delimited", case_id=case_id, run_id=run_id or "")
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     file_aids: list[str] = []
     case_host_dict = _load_case_host_dict(case_id)
 
@@ -2501,20 +2549,6 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  {path}: {err}")
         if len(_delim_failed_files) > 10:
             print(f"  ... and {len(_delim_failed_files) - 10} more")
-    audit.log(
-        tool="idx_ingest_delimited",
-        params={
-            "path": str(input_path),
-            "hostname": hostname,
-            "run_id": run_id or "",
-            "bulk_failed": total_bf,
-            "failed_files_count": len(_delim_failed_files),
-        },
-        result_summary=f"{total} indexed"
-        + (f", {total_bf} bulk failed" if total_bf else "")
-        + (f", {len(_delim_failed_files)} files skipped" if _delim_failed_files else ""),
-        input_files=[str(input_path)],
-    )
     from opensearch_mcp.bulk import get_last_bulk_reason
 
     reason = get_last_bulk_reason()
@@ -2556,6 +2590,7 @@ def accesslog_suffix(wanted: str | None) -> str:
 
 
 @_closes_write_context
+@_run_step("idx_ingest_accesslog", "path")
 def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Ingest Apache/Nginx access logs."""
     from opensearch_mcp import __version__
@@ -2581,7 +2616,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
 
     client = get_client()
     _preflight_shard_capacity(client, "accesslog", case_id=case_id, run_id=run_id or "")
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     case_host_dict = _load_case_host_dict(case_id)
     suffix = accesslog_suffix(getattr(args, "index_suffix", None))
 
@@ -2700,20 +2735,6 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  {path}: {err}")
         if len(_alog_failed_files) > 10:
             print(f"  ... and {len(_alog_failed_files) - 10} more")
-    audit.log(
-        tool="idx_ingest_accesslog",
-        params={
-            "path": str(input_path),
-            "hostname": hostname,
-            "run_id": run_id or "",
-            "bulk_failed": total_bf,
-            "failed_files_count": len(_alog_failed_files),
-        },
-        result_summary=f"{total} indexed"
-        + (f", {total_bf} bulk failed" if total_bf else "")
-        + (f", {len(_alog_failed_files)} files skipped" if _alog_failed_files else ""),
-        input_files=[str(input_path)],
-    )
     if run_id:
         from opensearch_mcp.bulk import get_last_bulk_reason
 
@@ -2900,7 +2921,7 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
         summary += "; " + " ".join(result["warnings"])
     if incomplete:
         summary += f"; incomplete: {incomplete[:300]}"
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     audit.log(
         tool="enrich_intel",
         params={"case_id": case_id, "force": force},
@@ -2914,6 +2935,7 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
 
 
 @_closes_write_context
+@_run_step("idx_ingest_memory", "path")
 def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> None:
     """Parse a memory image with Volatility 3 and index results."""
     from opensearch_mcp import __version__
@@ -3010,7 +3032,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     client = get_client()
     _preflight_shard_capacity(client, "memory", case_id=case_id, run_id=run_id)
 
-    audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
+    audit = _run_writer()
     aid = audit._next_audit_id()
 
     # Build plugin checklist for status

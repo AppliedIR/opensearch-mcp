@@ -134,9 +134,12 @@ def test_each_file_has_its_own_entry_written_before_its_records(run, kind):
         assert entry["params"]["hostname"] == "RD01"
         at = next(i for i, x in enumerate(seq) if x[0] == "entry" and x[1] is entry)
         assert at < seq.index(("record", f.name, aid))  # written first
-    (summary,) = _entries(seq, f"idx_{tool}")
-    assert summary["params"]["run_id"] == RUN
-    assert summary.get("audit_id") not in {aid for _, aid in records}
+    # the run: one entry, before any step, naming its input; no entry at its end
+    (run_step,) = _entries(seq, f"idx_{tool}")
+    assert seq[0] == ("entry", run_step)
+    assert run_step["params"]["run_id"] == RUN
+    assert run_step["params"]["input"] == str(files[0].parent)
+    assert run_step["audit_id"] not in {aid for _, aid in records}
 
 
 @pytest.mark.parametrize("kind", sorted(KINDS))
@@ -146,8 +149,9 @@ def test_a_file_whose_entry_cant_be_written_is_not_indexed(run, kind, capsys):
     assert indexed == [files[0].name, files[2].name]
     out = capsys.readouterr().out
     assert "skipped (its audit entry couldn't be written, so it wasn't indexed)" in out
-    (summary,) = _entries(seq, f"idx_{KINDS[kind][2]}")
-    assert summary["params"]["failed_files_count"] == 1
+    (run_step,) = _entries(seq, f"idx_{KINDS[kind][2]}")  # the run itself is recorded
+    named = {str(x[1]["params"].get("file", "")) for x in seq if x[0] == "entry"}
+    assert str(files[1]) not in named  # nothing claims the file was recorded
 
 
 @pytest.mark.parametrize("kind", sorted(KINDS))
@@ -191,6 +195,8 @@ def _csv(tmp_path, monkeypatch, fail=False):
 def test_a_tool_csv_is_recorded_before_its_records(tmp_path, monkeypatch):
     f, seq, go = _csv(tmp_path, monkeypatch)
     go()
+    (run_step,) = _entries(seq, "idx_ingest_csv")  # the run, first, naming the CSV
+    assert seq[0] == ("entry", run_step) and run_step["params"]["input"] == str(f)
     (entry,) = _entries(seq, "idx_ingest_csv_amcache")
     assert seq.index(("entry", entry)) < seq.index(("record", f.name, entry["audit_id"]))
     assert entry["input_files"] == [str(f)]
@@ -202,7 +208,8 @@ def test_a_tool_csv_whose_entry_cant_be_written_is_not_indexed(tmp_path, monkeyp
     f, seq, go = _csv(tmp_path, monkeypatch, fail=True)
     with pytest.raises(SystemExit) as e:
         go()
-    assert e.value.code == 1 and not seq
+    assert e.value.code == 1
+    assert [x[1]["tool"] for x in seq] == ["idx_ingest_csv"]  # the run only: nothing indexed
     assert f"{f}: its audit entry couldn't be written, so it wasn't indexed." in (
         capsys.readouterr().err
     )

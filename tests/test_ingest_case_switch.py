@@ -61,7 +61,9 @@ def _ingest(tmp_path, monkeypatch, capsys) -> str:
     monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda _c: "NEW")
     monkeypatch.setattr(ingest_cli, "get_client", lambda: object())
     monkeypatch.setattr(ingest_cli, "_preflight_shard_capacity", lambda *a, **k: None)
-    audit = types.SimpleNamespace(_next_audit_id=lambda: "aid", log=lambda *a, **k: None)
+    audit = types.SimpleNamespace(
+        _next_audit_id=lambda: "aid", log=lambda *a, **k: k.get("audit_id")
+    )
     monkeypatch.setattr(ingest_cli, "AuditWriter", lambda mcp_name="": audit)
     args = argparse.Namespace(path=str(empty), hostname="", case="NEW", time_field=None,
                               time_from=None, time_to=None, batch_size=1000, dry_run=False,

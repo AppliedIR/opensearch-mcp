@@ -136,7 +136,9 @@ class TestDetectJsonFormatSingleObject:
             ingest_cli, "_preflight_shard_capacity", lambda *a, **kw: None, raising=False
         )
         # AuditWriter is heavy; stub to a no-op object.
-        fake_audit = types.SimpleNamespace(_next_audit_id=lambda: "aid", log=lambda *a, **kw: None)
+        fake_audit = types.SimpleNamespace(
+            _next_audit_id=lambda: "aid", log=lambda *a, **kw: kw.get("audit_id")
+        )  # written
         monkeypatch.setattr(
             ingest_cli,
             "AuditWriter",

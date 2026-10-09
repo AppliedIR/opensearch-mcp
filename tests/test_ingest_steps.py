@@ -245,6 +245,48 @@ def test_a_json_file_s_step_names_a_registered_file_by_the_registry(case, monkey
     assert _place_ok(step["inputs"][0], f)
 
 
+def _json_run(case, monkeypatch, f, dry_run=False):
+    from opensearch_mcp import ingest_cli
+
+    for name in ("_ensure_case_active", "_preflight_shard_capacity", "_write_bg_status"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda c: None)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(ingest_cli, "_case_dir_for", lambda c: case)
+    monkeypatch.setattr(ingest_cli, "get_client", MagicMock())
+    monkeypatch.setattr(ingest_cli, "_open_unit", MagicMock())
+    monkeypatch.setattr("opensearch_mcp.parse_json.ingest_json", lambda *a, **k: (1, 0, 0, False))
+    monkeypatch.setattr("opensearch_mcp.write_context.index_name", lambda t: f"case-{C12}-{t}-0")
+    args = argparse.Namespace(
+        path=str(f), hostname="RD01", case=None, time_field=None, time_from=None,
+        time_to=None, batch_size=1000, dry_run=dry_run, index_suffix=None,
+    )  # fmt: skip
+    ingest_cli.cmd_ingest_json(args)
+
+
+def test_the_run_is_one_entry_first_naming_its_registered_input_and_its_root(case, monkeypatch):
+    f = case / "evidence" / "json" / "events.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text('{"a": 1}\n')
+    digest = _register(case, f)
+    _json_run(case, monkeypatch, f)
+    entries = _entries(case)
+    runs = [e for e in entries if e["tool"] == "idx_ingest_json"]
+    assert len(runs) == 1 and entries[0] == runs[0]
+    (run,) = runs
+    reg = {"path": str(f.resolve()), "sha256": digest}
+    assert run["input_registered"] == [reg] and run["roots"] == [reg]
+    assert _place_ok(run["inputs"][0], f) and run["params"]["input"] == str(f)
+    assert len(entries) > 1  # its steps follow; none after them is the run's
+
+
+def test_a_dry_run_writes_no_entry(case, monkeypatch):
+    f = case / "events.jsonl"
+    f.write_text('{"a": 1}\n')
+    _json_run(case, monkeypatch, f, dry_run=True)
+    assert _entries(case) == []
+
+
 def test_srum_s_plaso_fallback_step_names_the_database_and_the_jsonl_it_wrote(case, monkeypatch):
     from opensearch_mcp import parse_plaso
     from opensearch_mcp.ingest import _ingest_plaso_artifact
