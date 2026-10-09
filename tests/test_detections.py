@@ -436,3 +436,20 @@ class TestDetectionsToolRegistration:
         # 17 original + idx_shard_status (shard-capacity) + idx_install_pipelines (Fix G)
         # + idx_host_inventory (the case's machines, read-only)
         assert len(tool_names) == 20
+
+
+class TestDetectionsRecordWhatTheyMatched:
+    def _logged(self, mock_client):
+        logged = []
+        with patch.object(srv.audit, "log", side_effect=lambda **kw: logged.append(kw) or "a1"):
+            resp = idx_list_detections()
+        return resp, logged
+
+    def test_the_unavailable_answer_is_recorded(self, mock_client):
+        mock_client.transport.perform_request.side_effect = RuntimeError("404 security_analytics")
+        mock_client.count.return_value = {"count": 0}
+        resp, logged = self._logged(mock_client)
+        (entry,) = logged
+        assert resp["error"] == "Security Analytics plugin not available"
+        assert entry["tool"] == "idx_list_detections"
+        assert resp["audit_id"] == entry["audit_id"]

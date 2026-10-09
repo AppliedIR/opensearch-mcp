@@ -3580,7 +3580,13 @@ def idx_list_detections(
                     "Sigma detectors unavailable. Check Hayabusa: "
                     f"{_hayabusa_query('Level:*', hb_index, client=client)}"
                 )
-            return resp
+            return _logged_query(  # the normal answer on OpenSearch 3.5: recorded too
+                resp,
+                tool="idx_list_detections",
+                params={"severity": severity, "detector_type": detector_type,
+                        "limit": limit, "offset": offset},
+                result_summary="Security Analytics plugin not available",
+            )  # fmt: skip
         raise
 
     sev_filter = severity.lower() if severity else ""
