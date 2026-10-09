@@ -273,6 +273,7 @@ def ingest_transcripts(
     pipeline_version: str = "",
     vss_id: str = "",
     host_dict=None,
+    notes: list[str] | None = None,
 ) -> tuple[int, int]:
     """Discover and ingest transcript files from a directory.
 
@@ -304,9 +305,7 @@ def ingest_transcripts(
         try:
             step = ops.file_marker(f)  # its step, before its record
         except ops.NoEntry as e:
-            import sys
-
-            print(f"  transcripts: skipped {f.name}: {e}", file=sys.stderr)
+            ops.not_indexed(notes, f, e)
             continue
         rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
         doc["host.name"] = hostname

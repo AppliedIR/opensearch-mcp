@@ -29,6 +29,7 @@ def parse_ssh_log(
     pipeline_version: str = "",
     vss_id: str = "",
     host_dict=None,
+    notes: list[str] | None = None,
 ) -> tuple[int, int, int]:
     """Parse sshd.log files — extract auth events.
 
@@ -59,7 +60,8 @@ def parse_ssh_log(
 
         try:
             step = ops.file_marker(log_file)  # its step, before its records
-        except ops.NoEntry:
+        except ops.NoEntry as e:
+            ops.not_indexed(notes, log_file, e)
             continue
 
         rel = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)

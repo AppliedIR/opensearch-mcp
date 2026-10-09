@@ -159,6 +159,22 @@ class Unreadable(NoEntry):
     """The file a step reads can't be read; its failure is recorded."""
 
 
+NOT_INDEXED = "not indexed"
+
+
+def not_indexed(notes: list[str] | None, path, err: NoEntry) -> None:
+    """A file a parser couldn't index, as it couldn't be read or its step
+    couldn't be written: named with the reason in the ingest status (the
+    parser's ``notes``) and on the console, never counted as an ordinary skip."""
+    import sys
+
+    why = f"couldn't be read ({err})" if isinstance(err, Unreadable) else str(err)
+    note = f"{NOT_INDEXED}: {path}: {why}"
+    if notes is not None:
+        notes.append(note)
+    print(f"  {note}", file=sys.stderr)
+
+
 def read_step(
     audit,
     tool: str,

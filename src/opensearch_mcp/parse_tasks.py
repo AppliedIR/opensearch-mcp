@@ -141,8 +141,8 @@ def parse_tasks_dir(
             continue
         try:
             step = ops.file_marker(task_file)  # its step, before its records
-        except ops.NoEntry:
-            skipped += 1
+        except ops.NoEntry as e:
+            ops.not_indexed(notes, task_file, e)
             continue
 
         # Convert local timestamp to UTC

@@ -1410,6 +1410,10 @@ def _ingest_custom_artifact(
         ar.indexed = cnt
         ar.skipped = sk
         ar.bulk_failed = bf
+        # files the parser couldn't index: counted and named in the status
+        unindexed = sum(1 for n in notes if n.startswith(ops.NOT_INDEXED + ":"))
+        if unindexed:
+            notes.insert(0, f"{unindexed} file(s) {ops.NOT_INDEXED}")
         note = "; ".join(notes)
         if note:  # appended, never replacing a note already there
             ar.note = "; ".join(filter(None, [ar.note, note]))
@@ -1430,6 +1434,8 @@ def _ingest_custom_artifact(
             tool_status["status"] = "failed" if "error" in tool_status else "complete"
             tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
             tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
+            if unindexed:
+                tool_status["not_indexed"] = tool_status.get("not_indexed", 0) + unindexed
             _update_status()
         _progress(
             "artifact_done",
@@ -1474,7 +1480,8 @@ def _run_custom_parser(
 ):
     """Dispatch to the correct custom parser. Returns (indexed, skipped, bulk_failed).
 
-    A parser that has something to report (tasks) appends it to `notes`.
+    A parser that has something to report (tasks' undated times, any file it
+    couldn't index) appends it to `notes`.
     """
     from opensearch_mcp.paths import relative_evidence_path
 
@@ -1497,6 +1504,7 @@ def _run_custom_parser(
             transcript_dir=artifact_path,
             volume_root=vr,
             system_timezone=host.system_timezone,
+            notes=notes,
             **kw,
         )
         return cnt, 0, bf
@@ -1510,6 +1518,7 @@ def _run_custom_parser(
             volume_root=vr,
             time_from=time_from,
             time_to=time_to,
+            notes=notes,
             **kw,
         )
 
@@ -1567,7 +1576,7 @@ def _run_custom_parser(
     if tool_name == "wer":
         from opensearch_mcp.parse_wer import parse_wer_dir
 
-        return parse_wer_dir(wer_dir=artifact_path, volume_root=vr, **kw)
+        return parse_wer_dir(wer_dir=artifact_path, volume_root=vr, notes=notes, **kw)
 
     if tool_name == "firewall":
         from opensearch_mcp.parse_w3c import parse_w3c_log
@@ -1593,6 +1602,7 @@ def _run_custom_parser(
             volume_root=vr,
             time_from=time_from,
             time_to=time_to,
+            notes=notes,
             **kw,
         )
 

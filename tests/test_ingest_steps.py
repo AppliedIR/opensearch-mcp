@@ -1004,3 +1004,91 @@ def test_the_evtx_parser_sends_a_non_object_data_as_data_raw(monkeypatch):
     parse_evtx.parse_and_index(Path("x.evtx"), MagicMock(), "case-x-evtx-0")
     ed = sent[0]["_source"]["winlog.event_data"]
     assert "Data" not in ed and ed["Data_raw"] == "plain text" and ed["User"] == "bob"
+
+
+_TASK_XML = (
+    '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+    "<RegistrationInfo><Date>2023-01-17T10:48:01Z</Date></RegistrationInfo>"
+    "<Actions><Exec><Command>x</Command></Exec></Actions></Task>"
+)
+_DATED = {"@timestamp": "2023-01-17T10:48:01Z"}
+
+
+def _custom_file(tool: str, root: Path, monkeypatch) -> tuple[Path, Path]:
+    """(the artifact folder, its one file) for each parser that batches files."""
+    from opensearch_mcp import parse_transcripts, parse_wer
+
+    d = root / tool
+    d.mkdir(parents=True)
+    if tool == "tasks":
+        f = d / "Updater"
+        f.write_text(_TASK_XML)
+    elif tool == "wer":
+        f = d / "Report.wer"
+        f.write_text("x")
+        monkeypatch.setattr(parse_wer, "parse_wer_file", lambda p: dict(_DATED))
+    elif tool == "ssh":
+        f = d / "sshd.log"
+        f.write_text("2023-01-17 10:48:01 sshd: Accepted password for bob\n")
+    elif tool == "defender":
+        f = d / "MPLog-20230117.log"
+        f.write_text("2023-01-17T10:48:01.000Z x\n")
+    else:
+        f = d / "PowerShell_transcript.HOST1.txt"
+        f.write_text("x")
+        monkeypatch.setattr(parse_transcripts, "discover_transcripts", lambda p: [f])
+        monkeypatch.setattr(parse_transcripts, "parse_transcript", lambda p, **k: dict(_DATED))
+    return d, f
+
+
+@pytest.mark.parametrize("why", ["unreadable", "entry not written"])
+@pytest.mark.parametrize("tool", ["tasks", "wer", "ssh", "defender", "transcripts"])
+def test_a_file_a_parser_couldnt_index_is_counted_and_named_in_the_status(
+    case, monkeypatch, tool, why
+):
+    from opensearch_mcp import bulk, ops
+    from opensearch_mcp.ingest import _ingest_custom_artifact
+    from opensearch_mcp.results import HostResult
+
+    root = case / "evidence" / "HOST1"
+    folder, f = _custom_file(tool, root, monkeypatch)
+    if why == "unreadable":
+
+        def file_input(case_dir, path, *a, **k):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(ops, "file_input", file_input)
+    else:
+        real_write = ops.write
+        monkeypatch.setattr(ops, "write", lambda audit, tool_, **kw: (
+            "" if kw.get("summary") == "recorded before its records were indexed"
+            else real_write(audit, tool_, **kw)))  # fmt: skip
+    sent: list = []
+    monkeypatch.setattr(bulk.helpers, "bulk", _bulk_into(sent))
+    monkeypatch.setattr(wc, "prepare_index", lambda client, index: None)
+    monkeypatch.setattr(wc, "note_second_copy", lambda client, ctx, index: None)
+    monkeypatch.setattr(wc, "_imported", {case})
+    monkeypatch.setattr(ingest, "_write_ingest_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(ingest, "_safe_count", lambda *a, **k: 0)
+    monkeypatch.setattr(wc, "index_name", lambda t: f"case-{C12}-{t}-0")
+    host = DiscoveredHost(hostname="HOST1", volume_root=root, system_timezone="UTC")
+    ctx = wc.WriteContext(case_dir=case, c12=C12, unit="u-host1", unit_raw="HOST1")
+    status = [{"hostname": "HOST1", "artifacts": [{"name": tool, "status": "pending"}]}]
+    result = HostResult(hostname="HOST1")
+    with wc.writing(ctx):
+        _ingest_custom_artifact(
+            tool, folder, MagicMock(), AuditWriter(mcp_name="opensearch-ingest-1"), "acme",
+            host, 0, result, status, lambda *a, **k: None, lambda: None,
+        )  # fmt: skip
+    (row,) = status[0]["artifacts"]
+    assert row["not_indexed"] == 1 and str(f) in row["note"]
+    assert row["note"].startswith("1 file(s) not indexed")
+    assert (ar := result.artifacts[-1]).skipped == 0 and str(f) in ar.note
+    assert not sent
+    if why == "unreadable":
+        assert "couldn't be read" in row["note"]
+        (failed,) = [e for e in _entries(case) if _summary(e).startswith("FAILED")]
+        assert failed["params"]["file"] == str(f)
+    else:
+        assert ops.NO_ENTRY in row["note"]
+

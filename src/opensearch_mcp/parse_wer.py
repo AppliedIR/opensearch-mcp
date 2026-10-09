@@ -81,6 +81,7 @@ def parse_wer_dir(
     pipeline_version: str = "",
     vss_id: str = "",
     host_dict=None,
+    notes: list[str] | None = None,
 ) -> tuple[int, int, int]:
     """Parse all Report.wer files in directory tree."""
     count = 0
@@ -96,8 +97,8 @@ def parse_wer_dir(
             continue
         try:
             step = ops.file_marker(wer_file)  # its step, before its records
-        except ops.NoEntry:
-            skipped += 1
+        except ops.NoEntry as e:
+            ops.not_indexed(notes, wer_file, e)
             continue
 
         from opensearch_mcp.paths import relative_evidence_path
