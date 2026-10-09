@@ -23,6 +23,7 @@ from pathlib import Path
 
 import yaml
 from sift_common import host_identity
+from sift_common.content_hash import content_hash
 
 from opensearch_mcp.bulk import ShardCapacityExhausted
 
@@ -450,13 +451,6 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         if not str(action.get("_index", "")).startswith(prefix):
             continue
         src = action.setdefault("_source", {})
-        step = (steps[n] if steps and n < len(steps) else "") or open_step
-        if step:  # the step that read the record's file
-            src["vhir.ingest_audit_id"] = step
-        if roots:  # one value, or every root when the run has several
-            paths, shas = [r["path"] for r in roots], [r["sha256"] for r in roots]
-            src["vhir.original.path"] = paths[0] if len(paths) == 1 else paths
-            src["vhir.original.sha256"] = shas[0] if len(shas) == 1 else shas
         rid = action.get("_id")
         resent = rid is not None and _stamped_here(action, src)
         if resent:
@@ -465,6 +459,13 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         if removed:
             key = (ctx.c12, ctx.unit_raw, artifact_type_of(action["_index"]))
             REMOVED[key] = REMOVED.get(key, 0) + removed
+        step = (steps[n] if steps and n < len(steps) else "") or open_step
+        if step:  # the step that read the record's file
+            src["vhir.ingest_audit_id"] = step
+        if roots:  # one value, or every root when the run has several
+            paths, shas = [r["path"] for r in roots], [r["sha256"] for r in roots]
+            src["vhir.original.path"] = paths[0] if len(paths) == 1 else paths
+            src["vhir.original.sha256"] = shas[0] if len(shas) == 1 else shas
         raw, key, canonical = ctx.resolve(src.get("host.name"))
         src["host.name"] = raw
         src["host.id"] = canonical
@@ -473,6 +474,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
+        # last, over the record as it is sent: its stored _source hashes alike
+        src["vhir.content_hash"] = content_hash(src)
         if ctx.store and action.get("_op_type", "index") == "index":
             # a shadow copy never replaces a record already in the case: the
             # live volume's tag wins, and the first copy to hold it keeps its own

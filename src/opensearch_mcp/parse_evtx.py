@@ -58,6 +58,26 @@ def _resolve_cached(host_dict, raw: str) -> str | None:
     return val
 
 
+def _java_text(value) -> str:
+    """`value` as the ingest pipeline's String.valueOf writes it."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_java_text(v) for v in value) + "]"
+    return str(value)
+
+
+def _normalise_data(doc: dict) -> None:
+    """A non-object `winlog.event_data.Data` goes to `Data_raw` as the bound
+    pipeline would put it, so the pipeline leaves the record as sent and its
+    content hash holds for the stored record."""
+    ed = doc.get("winlog.event_data")
+    if isinstance(ed, dict) and "Data" in ed and not isinstance(ed["Data"], dict):
+        ed["Data_raw"] = _java_text(ed.pop("Data"))
+
+
 def parse_and_index(
     evtx_path: Path,
     client: OpenSearch,
@@ -93,6 +113,7 @@ def parse_and_index(
             continue
 
         doc = normalize_event(data)
+        _normalise_data(doc)
 
         # host.id stamping (v1 host-identity).
         # normalize_event already wrote host.name from system.Computer.

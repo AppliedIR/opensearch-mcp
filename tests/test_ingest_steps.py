@@ -787,3 +787,51 @@ def test_a_run_given_unregistered_evidence_stamps_no_original(case, monkeypatch)
     stored = _json_stored(case, monkeypatch, f)
     assert len(stored) == 2
     assert not [k for src in stored for k in src if k.startswith("vhir.original")]
+
+
+def _spec_hash(src: dict) -> str:
+    """The content hash as defined, computed here independently: the dotted
+    fields, sorted, compact, UTF-8, without the hash itself, host.id,
+    vhir.prev_ids, triage.*, threat_intel.* and the evtx pipeline's fields."""
+
+    def flat(d, prefix=""):
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, dict) and v:
+                out.update(flat(v, f"{prefix}{k}."))
+            else:
+                out[f"{prefix}{k}"] = v
+        return out
+
+    keep = {
+        k: v
+        for k, v in flat(src).items()
+        if k not in {"vhir.content_hash", "host.id", "vhir.prev_ids",
+                     "winlog.event_data._pipeline_error"}
+        and not k.startswith(("triage.", "threat_intel."))
+    }  # fmt: skip
+    text = json.dumps(keep, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_each_record_carries_its_content_hash_over_what_is_stored(case, monkeypatch):
+    f = case / "evidence" / "json" / "events.jsonl"
+    f.parent.mkdir(parents=True)
+    f.write_text('{"a": 1}\n')
+    _register(case, f)
+    for src in _json_stored(case, monkeypatch, f):
+        assert src["vhir.content_hash"] == _spec_hash(src)
+        renamed = {**src, "host.id": "RD01 (renamed)", "triage.verdict": "SUSPICIOUS"}
+        assert _spec_hash(renamed) == src["vhir.content_hash"]  # later changes don't count
+
+
+def test_a_non_object_evtx_data_goes_to_data_raw_as_the_pipeline_writes_it():
+    from opensearch_mcp.parse_evtx import _normalise_data
+
+    for data, raw in (("text", "text"), (["a", 1, None, True], "[a, 1, null, true]")):
+        doc = {"winlog.event_data": {"Data": data, "User": "bob"}}
+        _normalise_data(doc)
+        assert doc == {"winlog.event_data": {"Data_raw": raw, "User": "bob"}}
+    obj = {"winlog.event_data": {"Data": {"Name": "a"}}}
+    _normalise_data(obj)
+    assert obj == {"winlog.event_data": {"Data": {"Name": "a"}}}  # an object stays
