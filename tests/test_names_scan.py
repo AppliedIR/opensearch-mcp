@@ -441,7 +441,6 @@ def test_a_memory_ingest_at_tier_2_observes_the_computer_name_variables(monkeypa
     monkeypatch.setattr(parse_memory.subprocess, "run", lambda *a, **k: SimpleNamespace(stderr=""))
     monkeypatch.setattr(parse_memory, "run_vol3_plugin", lambda image, plugin, timeout: envars)
     monkeypatch.setattr(parse_memory, "_index_vol3_records", lambda **kw: (1, 0, 0))
-    monkeypatch.setattr(parse_memory, "_register_memory_evidence", lambda *a: None)
     with wc.writing(ctx):
         parse_memory.ingest_memory(d / "evidence" / "mem2.raw", None, d.name, "MEM2",
                                    plugins=["windows.envars"])  # fmt: skip

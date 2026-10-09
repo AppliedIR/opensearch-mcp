@@ -599,3 +599,14 @@ def test_a_kape_zip_s_extraction_is_a_step_before_its_files_are_read(case, tmp_p
         "SYSTEM": hashlib.sha256(b"R" * 10).hexdigest(),
     }
     assert at_ingest and extraction in at_ingest[0]  # recorded before any file is read
+
+
+def test_a_memory_ingest_registers_nothing(case, monkeypatch):
+    image = case / "evidence" / "wks1.raw"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"MEM" * 1000)
+    _register(case, image)
+    before = (case / "evidence.json").read_text()
+    _, called, code = _memory_run(case, image, monkeypatch, plugins="windows.pslist")
+    assert code == 0 and "evidence_register" not in called
+    assert (case / "evidence.json").read_text() == before

@@ -107,7 +107,6 @@ def _memory(case_id: str, tmp_path, monkeypatch, run: str, records=None) -> str:
         records = [dict(SERVICE), dict(SERVICE), dict(SERVICE)]
         records += [dict(SERVICE, Name="svc-b"), dict(SERVICE, Name="svc-c")]
     monkeypatch.setattr(pm, "_find_vol3", lambda: "true")
-    monkeypatch.setattr(pm, "_register_memory_evidence", lambda *a, **k: None)
     monkeypatch.setattr(pm, "run_vol3_plugin", lambda *a, **k: copy.deepcopy(records))
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", run)
     image = tmp_path / "mem.raw"

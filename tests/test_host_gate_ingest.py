@@ -170,7 +170,6 @@ def _memory(g, hostname="h1"):
 
     mp = _pytest.MonkeyPatch()
     mp.setattr(pm, "_find_vol3", lambda: "true")
-    mp.setattr(pm, "_register_memory_evidence", lambda *a, **k: None)
     mp.setattr(pm, "run_vol3_plugin", lambda *a, **k: [{"PID": 4, "Name": "svc-a"}])
     g.undo = mp.undo
     image = g.tmp / "mem.raw"

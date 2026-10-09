@@ -111,7 +111,6 @@ def test_the_ingest_status_says_how_many(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_load_case_host_dict", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "c1")
     monkeypatch.setattr(pm, "_find_vol3", lambda: "true")
-    monkeypatch.setattr(pm, "_register_memory_evidence", lambda *a, **k: None)
     monkeypatch.setattr(pm, "run_vol3_plugin", lambda *a, **k: _records())
     image = tmp_path / "m.raw"
     image.write_bytes(b"\0" * 64)
