@@ -171,10 +171,9 @@ def test_the_summary_records_the_ingests_of_the_records_it_summarised(root, monk
                 resp["aggregations"]["result_ingests_missing"] = {"doc_count": 2}
             return resp
 
-    logged = []
     monkeypatch.setattr(server, "_get_os", lambda: Counted())
-    monkeypatch.setattr(server.audit, "log", lambda **kw: logged.append(kw) or "aid-1")
     server.idx_case_summary(case_id="a")
-    (entry,) = [e for e in logged if e["tool"] == "idx_case_summary"]
+    lines = (root / "a" / "audit" / "opensearch-mcp.jsonl").read_text().splitlines()
+    (entry,) = [e for e in map(json.loads, lines) if e["tool"] == "idx_case_summary"]
     assert entry["params"]["result_ingests"] == ["opensearch-ingest-1-007"]
     assert entry["params"]["result_ingests_missing"] == 2

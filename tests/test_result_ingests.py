@@ -232,3 +232,25 @@ def test_a_query_saves_its_response_as_returned_and_its_entry_holds_the_hash(
         "path": str(saved),
         "sha256": hashlib.sha256(saved.read_bytes()).hexdigest(),
     }
+
+
+def test_a_query_s_entry_stays_in_the_case_its_id_was_minted_for(os_, tmp_path, monkeypatch):
+    from sift_common.audit import AuditWriter
+
+    c, _ = os_
+    a, b = tmp_path / "case-a", tmp_path / "case-b"
+    for d in (a, b):
+        (d / "audit").mkdir(parents=True)
+    writer = AuditWriter("opensearch-mcp")
+    dirs = iter([a / "audit", b / "audit", b / "audit"])  # switched after the first
+    monkeypatch.setattr(writer, "_get_audit_dir", lambda *x, **k: next(dirs))
+    monkeypatch.setattr(srv, "audit", writer)
+    monkeypatch.setattr(srv, "_resolve_index", lambda *a, **k: (INDEX, None))
+    c.get.return_value = _hit(1, "x-001")
+    resp = srv.idx_get_event(event_id="d1", index=INDEX)
+    (entry,) = [
+        json.loads(x) for x in (a / "audit" / "opensearch-mcp.jsonl").read_text().splitlines()
+    ]
+    assert entry["audit_id"] == resp["audit_id"]
+    assert (a / "extractions" / resp["audit_id"] / "response.json").exists()
+    assert not (b / "audit" / "opensearch-mcp.jsonl").exists()

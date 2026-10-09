@@ -891,7 +891,12 @@ def _logged_query(resp: dict, **entry) -> dict:
                      "sha256": hashlib.sha256(data).hexdigest()}  # fmt: skip
         except OSError as e:
             logger.warning("query response not saved: %s", e)
-    logged = audit.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
+    # The entry goes where its id was minted and its response saved: the case
+    # resolved once, as the call started, whatever is active by now
+    writer = audit
+    if audit_dir is not None:
+        writer = AuditWriter(mcp_name=audit.mcp_name, audit_dir=str(audit_dir))
+    logged = writer.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
     if logged is None:
         if saved:  # an entry that wasn't written leaves no file of its own
             Path(saved["path"]).unlink(missing_ok=True)
