@@ -284,6 +284,7 @@ def _run_step(tool: str, input_attr: str):
                 return fn(args, *a, **kw)
             finally:
                 _run.audit = _run.step = None
+                ops.reset_extracted()
 
         return wrapper
 
@@ -1148,6 +1149,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
             tmpdir = make_ingest_tmpdir(case_id)
             print(f"Extracting {input_path.name}...")
             extract_container(input_path, tmpdir, password=password)
+            from opensearch_mcp import ops
+            from opensearch_mcp.containers import extraction_command
+
+            try:  # the extraction, with every file it wrote, before any is read
+                ops.extraction_step(
+                    _run_writer(), _case_dir_for(case_id), input_path, tmpdir,
+                    extraction_command(input_path, tmpdir),
+                )  # fmt: skip
+            except ops.NoEntry as e:
+                print(f"Error: {input_path}: {e}.", file=sys.stderr)
+                sys.exit(1)
 
             # Check for Velociraptor offline collector
             if is_velociraptor_collection(tmpdir):
@@ -2964,6 +2976,17 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             cmd = ["7z", "x", f"-o{_mem_extract_dir}", str(image_path)]
             subprocess.run(cmd, check=True, capture_output=True, timeout=600,
                            **seven_zip_password(password))  # fmt: skip
+            from opensearch_mcp import ops
+
+            try:  # the extraction, with every file it wrote, before any is read
+                ops.extraction_step(
+                    _run_writer(), _case_dir_for(_resolve_case_id(getattr(args, "case", None))),
+                    image_path, _mem_extract_dir, cmd,
+                )  # fmt: skip
+            except ops.NoEntry as e:
+                shutil.rmtree(_mem_extract_dir, ignore_errors=True)
+                print(f"Error: {image_path}: {e}.", file=sys.stderr)
+                sys.exit(1)
             memory_exts = {".img", ".raw", ".vmem", ".dmp", ".mem", ".bin", ".lime"}
             extracted = [f for f in _mem_extract_dir.iterdir() if f.suffix.lower() in memory_exts]
             if not extracted:

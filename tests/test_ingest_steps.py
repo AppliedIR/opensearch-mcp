@@ -420,7 +420,14 @@ def _memory_run(
         return len(actions), 0
 
     monkeypatch.setattr(pm, "_find_vol3", lambda: "vol")
-    monkeypatch.setattr(pm.subprocess, "run", MagicMock(return_value=MagicMock(stderr="")))
+    import subprocess
+    import types
+
+    # vol3's symbol check only; 7z and the rest keep the real subprocess
+    monkeypatch.setattr(pm, "subprocess", types.SimpleNamespace(
+        run=MagicMock(return_value=MagicMock(stderr="")),
+        TimeoutExpired=subprocess.TimeoutExpired,
+    ))  # fmt: skip
     monkeypatch.setattr(
         pm, "run_vol3_plugin",
         vol3 or (lambda image_path, plugin, timeout=0:
@@ -479,3 +486,116 @@ def test_a_failed_plugin_is_its_one_entry(case, monkeypatch):
     assert len(flushed) == 1
     netscan = [e for e in _entries(case) if e["params"].get("plugin") == "windows.netscan"]
     assert len(netscan) == 1 and _summary(netscan[0]) == "FAILED: vol3 exited 1"
+
+
+def _stub_7z(tmp_path: Path, monkeypatch) -> None:
+    """A stub on PATH, not 7z: it writes two samples into the -o folder."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    seven = bindir / "7z"
+    seven.write_text(
+        """#!/bin/sh
+for a in "$@"; do case "$a" in -o*) d="${a#-o}";; esac; done
+printf 'SAMPLE-ONE' > "$d/s1.raw"
+printf 'SAMPLE-TWO' > "$d/s2.raw"
+"""
+    )
+    seven.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+
+def test_a_7z_s_extraction_is_a_step_and_each_sample_traces_to_it(case, tmp_path, monkeypatch):
+    _stub_7z(tmp_path, monkeypatch)
+    archive = case / "evidence" / "mem.7z"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"7z" + b"x" * 64)
+    a_sha = _register(case, archive)
+    monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", "hunter2")
+    flushed, _, _ = _memory_run(case, archive, monkeypatch, plugins="windows.pslist")
+    entries = _entries(case)
+    (extraction,) = [e for e in entries if e["tool"] == "extract_archive"]
+    assert extraction["input_registered"] == [{"path": str(archive.resolve()), "sha256": a_sha}]
+    assert "hunter2" not in json.dumps(extraction)  # 7z reads it on stdin, never argv
+    s2_sha = hashlib.sha256(b"SAMPLE-TWO").hexdigest()
+    (s2,) = [o for o in extraction["outputs"] if o["path"].endswith("s2.raw")]
+    assert s2["sha256"] == s2_sha and s2["size"] == 10
+    ((aid, written_by_then, _),) = [f for f in flushed if f[2] == ["s2.raw"]]
+    (step,) = [e for e in entries[:written_by_then] if e["audit_id"] == aid]
+    (i,) = step["inputs"]
+    assert (i["path"], i["sha256"]) == (s2["path"], s2_sha)  # the manifest's hash
+    assert i["produced_by"] == extraction["audit_id"]
+    assert entries.index(extraction) < entries.index(step)
+
+
+def test_the_whole_7z_route_is_one_run_and_no_id_is_used_twice(case, tmp_path, monkeypatch):
+    _stub_7z(tmp_path, monkeypatch)
+    archive = case / "evidence" / "mem.7z"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"7z" + b"x" * 64)
+    _register(case, archive)
+    flushed, _, _ = _memory_run(case, archive, monkeypatch)  # 2 samples x 2 plugins
+    entries = _entries(case)
+    assert len(flushed) == 4 and len({aid for aid, _, _ in flushed}) == 4
+    assert not [a for a, n in Counter(e["audit_id"] for e in entries).items() if n > 1]
+    assert [e["tool"] for e in entries].count("idx_ingest_memory") == 1
+    assert entries[0]["tool"] == "idx_ingest_memory"
+
+
+def test_a_kape_zip_s_extraction_is_a_step_before_its_files_are_read(case, tmp_path, monkeypatch):
+    import opensearch_mcp.containers as C
+    from opensearch_mcp import ingest_cli as cli
+
+    archive = case / "evidence" / "kape.zip"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"PK\x03\x04" + b"z" * 32)
+    digest = _register(case, archive)
+    work = tmp_path / "work"
+    work.mkdir()
+    logs = "C/Windows/System32/winevt/Logs"
+
+    def extract(path, dest, password=None):
+        (dest / logs).mkdir(parents=True)
+        (dest / logs / "Security.evtx").write_bytes(b"E" * 100)
+        (dest / logs / "System.evtx").write_bytes(b"S" * 100)
+        (dest / "C/Windows/System32/config").mkdir(parents=True)
+        (dest / "C/Windows/System32/config/SYSTEM").write_bytes(b"R" * 10)
+
+    class Stop(Exception):
+        pass
+
+    at_ingest = []
+
+    def ingest(hosts=None, **kw):
+        at_ingest.append(_entries(case))
+        raise Stop
+
+    for name, value in (
+        ("detect_container", lambda p: "archive"),
+        ("cleanup_orphaned_mounts", lambda: None),
+        ("extract_container", extract),
+        ("is_velociraptor_collection", lambda p: False),
+        ("make_ingest_tmpdir", lambda case_id: work),
+        ("cleanup_tmpdir", lambda *a, **k: None),
+        ("check_sudo", lambda: None),
+    ):
+        monkeypatch.setattr(C, name, value)
+    monkeypatch.setattr(cli, "ingest", ingest)
+    for name in ("_preflight_shard_capacity", "_ensure_case_active", "get_client", "_gate"):
+        monkeypatch.setattr(cli, name, MagicMock())
+    monkeypatch.setattr(cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(cli, "_case_dir_for", lambda c: case)
+    args = argparse.Namespace(
+        path=str(archive), case="acme", yes=True, hostname="HOST1", vss=False,
+        all_logs=False, no_hayabusa=True, skip_triage=True,
+    )  # fmt: skip
+    with pytest.raises((Stop, SystemExit)):
+        cli.cmd_scan(args)
+    (extraction,) = [e for e in _entries(case) if e["tool"] == "extract_archive"]
+    assert extraction["input_registered"] == [{"path": str(archive.resolve()), "sha256": digest}]
+    made = {Path(o["path"]).name: o["sha256"] for o in extraction["outputs"]}
+    assert made == {
+        "Security.evtx": hashlib.sha256(b"E" * 100).hexdigest(),
+        "System.evtx": hashlib.sha256(b"S" * 100).hexdigest(),
+        "SYSTEM": hashlib.sha256(b"R" * 10).hexdigest(),
+    }
+    assert at_ingest and extraction in at_ingest[0]  # recorded before any file is read

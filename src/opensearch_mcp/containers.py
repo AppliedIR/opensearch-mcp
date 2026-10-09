@@ -55,9 +55,18 @@ def extract_container(path: Path, dest: Path, password: str | None = None) -> No
         raise ValueError(f"Unknown archive format: {path.name}")
 
 
+def extraction_command(path: Path, dest: Path) -> list[str]:
+    """The command extract_container runs for `path` (never the password:
+    7z reads it on stdin)."""
+    suffix = path.suffix.lower()
+    if suffix in (".zip", ".7z"):
+        return ["7z", "x", str(path), f"-o{dest}", "-y"]
+    return ["tar", "xf", str(path), "-C", str(dest)]
+
+
 def _extract_7z(path: Path, dest: Path, password: str | None = None) -> None:
     """Extract archive with 7z."""
-    cmd = ["7z", "x", str(path), f"-o{dest}", "-y"]
+    cmd = extraction_command(path, dest)
     result = subprocess.run(cmd, capture_output=True, **seven_zip_password(password))
     # 7z exit codes: 0=ok, 1=warning (timestamps), 2+=error
     if result.returncode > 1:
