@@ -119,6 +119,23 @@ def hold(cm) -> None:
     (stack if stack is not None else _process_held).enter_context(cm)
 
 
+def current_op() -> str:
+    """The step whose records are being written on this thread ("" for none):
+    a parsed file's or a plugin run's audit id."""
+    return getattr(_tls, "op", "")
+
+
+@contextlib.contextmanager
+def op(audit_id: str):
+    """Write the records inside the block under step ``audit_id``."""
+    prev = current_op()
+    _tls.op = audit_id
+    try:
+        yield audit_id
+    finally:
+        _tls.op = prev
+
+
 @contextlib.contextmanager
 def writing(ctx: WriteContext):
     """Open ``ctx`` for the writes inside the block."""
@@ -386,6 +403,9 @@ def removed_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> 
 def stamp_or_refuse(actions: list[dict], client=None) -> None:
     """Stamp ``actions`` with the open context; refuse a write to a case
     index when no context is open, so no record is stored without its machine."""
+    # a parser that batches several files' records names each record's step;
+    # the marker is never sent
+    steps = [str(a.pop(STEP_KEY, "") or "") for a in actions]
     ctx = current()
     if ctx is not None:
         if client is not None and ctx.case_dir not in _imported:
@@ -393,7 +413,7 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
 
             ensure_v1_imported(client, ctx.case_dir)  # before any name binds
             _imported.add(ctx.case_dir)
-        stamp(ctx, actions)
+        stamp(ctx, actions, steps)
         if client is not None:
             for index in {str(a.get("_index", "")) for a in actions}:
                 if index.startswith(f"case-{ctx.c12}-"):
@@ -405,13 +425,21 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
             raise NoWriteContext(f"refusing to write to {action['_index']}: no ingest run is open")
 
 
-def stamp(ctx: WriteContext, actions: list[dict]) -> None:
-    """Set the machine, unit and id fields of every action into ``ctx``'s case."""
+# An action's own step, when its parser batches several files' records.
+STEP_KEY = "_vhir_op"
+
+
+def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None) -> None:
+    """Set the machine, unit and id fields of every action into ``ctx``'s case,
+    and the step of a record whose parser batches several files (``steps``)."""
     prefix = f"case-{ctx.c12}-"
-    for action in actions:
+    for n, action in enumerate(actions):
         if not str(action.get("_index", "")).startswith(prefix):
             continue
         src = action.setdefault("_source", {})
+        step = steps[n] if steps and n < len(steps) else ""
+        if step:  # the step that read the record's file
+            src["vhir.ingest_audit_id"] = step
         rid = action.get("_id")
         resent = rid is not None and _stamped_here(action, src)
         if resent:

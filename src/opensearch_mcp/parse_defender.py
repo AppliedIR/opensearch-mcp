@@ -155,7 +155,13 @@ def parse_mplog(
     mp_files = sorted(
         list(mplog_dir.glob("MPLog-*.log")) + list(mplog_dir.glob("MPDetection-*.log"))
     )
+    from opensearch_mcp import ops
+
     for log_file in mp_files:
+        try:
+            step = ops.file_marker(log_file)  # its step, before its records
+        except ops.NoEntry:
+            continue
         rel_file = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
         current_ts = None
 
@@ -282,7 +288,7 @@ def parse_mplog(
                 line_hash = hashlib.md5(line_body.encode()).hexdigest()
                 id_input = f"{index_name}:{rel_file}:{current_ts or ''}:{line_hash}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
-                actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
+                actions.append({"_index": index_name, "_id": doc_hash, "_source": doc, **step})
 
                 if len(actions) >= 1000:
                     flushed, failed = flush_bulk(client, actions)

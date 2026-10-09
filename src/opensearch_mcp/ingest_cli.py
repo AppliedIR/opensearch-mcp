@@ -18,11 +18,11 @@ from pathlib import Path
 import yaml
 from sift_common.audit import AuditWriter
 
+from opensearch_mcp import write_context as wc
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
 from opensearch_mcp.ingest_counts import describe, stored_counts
 from opensearch_mcp.ingest_status import write_status
-from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.memory_tiers import TIERS
 from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import (
@@ -1792,40 +1792,36 @@ def cmd_scan(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-@_closes_write_context
 def _file_entry(
     audit, tool: str, f: Path, hostname: str, index_name: str, run_id, extra: dict | None = None
 ) -> str:
-    """Mint this file's audit id and write its entry (the file, its sha256 and
-    the run) before any of its records is indexed, so every id a record
+    """Write this file's entry (the file, its place, its hash or the registry's,
+    and the run) before any of its records is indexed, so every id a record
     carries names the file it came from, even if the run stops part-way.
-    "" when the entry couldn't be written: the file is then not indexed."""
-    aid = audit._next_audit_id()
+    ``(audit id, "")``, or ``("", why)`` when the file can't be read or its
+    entry couldn't be written: it is then not indexed."""
+    from sift_common import resolve_case_dir
+
+    from opensearch_mcp import ops
+
+    params = {"hostname": hostname, "index_name": index_name, "run_id": run_id or ""}
     try:
-        sha = sha256_file(f)
-    except OSError:  # unreadable: its parse fails and names it
-        sha = ""
-    logged = audit.log(
-        tool=tool,
-        audit_id=aid,
-        params={
-            "hostname": hostname,
-            "index_name": index_name,
-            "file": str(f),
-            "run_id": run_id or "",
-            **(extra or {}),
-        },
-        result_summary="recorded before its records were indexed",
-        input_files=[str(f)],
-        input_sha256s=[sha] if sha else [],
-        source_evidence=str(f),
-    )
-    return "" if logged is None else aid  # None: not written
+        aid, _sha = ops.read_step(
+            audit, tool, f, case_dir=resolve_case_dir() or None, params={**params, **(extra or {})}
+        )
+    except ops.NoEntry as e:  # unreadable (its failure recorded) or not recorded
+        return "", str(e)
+    return aid, ""
 
 
-NO_ENTRY = "its audit entry couldn't be written, so it wasn't indexed"
+def _file_outcome(audit, aid: str, tool: str, summary: str, f: Path) -> None:
+    """What became of a file after its entry: an entry of its own about it."""
+    from opensearch_mcp import ops
+
+    ops.later(audit, aid, tool, summary, {"file": str(f)})
 
 
+@_closes_write_context
 def cmd_csv(args: argparse.Namespace) -> None:
     """Ingest a pre-parsed CSV (examiner identifies the tool).
 
@@ -1864,27 +1860,31 @@ def cmd_csv(args: argparse.Namespace) -> None:
     run_id = os.environ.get("VHIR_INGEST_RUN_ID", "") or None
     print(f"Ingesting {csv_path.name} as {tool_name} -> {index_name}")
     entry = f"idx_ingest_csv_{tool_name}"
-    aid = _file_entry(audit, entry, csv_path, hostname, index_name, run_id, {"tool": tool_name})
+    aid, why = _file_entry(
+        audit, entry, csv_path, hostname, index_name, run_id, {"tool": tool_name}
+    )
     if not aid:
-        print(f"Error: {csv_path}: {NO_ENTRY}.", file=sys.stderr)
+        print(f"Error: {csv_path}: {why}.", file=sys.stderr)
         sys.exit(1)
 
     case_host_dict = _load_case_host_dict(case_id)
 
-    count, sk, bf = ingest_csv(
-        csv_path=csv_path,
-        client=client,
-        index_name=index_name,
-        hostname=hostname,
-        source_file=str(csv_path),
-        ingest_audit_id=aid,
-        pipeline_version=pipeline_version,
-        natural_key=cfg.natural_key,
-        time_field=cfg.time_field,
-        host_dict=case_host_dict,
-        row_host=tool_name != "jumplists",
-    )
+    with wc.op(aid):
+        count, sk, bf = ingest_csv(
+            csv_path=csv_path,
+            client=client,
+            index_name=index_name,
+            hostname=hostname,
+            source_file=str(csv_path),
+            ingest_audit_id=aid,
+            pipeline_version=pipeline_version,
+            natural_key=cfg.natural_key,
+            time_field=cfg.time_field,
+            host_dict=case_host_dict,
+            row_host=tool_name != "jumplists",
+        )
 
+    _file_outcome(audit, aid, entry, f"{count} indexed, {sk} skipped, {bf} bulk failed", csv_path)
     print(
         f"Indexed {count:,} entries"
         + (f" ({sk} skipped)" if sk else "")
@@ -2009,26 +2009,27 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             suffix = stem_type("json", getattr(args, "index_suffix", None) or f.stem)
             index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-            aid = _file_entry(audit, "ingest_json", f, hostname, index_name, run_id)
+            aid, why = _file_entry(audit, "ingest_json", f, hostname, index_name, run_id)
             if not aid:
-                _json_failed_files.append((str(f), NO_ENTRY))
-                print(f"skipped ({NO_ENTRY})")
+                _json_failed_files.append((str(f), why))
+                print(f"skipped ({why})")
                 continue
             try:
-                cnt, sk, bf, hr = ingest_json(
-                    f,
-                    client,
-                    index_name,
-                    hostname,
-                    time_field=time_field,
-                    source_file=str(f),
-                    ingest_audit_id=aid,
-                    pipeline_version=f"opensearch-mcp-{__version__}",
-                    time_from=time_from,
-                    time_to=time_to,
-                    batch_size=batch_size,
-                    host_dict=case_host_dict,
-                )
+                with wc.op(aid):
+                    cnt, sk, bf, hr = ingest_json(
+                        f,
+                        client,
+                        index_name,
+                        hostname,
+                        time_field=time_field,
+                        source_file=str(f),
+                        ingest_audit_id=aid,
+                        pipeline_version=f"opensearch-mcp-{__version__}",
+                        time_from=time_from,
+                        time_to=time_to,
+                        batch_size=batch_size,
+                        host_dict=case_host_dict,
+                    )
                 print(f"{cnt:,} entries")
                 if hr:
                     print(
@@ -2038,6 +2039,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
                 total += cnt
                 total_sk += sk
                 total_bf += bf
+                _file_outcome(
+                    audit, aid, "ingest_json", f"{cnt} indexed, {sk} skipped, {bf} bulk failed", f
+                )
             except ShardCapacityExhausted:
                 # Re-raise so the outer circuit-breaker handler fires
                 # — halting walk is the correct response to cluster
@@ -2051,6 +2055,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
                 # continue instead of aborting the walk.
                 _json_failed_files.append((str(f), str(e)[:200]))
                 print(f"skipped ({e})")
+                _file_outcome(audit, aid, "ingest_json", f"FAILED: {str(e)[:200]}", f)
             if run_id:
                 _write_bg_status(
                     case_id,
@@ -2402,30 +2407,31 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 print("skipped (unrecognized format)")
                 _delim_failed_files.append((str(f), "unrecognized format"))
                 continue
-            aid = _file_entry(audit, "ingest_delimited", f, hostname, index_name, run_id)
+            aid, why = _file_entry(audit, "ingest_delimited", f, hostname, index_name, run_id)
             if not aid:
-                _delim_failed_files.append((str(f), NO_ENTRY))
-                print(f"skipped ({NO_ENTRY})")
+                _delim_failed_files.append((str(f), why))
+                print(f"skipped ({why})")
                 continue
             file_aids.append(aid)
             try:
-                cnt, sk, bf, hr = ingest_delimited(
-                    f,
-                    client,
-                    index_name,
-                    hostname,
-                    fmt=fmt,
-                    delimiter=delimiter,
-                    time_field=time_field,
-                    source_file=str(f),
-                    ingest_audit_id=aid,
-                    pipeline_version=f"opensearch-mcp-{__version__}",
-                    time_from=time_from,
-                    time_to=time_to,
-                    batch_size=batch_size,
-                    on_progress=_on_progress if run_id else None,
-                    host_dict=case_host_dict,
-                )
+                with wc.op(aid):
+                    cnt, sk, bf, hr = ingest_delimited(
+                        f,
+                        client,
+                        index_name,
+                        hostname,
+                        fmt=fmt,
+                        delimiter=delimiter,
+                        time_field=time_field,
+                        source_file=str(f),
+                        ingest_audit_id=aid,
+                        pipeline_version=f"opensearch-mcp-{__version__}",
+                        time_from=time_from,
+                        time_to=time_to,
+                        batch_size=batch_size,
+                        on_progress=_on_progress if run_id else None,
+                        host_dict=case_host_dict,
+                    )
                 print(f"{cnt:,} entries")
                 if hr:
                     print("    NOTE: 'host' renamed to 'source_host' (conflicts with host.name)")
@@ -2433,6 +2439,13 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 total_sk += sk
                 total_bf += bf
                 touched.add(index_name)
+                _file_outcome(
+                    audit,
+                    aid,
+                    "ingest_delimited",
+                    f"{cnt} indexed, {sk} skipped, {bf} bulk failed",
+                    f,
+                )
                 if run_id:
                     _write_bg_status(
                         case_id,
@@ -2461,6 +2474,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 # summary, not silent data loss.
                 _delim_failed_files.append((str(f), str(e)[:200]))
                 print(f"skipped ({e})")
+                _file_outcome(audit, aid, "ingest_delimited", f"FAILED: {str(e)[:200]}", f)
     except ShardCapacityExhausted as _sce:
         write_status(
             case_id=case_id,
@@ -2606,24 +2620,25 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         for idx, f in enumerate(files):
             index_name = _index_name(suffix)
             print(f"  {f.name} -> {index_name}...", end=" ", flush=True)
-            aid = _file_entry(audit, "ingest_accesslog", f, hostname, index_name, run_id)
+            aid, why = _file_entry(audit, "ingest_accesslog", f, hostname, index_name, run_id)
             if not aid:
-                _alog_failed_files.append((str(f), NO_ENTRY))
-                print(f"skipped ({NO_ENTRY})")
+                _alog_failed_files.append((str(f), why))
+                print(f"skipped ({why})")
                 continue
             try:
-                cnt, sk, bf = ingest_accesslog(
-                    f,
-                    client,
-                    index_name,
-                    hostname,
-                    time_from=time_from,
-                    time_to=time_to,
-                    source_file=unit_locator(f, ctx.case_dir),
-                    ingest_audit_id=aid,
-                    pipeline_version=f"opensearch-mcp-{__version__}",
-                    host_dict=case_host_dict,
-                )
+                with wc.op(aid):
+                    cnt, sk, bf = ingest_accesslog(
+                        f,
+                        client,
+                        index_name,
+                        hostname,
+                        time_from=time_from,
+                        time_to=time_to,
+                        source_file=unit_locator(f, ctx.case_dir),
+                        ingest_audit_id=aid,
+                        pipeline_version=f"opensearch-mcp-{__version__}",
+                        host_dict=case_host_dict,
+                    )
                 print(f"{cnt:,} entries ({sk} skipped)")
                 total += cnt
                 total_sk += sk
@@ -2633,6 +2648,13 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
                     if time_from or time_to:
                         why += " or outside the time window"
                     _alog_unindexed.append(f"{f} ({why})")
+                _file_outcome(
+                    audit,
+                    aid,
+                    "ingest_accesslog",
+                    f"{cnt} indexed, {sk} skipped, {bf} bulk failed",
+                    f,
+                )
             except ShardCapacityExhausted:
                 # Re-raise so the outer circuit-breaker handler fires.
                 raise
@@ -2643,6 +2665,7 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
                 # vulnerable, but any crash should still skip-and-continue.
                 _alog_failed_files.append((str(f), str(e)[:200]))
                 print(f"skipped ({e})")
+                _file_outcome(audit, aid, "ingest_accesslog", f"FAILED: {str(e)[:200]}", f)
             if run_id:
                 _write_bg_status(
                     case_id,

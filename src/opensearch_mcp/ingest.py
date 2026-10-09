@@ -12,11 +12,12 @@ from pathlib import Path
 from opensearchpy import OpenSearch
 from sift_common.audit import AuditWriter
 
-from opensearch_mcp import __version__
+from opensearch_mcp import __version__, ops
 from opensearch_mcp import write_context as wc
 from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
+from opensearch_mcp.ops import NO_ENTRY
 from opensearch_mcp.parse_evtx import evtx_truncation, parse_and_index
 from opensearch_mcp.paths import vhir_dir
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
@@ -719,10 +720,13 @@ def _ingest_hosts(
                     _update_status()
 
                 for file_idx, evtx_file in enumerate(evtx_files):
-                    file_hash = ""  # hashed in the try: an unreadable file fails only itself
-                    aid = audit._next_audit_id()
+                    params = {"hostname": host.hostname, "index_name": index_name,
+                              "run_id": run_id}  # fmt: skip
+                    aid = ""
                     try:
-                        file_hash = sha256_file(evtx_file)
+                        aid, file_hash = ops.read_step(
+                            audit, "ingest_evtx", evtx_file, case_dir=case_dir, params=params
+                        )
                         from opensearch_mcp.paths import relative_evidence_path
 
                         rel_path = relative_evidence_path(evtx_file, host.volume_root)
@@ -732,18 +736,19 @@ def _ingest_hosts(
                             truncated.append(f"{evtx_file.name}: {cut}")
                             if evtx_status:
                                 evtx_status["truncated"] = truncated
-                        cnt, sk, bf = parse_and_index(
-                            evtx_path=evtx_file,
-                            client=client,
-                            index_name=index_name,
-                            source_file=rel_path,
-                            ingest_audit_id=aid,
-                            time_from=time_from,
-                            time_to=time_to,
-                            reduced_ids=reduced_ids,
-                            vss_id=host.vss_id,
-                            host_dict=host_dict,
-                        )
+                        with wc.op(aid):
+                            cnt, sk, bf = parse_and_index(
+                                evtx_path=evtx_file,
+                                client=client,
+                                index_name=index_name,
+                                source_file=rel_path,
+                                ingest_audit_id=aid,
+                                time_from=time_from,
+                                time_to=time_to,
+                                reduced_ids=reduced_ids,
+                                vss_id=host.vss_id,
+                                host_dict=host_dict,
+                            )
                         ar.indexed += cnt
                         ar.skipped += sk
                         ar.bulk_failed += bf
@@ -755,22 +760,14 @@ def _ingest_hosts(
                             sha256=file_hash,
                             doc_count=cnt,
                         )
-                        audit.log(
-                            tool="ingest_evtx",
-                            audit_id=aid,
-                            params={
-                                "hostname": host.hostname,
-                                "index_name": index_name,
-                                "file": str(evtx_file),
-                                "run_id": run_id,
-                                "bulk_failed": bf,
-                            },
-                            result_summary=f"{cnt} indexed, {sk} skipped"
+                        ops.later(
+                            audit,
+                            aid,
+                            "ingest_evtx",
+                            f"{cnt} indexed, {sk} skipped"
                             + (f", truncated: {cut}" if cut else "")
                             + (f", {bf} bulk failed" if bf else ""),
-                            input_files=[str(evtx_file)],
-                            input_sha256s=[file_hash],
-                            source_evidence=str(evtx_file),
+                            {**params, "file": str(evtx_file), "bulk_failed": bf},
                         )
                         # Per-file status update
                         if evtx_status:
@@ -792,18 +789,9 @@ def _ingest_hosts(
                             ar.error += f"; {evtx_file.name}: {e}"
                         else:
                             ar.error = f"{evtx_file.name}: {e}"
-                        audit.log(
-                            tool="ingest_evtx",
-                            audit_id=aid,
-                            params={
-                                "hostname": host.hostname,
-                                "file": str(evtx_file),
-                                "run_id": run_id,
-                            },
-                            result_summary=f"FAILED: {e}",
-                            input_files=[str(evtx_file)],
-                            input_sha256s=[file_hash] if file_hash else [],
-                        )
+                        if aid:  # one that failed before its step: read_step recorded it
+                            ops.later(audit, aid, "ingest_evtx", f"FAILED: {e}",
+                                      {**params, "file": str(evtx_file)})  # fmt: skip
 
                 if evtx_status:
                     evtx_status["status"] = "failed" if ar.error else "complete"
@@ -846,6 +834,7 @@ def _ingest_hosts(
                         _update_status=_update_status,
                         run_id=run_id,
                         host_dict=host_dict,
+                        case_dir=case_dir,
                     )
                     continue
                 _ingest_plaso_artifact(
@@ -862,6 +851,7 @@ def _ingest_hosts(
                     _update_status=_update_status,
                     run_id=run_id,
                     host_dict=host_dict,
+                    case_dir=case_dir,
                 )
                 continue
 
@@ -885,6 +875,7 @@ def _ingest_hosts(
                     time_to=time_to,
                     run_id=run_id,
                     host_dict=host_dict,
+                    case_dir=case_dir,
                 )
                 continue
 
@@ -905,8 +896,6 @@ def _ingest_hosts(
             cfg = TOOLS[tool_name]
             index_name = wc.index_name(cfg.index_suffix)
             existing = _safe_count(client, index_name, wc.current().unit)
-            file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
-            aid = audit._next_audit_id()
 
             # MFT natural key: add vss_id as 5th component when VSS is active
             natural_key = cfg.natural_key
@@ -929,8 +918,15 @@ def _ingest_hosts(
 
             unread: list[str] = []
             hives: list[str] = []
+            params = {"hostname": host.hostname, "tool": tool_name, "index_name": index_name,
+                      "run_id": run_id}  # fmt: skip
+            aid = ""
             try:
-                file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
+                # RECmd reads the whole config folder: the folder is what the step reads
+                read = artifact_path.parent if tool_name == "registry" else artifact_path
+                aid, file_hash = ops.read_step(
+                    audit, f"ingest_{tool_name}", read, case_dir=case_dir, params=params
+                )
                 from opensearch_mcp.paths import relative_evidence_path
 
                 # RECmd reads the whole config folder; each row then names its own hive
@@ -940,25 +936,26 @@ def _ingest_hosts(
                 )
                 collided: dict = {}
                 seen = id_seen.setdefault(index_name, {}) if cfg.index_suffix in shared else None
-                cnt, sk, bf = run_and_ingest(
-                    tool_name=tool_name,
-                    artifact_path=artifact_path,
-                    client=client,
-                    case_id=case_id,
-                    hostname=host.hostname,
-                    source_file=_rel_src,
-                    ingest_audit_id=aid,
-                    pipeline_version=_PIPELINE_VERSION,
-                    time_from=time_from,
-                    time_to=time_to,
-                    vss_id=host.vss_id,
-                    natural_key_override=natural_key,
-                    host_dict=host_dict,
-                    not_read=unread,
-                    hives_read=hives,
-                    seen=seen,
-                    collided=collided,
-                )
+                with wc.op(aid):
+                    cnt, sk, bf = run_and_ingest(
+                        tool_name=tool_name,
+                        artifact_path=artifact_path,
+                        client=client,
+                        case_id=case_id,
+                        hostname=host.hostname,
+                        source_file=_rel_src,
+                        ingest_audit_id=aid,
+                        pipeline_version=_PIPELINE_VERSION,
+                        time_from=time_from,
+                        time_to=time_to,
+                        vss_id=host.vss_id,
+                        natural_key_override=natural_key,
+                        host_dict=host_dict,
+                        not_read=unread,
+                        hives_read=hives,
+                        seen=seen,
+                        collided=collided,
+                    )
                 # The audit lists every hive RECmd read, each with its hash
                 inputs = hives or [str(artifact_path)]
                 hashes = [_sha256_or_empty(Path(p)) for p in hives] if hives else []
@@ -981,24 +978,20 @@ def _ingest_hosts(
                     sha256=file_hash,
                     doc_count=cnt,
                 )
-                audit.log(
-                    tool=f"ingest_{tool_name}",
-                    audit_id=aid,
-                    params={
-                        "hostname": host.hostname,
-                        "tool": tool_name,
-                        "file": str(artifact_path),
-                        "run_id": run_id,
-                        "bulk_failed": bf,
-                    },
-                    result_summary=f"{cnt} indexed"
+                ops.later(
+                    audit,
+                    aid,
+                    f"ingest_{tool_name}",
+                    f"{cnt} indexed"
                     + (f", {len(unread)} not read" if unread else "")
                     + (f", {sk} skipped" if sk else "")
                     + (f", {bf} bulk failed" if bf else "")
                     + "".join(f"; {r}" for r in replaced),
-                    input_files=inputs,
-                    input_sha256s=hashes,
-                    source_evidence=str(artifact_path),
+                    {**params, "file": str(artifact_path), "bulk_failed": bf},
+                    # every hive RECmd read, each with its hash and place
+                    inputs=[{**ops.place(p), "sha256": h} for p, h in zip(inputs, hashes)]
+                    if hives
+                    else None,
                 )
                 if tool_status:
                     tool_status["status"] = "failed" if "error" in tool_status else "complete"
@@ -1022,15 +1015,14 @@ def _ingest_hosts(
             except Exception as e:
                 ar.error = str(e)
                 ar.not_read = unread
-                audit.log(
-                    tool=f"ingest_{tool_name}",
-                    audit_id=aid,
-                    params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
-                    result_summary=f"FAILED: {e}"
-                    + (f", {len(unread)} not read" if unread else ""),
-                    input_files=[str(artifact_path)],
-                    input_sha256s=[file_hash] if file_hash else [],
-                )
+                if aid:  # one that failed before its step: read_step recorded it
+                    ops.later(
+                        audit,
+                        aid,
+                        f"ingest_{tool_name}",
+                        f"FAILED: {e}" + (f", {len(unread)} not read" if unread else ""),
+                        params,
+                    )
                 if tool_status:
                     tool_status["status"] = "failed"
                     tool_status["error"] = str(e)
@@ -1065,6 +1057,7 @@ def _ingest_plaso_volume(
     _update_status,
     run_id: str = "",
     host_dict=None,
+    case_dir=None,
 ) -> None:
     """A host's Plaso runs (the OS preset on Linux and macOS, the narrow set
     on Windows) into case-<id>-plaso-<host>. Each run's work folder is under
@@ -1095,7 +1088,6 @@ def _ingest_plaso_volume(
         tool_status["status"] = "running"
         _update_status()
     _progress("artifact_start", hostname=host.hostname, artifact="plaso")
-    aid = audit._next_audit_id()
     runs, run_note = plaso_runs(host)
     image = host.image_path is not None  # read off the image: no root
     # Off an image, Plaso applies each volume's own zone, unless the examiner
@@ -1113,22 +1105,40 @@ def _ingest_plaso_volume(
     errors: list[str] = []
     base = vhir_dir() / "cases" / case_id / "tmp"
     base.mkdir(parents=True, exist_ok=True)
+    params = {"hostname": host.hostname, "tool": "plaso", "index_name": index_name,
+              "run_id": run_id}  # fmt: skip
     for parsers, source in runs:
         workdir = Path(tempfile.mkdtemp(prefix=f"plaso-{host.hostname}-", dir=base))
+        aid = ""
         try:
             jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone, **run_kw)
-            cnt, bf = _ingest_jsonl(
-                jsonl,
-                client,
-                index_name,
-                host.hostname,
-                ingest_audit_id=aid,
-                pipeline_version=_PIPELINE_VERSION,
-                vss_id=host.vss_id,
-                host_dict=host_dict,
-                volume_root=None if image else host.volume_root,
-                volume=host.volume_label if image else None,
+            # one step per Plaso run: what it read and the JSONL it wrote,
+            # recorded before the JSONL's records are indexed
+            src_in, src_reg = ops.file_input(case_dir, source)
+            aid = ops.write(
+                audit,
+                "ingest_plaso",
+                params={**params, "parsers": parsers, "source": str(source)},
+                summary="recorded before its records were indexed",
+                inputs=[src_in],
+                input_registered=[src_reg] if src_reg else None,
+                outputs=[ops.output(jsonl)],
             )
+            if not aid:
+                raise RuntimeError(NO_ENTRY)
+            with wc.op(aid):
+                cnt, bf = _ingest_jsonl(
+                    jsonl,
+                    client,
+                    index_name,
+                    host.hostname,
+                    ingest_audit_id=aid,
+                    pipeline_version=_PIPELINE_VERSION,
+                    vss_id=host.vss_id,
+                    host_dict=host_dict,
+                    volume_root=None if image else host.volume_root,
+                    volume=host.volume_label if image else None,
+                )
             ar.indexed += cnt
             ar.bulk_failed += bf
             unread, note = plaso_status(
@@ -1136,23 +1146,26 @@ def _ingest_plaso_volume(
             )
             ar.not_read += unread
             notes.append(note)
+            ops.later(
+                audit,
+                aid,
+                "ingest_plaso",
+                f"{cnt} indexed"
+                + (f", {len(unread)} not read" if unread else "")
+                + (f", {bf} bulk failed" if bf else ""),
+                params,
+            )
         except Exception as e:
             errors.append(f"{parsers} over {source}: {e}")
+            failed = {**params, "parsers": parsers, "source": str(source)}
+            if aid:
+                ops.later(audit, aid, "ingest_plaso", f"FAILED: {e}", failed)
+            else:  # it failed before its step was recorded: the failure is its entry
+                ops.write(audit, "ingest_plaso", params=failed, summary=f"FAILED: {e}")
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
     ar.note = "; ".join(dict.fromkeys(notes))
     ar.error = "\n".join(errors)
-    audit.log(
-        tool="ingest_plaso",
-        audit_id=aid,
-        params={"hostname": host.hostname, "tool": "plaso", "run_id": run_id, "runs": runs},
-        result_summary=(f"FAILED: {ar.error}; " if errors else "")
-        + f"{ar.indexed} indexed"
-        + (f", {len(ar.not_read)} not read" if ar.not_read else "")
-        + (f", {ar.bulk_failed} bulk failed" if ar.bulk_failed else ""),
-        input_files=[str(source) for _, source in runs],
-        source_evidence=str(host.volume_root),
-    )
     if tool_status:
         tool_status["status"] = "failed" if errors else "complete"
         tool_status["indexed"] = ar.indexed
@@ -1191,6 +1204,7 @@ def _ingest_plaso_artifact(
     _update_status,
     run_id: str = "",
     host_dict=None,
+    case_dir=None,
 ) -> None:
     """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback)."""
     from opensearch_mcp.parse_prefetch import parse_prefetch
@@ -1198,8 +1212,8 @@ def _ingest_plaso_artifact(
 
     index_name = wc.index_name(tool_name)
     existing = _safe_count(client, index_name, wc.current().unit)
-    plaso_hash = ""  # hashed in the try: an unreadable file fails its artifact only
-    aid = audit._next_audit_id()
+    params = {"hostname": host.hostname, "tool": tool_name, "index_name": index_name,
+              "run_id": run_id}  # fmt: skip
 
     ar = ArtifactResult(
         artifact=tool_name,
@@ -1215,35 +1229,35 @@ def _ingest_plaso_artifact(
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
-        plaso_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         from opensearch_mcp.paths import relative_evidence_path as _rel
 
         _plaso_src = _rel(artifact_path, host.volume_root)
-        if tool_name == "prefetch":
-            cnt, bf, _note, outcome, rows = parse_prefetch(
-                prefetch_dir=artifact_path,
-                client=client,
-                index_name=index_name,
-                hostname=host.hostname,
-                ingest_audit_id=aid,
-                pipeline_version=_PIPELINE_VERSION,
-                vss_id=host.vss_id,
-                source_file=_plaso_src,
-                host_dict=host_dict,
-            )
-        else:
-            cnt, bf, _note, outcome, rows = parse_srum(
-                srum_path=artifact_path,
-                client=client,
-                index_name=index_name,
-                hostname=host.hostname,
-                case_id=case_id,
-                ingest_audit_id=aid,
-                pipeline_version=_PIPELINE_VERSION,
-                vss_id=host.vss_id,
-                source_file=_plaso_src,
-                host_dict=host_dict,
-            )
+        # the parser records each file its records come from: the tool's CSV
+        # (with the staging and wintools steps that made it) or Plaso's JSONL
+        with ops.recording(audit, case_dir, f"ingest_{tool_name}", params):
+            if tool_name == "prefetch":
+                cnt, bf, _note, outcome, rows = parse_prefetch(
+                    prefetch_dir=artifact_path,
+                    client=client,
+                    index_name=index_name,
+                    hostname=host.hostname,
+                    pipeline_version=_PIPELINE_VERSION,
+                    vss_id=host.vss_id,
+                    source_file=_plaso_src,
+                    host_dict=host_dict,
+                )
+            else:
+                cnt, bf, _note, outcome, rows = parse_srum(
+                    srum_path=artifact_path,
+                    client=client,
+                    index_name=index_name,
+                    hostname=host.hostname,
+                    case_id=case_id,
+                    pipeline_version=_PIPELINE_VERSION,
+                    vss_id=host.vss_id,
+                    source_file=_plaso_src,
+                    host_dict=host_dict,
+                )
         # The parser's final attempt decides: it failed, or it produced no
         # rows from inputs that are there (Plaso exits 0 on a damaged file,
         # and its errors return 0). Its rows count records already in the
@@ -1266,20 +1280,11 @@ def _ingest_plaso_artifact(
         if _note:
             ar.note = _note
         _write_ingest_manifest(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
-        audit.log(
-            tool=f"ingest_{tool_name}",
-            audit_id=aid,
-            params={
-                "hostname": host.hostname,
-                "tool": tool_name,
-                "path": str(artifact_path),
-                "run_id": run_id,
-                "bulk_failed": bf,
-            },
-            result_summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
-            input_files=[str(artifact_path)],
-            input_sha256s=[plaso_hash] if plaso_hash else [],
-            source_evidence=str(artifact_path),
+        ops.write(
+            audit,
+            f"ingest_{tool_name}",
+            params={**params, "path": str(artifact_path), "bulk_failed": bf},
+            summary=f"{cnt} indexed" + (f", {bf} bulk failed" if bf else ""),
         )
         if bf:  # records OpenSearch rejected: the artifact is incomplete
             from opensearch_mcp.bulk import get_last_bulk_reason
@@ -1304,13 +1309,11 @@ def _ingest_plaso_artifact(
         )
     except Exception as e:
         ar.error = str(e)
-        audit.log(
-            tool=f"ingest_{tool_name}",
-            audit_id=aid,
-            params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
-            result_summary=f"FAILED: {e}",
-            input_files=[str(artifact_path)],
-            input_sha256s=[plaso_hash] if plaso_hash else [],
+        ops.write(
+            audit,
+            f"ingest_{tool_name}",
+            params={**params, "path": str(artifact_path)},
+            summary=f"FAILED: {e}",
         )
         if tool_status:
             tool_status["status"] = "failed"
@@ -1342,12 +1345,13 @@ def _ingest_custom_artifact(
     time_to=None,
     run_id: str = "",
     host_dict=None,
+    case_dir=None,
 ) -> None:
     """Ingest a custom-parsed artifact (transcripts, defender, IIS, etc.)."""
     index_name = wc.index_name(tool_name)
     existing = _safe_count(client, index_name, wc.current().unit)
-    file_hash = ""  # hashed in the try: an unreadable file fails its artifact only
-    aid = audit._next_audit_id()
+    params = {"hostname": host.hostname, "tool": tool_name, "index_name": index_name,
+              "run_id": run_id}  # fmt: skip
 
     ar = ArtifactResult(
         artifact=tool_name,
@@ -1363,20 +1367,21 @@ def _ingest_custom_artifact(
     _progress("artifact_start", hostname=host.hostname, artifact=tool_name)
 
     try:
-        file_hash = sha256_file(artifact_path) if artifact_path.is_file() else ""
         notes: list[str] = []
-        cnt, sk, bf = _run_custom_parser(
-            tool_name,
-            artifact_path,
-            client,
-            index_name,
-            host,
-            aid,
-            time_from,
-            time_to,
-            host_dict=host_dict,
-            notes=notes,
-        )
+        # each file the parser reads is its own step, before its records
+        with ops.recording(audit, case_dir, f"ingest_{tool_name}", params):
+            cnt, sk, bf = _run_custom_parser(
+                tool_name,
+                artifact_path,
+                client,
+                index_name,
+                host,
+                "",
+                time_from,
+                time_to,
+                host_dict=host_dict,
+                notes=notes,
+            )
         ar.indexed = cnt
         ar.skipped = sk
         ar.bulk_failed = bf
@@ -1385,22 +1390,14 @@ def _ingest_custom_artifact(
             ar.note = "; ".join(filter(None, [ar.note, note]))
             print(f"  {host.hostname}: {tool_name}: {note}", file=sys.stderr)
         _write_ingest_manifest(str(artifact_path), host.hostname, tool_name, doc_count=cnt)
-        audit.log(
-            tool=f"ingest_{tool_name}",
-            audit_id=aid,
-            params={
-                "hostname": host.hostname,
-                "path": str(artifact_path),
-                "run_id": run_id,
-                "bulk_failed": bf,
-            },
-            result_summary=f"{cnt} indexed"
+        ops.write(
+            audit,
+            f"ingest_{tool_name}",
+            params={**params, "path": str(artifact_path), "bulk_failed": bf},
+            summary=f"{cnt} indexed"
             + (f", {sk} skipped" if sk else "")
             + (f", {bf} bulk failed" if bf else "")
             + (f"; {note}" if note else ""),
-            input_files=[str(artifact_path)],
-            input_sha256s=[file_hash] if file_hash else [],
-            source_evidence=str(artifact_path),
         )
         if tool_status:
             if note:
@@ -1418,13 +1415,11 @@ def _ingest_custom_artifact(
         )
     except Exception as e:
         ar.error = str(e)
-        audit.log(
-            tool=f"ingest_{tool_name}",
-            audit_id=aid,
-            params={"hostname": host.hostname, "tool": tool_name, "run_id": run_id},
-            result_summary=f"FAILED: {e}",
-            input_files=[str(artifact_path)],
-            input_sha256s=[file_hash] if file_hash else [],
+        ops.write(
+            audit,
+            f"ingest_{tool_name}",
+            params={**params, "path": str(artifact_path)},
+            summary=f"FAILED: {e}",
         )
         if tool_status:
             tool_status["status"] = "failed"
@@ -1498,15 +1493,16 @@ def _run_custom_parser(
 
         cnt = sk = bf = 0
         for log_file in sorted(artifact_path.rglob("u_ex*.log")):
-            c, s, b = parse_w3c_log(
-                log_file,
-                timestamp_is_utc=True,
-                time_from=time_from,
-                time_to=time_to,
-                source_file=relative_evidence_path(log_file, vr),
-                parse_method="iis-w3c",
-                **kw,
-            )
+            with ops.step(log_file) as sid:
+                c, s, b = parse_w3c_log(
+                    log_file,
+                    **{**kw, "ingest_audit_id": sid},
+                    timestamp_is_utc=True,
+                    time_from=time_from,
+                    time_to=time_to,
+                    source_file=relative_evidence_path(log_file, vr),
+                    parse_method="iis-w3c",
+                )
             cnt += c
             sk += s
             bf += b
@@ -1517,15 +1513,16 @@ def _run_custom_parser(
 
         cnt = sk = bf = 0
         for log_file in sorted(artifact_path.rglob("httperr*.log")):
-            c, s, b = parse_w3c_log(
-                log_file,
-                timestamp_is_utc=True,
-                time_from=time_from,
-                time_to=time_to,
-                source_file=relative_evidence_path(log_file, vr),
-                parse_method="httperr-w3c",
-                **kw,
-            )
+            with ops.step(log_file) as sid:
+                c, s, b = parse_w3c_log(
+                    log_file,
+                    **{**kw, "ingest_audit_id": sid},
+                    timestamp_is_utc=True,
+                    time_from=time_from,
+                    time_to=time_to,
+                    source_file=relative_evidence_path(log_file, vr),
+                    parse_method="httperr-w3c",
+                )
             cnt += c
             sk += s
             bf += b
@@ -1550,16 +1547,17 @@ def _run_custom_parser(
     if tool_name == "firewall":
         from opensearch_mcp.parse_w3c import parse_w3c_log
 
-        return parse_w3c_log(
-            artifact_path,
-            timestamp_is_utc=False,
-            system_timezone=host.system_timezone,
-            time_from=time_from,
-            time_to=time_to,
-            source_file=relative_evidence_path(artifact_path, vr),
-            parse_method="firewall-w3c",
-            **kw,
-        )
+        with ops.step(artifact_path) as sid:
+            return parse_w3c_log(
+                artifact_path,
+                **{**kw, "ingest_audit_id": sid},
+                timestamp_is_utc=False,
+                system_timezone=host.system_timezone,
+                time_from=time_from,
+                time_to=time_to,
+                source_file=relative_evidence_path(artifact_path, vr),
+                parse_method="firewall-w3c",
+            )
 
     if tool_name == "ssh":
         from opensearch_mcp.parse_ssh import parse_ssh_log

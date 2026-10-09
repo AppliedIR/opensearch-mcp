@@ -298,8 +298,16 @@ def ingest_transcripts(
                 file=sys.stderr,
             )
             continue
+        from opensearch_mcp import ops
         from opensearch_mcp.paths import relative_evidence_path
 
+        try:
+            step = ops.file_marker(f)  # its step, before its record
+        except ops.NoEntry as e:
+            import sys
+
+            print(f"  transcripts: skipped {f.name}: {e}", file=sys.stderr)
+            continue
         rel = relative_evidence_path(f, volume_root) if volume_root else str(f)
         doc["host.name"] = hostname
         if hostname:
@@ -320,7 +328,7 @@ def ingest_transcripts(
         if vss_id:
             id_data["vss_id"] = vss_id
         _id = _doc_id(index_name, id_data)
-        actions.append({"_index": index_name, "_id": _id, "_source": doc})
+        actions.append({"_index": index_name, "_id": _id, "_source": doc, **step})
 
         if len(actions) >= 100:
             flushed, failed = flush_bulk(client, actions)

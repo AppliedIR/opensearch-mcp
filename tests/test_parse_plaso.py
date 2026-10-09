@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -159,6 +161,8 @@ class TestIngestJsonl:
 
 
 class TestParsePrefetch:
+    # the run's step is the caller's to record (ingest opens the recording)
+    @patch("opensearch_mcp.ops.step", lambda *a, **k: contextlib.nullcontext("step-1"))
     @patch("opensearch_mcp.parse_plaso._run_plaso")
     @patch("opensearch_mcp.parse_plaso._ingest_jsonl")
     def test_calls_plaso_with_prefetch_parser(self, mock_ingest, mock_run):
@@ -176,6 +180,8 @@ class TestParsePrefetch:
 
 
 class TestParseSrum:
+    # the run's step is the caller's to record (ingest opens the recording)
+    @patch("opensearch_mcp.ops.step", lambda *a, **k: contextlib.nullcontext("step-1"))
     @patch("opensearch_mcp.parse_plaso._run_plaso")
     @patch("opensearch_mcp.parse_plaso._ingest_jsonl")
     def test_calls_plaso_with_esedb_srum_parser(self, mock_ingest, mock_run):

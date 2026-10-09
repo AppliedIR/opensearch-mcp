@@ -115,6 +115,8 @@ def _parse_srum_wintools(
         raise RuntimeError("No active case directory")
     case_dir = Path(case_dir_str)
 
+    from opensearch_mcp import ops
+
     # Stage SRUM to case extractions (on the SMB share) for ESE recovery
     srum_workdir = case_dir / "extractions" / "srum" / hostname
     srum_workdir.mkdir(parents=True, exist_ok=True)
@@ -140,18 +142,19 @@ def _parse_srum_wintools(
     total_count = 0
     total_failed = 0
     for csv_file in csv_files:
-        count, _sk, bf = ingest_csv(
-            csv_path=csv_file,
-            client=client,
-            index_name=index_name,
-            hostname=hostname,
-            source_file=source_file or str(srum_path),
-            ingest_audit_id=ingest_audit_id,
-            pipeline_version=pipeline_version,
-            vss_id=vss_id,
-            parse_method="SrumECmd",
-            host_dict=host_dict,
-        )
+        with ops.step(csv_file) as sid:
+            count, _sk, bf = ingest_csv(
+                csv_path=csv_file,
+                client=client,
+                index_name=index_name,
+                hostname=hostname,
+                source_file=source_file or str(srum_path),
+                ingest_audit_id=sid,
+                pipeline_version=pipeline_version,
+                vss_id=vss_id,
+                parse_method="SrumECmd",
+                host_dict=host_dict,
+            )
         total_count += count
         total_failed += bf
 

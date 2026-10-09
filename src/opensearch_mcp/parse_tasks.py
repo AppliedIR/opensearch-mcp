@@ -9,6 +9,7 @@ from pathlib import Path
 import defusedxml.ElementTree as ET
 from opensearchpy import OpenSearch
 
+from opensearch_mcp import ops
 from opensearch_mcp.bulk import flush_bulk
 
 NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
@@ -138,6 +139,11 @@ def parse_tasks_dir(
         if doc is None:
             skipped += 1
             continue
+        try:
+            step = ops.file_marker(task_file)  # its step, before its records
+        except ops.NoEntry:
+            skipped += 1
+            continue
 
         # Convert local timestamp to UTC
         if "@timestamp" in doc:
@@ -183,7 +189,7 @@ def parse_tasks_dir(
         # The file's bytes too: a rebuilt machine can have a different file at the same path.
         id_input = f"{index_name}:{rel}:{_file_sha256(task_file)}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
-        actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
+        actions.append({"_index": index_name, "_id": doc_hash, "_source": doc, **step})
 
         if len(actions) >= 100:
             flushed, failed = flush_bulk(client, actions)

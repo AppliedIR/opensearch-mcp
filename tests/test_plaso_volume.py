@@ -406,7 +406,7 @@ def test_a_failed_run_fails_the_artifact_and_the_other_run_is_kept(tmp_path, mon
             return "aid-1"
 
         def log(self, **kw):
-            pass
+            return kw.get("audit_id")  # written
 
     result = HostResult(hostname="h")
     ingest._ingest_plaso_volume(
@@ -426,7 +426,7 @@ class _Audit:
         return "aid-1"
 
     def log(self, **kw):
-        pass
+        return kw.get("audit_id")  # written
 
 
 @pytest.mark.parametrize(

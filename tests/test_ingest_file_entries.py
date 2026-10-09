@@ -109,7 +109,14 @@ def run(tmp_path, monkeypatch):
 
 
 def _entries(seq, tool):
-    return [k for kind, *rest in seq if kind == "entry" for k in rest if k["tool"] == tool]
+    """Each file's step (an entry about a step is a later fact about it)."""
+    return [
+        k
+        for kind, *rest in seq
+        if kind == "entry"
+        for k in rest
+        if k["tool"] == tool and not (k.get("extra") or {}).get("about")
+    ]
 
 
 @pytest.mark.parametrize("kind", sorted(KINDS))

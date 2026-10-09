@@ -92,8 +92,10 @@ def _scan(tmp_path: Path, only_missing: bool = False):
             status_pid=os.getpid(),
             status_run_id="run-regsource",
         )
-    (entry,) = [
-        c.kwargs for c in audit.log.call_args_list if c.kwargs.get("tool") == "ingest_registry"
+    (entry,) = [  # what the run read and indexed: the entry about the folder's step
+        c.kwargs
+        for c in audit.log.call_args_list
+        if c.kwargs.get("tool") == "ingest_registry" and (c.kwargs.get("extra") or {}).get("about")
     ]
     return config, missing, docs, entry
 

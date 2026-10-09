@@ -300,7 +300,7 @@ def test_an_image_run_takes_its_selectors_and_no_root_or_zone(tmp_path, monkeypa
             return "aid-1"
 
         def log(self, **kw):
-            pass
+            return kw.get("audit_id")  # written
 
     ingest._ingest_plaso_volume(
         None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,
@@ -563,7 +563,7 @@ def _plaso_status_of(tmp_path, monkeypatch, host, jsonl_text=""):
             return "aid-1"
 
         def log(self, **kw):
-            pass
+            return kw.get("audit_id")  # written
 
     ingest._ingest_plaso_volume(
         None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,
@@ -644,7 +644,7 @@ def test_a_new_york_volume_keeps_its_zone_under_a_berlin_override(tmp_path, monk
             return "aid-1"
 
         def log(self, **kw):
-            pass
+            return kw.get("audit_id")  # written
 
     ingest._ingest_plaso_volume(
         None, Audit(), "c1", host, 0, HostResult(hostname="h"), status, lambda *a, **k: None,

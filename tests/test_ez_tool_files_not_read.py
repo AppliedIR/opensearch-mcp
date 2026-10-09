@@ -181,8 +181,8 @@ def test_files_not_read_are_named_when_indexing_then_fails(tmp_path, status_dir)
     (summary,) = [
         c.kwargs["result_summary"]
         for c in audit.log.call_args_list
-        if c.kwargs["tool"] == "ingest_lnk"
-    ]
+        if c.kwargs["tool"] == "ingest_lnk" and (c.kwargs.get("extra") or {}).get("about")
+    ]  # what became of the artifact: the entry about its step
     assert summary == "FAILED: circuit_breaking_exception, 1 not read"
     hosts = [_rebuilt_status_host(h) for h in result.hosts]
     ingest_status.write_status("c1", os.getpid(), "run-unread", "complete", hosts, {}, "")
@@ -221,6 +221,6 @@ def test_the_audit_entry_counts_the_files_not_read(tmp_path, status_dir):
     (summary,) = [
         c.kwargs["result_summary"]
         for c in audit.log.call_args_list
-        if c.kwargs["tool"] == "ingest_lnk"
-    ]
+        if c.kwargs["tool"] == "ingest_lnk" and (c.kwargs.get("extra") or {}).get("about")
+    ]  # what became of the artifact: the entry about its step
     assert "1 not read" in summary

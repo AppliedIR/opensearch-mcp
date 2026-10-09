@@ -54,7 +54,13 @@ def parse_ssh_log(
     actions: list[dict] = []
 
     for log_file in sorted(ssh_dir.rglob("*.log")):
+        from opensearch_mcp import ops
         from opensearch_mcp.paths import relative_evidence_path
+
+        try:
+            step = ops.file_marker(log_file)  # its step, before its records
+        except ops.NoEntry:
+            continue
 
         rel = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
         with open(log_file, encoding="utf-8", errors="replace") as f:
@@ -138,7 +144,7 @@ def parse_ssh_log(
                 msg_hash = hashlib.sha256(message.encode()).hexdigest()[:16]
                 id_input = f"{index_name}:{rel}:{doc['@timestamp']}:{msg_hash}"
                 doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
-                actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
+                actions.append({"_index": index_name, "_id": doc_hash, "_source": doc, **step})
 
                 if len(actions) >= 1000:
                     flushed, bf = flush_bulk(client, actions)

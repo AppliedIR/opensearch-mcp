@@ -8,6 +8,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
+from opensearch_mcp import ops
 from opensearch_mcp.bulk import flush_bulk
 
 
@@ -93,6 +94,11 @@ def parse_wer_dir(
         except Exception:
             skipped += 1
             continue
+        try:
+            step = ops.file_marker(wer_file)  # its step, before its records
+        except ops.NoEntry:
+            skipped += 1
+            continue
 
         from opensearch_mcp.paths import relative_evidence_path
 
@@ -115,7 +121,7 @@ def parse_wer_dir(
         # The file's bytes too: a rebuilt machine can have a different file at the same path.
         id_input = f"{index_name}:{rel}:{_file_sha256(wer_file)}"
         doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
-        actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
+        actions.append({"_index": index_name, "_id": doc_hash, "_source": doc, **step})
 
         if len(actions) >= 100:
             flushed, failed = flush_bulk(client, actions)

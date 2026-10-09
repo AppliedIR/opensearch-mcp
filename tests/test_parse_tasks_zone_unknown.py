@@ -79,6 +79,7 @@ class _Audit:
 
     def log(self, **kw):
         self.logged.append(kw)
+        return kw.get("audit_id")  # written
 
 
 def _custom_artifact(tmp_path, zone, dates, monkeypatch):
@@ -102,7 +103,8 @@ def _custom_artifact(tmp_path, zone, dates, monkeypatch):
             lambda *a, **k: None,
             lambda: None,
         )
-    return sent, status[0]["artifacts"][0], audit.logged[0], result.artifacts[0]
+    # the artifact's outcome is its last entry; each task file's step comes first
+    return sent, status[0]["artifacts"][0], audit.logged[-1], result.artifacts[0]
 
 
 def test_local_dates_with_the_zone_unknown_are_counted_everywhere(tmp_path, monkeypatch, capsys):

@@ -214,17 +214,21 @@ def parse_prefetch(
     tmpdir = Path(tempfile.mkdtemp(prefix="vhir-plaso-prefetch-"))
     try:
         jsonl_file = _run_plaso("prefetch", prefetch_dir, tmpdir)
-        return _ingest_jsonl(
-            jsonl_file,
-            client,
-            index_name,
-            hostname,
-            source_dir=source_file or str(prefetch_dir),
-            ingest_audit_id=ingest_audit_id,
-            pipeline_version=pipeline_version,
-            vss_id=vss_id,
-            host_dict=host_dict,
-        )
+        from opensearch_mcp import ops
+
+        # one step: what Plaso read and the JSONL it wrote, before its records
+        with ops.step(prefetch_dir, outputs=[jsonl_file]) as sid:
+            return _ingest_jsonl(
+                jsonl_file,
+                client,
+                index_name,
+                hostname,
+                source_dir=source_file or str(prefetch_dir),
+                ingest_audit_id=sid,
+                pipeline_version=pipeline_version,
+                vss_id=vss_id,
+                host_dict=host_dict,
+            )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -250,17 +254,21 @@ def parse_srum(
     tmpdir = Path(tempfile.mkdtemp(prefix="vhir-plaso-srum-"))
     try:
         jsonl_file = _run_plaso("esedb/srum", srum_path, tmpdir)
-        return _ingest_jsonl(
-            jsonl_file,
-            client,
-            index_name,
-            hostname,
-            source_dir=source_file or str(srum_path),
-            ingest_audit_id=ingest_audit_id,
-            pipeline_version=pipeline_version,
-            vss_id=vss_id,
-            host_dict=host_dict,
-        )
+        from opensearch_mcp import ops
+
+        # one step: what Plaso read and the JSONL it wrote, before its records
+        with ops.step(srum_path, outputs=[jsonl_file]) as sid:
+            return _ingest_jsonl(
+                jsonl_file,
+                client,
+                index_name,
+                hostname,
+                source_dir=source_file or str(srum_path),
+                ingest_audit_id=sid,
+                pipeline_version=pipeline_version,
+                vss_id=vss_id,
+                host_dict=host_dict,
+            )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -56,15 +56,24 @@ def _run(tmp_path, unreadable=()):
 
     audit = MagicMock()
     audit._next_audit_id.return_value = "aid-1"
+    audit.log.side_effect = lambda **kw: kw["audit_id"]  # written
     client = MagicMock()
     client.count.side_effect = Exception("no index")
+    def plaso(parser, source, tmpdir):  # SRUM's Plaso fallback: its JSONL
+        out = Path(tmpdir) / "out.jsonl"
+        out.write_text("{}\n")
+        return out
+
+    # each step hashes what it reads, before the stubbed parser below it runs
     with (
-        patch("opensearch_mcp.ingest.sha256_file", side_effect=sha256),
+        patch("opensearch_mcp.ops.sha256_file", side_effect=sha256),
         patch("opensearch_mcp.ingest.evtx_truncation", return_value=[]),
         patch("opensearch_mcp.ingest.parse_and_index", return_value=(5, 0, 0)),
         patch("opensearch_mcp.ingest.run_and_ingest", return_value=(7, 0, 0)),
-        patch("opensearch_mcp.parse_srum.parse_srum", return_value=(9, 0, "", "completed", 9)),
-        patch("opensearch_mcp.ingest._run_custom_parser", return_value=(3, 0, 0)),
+        patch("opensearch_mcp.wintools.wintools_available", return_value=False),
+        patch("opensearch_mcp.parse_plaso._run_plaso", side_effect=plaso),
+        patch("opensearch_mcp.parse_plaso._ingest_jsonl", return_value=(9, 0)),
+        patch("opensearch_mcp.parse_w3c.parse_w3c_log", return_value=(3, 0, 0)),
     ):
         ingest(
             hosts=[_host(tmp_path)],
@@ -81,10 +90,11 @@ def _run(tmp_path, unreadable=()):
 
 
 def _hashes(audit, tool):
+    """The hashes each step that read a file of `tool` recorded."""
     return [
         c.kwargs.get("input_sha256s")
         for c in audit.log.call_args_list
-        if c.kwargs.get("tool") == f"ingest_{tool}"
+        if c.kwargs.get("tool") == f"ingest_{tool}" and c.kwargs.get("input_files")
     ]
 
 

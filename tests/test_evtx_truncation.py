@@ -108,14 +108,18 @@ def test_a_cut_file_is_indexed_and_named_in_the_status_and_audit(host):
         "HOST1: 1 evtx file(s) are cut short: records past the cut, and any in a partial "
         f"last chunk, were not indexed (Security.evtx: {cut})"
     ]
-    assert summaries == [f"1206 indexed, 0 skipped, truncated: {cut}"]
+    # the file's step before its records, then what became of it
+    assert summaries == [
+        "recorded before its records were indexed",
+        f"1206 indexed, 0 skipped, truncated: {cut}",
+    ]
 
 
 def test_anchor_an_intact_file_reads_as_before(host):
     _evtx(host.evtx_dir / "Security.evtx", 20, 4096 + 33 * CHUNK)
     _, _, status, summaries = _ingest(host)
     assert not [w for w in status.get("warnings", []) if "cut short" in w]
-    assert summaries == ["1206 indexed, 0 skipped"]
+    assert summaries == ["recorded before its records were indexed", "1206 indexed, 0 skipped"]
 
 
 @pytest.mark.parametrize("hayabusa", [True, False])
