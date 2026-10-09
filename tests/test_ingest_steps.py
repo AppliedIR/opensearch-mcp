@@ -730,7 +730,7 @@ def test_a_case_record_with_no_step_open_is_refused_and_nothing_is_sent(case, mo
 
     sent: list = []
     actions = [{"_index": f"case-{C12}-evtx-0", "_id": "r1", "_source": {"x": 1}}]
-    with wc.writing(_write_ctx(case, monkeypatch, sent)):
+    with wc.writing(_write_ctx(case, monkeypatch, sent)), wc.op(""):  # no step open
         with pytest.raises(wc.NoWriteContext, match="no step is recorded"):
             flush_bulk(MagicMock(), actions)
     assert sent == []

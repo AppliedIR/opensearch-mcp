@@ -73,8 +73,8 @@ def _case_dirs(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _case_for_every_ingest(request, monkeypatch):
-    """Open a unit for writes made outside an ingest run (inner parsers called
-    directly). `@pytest.mark.no_case_dirs` turns this and the case-directory
+    """Open a unit, and a step, for writes made outside an ingest run (inner
+    parsers called directly). `@pytest.mark.no_case_dirs` turns this and the case-directory
     hook off, for rows about a missing case or a write with no run open."""
     from opensearch_mcp import write_context as wc
 
@@ -90,7 +90,8 @@ def _case_for_every_ingest(request, monkeypatch):
     wc._imported.add(default.case_dir)
     wc.set_current(default)
     try:
-        yield
+        with wc.op("opensearch-test-001"):  # and a step its records are written under
+            yield
     finally:
         wc.set_current(None)
 

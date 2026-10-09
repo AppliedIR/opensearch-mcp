@@ -33,13 +33,6 @@ def new_case(name: str | None = None) -> tuple[Path, str]:
     return d, u[:12]
 
 
-@pytest.fixture(autouse=True)
-def _a_step_is_open():
-    """Records here are written under a step, as an ingest writes them."""
-    with wc.op("opensearch-ingest-1-20261009-001"):
-        yield
-
-
 class _Sent:
     """A cluster stand-in for flush_bulk: keeps every action, accepts all."""
 
