@@ -333,13 +333,22 @@ def ingest_memory(
     run_id: str = "",
     pipeline_version: str = "",
     on_progress=None,
-    audit_log=None,
+    audit=None,
     host_dict=None,
+    case_dir=None,
 ) -> dict:
     """Run vol3 plugins and index results.
 
+    Each plugin's run is one step: its entry, written once vol3 has returned
+    and before any of its records is indexed, names the image (by the registry,
+    or by the manifest of the extraction that wrote it) and its place; the
+    plugin's records carry its id. A plugin that fails is that one entry.
+
     Returns dict with per-plugin results.
     """
+    from opensearch_mcp import ops
+    from opensearch_mcp import write_context as wc
+
     if plugins is not None and len(plugins) > 0:
         plugin_list = plugins
     elif tier >= 3:
@@ -351,6 +360,15 @@ def ingest_memory(
 
     source_file = str(image_path)
     results: dict = {}
+    image_in, image_reg = ops.image_input(case_dir, image_path)
+
+    def step(tool: str, params: dict, summary: str) -> str:
+        if audit is None:
+            return ""
+        return ops.write(
+            audit, tool, params=params, summary=summary, inputs=[image_in],
+            input_registered=[image_reg] if image_reg else None,
+        )  # fmt: skip
 
     vol_cmd = _find_vol3()
 
@@ -389,74 +407,56 @@ def ingest_memory(
         if on_progress:
             on_progress("plugin_start", plugin=plugin, hostname=hostname)
 
+        tool = f"ingest_vol3_{suffix}"
+        params = {"plugin": plugin, "image": source_file, "hostname": hostname,
+                  "index_name": index_name, "run_id": run_id}  # fmt: skip
         try:
             records = run_vol3_plugin(image_path, plugin, timeout=timeout)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             results[plugin] = {"status": "failed", "error": str(e)}
-            if audit_log:
-                audit_log(
-                    tool=f"ingest_vol3_{suffix}",
-                    params={
-                        "plugin": plugin,
-                        "image": source_file,
-                        "hostname": hostname,
-                        "index_name": index_name,
-                        "run_id": run_id,
-                    },
-                    result_summary=f"FAILED: {e}",
-                    input_files=[str(image_path)],
-                )
+            step(tool, params, f"FAILED: {e}")  # the plugin's one entry
             if on_progress:
                 on_progress("plugin_failed", plugin=plugin, error=str(e))
             continue
 
         if plugin == "windows.envars":
             observe_envar_names(records)
+        aid = step(tool, params, f"{len(records)} record(s) from vol3, recorded before indexing")
         if not records:
             results[plugin] = {"status": "empty", "indexed": 0}
             if on_progress:
                 on_progress("plugin_done", plugin=plugin, indexed=0)
             continue
+        if audit is not None and not aid:  # its records would carry an id with no entry
+            results[plugin] = {"status": "failed", "error": ops.NO_ENTRY}
+            if on_progress:
+                on_progress("plugin_failed", plugin=plugin, error=ops.NO_ENTRY)
+            continue
 
-        count, bf, implausible = _index_vol3_records(
-            records=records,
-            client=client,
-            index_name=index_name,
-            plugin=plugin,
-            hostname=hostname,
-            source_file=source_file,
-            ingest_audit_id=ingest_audit_id,
-            pipeline_version=pipeline_version,
-            host_dict=host_dict,
-        )
+        with wc.op(aid or ingest_audit_id):
+            count, bf, implausible = _index_vol3_records(
+                records=records,
+                client=client,
+                index_name=index_name,
+                plugin=plugin,
+                hostname=hostname,
+                source_file=source_file,
+                ingest_audit_id=aid or ingest_audit_id,
+                pipeline_version=pipeline_version,
+                host_dict=host_dict,
+            )
         results[plugin] = {
             "status": "complete",
             "indexed": count,
             "bulk_failed": bf,
             "implausible_time": implausible,
         }
-        counts = stored_counts(client, index_name, ingest_audit_id) if ingest_audit_id else {}
+        stamped = aid or ingest_audit_id
+        counts = stored_counts(client, index_name, stamped) if stamped else {}
         results[plugin].update(counts)
-
-        # Per-plugin success audit — run_id + index_name required for
-        # resolver parser_step chaining (manager.py:1057, :1075).
-        # bulk_failed surfaces silent rejection counts per plugin so a
-        # shard-limit issue is visible in the audit trail, not only in
-        # stderr warnings.
-        if audit_log:
-            audit_log(
-                tool=f"ingest_vol3_{suffix}",
-                params={
-                    "plugin": plugin,
-                    "image": source_file,
-                    "hostname": hostname,
-                    "index_name": index_name,
-                    "run_id": run_id,
-                    "bulk_failed": bf,
-                },
-                result_summary=f"{count} indexed, {bf} bulk failed",
-                input_files=[str(image_path)],
-            )
+        if aid and bf:  # rejected records: a later fact about the plugin's step
+            ops.later(audit, aid, tool, f"{count} indexed, {bf} bulk failed",
+                      {**params, "bulk_failed": bf})  # fmt: skip
 
         if on_progress:
             on_progress(

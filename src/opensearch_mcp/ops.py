@@ -90,7 +90,11 @@ def file_input(
     reg = registered(case_dir, path)
     if reg is None:
         if sha256 is None:
-            sha256 = sha256_file(Path(path)) if Path(path).is_file() else ""
+            made = _extracted().get(entry.get("realpath", ""))
+            if made is not None:  # an extracted file: its hash in the extraction's manifest
+                sha256, produced_by = made[0], produced_by or made[1]
+            else:
+                sha256 = sha256_file(Path(path)) if Path(path).is_file() else ""
         entry["sha256"] = sha256
     if produced_by:
         entry["produced_by"] = produced_by
@@ -300,3 +304,57 @@ def file_marker(path, **kw) -> dict:
     if getattr(_tls, "rec", None) is None:
         return {}
     return {STEP_KEY: step_entry(path, **kw)}
+
+
+def _extracted() -> dict:
+    """``{realpath: (sha256, extraction step)}`` of the files this thread's
+    run extracted."""
+    made = getattr(_tls, "extracted", None)
+    if made is None:
+        made = _tls.extracted = {}
+    return made
+
+
+def reset_extracted() -> None:
+    """Forget the run's extracted files (the run is over)."""
+    _tls.extracted = {}
+
+
+def extraction_step(audit, case_dir, archive, dest, command: list[str], params=None) -> str:
+    """Record an archive's extraction, after it and before any member is used:
+    the archive (by the registry when registered, never hashed again), the
+    command (it never carries the password: 7z reads that on stdin) and an
+    output manifest of every regular file extracted, hashed. A later step that
+    reads one of them takes its hash from the manifest. Raises NoEntry when
+    the entry couldn't be written."""
+    entry, reg = file_input(case_dir, archive)
+    outs = [output(p) for p in sorted(Path(dest).rglob("*")) if p.is_file() and not p.is_symlink()]
+    aid = write(
+        audit,
+        "extract_archive",
+        params={"archive": str(archive), "dest": str(dest), "command": [str(c) for c in command],
+                **(params or {})},
+        summary=f"{len(outs)} file(s) extracted",
+        inputs=[entry],
+        input_registered=[reg] if reg else None,
+        outputs=outs,
+    )  # fmt: skip
+    if not aid:
+        raise NoEntry(NO_ENTRY)
+    made = _extracted()
+    for o in outs:
+        made[os.path.realpath(o["path"])] = (o["sha256"], aid)
+    return aid
+
+
+def image_input(case_dir, path) -> tuple[dict, dict | None]:
+    """An image a tool reads whole: by the registry, or by the manifest of the
+    extraction that wrote it; otherwise its place only (an image is large and
+    is not hashed here)."""
+    entry = place(path)
+    reg = registered(case_dir, path)
+    if reg is None:
+        made = _extracted().get(entry.get("realpath", ""))
+        if made is not None:
+            entry["sha256"], entry["produced_by"] = made
+    return entry, reg

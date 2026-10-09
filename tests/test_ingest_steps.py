@@ -401,3 +401,81 @@ def test_srum_through_wintools_records_the_csv_its_records_come_from(case, monke
     assert i["produced_by"] == [staged["audit_id"], "wintools-steve-20261009-007"]
     assert staged["inputs"][0]["sha256"] == _sha(srum)
     assert [Path(o["path"]).name for o in staged["outputs"]] == ["SRUDB.dat"]
+
+
+def _memory_run(
+    case: Path, image: Path, monkeypatch, plugins="windows.pslist,windows.netscan", vol3=None
+):
+    """cmd_ingest_memory with vol3 a fake (each plugin gives one record naming
+    the image it read); each flush notes its records' id and the entries
+    written by then."""
+    from opensearch_mcp import ingest_cli
+    from opensearch_mcp import parse_memory as pm
+
+    flushed, called = [], []
+
+    def flush(client, actions):
+        flushed.append((actions[0]["_source"]["vhir.ingest_audit_id"], len(_entries(case)),
+                        [a["_source"]["Image"] for a in actions]))  # fmt: skip
+        return len(actions), 0
+
+    monkeypatch.setattr(pm, "_find_vol3", lambda: "vol")
+    monkeypatch.setattr(pm.subprocess, "run", MagicMock(return_value=MagicMock(stderr="")))
+    monkeypatch.setattr(
+        pm, "run_vol3_plugin",
+        vol3 or (lambda image_path, plugin, timeout=0:
+                 [{"PID": 4, "Plugin": plugin, "Image": image_path.name}]),
+    )  # fmt: skip
+    monkeypatch.setattr(pm, "flush_bulk", flush)
+    monkeypatch.setattr(pm, "stored_counts", lambda *a, **k: {})
+    monkeypatch.setattr("opensearch_mcp.gateway.call_tool", lambda n, a, **k: called.append(n))
+    for name in ("_ensure_case_active", "_preflight_shard_capacity", "write_status", "_gate"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda c: None)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(ingest_cli, "_case_dir_for", lambda c: case)
+    monkeypatch.setattr(ingest_cli, "get_client", MagicMock())
+    args = argparse.Namespace(path=str(image), hostname="WKS1", case=None, tier=1,
+                              plugins=plugins, yes=True, timeout=60)  # fmt: skip
+    code = 0
+    try:
+        ingest_cli.cmd_ingest_memory(args)
+    except SystemExit as e:
+        code = e.code or 0
+    return flushed, called, code
+
+
+def test_each_vol3_plugin_is_its_own_step_naming_the_registered_image(case, monkeypatch):
+    image = case / "evidence" / "wks1.raw"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"MEM" * 1000)
+    digest = _register(case, image)
+    flushed, _, code = _memory_run(case, image, monkeypatch)
+    assert code == 0 and len(flushed) == 2
+    ids = [aid for aid, _, _ in flushed]
+    assert len(set(ids)) == 2  # one step per plugin
+    for aid, written_by_then, _ in flushed:
+        (step,) = [e for e in _entries(case)[:written_by_then] if e["audit_id"] == aid]
+        assert step["tool"].startswith("ingest_vol3_")
+        assert step["input_registered"] == [{"path": str(image.resolve()), "sha256": digest}]
+        assert _place_ok(step["inputs"][0], image) and "sha256" not in step["inputs"][0]
+    entries = _entries(case)
+    assert not [a for a, n in Counter(e["audit_id"] for e in entries).items() if n > 1]
+    assert [e for e in entries if e["tool"] == "idx_ingest_memory"] == [entries[0]]  # the run
+
+
+def test_a_failed_plugin_is_its_one_entry(case, monkeypatch):
+    image = case / "evidence" / "wks1.raw"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"MEM" * 1000)
+    _register(case, image)
+
+    def vol3(image_path, plugin, timeout=0):
+        if plugin == "windows.netscan":
+            raise RuntimeError("vol3 exited 1")
+        return [{"PID": 4, "Plugin": plugin, "Image": image_path.name}]
+
+    flushed, _, _ = _memory_run(case, image, monkeypatch, vol3=vol3)
+    assert len(flushed) == 1
+    netscan = [e for e in _entries(case) if e["params"].get("plugin") == "windows.netscan"]
+    assert len(netscan) == 1 and _summary(netscan[0]) == "FAILED: vol3 exited 1"

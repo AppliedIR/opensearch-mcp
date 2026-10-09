@@ -3033,7 +3033,6 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     _preflight_shard_capacity(client, "memory", case_id=case_id, run_id=run_id)
 
     audit = _run_writer()
-    aid = audit._next_audit_id()
 
     # Build plugin checklist for status
     status_plugins = [{"name": p, "status": "pending"} for p in plugin_list]
@@ -3102,15 +3101,6 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                     break
             print(f"FAILED: {kw['error']}")
 
-    def _audit_log(tool, params, result_summary, input_files=None):
-        audit.log(
-            tool=tool,
-            audit_id=aid,
-            params=params,
-            result_summary=result_summary,
-            input_files=input_files,
-        )
-
     # Initial status
     _write_mem_status("running")
 
@@ -3159,12 +3149,12 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
             tier=tier,
             plugins=plugins,
             timeout=timeout,
-            ingest_audit_id=aid,
             run_id=run_id,
             pipeline_version=f"opensearch-mcp-{__version__}",
             on_progress=_progress,
-            audit_log=_audit_log,
+            audit=audit,
             host_dict=_mem_host_dict,
+            case_dir=case_dir,
         )
     except ShardCapacityExhausted as e:
         # Distinct status so monitoring can differentiate capacity
@@ -3189,23 +3179,6 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
 
     # Final status
     _write_mem_status("complete")
-
-    # Audit the overall operation
-    # Aggregate bulk rejections across all plugins for visibility.
-    total_bulk_failed = sum(r.get("bulk_failed", 0) for r in results.values())
-    audit.log(
-        tool="idx_ingest_memory",
-        audit_id=aid,
-        params={
-            "image": str(image_path),
-            "hostname": hostname,
-            "tier": tier,
-            "run_id": run_id,
-            "bulk_failed": total_bulk_failed,
-        },
-        result_summary=(f"{total} indexed, {len(failed)} failed, {total_bulk_failed} bulk failed"),
-        input_files=[str(image_path)],
-    )
 
     # Clean up extracted temp dir (multi-GB memory image)
     if _mem_extract_dir and _mem_extract_dir.exists():
