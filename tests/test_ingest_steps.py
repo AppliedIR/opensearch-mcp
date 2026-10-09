@@ -927,6 +927,31 @@ def test_a_threat_intel_run_is_a_step_written_before_its_first_write(case, monke
     assert result["reference_op"] == ref["audit_id"] and ref["reference"]["source"]
 
 
+def test_a_threat_intel_run_records_the_providers_that_answered_and_when(case, monkeypatch):
+    from opensearch_mcp import threat_intel
+
+    client = MagicMock()
+    client.update_by_query.return_value = {"updated": 1, "version_conflicts": 0}
+    monkeypatch.setattr("opensearch_mcp.case_scope.case_read_scope", lambda c, cl: "case-x-*")
+    monkeypatch.setattr("opensearch_mcp.write_context.case_dir_for", lambda c: case)
+    monkeypatch.setattr(threat_intel, "extract_unique_iocs",
+                        lambda *a, **k: {"ip": {"8.8.8.8": {("source.ip", "8.8.8.8")}},
+                                         "hash": {}, "domain": {}})  # fmt: skip
+    entry = {"ioc_value": "8.8.8.8", "ioc_type": "ip", "outcome": "NO_MATCH",
+             "opencti": {"outcome": "NO_MATCH"}, "misp": {"outcome": "NO_MATCH"}}  # fmt: skip
+    replies = {"8.8.8.8": {"entry": entry, "confirmed": True}}
+    monkeypatch.setattr(threat_intel, "batch_lookup", lambda *a, **k: replies)
+    monkeypatch.setattr(threat_intel, "_removed_providers", lambda *a: ({}, False))
+    monkeypatch.setattr(threat_intel, "_removed_warnings", lambda *a: [])
+    with pytest.raises(threat_intel.IntelEnrichmentHalted):  # no coverage: halted, still recorded
+        threat_intel.enrich_case(client, "acme")
+    (ref,) = [e for e in _entries(case) if e["tool"] == "enrich_intel" and "reference" in e]
+    (fact,) = [e for e in _entries(case) if e.get("about") == ref["audit_id"]]
+    lookups = fact["lookups"]
+    assert lookups["providers"] == ["misp", "opencti"]
+    assert lookups["started"] <= lookups["finished"] and lookups["started"].endswith("+00:00")
+
+
 def test_a_returned_record_names_its_enrichment_groups_and_their_steps(monkeypatch):
     from opensearch_mcp import server as srv
 

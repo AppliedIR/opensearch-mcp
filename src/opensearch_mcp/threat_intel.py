@@ -1195,7 +1195,9 @@ def enrich_case(
 
     if on_progress:
         on_progress("looking_up", total=total_iocs)
+    started = datetime.now(timezone.utc).isoformat()
     results = batch_lookup(iocs, on_progress=on_progress)
+    finished = datetime.now(timezone.utc).isoformat()
     coverage = results.pop("_intel_coverage", {})
 
     outcomes = [r["entry"]["outcome"] if r["confirmed"] else UNAVAILABLE for r in results.values()]
@@ -1207,6 +1209,13 @@ def enrich_case(
     # A provider the replies no longer carry loses its stored answers on every
     # document this run stamps: say so before it happens
     configured = {n for r in results.values() for n in _blocks(r["entry"])}
+    # The providers' own versions aren't known: the step's later fact names
+    # the providers that replied and when they were asked
+    ops.later(
+        audit, ref, "enrich_intel", "providers looked up",
+        extra={"lookups": {"providers": sorted(configured), "started": started,
+                           "finished": finished}},
+    )  # fmt: skip
     warnings = (
         _removed_warnings(*_removed_providers(client, index_pattern, configured))
         if configured
