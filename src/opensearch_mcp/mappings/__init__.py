@@ -79,6 +79,10 @@ HOST_KEY_FIELDS: dict[str, dict] = {
     "vhir.unit": {"type": "keyword"},
     "vhir.prev_ids": {"type": "keyword"},
     "vhir.rid": {"type": "keyword", "index": False},
+    # the registered evidence a record's run was given, and the record's hash
+    "vhir.original.path": {"type": "keyword"},
+    "vhir.original.sha256": {"type": "keyword"},
+    "vhir.content_hash": {"type": "keyword"},
 }
 
 

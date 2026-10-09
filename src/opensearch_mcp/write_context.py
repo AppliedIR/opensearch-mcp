@@ -483,7 +483,10 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
 
 
 # What the stamp owns, dotted and nested: evidence that carries them is restamped.
-_OWNED = ("host.id", "vhir.host_key", "vhir.unit", "vhir.rid", "vhir.prev_ids")
+_OWNED = (
+    "host.id", "vhir.host_key", "vhir.unit", "vhir.rid", "vhir.prev_ids",
+    "vhir.original.path", "vhir.original.sha256", "vhir.content_hash",
+)  # fmt: skip
 
 
 def _stamped_here(action: dict, src: dict) -> bool:
@@ -495,7 +498,10 @@ def _stamped_here(action: dict, src: dict) -> bool:
 
 
 # Field names the stamp owns, at any depth of the subtree they belong to.
-_RESERVED = {"vhir": {"host_key", "unit", "rid", "prev_ids"}, "host": {"id"}}
+_RESERVED = {
+    "vhir": {"host_key", "unit", "rid", "prev_ids", "original", "content_hash"},
+    "host": {"id"},
+}
 
 
 def _drop_owned(src: dict, resent: bool = False) -> int:

@@ -835,3 +835,31 @@ def test_a_non_object_evtx_data_goes_to_data_raw_as_the_pipeline_writes_it():
     obj = {"winlog.event_data": {"Data": {"Name": "a"}}}
     _normalise_data(obj)
     assert obj == {"winlog.event_data": {"Data": {"Name": "a"}}}  # an object stays
+
+
+def test_every_template_maps_the_original_and_content_hash_as_keywords():
+    from opensearch_mcp import mappings as m
+
+    files = [m._EVTX_TEMPLATE_FILE] + [m._MAPPINGS_DIR / f for _, f in m._TEMPLATES_REGISTRY]
+    assert len(files) == 16
+    for path in files:
+        props = m.with_host_key_fields(m._load_json(path))["template"]["mappings"]["properties"]
+        for field in ("vhir.original.path", "vhir.original.sha256", "vhir.content_hash"):
+            assert props[field] == {"type": "keyword"}, (path.name, field)
+
+
+def test_what_evidence_says_for_the_stamped_fields_is_removed_and_replaced(case, monkeypatch):
+    from opensearch_mcp.bulk import flush_bulk
+
+    sent: list = []
+    monkeypatch.setattr(wc, "REMOVED", {})  # this write's count only
+    action = {"_index": f"case-{C12}-evtx-0", "_id": "r1", "_source": {
+        "x": 1, "vhir.content_hash": "forged", "vhir.original.path": "/forged",
+        "vhir": {"original": {"sha256": "forged"}},
+    }}  # fmt: skip
+    with wc.writing(_write_ctx(case, monkeypatch, sent)), wc.op("opensearch-ingest-1-001"):
+        flush_bulk(MagicMock(), [action])
+    src = sent[0]["_source"]
+    assert "vhir" not in src and "vhir.original.path" not in src  # no run root: none stamped
+    assert src["vhir.content_hash"] == _spec_hash(src) != "forged"
+    assert wc.removed_note(c12=C12) == "3 reserved identity fields removed from evidence"
