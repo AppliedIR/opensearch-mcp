@@ -90,6 +90,37 @@ def test_a_fetched_event_records_its_ingest(os_, monkeypatch):
     assert "result_ingests" not in doc
 
 
+def _stamped(n, aid):
+    hit = _hit(n, aid)
+    hit["_source"].update({"vhir.content_hash": f"{n:064x}", "vhir.original.sha256": "ab" * 32})
+    return hit
+
+
+def test_a_search_records_each_record_it_returned_and_how_many_carry_no_ingest(os_):
+    c, logged = os_
+    _search(c, [_stamped(1, "opensearch-ex-20261009-001"), _stamped(2, None)])
+    params = logged[0]["params"]
+    assert params["result_ingests"] == ["opensearch-ex-20261009-001"]
+    assert params["result_ingests_missing"] == 1  # never dropped silently
+    assert params["result_docs"] == [
+        {"_index": INDEX, "_id": "d1", "ingest_audit_id": "opensearch-ex-20261009-001",
+         "content_hash": f"{1:064x}", "original_sha256": "ab" * 32},
+        {"_index": INDEX, "_id": "d2", "ingest_audit_id": "",
+         "content_hash": f"{2:064x}", "original_sha256": "ab" * 32},
+    ]  # fmt: skip
+
+
+def test_a_fetched_event_records_its_record(os_, monkeypatch):
+    c, logged = os_
+    c.get.return_value = _stamped(1, "opensearch-ex-20261009-004")
+    monkeypatch.setattr(srv, "_resolve_index", lambda *a, **k: (INDEX, None))
+    srv.idx_get_event(event_id="d1", index=INDEX)
+    (doc,) = logged[0]["params"]["result_docs"]
+    assert doc["_id"] == "d1" and doc["content_hash"] == f"{1:064x}"
+    assert doc["ingest_audit_id"] == "opensearch-ex-20261009-004"
+    assert "result_ingests_missing" not in logged[0]["params"]
+
+
 def _summary(ids=(), missing=0, other=0, **own):
     return {
         "hits": {"total": {"value": 9}, "hits": []},

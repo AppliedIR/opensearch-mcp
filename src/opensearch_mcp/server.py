@@ -869,20 +869,44 @@ def _ingest_params(result: dict) -> dict:
     return out
 
 
-def _result_ingests(sources: list) -> list[str]:
-    """The distinct `vhir.ingest_audit_id` values of the returned records,
-    sorted: the parser entries that wrote them, recorded in the audit entry so
-    a finding citing these results traces to the files they came from."""
-    ids = set()
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        aid = src.get("vhir.ingest_audit_id")
-        if aid is None and isinstance(src.get("vhir"), dict):
-            aid = src["vhir"].get("ingest_audit_id")
+def _field(src: dict, dotted: str):
+    """`dotted` in a record, given dotted or nested."""
+    if dotted in src:
+        return src[dotted]
+    node = src
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _hit_params(hits: list) -> dict:
+    """What a query returned, for its audit entry: the ingests its records
+    came from, how many carry none (never dropped silently), and each record
+    (its index, id, ingest, content hash and original) so a finding citing it
+    can be checked against the stored record."""
+    ids: set = set()
+    missing = 0
+    docs = []
+    for h in hits:
+        src = h.get("_source") if isinstance(h.get("_source"), dict) else {}
+        aid = _field(src, "vhir.ingest_audit_id")
         if isinstance(aid, str) and aid:
             ids.add(aid)
-    return sorted(ids)
+        else:
+            missing += 1
+        docs.append({
+            "_index": h.get("_index", ""),
+            "_id": h.get("_id", ""),
+            "ingest_audit_id": aid if isinstance(aid, str) else "",
+            "content_hash": _field(src, "vhir.content_hash") or "",
+            "original_sha256": _field(src, "vhir.original.sha256") or "",
+        })  # fmt: skip
+    out: dict = {"result_ingests": sorted(ids), "result_docs": docs}
+    if missing:
+        out["result_ingests_missing"] = missing
+    return out
 
 
 @server.tool()
@@ -1015,7 +1039,7 @@ def idx_search(
             "index": requested,
             "scope": index,
             "limit": limit,
-            "result_ingests": _result_ingests([h.get("_source") for h in result["hits"]["hits"]]),
+            **_hit_params(result["hits"]["hits"]),
         },  # fmt: skip
         result_summary=f"{total} total, {len(docs)} returned",
     )
@@ -1180,7 +1204,7 @@ def idx_get_event(
         params={
             "event_id": event_id,
             "index": index,
-            "result_ingests": _result_ingests([result.get("_source")]),
+            **_hit_params([result]),
         },  # fmt: skip
         result_summary=f"doc {event_id}",
     )
