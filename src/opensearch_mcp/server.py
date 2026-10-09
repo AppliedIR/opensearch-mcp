@@ -900,6 +900,20 @@ def _logged_query(resp: dict, **entry) -> dict:
     return out
 
 
+def _related_doc_params(client, related: list[dict]) -> dict:
+    """The documents the findings matched, as a search's records are recorded
+    (ingest, content hash, original), read with one mget."""
+    docs = [{"_index": r["index"], "_id": d} for r in related for d in r["related_doc_ids"]]
+    if not docs:
+        return {}
+    fields = ["vhir.ingest_audit_id", "vhir.content_hash", "vhir.original.sha256"]
+    try:
+        got = client.mget(body={"docs": docs}, _source_includes=fields)
+    except Exception as e:  # recorded, not dropped: the findings still name them
+        return {"result_docs_error": str(e)[:200]}
+    return _hit_params([d for d in got.get("docs", []) if d.get("found")])
+
+
 def _field(src: dict, dotted: str):
     """`dotted` in a record, given dotted or nested."""
     if dotted in src:
@@ -3591,6 +3605,7 @@ def idx_list_detections(
 
     sev_filter = severity.lower() if severity else ""
     findings = []
+    related: list[dict] = []  # each finding's documents, for its audit entry
     for finding in response.get("findings", []):
         rules = []
         for q in finding.get("queries", []):
@@ -3615,6 +3630,9 @@ def idx_list_detections(
                 "matched_docs": len(finding.get("related_doc_ids", [])),
             }
         )
+        doc_ids = list(finding.get("related_doc_ids") or [])
+        related.append({"id": finding.get("id"), "index": finding.get("index"),
+                        "related_doc_ids": doc_ids})  # fmt: skip
 
         if len(findings) >= limit:
             break
@@ -3654,6 +3672,8 @@ def idx_list_detections(
             "detector_type": detector_type,
             "limit": limit,
             "offset": offset,
+            "result_findings": related,
+            **_related_doc_params(client, related),
         },
         result_summary=f"{len(findings)} findings",
     )

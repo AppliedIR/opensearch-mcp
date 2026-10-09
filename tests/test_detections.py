@@ -453,3 +453,34 @@ class TestDetectionsRecordWhatTheyMatched:
         assert resp["error"] == "Security Analytics plugin not available"
         assert entry["tool"] == "idx_list_detections"
         assert resp["audit_id"] == entry["audit_id"]
+
+    def test_each_finding_s_documents_are_recorded_with_their_ingest_and_hash(self, mock_client):
+        idx = "case-0123abcdef01-evtx-0"
+        mock_client.transport.perform_request.return_value = {
+            "total_findings": 2,
+            "findings": [_make_finding("f-1", index=idx, doc_ids=["d1", "d2"]),
+                         _make_finding("f-2", index=idx, doc_ids=["d3"])],
+        }  # fmt: skip
+        src = {"vhir.ingest_audit_id": "ingest-1", "vhir.content_hash": "c" * 64,
+               "vhir.original.sha256": "a" * 64}  # fmt: skip
+        mock_client.mget.return_value = {"docs": [
+            {"_index": idx, "_id": "d1", "found": True, "_source": src},
+            {"_index": idx, "_id": "d2", "found": True, "_source": {}},
+            {"_index": idx, "_id": "d3", "found": False},
+        ]}  # fmt: skip
+        _, logged = self._logged(mock_client)
+        (entry,) = logged
+        params = entry["params"]
+        assert params["result_findings"] == [
+            {"id": "f-1", "index": idx, "related_doc_ids": ["d1", "d2"]},
+            {"id": "f-2", "index": idx, "related_doc_ids": ["d3"]},
+        ]
+        (call,) = mock_client.mget.call_args_list  # one mget for every document
+        assert call.kwargs["body"] == {
+            "docs": [{"_index": idx, "_id": d} for d in ("d1", "d2", "d3")]
+        }
+        assert params["result_ingests"] == ["ingest-1"] and params["result_ingests_missing"] == 1
+        assert params["result_docs"][0] == {
+            "_index": idx, "_id": "d1", "ingest_audit_id": "ingest-1",
+            "content_hash": "c" * 64, "original_sha256": "a" * 64,
+        }  # fmt: skip
