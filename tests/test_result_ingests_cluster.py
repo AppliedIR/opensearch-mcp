@@ -8,6 +8,7 @@ import pytest
 from test_host_keys_cluster import cases, client, write  # noqa: F401
 
 from opensearch_mcp import server as srv
+from opensearch_mcp import write_context as wc
 
 pytestmark = pytest.mark.integration
 
@@ -15,12 +16,13 @@ A, B = "opensearch-ex-20261008-001", "opensearch-ex-20261008-002"
 
 
 def test_each_summary_tool_logs_the_ingests_it_counted(client, cases, monkeypatch):  # noqa: F811
-    case, _ = cases("ri")
-    docs = {}
-    for n, aid in enumerate([A, A, A, B, B, None]):
-        docs[str(n)] = {"@timestamp": "2026-10-08T00:00:00Z", "event.code": "4624",
-                        **({"vhir.ingest_audit_id": aid} if aid else {})}  # fmt: skip
-    write(client, case, "hosts/RD01", "RD01", docs)
+    case, c12 = cases("ri")
+    doc = {"@timestamp": "2026-10-08T00:00:00Z", "event.code": "4624"}
+    for step, rids in ((A, "012"), (B, "34")):  # each ingest's records under its own step
+        with wc.op(step):
+            write(client, case, "hosts/RD01", "RD01", {r: dict(doc) for r in rids})
+    # a record with no ingest id, as one stored before steps were recorded
+    client.index(index=f"case-{c12}-evtx-0", id="5", body=dict(doc), refresh=True)
     monkeypatch.setattr(srv, "_get_active_case", lambda: case.name)
     logged = []
     monkeypatch.setattr(srv.audit, "log", lambda **kw: logged.append(kw))

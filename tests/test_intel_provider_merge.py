@@ -352,7 +352,14 @@ def test_the_warning_reaches_the_status_the_audit_and_the_console(
         quick.setattr(
             ingest_cli,
             "AuditWriter",
-            lambda **k: type("A", (), {"log": lambda self, **kw: logged.append(kw)})(),
+            lambda **k: type(
+                "A",
+                (),
+                {
+                    "_next_audit_id": lambda self: "opensearch-ingest-1-001",
+                    "log": lambda self, **kw: logged.append(kw) or kw["audit_id"],
+                },
+            )(),
         )
         ingest_cli.cmd_enrich_intel(argparse.Namespace(case=case_id, force=False, dry_run=False))
         (status,) = idx_ingest_status(case_id=case_id)["ingests"]

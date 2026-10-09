@@ -261,7 +261,7 @@ def test_a_summary_of_an_ingested_case_is_unchanged(tools):
     summary = srv.idx_case_summary(case_id=f"{tag}-mix")
     assert sorted(summary["hosts"]) == ["newhost", "oldhost"]
     assert summary["total_docs"] == 11
-    assert "error" not in summary and summary["audit_id"] == "aid-1"
+    assert "error" not in summary and summary["audit_id"].startswith("opensearch-")
 
 
 # A field that is ip in some indices and keyword in others

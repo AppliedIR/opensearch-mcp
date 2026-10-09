@@ -444,7 +444,13 @@ def test_two_runs_give_the_same_stamps(triage):
     first = case.stamp("registry", {"match_all": {}}) + case.stamp("evtx", {"match_all": {}})
     result = run(case)
     second = case.stamp("registry", {"match_all": {}}) + case.stamp("evtx", {"match_all": {}})
-    assert first == second
+
+    def verdicts(stamps):  # each run stamps its own step: the verdicts are what must agree
+        return [{k: v for k, v in s.items() if k != "op_id"} for s in stamps]
+
+    assert verdicts(first) == verdicts(second)
+    ops_ = lambda stamps: {s["op_id"] for s in stamps if s}  # noqa: E731
+    assert len(ops_(first)) == len(ops_(second)) == 1 and ops_(first) != ops_(second)
     assert result.get("_cleared", {}).get("cleared", 0) == 0  # the second run retires nothing
 
 

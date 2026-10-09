@@ -139,7 +139,10 @@ class TestAHaltedRunThatStamped:
             for log in (tmp_path / "audit").glob("*.jsonl")
             for line in log.read_text().splitlines()
         ]
-        (record,) = [r for r in records if r["tool"] == "enrich_intel"]
+        # the run's reference step, then what it did: an entry about that step
+        (ref,) = [r for r in records if r["tool"] == "enrich_intel" and "reference" in r]
+        (record,) = [r for r in records if r["tool"] == "enrich_intel" and "about" in r]
+        assert record["about"] == ref["audit_id"]
         assert record["params"]["case_id"] == case_id
         summary = record["result_summary"]["value"]
         # the unavailable IOC's document gets its UNAVAILABLE entry too

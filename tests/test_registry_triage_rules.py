@@ -437,8 +437,13 @@ def test_an_enrichment_run_is_a_step_and_every_triage_write_stamps_its_id(monkey
     assert ref["reference"]["source"] and "opensearch-mcp" in ref["reference"]["source_version"]
     stamping = [b for b, _ in calls if "ctx._source['triage." in str(b["script"]["source"])]
     assert stamping  # the persistence rules stamp
+    import re
+
+    sets = re.compile(r"ctx\._source\['triage\.(?!op_id')\w+'\]\s*=(?!=)")
     for body in stamping:
+        source = body["script"]["source"]
         assert body["script"]["params"]["op_id"] == ref["audit_id"]
-        assert body["script"]["source"].endswith("ctx._source['triage.op_id'] = params.op_id")
+        for m in sets.finditer(source):  # the id is set just before each triage field
+            assert source[: m.start()].endswith("ctx._source['triage.op_id'] = params.op_id; ")
     clears = [b for b, _ in calls if b not in stamping]
     assert all("triage.op_id" in b["script"]["params"]["f"] for b in clears)  # cleared too

@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -441,11 +442,15 @@ def reference_step(audit, tool: str, source: str, source_version: str, params: d
     return aid
 
 
-class StampingClient:
-    """An OpenSearch client whose update_by_query scripts that set a `triage.*`
-    field also stamp `triage.op_id`: the enrichment step that wrote them."""
+# An assignment to a triage field (not a comparison, not the op id itself)
+_SETS_TRIAGE = re.compile(r"ctx\._source\['triage\.(?!op_id')\w+'\]\s*=(?!=)")
+_STAMP = "ctx._source['triage.op_id'] = params.op_id; "
 
-    _SETS_TRIAGE = "ctx._source['triage."
+
+class StampingClient:
+    """An OpenSearch client whose update_by_query scripts stamp `triage.op_id`,
+    the enrichment step, wherever they set a `triage.*` field: just before
+    each such assignment, so a record the script leaves alone isn't stamped."""
 
     def __init__(self, client, op_id: str):
         self._client, self.op_id = client, op_id
@@ -456,12 +461,11 @@ class StampingClient:
     def update_by_query(self, *args, **kw):
         body = kw.get("body")
         script = body.get("script") if isinstance(body, dict) else None
-        if isinstance(script, dict) and self._SETS_TRIAGE in str(script.get("source", "")):
-            script = {**script, "params": {**(script.get("params") or {}), "op_id": self.op_id}}
-            script["source"] = (
-                str(script["source"]).rstrip().rstrip(";")
-                + "; ctx._source['triage.op_id'] = params.op_id"
-            )
+        source = str(script.get("source", "")) if isinstance(script, dict) else ""
+        if _SETS_TRIAGE.search(source):
+            params = {**(script.get("params") or {}), "op_id": self.op_id}
+            stamped = _SETS_TRIAGE.sub(lambda m: _STAMP + m.group(0), source)
+            script = {**script, "params": params, "source": stamped}
             kw["body"] = {**body, "script": script}
         return self._client.update_by_query(*args, **kw)
 
