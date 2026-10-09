@@ -258,6 +258,37 @@ def current_recording():
     return getattr(_tls, "rec", None)
 
 
+def staging_step(copied: list[tuple], tool: str, wintools_audit_id: str = "") -> str:
+    """Record a staging copy (for a Windows tool to read over the share) as a
+    step: each original read (the registry's when registered, otherwise
+    hashed with its place) and each copy written, hashed; and the wintools
+    call's own audit id when it ran first. Raises NoEntry as step_entry."""
+    rec = getattr(_tls, "rec", None)
+    if rec is None:
+        raise NoEntry(f"staging for {tool}: no ingest run is recording its steps")
+    audit, case_dir, _tool, params = rec
+    inputs, regs, outputs = [], [], []
+    for original, copy in copied:
+        entry, reg = file_input(case_dir, original)
+        inputs.append(entry)
+        if reg:
+            regs.append(reg)
+        outputs.append(output(copy))
+    aid = write(
+        audit,
+        "stage_for_wintools",
+        params={**params, "tool": tool},
+        summary=f"{len(outputs)} file(s) staged for {tool}",
+        inputs=inputs,
+        input_registered=regs or None,
+        outputs=outputs,
+        extra={"wintools_audit_id": wintools_audit_id} if wintools_audit_id else None,
+    )
+    if not aid:
+        raise NoEntry(f"staging for {tool}: {NO_ENTRY}")
+    return aid
+
+
 def file_marker(path, **kw) -> dict:
     """For a parser that batches several files' records: write ``path``'s step
     (under the open recording) and return the marker its records carry, so each

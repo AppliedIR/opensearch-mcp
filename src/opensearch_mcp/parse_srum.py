@@ -120,12 +120,15 @@ def _parse_srum_wintools(
     # Stage SRUM to case extractions (on the SMB share) for ESE recovery
     srum_workdir = case_dir / "extractions" / "srum" / hostname
     srum_workdir.mkdir(parents=True, exist_ok=True)
+    copied = [(srum_path, srum_workdir / "SRUDB.dat")]
     shutil.copy2(srum_path, srum_workdir / "SRUDB.dat")
 
     # Also copy SRU log files if present (needed for full recovery)
     sru_dir = srum_path.parent
     for log_file in sru_dir.glob("SRU*.log"):
         shutil.copy2(log_file, srum_workdir / log_file.name)
+        copied.append((log_file, srum_workdir / log_file.name))
+    produced = [ops.staging_step(copied, "SrumECmd.exe")]  # then the wintools call's
 
     # Pass the staged path — run_tool_and_get_csv handles UNC conversion
     csv_files = run_tool_and_get_csv(
@@ -134,6 +137,7 @@ def _parse_srum_wintools(
         evidence_path=str(srum_workdir / "SRUDB.dat"),
         purpose="Parse SRUM database for resource usage monitoring",
         hostname=hostname,
+        produced_by=produced,
     )
 
     if not csv_files:
@@ -142,7 +146,7 @@ def _parse_srum_wintools(
     total_count = 0
     total_failed = 0
     for csv_file in csv_files:
-        with ops.step(csv_file) as sid:
+        with ops.step(csv_file, produced_by=list(produced)) as sid:
             count, _sk, bf = ingest_csv(
                 csv_path=csv_file,
                 client=client,

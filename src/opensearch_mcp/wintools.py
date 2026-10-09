@@ -59,12 +59,17 @@ def run_tool_and_get_csv(
     extra_args: list[str] | None = None,
     purpose: str = "",
     hostname: str = "",
+    produced_by: list | None = None,
 ) -> list[Path]:
     """Run an EZ tool on Windows and return paths to CSV output files.
 
     Automatically stages evidence to the SMB share if the path is
     outside the case directory (e.g., inside a VHDX temp mount).
     Converts all paths to UNC for Windows accessibility.
+
+    ``produced_by`` gets the ids of what produced the CSVs: the staging step
+    (which records the copy and keeps the wintools call's audit id) and the
+    wintools call's audit id.
     """
     import shutil
 
@@ -94,8 +99,14 @@ def run_tool_and_get_csv(
         staging.mkdir(parents=True, exist_ok=True)
         if evidence.is_dir():
             shutil.copytree(str(evidence), str(staging), dirs_exist_ok=True)
+            copied = [
+                (f, staging / f.relative_to(evidence))
+                for f in sorted(evidence.rglob("*"))
+                if f.is_file() and not f.is_symlink()
+            ]
         else:
             shutil.copy2(str(evidence), str(staging / evidence.name))
+            copied = [(evidence, staging / evidence.name)]
         # Convert staged path to UNC
         rel = str(staging.relative_to(case_dir))
         unc_evidence = _to_unc_path(rel)
@@ -115,6 +126,15 @@ def run_tool_and_get_csv(
         purpose=purpose or f"Run {tool_binary}",
         input_files=[unc_evidence],
     )
+    called = str(result.get("audit_id") or "") if isinstance(result, dict) else ""
+    if needs_staging:
+        from opensearch_mcp import ops
+
+        staged = ops.staging_step(copied, tool_binary, wintools_audit_id=called)
+        if produced_by is not None:
+            produced_by.append(staged)
+    if produced_by is not None and called:
+        produced_by.append(called)
 
     if not result.get("success"):
         error = result.get("error", result.get("stderr", "unknown error"))

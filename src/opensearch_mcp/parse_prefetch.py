@@ -97,12 +97,14 @@ def _parse_prefetch_wintools(
     from opensearch_mcp.parse_csv import ingest_csv
     from opensearch_mcp.wintools import run_tool_and_get_csv
 
+    produced: list[str] = []  # the staging step and the wintools call
     csv_files = run_tool_and_get_csv(
         tool_binary="PECmd.exe",
         input_flag="-d",
         evidence_path=str(prefetch_dir),
         purpose="Parse prefetch files for execution history",
         hostname=hostname,
+        produced_by=produced,
     )
 
     if not csv_files:
@@ -111,7 +113,7 @@ def _parse_prefetch_wintools(
     total_count = 0
     total_failed = 0
     for csv_file in csv_files:
-        with ops.step(csv_file) as sid:
+        with ops.step(csv_file, produced_by=list(produced)) as sid:
             count, _sk, bf = ingest_csv(
                 csv_path=csv_file,
                 client=client,

@@ -283,3 +283,79 @@ def test_srum_s_plaso_fallback_step_names_the_database_and_the_jsonl_it_wrote(ca
     assert step["inputs"][0]["sha256"] == _sha(srum) and _place_ok(step["inputs"][0], srum)
     path, digest = written["jsonl"]
     assert [(o["path"], o["sha256"]) for o in step["outputs"]] == [(path, digest)]
+
+
+def _fake_wintools(case: Path, monkeypatch, csv_name: str = "SrumECmd_Output.csv"):
+    """run_windows_command through the gateway: it writes the tool's CSV into
+    the case's extractions and answers with its own audit id."""
+    from opensearch_mcp import wintools
+
+    def run(command, purpose, input_files=None, timeout=300):
+        out = case / "extractions" / "wintools-out"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / csv_name).write_text("a,b\n1,2\n")
+        return {"success": True, "audit_id": "wintools-steve-20261009-007",
+                "csv_output_dir": "extractions/wintools-out"}  # fmt: skip
+
+    monkeypatch.setattr(wintools, "run_windows_tool", run)
+    monkeypatch.setattr(wintools, "_to_unc_path", lambda rel: f"\\\\sift\\cases\\{rel}")
+    return case / "extractions" / "wintools-out" / csv_name
+
+
+def test_a_wintools_staging_copy_is_a_step_that_keeps_the_wintools_call_s_id(
+    case, tmp_path, monkeypatch
+):
+    from opensearch_mcp import ops
+    from opensearch_mcp.wintools import run_tool_and_get_csv
+
+    prefetch = tmp_path / "mnt" / "vol1" / "Prefetch"  # outside the case: staged
+    prefetch.mkdir(parents=True)
+    (prefetch / "CMD.EXE-1.pf").write_bytes(b"pf1")
+    _fake_wintools(case, monkeypatch, "PECmd_Output.csv")
+    produced: list = []
+    with ops.recording(AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_prefetch", {}):
+        run_tool_and_get_csv("PECmd.exe", "-d", str(prefetch), hostname="HOST1",
+                             produced_by=produced)  # fmt: skip
+    (step,) = [e for e in _entries(case) if e["tool"] == "stage_for_wintools"]
+    original = prefetch / "CMD.EXE-1.pf"
+    (i,) = step["inputs"]
+    assert i["sha256"] == _sha(original) and _place_ok(i, original)
+    (o,) = step["outputs"]
+    copy = case / "extractions" / "Prefetch-HOST1" / "CMD.EXE-1.pf"
+    assert (o["path"], o["sha256"]) == (str(copy), _sha(copy))
+    assert step["wintools_audit_id"] == "wintools-steve-20261009-007"
+    assert produced == [step["audit_id"], "wintools-steve-20261009-007"]
+
+
+def test_srum_through_wintools_records_the_csv_its_records_come_from(case, monkeypatch):
+    from opensearch_mcp import parse_csv
+    from opensearch_mcp.ingest import _ingest_plaso_artifact
+    from opensearch_mcp.results import HostResult
+
+    srum = case / "evidence" / "HOST1" / "SRUDB.dat"
+    srum.parent.mkdir(parents=True)
+    srum.write_bytes(b"esedb")
+    csv = _fake_wintools(case, monkeypatch)
+    seen = []
+    monkeypatch.setattr("opensearch_mcp.wintools.wintools_available", lambda: True)
+    monkeypatch.setattr(
+        parse_csv, "ingest_csv",
+        lambda **kw: seen.append((kw["csv_path"], kw["ingest_audit_id"])) or (2, 0, 0),
+    )  # fmt: skip
+    monkeypatch.setattr(ingest, "_write_ingest_manifest", lambda *a, **k: None)
+    monkeypatch.setattr(ingest, "_safe_count", lambda *a, **k: 0)
+    monkeypatch.setattr(wc, "index_name", lambda t: f"case-{C12}-{t}-0")
+    monkeypatch.setattr(wc, "current", lambda: MagicMock(unit="u1"))
+    host = DiscoveredHost(hostname="HOST1", volume_root=srum.parent)
+    _ingest_plaso_artifact(
+        "srum", srum, MagicMock(), AuditWriter(mcp_name="opensearch-ingest-1"), "acme", host, 0,
+        HostResult(hostname="HOST1"), [], lambda *a, **k: None, lambda: None,
+    )  # fmt: skip
+    ((read, aid),) = seen
+    (step,) = [e for e in _entries(case) if e["audit_id"] == aid]
+    (i,) = step["inputs"]
+    assert (Path(i["path"]), i["sha256"]) == (csv, _sha(csv))  # the CSV, not SRUDB.dat
+    (staged,) = [e for e in _entries(case) if e["tool"] == "stage_for_wintools"]
+    assert i["produced_by"] == [staged["audit_id"], "wintools-steve-20261009-007"]
+    assert staged["inputs"][0]["sha256"] == _sha(srum)
+    assert [Path(o["path"]).name for o in staged["outputs"]] == ["SRUDB.dat"]
