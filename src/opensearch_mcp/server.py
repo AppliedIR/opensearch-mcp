@@ -896,6 +896,7 @@ def _logged_query(resp: dict, **entry) -> dict:
     writer = audit
     if audit_dir is not None:
         writer = AuditWriter(mcp_name=audit.mcp_name, audit_dir=str(audit_dir))
+        entry.setdefault("case_id", Path(audit_dir).parent.name)  # that case's, too
     logged = writer.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
     if logged is None:
         if saved:  # an entry that wasn't written leaves no file of its own

@@ -241,6 +241,11 @@ def test_a_query_s_entry_stays_in_the_case_its_id_was_minted_for(os_, tmp_path, 
     a, b = tmp_path / "case-a", tmp_path / "case-b"
     for d in (a, b):
         (d / "audit").mkdir(parents=True)
+    home = tmp_path / "home"
+    (home / ".vhir").mkdir(parents=True)
+    (home / ".vhir" / "active_case").write_text(str(b))  # b is active by the time it logs
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("VHIR_ACTIVE_CASE", raising=False)
     writer = AuditWriter("opensearch-mcp")
     dirs = iter([a / "audit", b / "audit", b / "audit"])  # switched after the first
     monkeypatch.setattr(writer, "_get_audit_dir", lambda *x, **k: next(dirs))
@@ -251,6 +256,6 @@ def test_a_query_s_entry_stays_in_the_case_its_id_was_minted_for(os_, tmp_path, 
     (entry,) = [
         json.loads(x) for x in (a / "audit" / "opensearch-mcp.jsonl").read_text().splitlines()
     ]
-    assert entry["audit_id"] == resp["audit_id"]
+    assert entry["audit_id"] == resp["audit_id"] and entry["case_id"] == "case-a"
     assert (a / "extractions" / resp["audit_id"] / "response.json").exists()
     assert not (b / "audit" / "opensearch-mcp.jsonl").exists()
