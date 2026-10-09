@@ -408,6 +408,13 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
     steps = [str(a.pop(STEP_KEY, "") or "") for a in actions]
     ctx = current()
     if ctx is not None:
+        open_step = current_op()
+        prefix = f"case-{ctx.c12}-"
+        for n, action in enumerate(actions):  # no record without the step that read it
+            if str(action.get("_index", "")).startswith(prefix) and not (steps[n] or open_step):
+                raise NoWriteContext(
+                    f"refusing to write to {action['_index']}: no step is recorded for its records"
+                )
         if client is not None and ctx.case_dir not in _imported:
             from opensearch_mcp.case_scope import ensure_v1_imported
 
@@ -431,13 +438,16 @@ STEP_KEY = "_vhir_op"
 
 def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None) -> None:
     """Set the machine, unit and id fields of every action into ``ctx``'s case,
-    and the step of a record whose parser batches several files (``steps``)."""
+    and the step each record was written under: its own when its parser
+    batches several files (``steps``), else the step open on this thread,
+    whatever id the parser gave it."""
     prefix = f"case-{ctx.c12}-"
+    open_step = current_op()
     for n, action in enumerate(actions):
         if not str(action.get("_index", "")).startswith(prefix):
             continue
         src = action.setdefault("_source", {})
-        step = steps[n] if steps and n < len(steps) else ""
+        step = (steps[n] if steps and n < len(steps) else "") or open_step
         if step:  # the step that read the record's file
             src["vhir.ingest_audit_id"] = step
         rid = action.get("_id")

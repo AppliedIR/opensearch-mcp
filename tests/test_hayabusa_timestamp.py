@@ -90,7 +90,11 @@ def hayabusa(tmp_path, monkeypatch):
         fixture.write_text(csv_text)
         client = _Client()
         host = SimpleNamespace(hostname="host-a", evtx_dir=str(evtx), volume_root=evtx)
-        result = ingest.run_hayabusa_batch([host], client, "rowcase")
+        audit = SimpleNamespace(  # the run's writer: the step its alerts are written under
+            _next_audit_id=lambda: "opensearch-ingest-1-20261009-001",
+            log=lambda **kw: kw["audit_id"],
+        )
+        result = ingest.run_hayabusa_batch([host], client, "rowcase", audit=audit)
         assert result == {"host-a": len(ROWS)}, result
         return client.sent
 

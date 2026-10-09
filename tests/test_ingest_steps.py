@@ -700,3 +700,37 @@ def test_each_shadow_copy_store_is_a_mount_point_with_its_store(case, tmp_path, 
     ]
     for p in points:
         assert set(p) == {"target", "realpath", "st_dev", "mnt_id", "offset", "store"}
+
+
+def _write_ctx(case, monkeypatch, sent):
+    from opensearch_mcp import bulk
+
+    monkeypatch.setattr(bulk.helpers, "bulk", _bulk_into(sent))
+    monkeypatch.setattr(wc, "prepare_index", lambda client, index: None)
+    monkeypatch.setattr(wc, "note_second_copy", lambda client, ctx, index: None)
+    monkeypatch.setattr(wc, "_imported", {case})
+    return wc.WriteContext(case_dir=case, c12=C12, unit="u-host1", unit_raw="HOST1")
+
+
+def test_a_record_carries_the_step_open_when_it_is_written_whatever_its_parser_said(
+    case, monkeypatch
+):
+    from opensearch_mcp.bulk import flush_bulk
+
+    sent: list = []
+    action = {"_index": f"case-{C12}-evtx-0", "_id": "r1",
+              "_source": {"vhir.ingest_audit_id": "the-parser-s-own", "x": 1}}  # fmt: skip
+    with wc.writing(_write_ctx(case, monkeypatch, sent)), wc.op("opensearch-ingest-1-001"):
+        flush_bulk(MagicMock(), [action])
+    assert sent[0]["_source"]["vhir.ingest_audit_id"] == "opensearch-ingest-1-001"
+
+
+def test_a_case_record_with_no_step_open_is_refused_and_nothing_is_sent(case, monkeypatch):
+    from opensearch_mcp.bulk import flush_bulk
+
+    sent: list = []
+    actions = [{"_index": f"case-{C12}-evtx-0", "_id": "r1", "_source": {"x": 1}}]
+    with wc.writing(_write_ctx(case, monkeypatch, sent)):
+        with pytest.raises(wc.NoWriteContext, match="no step is recorded"):
+            flush_bulk(MagicMock(), actions)
+    assert sent == []
