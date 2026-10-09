@@ -422,3 +422,56 @@ def umount_entry(audit, realpath: str, mount_id) -> str:
         summary="unmounted",
         extra={"umount": {"realpath": realpath, "mnt_id": mount_id}},
     )
+
+
+def reference_step(audit, tool: str, source: str, source_version: str, params: dict) -> str:
+    """An enrichment run's step, written before its first write: the source it
+    consults and that source's version (or database version). Its id is what
+    the run stamps on every field group it writes. Raises NoEntry when it
+    couldn't be written."""
+    aid = write(
+        audit,
+        tool,
+        params=params,
+        summary="recorded before its first write",
+        extra={"reference": {"source": source, "source_version": source_version}},
+    )
+    if not aid:
+        raise NoEntry(NO_ENTRY)
+    return aid
+
+
+class StampingClient:
+    """An OpenSearch client whose update_by_query scripts that set a `triage.*`
+    field also stamp `triage.op_id`: the enrichment step that wrote them."""
+
+    _SETS_TRIAGE = "ctx._source['triage."
+
+    def __init__(self, client, op_id: str):
+        self._client, self.op_id = client, op_id
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def update_by_query(self, *args, **kw):
+        body = kw.get("body")
+        script = body.get("script") if isinstance(body, dict) else None
+        if isinstance(script, dict) and self._SETS_TRIAGE in str(script.get("source", "")):
+            script = {**script, "params": {**(script.get("params") or {}), "op_id": self.op_id}}
+            script["source"] = (
+                str(script["source"]).rstrip().rstrip(";")
+                + "; ctx._source['triage.op_id'] = params.op_id"
+            )
+            kw["body"] = {**body, "script": script}
+        return self._client.update_by_query(*args, **kw)
+
+
+def case_writer(audit, case_dir):
+    """A writer for `case_dir`'s audit (whichever case is active), under
+    `audit`'s name; `audit` itself when the case has no folder."""
+    if case_dir is None:
+        return audit
+    from sift_common.audit import AuditWriter
+
+    name = getattr(audit, "mcp_name", None) or "opensearch-mcp"
+    return AuditWriter(mcp_name=name, case_dir_resolver=lambda: case_dir)

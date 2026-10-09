@@ -903,6 +903,7 @@ def stamp_documents(
     ioc_results: dict[str, dict],
     origins: dict[str, set[tuple[str, str]]],
     force: bool = False,
+    op_id: str = "",
 ) -> tuple[int, int, int]:
     """Stamp each looked-up IOC's entry on the documents carrying it.
 
@@ -969,6 +970,8 @@ def stamp_documents(
         entry.setdefault("reason", "")
         if not entry["reason"]:
             entry.pop("reason")
+        if op_id:  # the enrichment step that wrote this provider entry
+            entry["op_id"] = op_id
         try:
             response = client.update_by_query(
                 index=index_pattern,
@@ -1129,16 +1132,28 @@ def enrich_case(
     force: bool = False,
     on_progress=None,
     include_filesystem: bool = False,
+    audit=None,
 ) -> dict:
     """Full enrichment pipeline for a case.
 
     `include_filesystem` also looks up bulk filesystem hashes (bodyfile).
+    The run is a reference step, written before its first write; every IOC
+    entry it stamps carries the step's id (`op_id`).
 
-    Returns summary dict.
+    Returns summary dict, with the step's id as `reference_op`.
     """
+    from opensearch_mcp import __version__, ops
     from opensearch_mcp.case_scope import case_read_scope
 
     index_pattern = case_read_scope(case_id, client)
+    from opensearch_mcp.write_context import case_dir_for
+
+    audit = ops.case_writer(audit, case_dir_for(case_id))  # the enriched case's audit
+    ref = ops.reference_step(
+        audit, "enrich_intel", "threat intel (lookup_ioc through the gateway)",
+        f"opensearch-mcp {__version__}; provider versions unknown",
+        {"case_id": case_id, "force": force, "include_filesystem": include_filesystem},
+    )  # fmt: skip
 
     if on_progress:
         on_progress("extracting", message="Extracting unique IOCs from indexed data")
@@ -1175,6 +1190,7 @@ def enrich_case(
             "status": "no_iocs",
             "message": "No external IOCs found in indexed data",
             "legacy_stamps_cleared": legacy_cleared,
+            "reference_op": ref,
         }
 
     if on_progress:
@@ -1201,10 +1217,11 @@ def enrich_case(
         on_progress("stamping", matched=matched)
     origins = {value: where for found in iocs.values() for value, where in found.items()}
     updated, conflicts, failed_stamps = stamp_documents(
-        client, index_pattern, results, origins, force=force
+        client, index_pattern, results, origins, force=force, op_id=ref
     )
 
     counts = {
+        "reference_op": ref,
         "iocs_extracted": total_iocs,
         "iocs_looked_up": len(results),
         "matched": matched,

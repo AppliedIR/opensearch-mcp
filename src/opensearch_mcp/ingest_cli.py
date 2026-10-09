@@ -1814,7 +1814,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         print(f"{kw['enriched']} enriched")
 
                 triage_results = enrich_remote(
-                    client=client, case_id=case_id, on_progress=_triage_progress
+                    client=client, case_id=case_id, on_progress=_triage_progress, audit=audit
                 )
                 if "_gateway" in triage_results:
                     print(f"  Triage: {triage_results['_gateway']}")
@@ -2876,6 +2876,7 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
                 force=force,
                 on_progress=_progress,
                 include_filesystem=include_filesystem,
+                audit=_run_writer(),
             )
     except Exception as e:  # noqa: BLE001
         # Terminal failed write with the real exception text so
@@ -2925,7 +2926,8 @@ def cmd_enrich_intel(args: argparse.Namespace, examiner: str = "unknown") -> Non
 
 
 def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str = "") -> None:
-    """The audit record of an enrichment run that stamped documents."""
+    """What an enrichment run that stamped documents did: an entry about its
+    reference step, which was written before its first write."""
     summary = (
         f"{result['documents_updated']} docs updated, "
         f"{result.get('matched', 0)} matched, {result.get('not_found', 0)} not found, "
@@ -2935,12 +2937,11 @@ def _audit_enrichment(case_id: str, force: bool, result: dict, incomplete: str =
         summary += "; " + " ".join(result["warnings"])
     if incomplete:
         summary += f"; incomplete: {incomplete[:300]}"
-    audit = _run_writer()
-    audit.log(
-        tool="enrich_intel",
-        params={"case_id": case_id, "force": force},
-        result_summary=summary,
-    )
+    from opensearch_mcp import ops
+
+    # what the run did: a later fact about its reference step
+    ops.later(_run_writer(), result.get("reference_op", ""), "enrich_intel", summary,
+              {"case_id": case_id, "force": force})  # fmt: skip
 
 
 # ---------------------------------------------------------------------------

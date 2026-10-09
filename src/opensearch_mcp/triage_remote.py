@@ -94,17 +94,34 @@ def enrich_remote(
     client: OpenSearch,
     case_id: str,
     on_progress=None,
+    audit=None,
 ) -> dict:
     """Run batch triage enrichment against indexed data.
 
+    The run is a reference step, written before its first write: the rules
+    and windows-triage, with their versions. Every triage field group it
+    writes carries the step's id (`triage.op_id`).
+
     Returns dict with counts per artifact type.
     """
+    from opensearch_mcp import ops
     from opensearch_mcp.case_scope import CaseScopeError, scope_of
 
     try:
         scope_of(case_id)
     except CaseScopeError as e:
         return {"error": str(e)}
+    from opensearch_mcp.write_context import case_dir_for
+
+    audit = ops.case_writer(audit, case_dir_for(case_id))  # the enriched case's audit
+    try:
+        ref = ops.reference_step(
+            audit, "enrich_triage", "windows-triage and registry persistence rules",
+            _triage_versions(), {"case_id": case_id},
+        )  # fmt: skip
+    except ops.NoEntry as e:
+        return {"error": f"Not enriched: {e}"}
+    client = ops.StampingClient(client, ref)
     case_ix = _CaseIndices(case_id, client)
 
     # Refresh indices so aggregations see all recently ingested docs
@@ -113,7 +130,7 @@ def enrich_remote(
     except Exception:
         pass
 
-    results: dict = {}
+    results: dict = {"_reference_op": ref}
 
     # Stamps this version no longer writes are removed (events other than process
     # creation and 7045, and values of a service key other than ImagePath);
@@ -244,6 +261,22 @@ def enrich_remote(
 # ---------------------------------------------------------------------------
 # File enrichment (check_file)
 # ---------------------------------------------------------------------------
+
+
+def _triage_versions() -> str:
+    """The rules' version (this package's) and windows-triage's database
+    version when the gateway answers; "unknown" for what doesn't."""
+    from opensearch_mcp import __version__
+
+    triage = "unknown"
+    if gateway_available():
+        try:
+            stats = call_tool("get_db_stats", {}, timeout=10)
+            if isinstance(stats, dict):
+                triage = str(stats.get("db_version") or stats.get("version") or "unknown")
+        except Exception:
+            pass
+    return f"rules opensearch-mcp {__version__}; windows-triage db {triage}"
 
 
 def _enrich_file_artifact(
@@ -510,6 +543,7 @@ _TRIAGE_FIELDS = [
     "triage.confidence",
     "triage.lolbin",
     "triage.expected_paths",
+    "triage.op_id",  # the enrichment step that wrote them
 ]
 _AMCACHE_HASH_LIMIT = 31457280  # Amcache's SHA1 covers only the first 30 MiB of a file
 

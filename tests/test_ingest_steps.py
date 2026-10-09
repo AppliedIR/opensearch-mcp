@@ -894,3 +894,45 @@ def test_installing_the_templates_gives_existing_case_indices_the_stamp_fields()
     assert result["stamp_fields"]["patched"] == [f"case-{C12}-evtx-0"]
     bodies = [c.kwargs["body"] for c in client.indices.put_mapping.call_args_list]
     assert {"properties": {f: {"type": "keyword"} for f in mappings.STAMP_FIELDS}} in bodies
+
+
+def test_each_threat_intel_entry_stamped_carries_its_enrichment_step(monkeypatch):
+    from opensearch_mcp import threat_intel
+
+    client = MagicMock()
+    client.update_by_query.return_value = {"updated": 1, "version_conflicts": 0}
+    results = {"8.8.8.8": {"entry": {"ioc_value": "8.8.8.8", "ioc_type": "ip",
+                                     "outcome": "NO_MATCH"}, "confirmed": True}}  # fmt: skip
+    origins = {"8.8.8.8": {("source.ip", "8.8.8.8")}}
+    threat_intel.stamp_documents(client, "case-x-*", results, origins, op_id="opensearch-mcp-007")
+    (call,) = client.update_by_query.call_args_list
+    assert call.kwargs["body"]["script"]["params"]["entry"]["op_id"] == "opensearch-mcp-007"
+
+
+def test_a_threat_intel_run_is_a_step_written_before_its_first_write(case, monkeypatch):
+    from opensearch_mcp import threat_intel
+
+    seen = []
+    client = MagicMock()
+    client.update_by_query.side_effect = lambda **kw: (
+        seen.append([e["tool"] for e in _entries(case)]) or {"updated": 0}
+    )
+    monkeypatch.setattr("opensearch_mcp.case_scope.case_read_scope", lambda c, cl: "case-x-*")
+    monkeypatch.setattr("opensearch_mcp.write_context.case_dir_for", lambda c: case)
+    monkeypatch.setattr(threat_intel, "extract_unique_iocs",
+                        lambda *a, **k: {"ip": {}, "hash": {}, "domain": {}})  # fmt: skip
+    result = threat_intel.enrich_case(client, "acme", force=True)  # force: a legacy clear
+    assert seen and seen[0] == ["enrich_intel"]  # the step, before the first write
+    (ref,) = [e for e in _entries(case) if e["tool"] == "enrich_intel"]
+    assert result["reference_op"] == ref["audit_id"] and ref["reference"]["source"]
+
+
+def test_a_returned_record_names_its_enrichment_groups_and_their_steps(monkeypatch):
+    from opensearch_mcp import server as srv
+
+    hit = {"_index": "i", "_id": "d1", "_source": {
+        "vhir.ingest_audit_id": "ing-1", "triage.op_id": "tri-1",
+        "threat_intel.iocs": [{"ioc_value": "x", "op_id": "ti-2"}, {"ioc_value": "y"}],
+    }}  # fmt: skip
+    (doc,) = srv._hit_params([hit])["result_docs"]
+    assert doc["enrichment"] == {"triage": "tri-1", "threat_intel": ["ti-2"]}

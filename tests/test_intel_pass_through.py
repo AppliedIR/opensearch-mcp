@@ -334,7 +334,14 @@ def test_the_cli_reports_matched_not_found_and_unavailable(quick, capsys, tmp_pa
     quick.setattr(
         ingest_cli,
         "AuditWriter",
-        lambda **k: type("A", (), {"log": lambda self, **kw: logged.append(kw)})(),
+        lambda **k: type(
+            "A",
+            (),
+            {
+                "_next_audit_id": lambda self: "opensearch-ingest-1-001",
+                "log": lambda self, **kw: logged.append(kw) or kw["audit_id"],
+            },
+        )(),
     )
     ingest_cli.cmd_enrich_intel(argparse.Namespace(case="C-1", force=False, dry_run=False))
     out = capsys.readouterr().out

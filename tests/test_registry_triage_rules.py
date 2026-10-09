@@ -397,7 +397,10 @@ class _OpenSearch:
 
 def test_empty_registry_loops_say_why(monkeypatch):
     monkeypatch.setattr(triage_remote, "gateway_available", lambda: True)
-    monkeypatch.setattr(triage_remote, "call_tool", lambda *a, **k: pytest.fail("no lookup"))
+    monkeypatch.setattr(  # the database version only: no lookup
+        triage_remote, "call_tool",
+        lambda name, *a, **k: {} if name == "get_db_stats" else pytest.fail("no lookup"),
+    )  # fmt: skip
     res = triage_remote.enrich_remote(_OpenSearch(["case-c1-registry-h"]), "c1")
     for name in ("registry_svcs", "registry_activestub", "registry_netsh"):
         assert res[name]["status"] == "empty", (name, res[name])
@@ -409,3 +412,33 @@ def test_a_failing_rule_is_counted_failed_not_without_data():
     rp = triage_remote._enrich_registry_persistence(client, "c1")
     assert (rp["status"], rp["rules_failed"]) == ("failed", 1)
     assert rp["rules_without_data"] == [r for r in ALL_RULES if r != "BootExecute"]
+
+
+def test_an_enrichment_run_is_a_step_and_every_triage_write_stamps_its_id(monkeypatch):
+    import json
+    import uuid
+
+    from opensearch_mcp.write_context import case_dir_for
+
+    monkeypatch.setattr(triage_remote, "gateway_available", lambda: False)
+    cid = f"steps-{uuid.uuid4().hex[:8]}"  # a case of its own: its audit holds this run only
+    audit = case_dir_for(cid) / "audit"
+    calls = []
+
+    class Recording(_OpenSearch):
+        def update_by_query(self, index, body, **kw):
+            written = sorted(audit.glob("*.jsonl"))
+            entries = [json.loads(x) for f in written for x in f.read_text().splitlines()]
+            calls.append((body, entries))
+            return {"updated": 0, "total": 0}
+
+    triage_remote.enrich_remote(Recording([f"case-{cid}-registry-h", f"case-{cid}-evtx-h"]), cid)
+    (ref,) = [e for e in calls[0][1] if e["tool"] == "enrich_triage"]  # before the first write
+    assert ref["reference"]["source"] and "opensearch-mcp" in ref["reference"]["source_version"]
+    stamping = [b for b, _ in calls if "ctx._source['triage." in str(b["script"]["source"])]
+    assert stamping  # the persistence rules stamp
+    for body in stamping:
+        assert body["script"]["params"]["op_id"] == ref["audit_id"]
+        assert body["script"]["source"].endswith("ctx._source['triage.op_id'] = params.op_id")
+    clears = [b for b, _ in calls if b not in stamping]
+    assert all("triage.op_id" in b["script"]["params"]["f"] for b in clears)  # cleared too

@@ -906,12 +906,29 @@ def _related_doc_params(client, related: list[dict]) -> dict:
     docs = [{"_index": r["index"], "_id": d} for r in related for d in r["related_doc_ids"]]
     if not docs:
         return {}
-    fields = ["vhir.ingest_audit_id", "vhir.content_hash", "vhir.original.sha256"]
+    fields = ["vhir.ingest_audit_id", "vhir.content_hash", "vhir.original.sha256",
+              "triage.op_id", "threat_intel.iocs"]  # fmt: skip
     try:
         got = client.mget(body={"docs": docs}, _source_includes=fields)
     except Exception as e:  # recorded, not dropped: the findings still name them
         return {"result_docs_error": str(e)[:200]}
     return _hit_params([d for d in got.get("docs", []) if d.get("found")])
+
+
+def _enrichment_ops(src: dict) -> dict:
+    """The enrichment groups on a record and the step that wrote each: the
+    triage group's `triage.op_id`, each threat-intel entry's `op_id`."""
+    out: dict = {}
+    triage = _field(src, "triage.op_id")
+    if isinstance(triage, str) and triage:
+        out["triage"] = triage
+    iocs = _field(src, "threat_intel.iocs")
+    ids = sorted({e["op_id"] for e in iocs if isinstance(e, dict) and e.get("op_id")}) if (
+        isinstance(iocs, list)
+    ) else []  # fmt: skip
+    if ids:
+        out["threat_intel"] = ids
+    return out
 
 
 def _field(src: dict, dotted: str):
@@ -941,13 +958,17 @@ def _hit_params(hits: list) -> dict:
             ids.add(aid)
         else:
             missing += 1
-        docs.append({
+        doc = {
             "_index": h.get("_index", ""),
             "_id": h.get("_id", ""),
             "ingest_audit_id": aid if isinstance(aid, str) else "",
             "content_hash": _field(src, "vhir.content_hash") or "",
             "original_sha256": _field(src, "vhir.original.sha256") or "",
-        })  # fmt: skip
+        }
+        enrichment = _enrichment_ops(src)
+        if enrichment:  # the enrichment groups on it, with the step that wrote each
+            doc["enrichment"] = enrichment
+        docs.append(doc)
     out: dict = {"result_ingests": sorted(ids), "result_docs": docs}
     if missing:
         out["result_ingests_missing"] = missing
@@ -2877,10 +2898,10 @@ def idx_enrich_triage(
     case_dir = case_dir_for(cid)
     try:
         if case_dir is None:
-            results = enrich_remote(client, cid)
+            results = enrich_remote(client, cid, audit=audit)
         else:
             with case_writes(case_dir):
-                results = enrich_remote(client, cid)
+                results = enrich_remote(client, cid, audit=audit)
     except HostOpRefused as e:
         return {"error": f"Not enriched: {e}"}
 
@@ -2896,11 +2917,11 @@ def idx_enrich_triage(
     }
     if failed:
         resp["failed_artifacts"] = failed
-    aid = audit.log(
-        tool="idx_enrich_triage",
-        params={"case_id": cid},
-        result_summary=f"{total_enriched} docs enriched",
-    )
+    from opensearch_mcp import ops
+
+    # what the run did: a later fact about its reference step
+    aid = ops.later(audit, results.get("_reference_op", ""), "idx_enrich_triage",
+                    f"{total_enriched} docs enriched", {"case_id": cid})  # fmt: skip
     if aid:
         resp["audit_id"] = aid
     return resp
