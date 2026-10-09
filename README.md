@@ -43,7 +43,7 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 
 Every parser produces:
 - Deterministic content-based document IDs (re-ingest = zero duplicates)
-- Full provenance: `host.name`, `host.id`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.original.path` and `vhir.original.sha256`, `vhir.content_hash`, `vhir.parse_method`, `pipeline_version`
+- Full provenance: `host.name`, `host.id`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.content_hash`, `vhir.parse_method`, `pipeline_version`, and `vhir.original.path` and `vhir.original.sha256` when the ingest started from registered evidence
 - Proper `@timestamp` with timezone handling (local-time artifacts require `--source-timezone`)
 
 ### Query (17 MCP Tools)
