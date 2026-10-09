@@ -275,7 +275,7 @@ def _get_os():
             try:
                 from opensearch_mcp.mappings import ensure_winlog_pipeline
 
-                _install_result = ensure_winlog_pipeline(_client)
+                _install_result = ensure_winlog_pipeline(_client, audit)
                 if _install_result.get("status") != "ok":
                     logger.warning(
                         "winlog pipeline install reported %s: %s",
@@ -1482,7 +1482,7 @@ def idx_install_pipelines() -> dict:
     from opensearch_mcp.mappings import ensure_winlog_pipeline
 
     client = _get_os()
-    result = ensure_winlog_pipeline(client)
+    result = ensure_winlog_pipeline(client, audit)
 
     # Surface the non-evtx template install outcome in the summary so
     # operators running this manually see both halves of the work.

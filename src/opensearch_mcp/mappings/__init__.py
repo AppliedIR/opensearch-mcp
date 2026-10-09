@@ -131,7 +131,45 @@ def install_component_templates(client) -> dict[str, Any]:
     return results
 
 
-def install_all_templates(client) -> dict[str, Any]:
+# The stamp's own fields: what an index made before they were mapped lacks
+STAMP_FIELDS = ("vhir.original.path", "vhir.original.sha256", "vhir.content_hash")
+
+
+def put_stamp_fields(client, audit=None) -> dict[str, Any]:
+    """Map the stamp's fields `keyword` on every open case index, one
+    put_mapping each (one index's conflict doesn't stop the others), recorded
+    as one step when `audit` is given."""
+    results: dict[str, Any] = {"patched": [], "failed": []}
+    props = {f: HOST_KEY_FIELDS[f] for f in STAMP_FIELDS}
+    try:
+        rows = client.cat.indices(index="case-*", h="index", format="json",
+                                  expand_wildcards="open")  # fmt: skip
+    except Exception as e:
+        results["failed"].append({"index": "case-*", "error": str(e)})
+        rows = []
+    names = [r.get("index") for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    for index in sorted(n for n in names if n):
+        try:
+            client.indices.put_mapping(index=index, body={"properties": props})
+            results["patched"].append(index)
+        except Exception as e:
+            logger.warning("put_stamp_fields: %s failed: %s", index, e)
+            results["failed"].append({"index": index, "error": str(e)})
+    if audit is not None and (results["patched"] or results["failed"]):
+        from opensearch_mcp import ops
+
+        ops.write(
+            audit,
+            "put_stamp_fields",
+            params={"fields": list(STAMP_FIELDS), "indices": results["patched"]},
+            summary=f"{len(results['patched'])} case index(es) given the stamp's fields"
+            + (f", {len(results['failed'])} failed" if results["failed"] else ""),
+            extra={"failed": results["failed"]} if results["failed"] else None,
+        )
+    return results
+
+
+def install_all_templates(client, audit=None) -> dict[str, Any]:
     """Idempotent install of all non-evtx case-* index templates.
 
     Installs component templates FIRST (they're referenced by composable
@@ -182,6 +220,7 @@ def install_all_templates(client) -> dict[str, Any]:
     except Exception as e:  # never cost the install its per-template results
         logger.warning("install_all_templates: patching existing indices failed: %s", e)
         results["patched_indices"] = {"patched": [], "failed": [{"index": "*", "error": str(e)}]}
+    results["stamp_fields"] = put_stamp_fields(client, audit)  # indices made before them
     return results
 
 
@@ -250,7 +289,7 @@ def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]
     return results
 
 
-def ensure_winlog_pipeline(client) -> dict[str, Any]:
+def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
     """Install winlog_data_normalize_v1 pipeline + update evtx template.
 
     Order (IMPORTANT — Rev 6 correctness correction):
@@ -277,7 +316,7 @@ def ensure_winlog_pipeline(client) -> dict[str, Any]:
     # conflict, simulate-validation failure) or the whole function
     # raises. This matches CR's 2026-04-21 recommendation.
     try:
-        other_templates_result = install_all_templates(client)
+        other_templates_result = install_all_templates(client, audit)
     except Exception as _ot_e:
         logger.warning("install_all_templates unexpected failure: %s", _ot_e)
         other_templates_result = {

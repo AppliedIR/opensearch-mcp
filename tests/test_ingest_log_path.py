@@ -129,7 +129,7 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(srv, "get_client", lambda: mock.MagicMock())
     monkeypatch.setattr(srv, "_spawn_ingest", lambda *a, **k: mock.MagicMock(pid=4242))
     monkeypatch.setattr(shard_capacity, "check_shard_headroom", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(mappings, "ensure_winlog_pipeline", lambda c: {"status": "ok"})
+    monkeypatch.setattr(mappings, "ensure_winlog_pipeline", lambda c, audit=None: {"status": "ok"})
     monkeypatch.setattr(ingest_status, "write_status", lambda *a, **k: None)
     monkeypatch.setattr(ingest_status, "read_active_ingests", lambda *a, **k: [])
     evidence = tmp_path / "evidence"

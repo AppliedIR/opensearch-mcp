@@ -863,3 +863,34 @@ def test_what_evidence_says_for_the_stamped_fields_is_removed_and_replaced(case,
     assert "vhir" not in src and "vhir.original.path" not in src  # no run root: none stamped
     assert src["vhir.content_hash"] == _spec_hash(src) != "forged"
     assert wc.removed_note(c12=C12) == "3 reserved identity fields removed from evidence"
+
+
+def test_each_existing_case_index_is_given_the_stamp_fields_as_one_step(case):
+    from opensearch_mcp import mappings
+
+    client = MagicMock()
+    client.cat.indices.return_value = [
+        {"index": f"case-{C12}-evtx-0"}, {"index": f"case-{C12}-json-x-0"},
+    ]  # fmt: skip
+    client.indices.put_mapping.side_effect = lambda index, body: (
+        (_ for _ in ()).throw(RuntimeError("conflict")) if "json" in index else {}
+    )
+    result = mappings.put_stamp_fields(client, AuditWriter(mcp_name="opensearch-mcp"))
+    keywords = {f: {"type": "keyword"} for f in mappings.STAMP_FIELDS}
+    for call in client.indices.put_mapping.call_args_list:
+        assert call.kwargs["body"] == {"properties": keywords}
+    assert result["patched"] == [f"case-{C12}-evtx-0"]
+    assert [f["index"] for f in result["failed"]] == [f"case-{C12}-json-x-0"]
+    (step,) = [e for e in _entries(case) if e["tool"] == "put_stamp_fields"]
+    assert step["params"]["indices"] == [f"case-{C12}-evtx-0"] and step["failed"]
+
+
+def test_installing_the_templates_gives_existing_case_indices_the_stamp_fields():
+    from opensearch_mcp import mappings
+
+    client = MagicMock()
+    client.cat.indices.return_value = [{"index": f"case-{C12}-evtx-0"}]
+    result = mappings.install_all_templates(client)
+    assert result["stamp_fields"]["patched"] == [f"case-{C12}-evtx-0"]
+    bodies = [c.kwargs["body"] for c in client.indices.put_mapping.call_args_list]
+    assert {"properties": {f: {"type": "keyword"} for f in mappings.STAMP_FIELDS}} in bodies
