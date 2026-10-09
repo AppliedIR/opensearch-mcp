@@ -55,3 +55,12 @@ def test_a_file_that_isnt_regular_is_an_oserror_and_isnt_read(tmp_path, kind):
     assert isinstance(out.get("error"), OSError), out
     assert "not a regular file" in str(out["error"])
     assert _bounded(ingest._sha256_or_empty, path) == {"value": ""}
+
+
+def test_it_requires_a_sift_common_with_file_identity():
+    """0.6.4 is the first sift-common with file_identity; an older one would
+    fail at import, so it can't be installed under this one."""
+    from pathlib import Path
+
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    assert '"sift-common>=0.6.4",' in pyproject

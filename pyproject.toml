@@ -13,7 +13,7 @@ dependencies = [
     "evtx>=0.8",
     "mcp>=1.26,<2",
     "pyyaml>=6.0.3",
-    "sift-common",
+    "sift-common>=0.6.4",  # file_identity
     "regipy>=4.0",
     "python-dateutil>=2.9.0.post0",
     "defusedxml>=0.7",
