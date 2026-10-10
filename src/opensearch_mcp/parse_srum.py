@@ -24,6 +24,7 @@ def parse_srum(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int, str, str, int]:
     """Parse SRUM database. Returns (count_indexed, count_bulk_failed, note,
     outcome, rows): outcome is one of results.PARSER_COMPLETED/REDUCED/FAILED,
@@ -75,6 +76,7 @@ def parse_srum(
                 vss_id=vss_id,
                 source_file=source_file,
                 host_dict=host_dict,
+                volume_root=volume_root,
             )
         # Plaso succeeded with reduced fidelity
         return cnt, bf, _fallback_note, PARSER_REDUCED, cnt + bf + kept[0]
@@ -175,6 +177,7 @@ def _parse_srum_plaso(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int]:
     """Parse SRUM via Plaso esedb/srum parser."""
     from opensearch_mcp.parse_plaso import parse_srum as _plaso_srum
@@ -189,4 +192,5 @@ def _parse_srum_plaso(
         vss_id=vss_id,
         source_file=source_file,
         host_dict=host_dict,
+        volume_root=volume_root,
     )

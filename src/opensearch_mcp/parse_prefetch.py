@@ -22,6 +22,7 @@ def parse_prefetch(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int, str, str, int]:
     """Parse prefetch files. Returns (count_indexed, count_bulk_failed, note,
     outcome, rows): outcome is one of results.PARSER_COMPLETED/REDUCED/FAILED,
@@ -71,6 +72,7 @@ def parse_prefetch(
                 vss_id=vss_id,
                 source_file=source_file,
                 host_dict=host_dict,
+                volume_root=volume_root,
             )
         return cnt, bf, _fallback_note, PARSER_REDUCED, cnt + bf + kept[0]
     except subprocess.CalledProcessError as e:
@@ -142,6 +144,7 @@ def _parse_prefetch_plaso(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int]:
     """Parse prefetch via Plaso prefetch parser."""
     from opensearch_mcp.parse_plaso import parse_prefetch as _plaso_prefetch
@@ -156,4 +159,5 @@ def _parse_prefetch_plaso(
         vss_id=vss_id,
         source_file=source_file,
         host_dict=host_dict,
+        volume_root=volume_root,
     )

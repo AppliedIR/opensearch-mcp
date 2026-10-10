@@ -1270,6 +1270,7 @@ def _ingest_plaso_artifact(
                     vss_id=host.vss_id,
                     source_file=_plaso_src,
                     host_dict=host_dict,
+                    volume_root=host.volume_root,
                 )
             else:
                 cnt, bf, _note, outcome, rows = parse_srum(
@@ -1282,6 +1283,7 @@ def _ingest_plaso_artifact(
                     vss_id=host.vss_id,
                     source_file=_plaso_src,
                     host_dict=host_dict,
+                    volume_root=host.volume_root,
                 )
         # The parser's final attempt decides: it failed, or it produced no
         # rows from inputs that are there (Plaso exits 0 on a damaged file,

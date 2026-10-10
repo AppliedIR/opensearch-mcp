@@ -100,6 +100,7 @@ def _ingest_jsonl(
     host_dict=None,
     volume_root: Path | None = None,
     volume: str | None = None,
+    set_timestamp: bool = True,
 ) -> tuple[int, int]:
     """Index Plaso JSONL records into OpenSearch.
 
@@ -115,6 +116,9 @@ def _ingest_jsonl(
     inside the file system; vhir.source_file drops the leading "/", and
     vhir.volume (the run's partition or volume) is part of the _id, so two
     volumes with the same files stay apart.
+
+    set_timestamp=False (a parser's Plaso fallback): its records keep no
+    @timestamp, as before; the root only makes their paths and _id stable.
 
     Returns (count_indexed, count_bulk_failed).
     """
@@ -175,7 +179,7 @@ def _ingest_jsonl(
                 record["vhir.vss_id"] = vss_id
             record["vhir.parse_method"] = "plaso"
             ts = record.get("timestamp")
-            if (prefix or volume is not None) and isinstance(ts, int) and ts:
+            if set_timestamp and (prefix or volume is not None) and isinstance(ts, int) and ts:
                 try:  # exact to the microsecond; a value out of range is left unset
                     record["@timestamp"] = (_EPOCH + timedelta(microseconds=ts)).isoformat()
                 except OverflowError:
@@ -206,6 +210,7 @@ def parse_prefetch(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int]:
     """Parse .pf files with Plaso, index into OpenSearch.
 
@@ -228,6 +233,9 @@ def parse_prefetch(
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
                 host_dict=host_dict,
+                # the volume's own paths: one id whatever run or store mounted it
+                volume_root=volume_root,
+                set_timestamp=False,
             )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -243,6 +251,7 @@ def parse_srum(
     vss_id: str = "",
     source_file: str = "",
     host_dict=None,
+    volume_root: Path | None = None,
 ) -> tuple[int, int]:
     """Parse SRUM database with Plaso, index into OpenSearch.
 
@@ -268,6 +277,9 @@ def parse_srum(
                 pipeline_version=pipeline_version,
                 vss_id=vss_id,
                 host_dict=host_dict,
+                # the volume's own paths: one id whatever run or store mounted it
+                volume_root=volume_root,
+                set_timestamp=False,
             )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
