@@ -439,3 +439,36 @@ def test_the_ais_host_fix_changes_no_doc_and_no_binding(client, case, monkeypatc
     srv.case_host_fix("WKS01", "FIN-WKS01")
     assert docs(client, case) == before and hi.load(case).bindings == bindings
     assert canon(case, a) == "WKS01"
+
+
+def test_a_rename_updates_only_its_machines_indices_in_chunks(client, case, monkeypatch):
+    """Each artifact type its own index: the machine's docs span several, the
+    other machine's another; with one index per chunk every one of the
+    machine's indices is still relabelled and nothing else is touched."""
+    monkeypatch.setattr(host_ops, "_CHUNK_INDICES", 1)
+    a = machine(client, case, "WKS01", 2, "delim-m1")
+    for artifact in ("delim-m2", "delim-m3"):
+        ctx = wc.open_unit(case, "evidence/WKS01", "WKS01", source="test", origin="artifact")
+        with wc.writing(ctx):
+            bulk.flush_bulk(client, [
+                {"_index": wc.index_name(artifact), "_id": f"WKS01-{artifact}-{i}",
+                 "_source": {"@timestamp": "2024-01-01T00:00:00Z", "event.code": "1"}}
+                for i in range(2)
+            ])  # fmt: skip
+    b = machine(client, case, "WKS02", 3, "delim-m4")
+    before = docs(client, case)
+    calls = []
+    real = client.update_by_query
+    monkeypatch.setattr(
+        client, "update_by_query", lambda **k: calls.append(k["index"]) or real(**k)
+    )
+    result = host_ops.run(case, {"kind": "rename", "machine": a, "canonical": "FIN-WKS01"},
+                          "ex1", client=client)  # fmt: skip
+    assert result["state"] == "done" and result["relabelled"] == 6
+    c12 = wc.case_identity(case)[0]
+    assert sorted(calls) == [f"case-{c12}-delim-m{i}-0" for i in (1, 2, 3)]
+    after = docs(client, case)
+    assert {i for i, (h, _) in after.items() if h == "FIN-WKS01"} == {
+        i for i, (_, k) in before.items() if k == a
+    }
+    assert all(after[i] == before[i] for i, (_, k) in before.items() if k == b)
