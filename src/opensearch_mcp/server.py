@@ -820,16 +820,21 @@ def _registered_original(p: Path) -> bool:
     """`p` (resolved) is an original registered in the active case, wherever it
     lies: a file, a folder, or a file in a registered folder. case-mcp records
     the target of a link in evidence/, so evidence on read-only storage is
-    registered where it is."""
+    registered where it is. Never one in the system's folders or Valhuntir's
+    keys, registered or not."""
     import json
 
-    from sift_common import resolve_case_dir
+    from sift_common import SYSTEM_DIRS
 
+    from opensearch_mcp.write_context import case_dir_for
+
+    if any(p.is_relative_to(Path(d).resolve()) for d in SYSTEM_DIRS):
+        return False
     try:
-        resolved = resolve_case_dir()
-        if not resolved:  # no active case: never the working folder's registry
+        # the case the ingest writes to: ~/.vhir/active_case, as the tools read it
+        case_dir = case_dir_for(_get_active_case() or "")
+        if case_dir is None:  # no active case: never the working folder's registry
             return False
-        case_dir = Path(resolved)
         registry = json.loads((case_dir / "evidence.json").read_text())
     except Exception:  # noqa: BLE001 - no case or registry: nothing registered
         return False
