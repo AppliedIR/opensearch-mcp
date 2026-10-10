@@ -253,3 +253,15 @@ def test_the_tool_is_launched_inside_run_tool(sift_layout, monkeypatch, tmp_path
     path, _expected = _artifact(tmp_path / "evidence" / "host1", "lnk", user="jsmith")
     _run("lnk", path)
     assert seen and seen[0][0] == "LECmd"
+
+
+def test_an_ez_tool_in_a_folder_of_another_case_still_runs_via_dotnet(tmp_path, monkeypatch):
+    """SIFT installs EvtxECmd as EvtxeCmd/EvtxECmd.dll."""
+    ez = tmp_path / "zimmermantools"
+    (ez / "EvtxeCmd").mkdir(parents=True)
+    dll = ez / "EvtxeCmd" / "EvtxECmd.dll"
+    dll.write_bytes(b"")
+    monkeypatch.setattr(tools, "_EZ_TOOLS_DIR", ez, raising=False)
+    monkeypatch.setattr(tools.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert tools._launcher("EvtxECmd") == ["/usr/bin/dotnet", str(dll)]
+    assert tools._launcher("PECmd") == ["PECmd"]  # no dll: the tool itself
