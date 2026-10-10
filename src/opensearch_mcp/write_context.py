@@ -251,7 +251,7 @@ HOST_SCALED_SHARDS = 4
 SHARD_DOC_LIMIT = 1_500_000_000
 
 _prepared: set[str] = set()
-_imported: set[Path] = set()  # cases whose pre-0.7 hosts this process has seeded
+_imported: set[Path] = set()  # cases whose pre-0.6.4 hosts this process has seeded
 
 
 class ShardHeadroom(ShardCapacityExhausted):
@@ -310,7 +310,7 @@ def prepare_index(client, index: str) -> None:
 
 
 SECOND_COPY_NOTE = (
-    "this host already has pre-0.7 data in this case; this ingest adds a second copy"
+    "this host already has pre-0.6.4 data in this case; this ingest adds a second copy"
 )
 # (case c12, host name as ingested, artifact type) -> the note, for this process's runs
 SECOND_COPY: dict[tuple[str, str, str], str] = {}
@@ -319,8 +319,8 @@ REMOVED: dict[tuple[str, str, str], int] = {}
 
 
 def _v1_names(ctx: WriteContext) -> tuple[str, list[str]]:
-    """(the case id pre-0.7 names were built from, the unit's names as a
-    pre-0.7 index would carry them: the raw name and its v1 canonical)."""
+    """(the case id pre-0.6.4 names were built from, the unit's names as a
+    pre-0.6.4 index would carry them: the raw name and its v1 canonical)."""
     meta = {}
     try:
         meta = yaml.safe_load((ctx.case_dir / "CASE.yaml").read_text(encoding="utf-8")) or {}
@@ -342,8 +342,8 @@ def _v1_names(ctx: WriteContext) -> tuple[str, list[str]]:
 
 
 def note_second_copy(client, ctx: WriteContext, index: str) -> str:
-    """In a case from before 0.7, when the unit's host already has data of
-    this type in a pre-0.7 per-host index, record and return the notice."""
+    """In a case from before 0.6.4, when the unit's host already has data of
+    this type in a pre-0.6.4 per-host index, record and return the notice."""
     from opensearch_mcp.paths import legacy_index_name
 
     atype = artifact_type_of(index)

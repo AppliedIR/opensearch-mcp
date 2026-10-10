@@ -82,7 +82,7 @@ class _CaseIndices:
 
 def _index(case_ix: _CaseIndices | str, artifact_type: str = "") -> str:
     """The case's indices of `artifact_type` (all of them when empty); a
-    bare case id reads without the client, so no pre-0.7 alias members."""
+    bare case id reads without the client, so no pre-0.6.4 alias members."""
     from opensearch_mcp.case_scope import case_read_scope
 
     if isinstance(case_ix, str):

@@ -456,7 +456,7 @@ def test_a_case_folder_without_its_case_yaml_is_refused(tmp_path, monkeypatch):
         wc.host_context(None, "half-made", host)
 
 
-def test_a_scan_of_a_pre_0_7_host_says_it_adds_a_second_copy(tmp_path, monkeypatch):
+def test_a_scan_of_a_pre_0_6_4_host_says_it_adds_a_second_copy(tmp_path, monkeypatch):
     """Through the scan's own host loop, not only the helper."""
     from opensearch_mcp.discover import DiscoveredHost
 
@@ -588,7 +588,7 @@ def test_a_write_mints_the_case_identity_and_names_its_indices_by_it():
     assert client.actions[0]["_index"] == f"case-{case_uuid.replace('-', '')[:12]}-evtx-0"
 
 
-def test_a_failed_read_leaves_the_pre_0_7_import_to_run_again():
+def test_a_failed_read_leaves_the_pre_0_6_4_import_to_run_again():
     from opensearch_mcp.case_scope import ensure_v1_imported
 
     d = wc.case_dir_for(f"v1fail-{uuid.uuid4().hex[:6]}")
@@ -653,7 +653,7 @@ def test_a_second_run_of_a_host_reports_only_its_own_removals():
     ],
     ids=["timed out", "shards failed"],
 )
-def test_a_partial_read_leaves_the_pre_0_7_import_to_run_again(partial):
+def test_a_partial_read_leaves_the_pre_0_6_4_import_to_run_again(partial):
     from opensearch_mcp.case_scope import V1ReadIncomplete, ensure_v1_imported
 
     d = wc.case_dir_for(f"v1part-{uuid.uuid4().hex[:6]}")

@@ -5,7 +5,7 @@ expression from here. A case's indices are named from its identity in
 CASE.yaml (``case-<c12>-…``), never from its folder name, so a renamed case
 folder keeps its data and two cases never read each other's.
 
-A case from before 0.7 also has per-host indices named from its case id
+A case from before 0.6.4 also has per-host indices named from its case id
 (``case-<case id>-<type>-<host>``). They're read through an expression
 computed on every call, never stored: ``case-<id>-*`` less ``-case-<t>-*``
 for each case beside this one whose id ``t`` begins ``<id>-`` (those names
@@ -34,7 +34,7 @@ class CaseScope:
     case_dir: Path
     c12: str
     naming_version: int
-    legacy_id: str = ""  # CASE.yaml case_id: what pre-0.7 index names were built from
+    legacy_id: str = ""  # CASE.yaml case_id: what pre-0.6.4 index names were built from
 
     @property
     def prefix(self) -> str:
@@ -42,7 +42,7 @@ class CaseScope:
 
     @property
     def legacy_prefix(self) -> str:
-        """`case-<id>-` of this case's pre-0.7 index names."""
+        """`case-<id>-` of this case's pre-0.6.4 index names."""
         return f"case-{sanitize_index_component(self.legacy_id or self.case_id)}-"
 
 
@@ -78,11 +78,11 @@ def scope_of(case_id: str = "") -> CaseScope:
 
 
 def legacy_expression(scope: CaseScope, artifact_type: str = "", client=None) -> str:
-    """The case's pre-0.7 indices (of one type), as an expression: "" when it
+    """The case's pre-0.6.4 indices (of one type), as an expression: "" when it
     has none to read.
 
     With a client, the indices are listed in this call, and a longer case id
-    is excluded only when it has pre-0.7 indices: an exclusion that matches
+    is excluded only when it has pre-0.6.4 indices: an exclusion that matches
     nothing fails a request made with allow_no_indices=False. When they
     can't be listed, every longer case id is excluded.
     """
@@ -109,7 +109,7 @@ def _index_names(client, pattern: str) -> list[str] | None:
 
 def case_read_scope(case_id: str = "", client=None, artifact_type: str = "") -> str:
     """The index expression of a case (or of one artifact type in it):
-    `case-<c12>-*`, plus its pre-0.7 indices for a case from before 0.7."""
+    `case-<c12>-*`, plus its pre-0.6.4 indices for a case from before 0.6.4."""
     scope = scope_of(case_id)
     token = f"{sanitize_index_component(artifact_type)}-" if artifact_type else ""
     new = f"{scope.prefix}{token}*" if scope.c12 else ""
@@ -123,7 +123,7 @@ def case_read_scope(case_id: str = "", client=None, artifact_type: str = "") -> 
         if new_ok or old_ok:
             new, old = (new if new_ok else ""), (old if old_ok else "")
     parts = [p for p in (new, old) if p]
-    if not parts:  # no identity yet (nothing written) and nothing from before 0.7 to read
+    if not parts:  # no identity yet (nothing written) and nothing from before 0.6.4 to read
         raise CaseScopeError(f"Case {scope.case_id!r} has nothing indexed yet.")
     return ",".join(parts)
 
@@ -140,7 +140,7 @@ def _any_index(client, pattern: str) -> bool:
 
 def confine(expression: str, case_id: str = "", client=None) -> str:
     """`expression` when every segment is in the case: it starts with
-    `case-<c12>-`, or is a pre-0.7 name of this case that can't reach another
+    `case-<c12>-`, or is a pre-0.6.4 name of this case that can't reach another
     case's indices, or only excludes (`-…`). Raises CaseScopeError otherwise.
     An empty expression is the whole case."""
     if not expression or not expression.strip():
@@ -164,7 +164,7 @@ def confine(expression: str, case_id: str = "", client=None) -> str:
 
 def _longer_prefixes(scope: CaseScope) -> set[str]:
     """`case-<id>-` of the local cases whose id begins with this case's id
-    and a dash: their pre-0.7 names begin with this case's prefix."""
+    and a dash: their pre-0.6.4 names begin with this case's prefix."""
     own = scope.legacy_prefix
     return {
         f"case-{c}-"
@@ -174,7 +174,7 @@ def _longer_prefixes(scope: CaseScope) -> set[str]:
 
 
 def _legacy_segment_is_own(segment: str, scope: CaseScope) -> bool:
-    """A pre-0.7 name or pattern of a pre-0.7 case that can't reach another
+    """A pre-0.6.4 name or pattern of a pre-0.6.4 case that can't reach another
     case's indices: it starts `case-<id>-`, and its literal part (up to a
     wildcard) is incompatible with every longer local case id's prefix."""
     if not legacy_expression(scope) or not segment.startswith(scope.legacy_prefix):
@@ -185,7 +185,7 @@ def _legacy_segment_is_own(segment: str, scope: CaseScope) -> bool:
 
 def artifact_type(index: str, scope: CaseScope) -> str:
     """The artifact type of one of the case's indices: the remainder after
-    `case-<c12>-` with `-0` removed; for a pre-0.7 index, the type token
+    `case-<c12>-` with `-0` removed; for a pre-0.6.4 index, the type token
     after `case-<id>-` (its host tail dropped)."""
     if index.startswith(scope.prefix):
         rest = index[len(scope.prefix) :]
@@ -210,7 +210,7 @@ def _case_yaml(case_dir: Path) -> dict:
 
 def _local_case_ids(case_dir: Path) -> set[str]:
     """Sanitized ids of the cases beside this one: each one's CASE.yaml
-    `case_id` (what its pre-0.7 names were built from) and its folder name."""
+    `case_id` (what its pre-0.6.4 names were built from) and its folder name."""
     ids: set[str] = set()
     try:
         dirs = [d for d in case_dir.parent.iterdir() if d.is_dir() and (d / "CASE.yaml").is_file()]
@@ -226,7 +226,7 @@ def _local_case_ids(case_dir: Path) -> set[str]:
 
 def unattributed_indices(client, scope: CaseScope) -> list[str]:
     """Case indices no case on this machine can claim: neither a case's
-    identity prefix nor the pre-0.7 prefix of a case directory beside this
+    identity prefix nor the pre-0.6.4 prefix of a case directory beside this
     one. They're read by no case."""
     from opensearch_mcp.write_context import case_identity
 
@@ -249,7 +249,7 @@ def unattributed_indices(client, scope: CaseScope) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# A pre-0.7 case's hosts, once
+# A pre-0.6.4 case's hosts, once
 
 
 def _field_form(props: dict, field: str) -> str | None:
@@ -274,11 +274,11 @@ def _field_form(props: dict, field: str) -> str | None:
 
 
 class V1ReadIncomplete(RuntimeError):
-    """A pre-0.7 index answered for only some of its shards, or timed out."""
+    """A pre-0.6.4 index answered for only some of its shards, or timed out."""
 
 
 def _v1_pairs(client, index: str) -> list[tuple[str, str, str]]:
-    """(index, host.name, host.id) for every pair in one pre-0.7 index, read
+    """(index, host.name, host.id) for every pair in one pre-0.6.4 index, read
     with that index's own field forms."""
     props = client.indices.get_mapping(index=index)[index]["mappings"].get("properties", {})
     name_f, id_f = _field_form(props, "host.name"), _field_form(props, "host.id")
@@ -297,7 +297,7 @@ def _v1_pairs(client, index: str) -> list[tuple[str, str, str]]:
         if resp.get("timed_out") or failed:  # a page of only some shards' pairs
             why = "timed out" if resp.get("timed_out") else f"{failed} shard(s) failed"
             raise V1ReadIncomplete(
-                f"pre-0.7 host names in {index} couldn't be read in full ({why}); "
+                f"pre-0.6.4 host names in {index} couldn't be read in full ({why}); "
                 "nothing was recorded, and the import runs again next time"
             )
         agg = resp.get("aggregations", {}).get("p", {})
@@ -309,8 +309,8 @@ def _v1_pairs(client, index: str) -> list[tuple[str, str, str]]:
 
 
 def ensure_v1_imported(client, case_dir) -> bool:
-    """For a case from before 0.7, seed its host logs once from its v1 host
-    dictionary and the host names its pre-0.7 indices hold, so a new ingest
+    """For a case from before 0.6.4, seed its host logs once from its v1 host
+    dictionary and the host names its pre-0.6.4 indices hold, so a new ingest
     of one of its hosts joins that host's machine and keeps its host.id.
     Returns True when it imported now. A failed read raises, and nothing is
     recorded: the import runs again next time rather than on partial pairs."""

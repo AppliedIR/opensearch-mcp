@@ -21,7 +21,7 @@ from sift_common import host_identity
 from opensearch_mcp import triage_remote as tr
 from opensearch_mcp import write_context as wc
 
-CASE = f"triage-{uuid.uuid4().hex[:8]}"  # a case of this release: no pre-0.7 indices
+CASE = f"triage-{uuid.uuid4().hex[:8]}"  # a case of this release: no pre-0.6.4 indices
 
 
 def v2(artifact_type: str) -> str:

@@ -1,5 +1,5 @@
 """Case identity and machine keys against a cluster: each case reads only its
-own data, a renamed case folder keeps it, a case from before 0.7 is read
+own data, a renamed case folder keeps it, a case from before 0.6.4 is read
 through its alias and its hosts carry over, and the summary counts machines.
 Templates are the tree's, installed under this run's names. Values are
 synthetic."""
@@ -49,7 +49,7 @@ def cases(client, monkeypatch):
         else:
             u = uuid.uuid4().hex
             (d / "CASE.yaml").write_text(f"case_id: {cid}\ncase_uuid: {u}\nnaming_version: 2\n")
-        c12 = host_identity.ensure_case_uuid(d)[0]  # a pre-0.7 case gets one at its first write
+        c12 = host_identity.ensure_case_uuid(d)[0]  # a pre-0.6.4 case gets one at its first write
         made.append((c12, _scratch_templates.install(client, f"hk-{c12}", c12=c12)))
         return d, c12
 
@@ -122,7 +122,7 @@ def _count(client, case):
     return client.count(index=case_read_scope(case.name, client))["count"]
 
 
-def test_a_pre_0_7_case_reads_its_old_indices_also_ones_made_later(client, cases):
+def test_a_pre_0_6_4_case_reads_its_old_indices_also_ones_made_later(client, cases):
     case, _ = cases("legacy", v1=True)
     v1_index(client, f"case-{case.name}-evtx-wks10", [{"host.name": "WKS10"}])
     assert _count(client, case) == 1
@@ -166,14 +166,14 @@ def test_a_longer_case_id_known_only_by_its_folder_name_stays_out(
     assert _count(client, case) == 1
 
 
-def test_a_pre_0_7_case_beside_a_0_7_case_with_a_longer_id_reads_with_strict_requests(
+def test_a_pre_0_6_4_case_beside_a_0_6_4_case_with_a_longer_id_reads_with_strict_requests(
     client, cases, monkeypatch, tmp_path
 ):
     from opensearch_mcp.triage_remote import _CaseIndices, _index
 
     _own_cases_dir(cases, monkeypatch, tmp_path, "cove")
     case, _ = cases("cove", v1=True)
-    newer = case.parent / f"{case.name}-2"  # made by 0.7: no pre-0.7 indices
+    newer = case.parent / f"{case.name}-2"  # made by 0.6.4: no pre-0.6.4 indices
     newer.mkdir()
     (newer / "CASE.yaml").write_text(
         f"case_id: {case.name}-2\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"
@@ -303,7 +303,7 @@ def test_a_new_evtx_index_has_four_primaries_and_keyword_machine_fields(client, 
     assert field("vhir.rid") == {"type": "keyword", "index": False}
 
 
-def test_a_pre_0_7_host_ingested_again_says_it_adds_a_second_copy(client, cases):
+def test_a_pre_0_6_4_host_ingested_again_says_it_adds_a_second_copy(client, cases):
     case, c12 = cases("second", v1=True)
     v1_index(client, f"case-{case.name}-evtx-wks01", [{"host.name": "WKS01", "host.id": "WKS01"}])
     wc.SECOND_COPY.clear()
@@ -315,10 +315,10 @@ def test_a_pre_0_7_host_ingested_again_says_it_adds_a_second_copy(client, cases)
     assert out["notes"] == [f"evtx: {wc.SECOND_COPY_NOTE}"]
 
 
-# -- C: a pre-0.7 case's hosts carry over
+# -- C: a pre-0.6.4 case's hosts carry over
 
 
-def test_a_pre_0_7_machine_keeps_its_host_id_and_its_merge_is_flagged(client, cases):
+def test_a_pre_0_6_4_machine_keeps_its_host_id_and_its_merge_is_flagged(client, cases):
     case, c12 = cases("carry", v1=True)
     (case / "host-dictionary.yaml").write_text(
         "version: 1\nhosts:\n  WKS01:\n    aliases: [WKS01, wks01.corp.example.test]\n"

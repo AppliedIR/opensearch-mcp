@@ -1610,8 +1610,8 @@ def _run_custom_parser(
 
 
 def _add_second_copy_notes(host, host_idx, host_result, status_hosts) -> None:
-    """In a case from before 0.7: say on each artifact of the host that
-    already had pre-0.7 data of its type that this ingest added a second copy.
+    """In a case from before 0.6.4: say on each artifact of the host that
+    already had pre-0.6.4 data of its type that this ingest added a second copy.
     In any case: say how many reserved identity fields its evidence carried."""
     for ar in host_result.artifacts:
         ctx = getattr(host, "write_ctx", None)

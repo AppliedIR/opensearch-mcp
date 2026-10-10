@@ -224,7 +224,7 @@ def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
     if "*" not in index_pattern:
         return
     idx_names = _get_case_indices(index_pattern, client)
-    # per-file stems use "_" since 0.7 (delim-evtxecmd_<file>), "-" before
+    # per-file stems use "_" since 0.6.4 (delim-evtxecmd_<file>), "-" before
     has_evtx = any("-evtx-" in n for n in idx_names)
     has_evtxecmd = any(re.search(r"-delim-evtxecmd[-_]", n) for n in idx_names)
     if not (has_evtx and has_evtxecmd):
@@ -530,7 +530,7 @@ def _hayabusa_index(case_id: str = "", client=None) -> str:
     when there's no case."""
     from opensearch_mcp.case_scope import CaseScopeError, case_read_scope
 
-    if client is None:  # a pre-0.7 case's alerts are named only with the cluster's answer
+    if client is None:  # a pre-0.6.4 case's alerts are named only with the cluster's answer
         try:
             client = _get_os()
         except Exception:
@@ -545,7 +545,7 @@ def _hayabusa_index(case_id: str = "", client=None) -> str:
 def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> str:
     """An idx_search call over the Hayabusa alerts `expr` names, in a form its
     `index` accepts: an expression it would refuse (an exclusion, or a
-    pre-0.7 wildcard another case's indices could match) becomes the
+    pre-0.6.4 wildcard another case's indices could match) becomes the
     indices it names, and the index is left out when those can't be named."""
     from opensearch_mcp.case_scope import CaseScopeError, confine
 
@@ -1649,7 +1649,7 @@ def _failed_artifact_warnings(
             rs = e.get("result_summary")
             rs = str(rs.get("value", "") if isinstance(rs, dict) else rs or "")
             ts = str(e.get("ts", ""))
-            # the shared index, or a pre-0.7 per-host one; DEV01 and dev01 are one host
+            # the shared index, or a pre-0.6.4 per-host one; DEV01 and dev01 are one host
             index = build_index_name(c12, suffix[tool]) if c12 else ""
             if index not in docs_by_index:
                 index = legacy_index_name(cid, suffix[tool], host)
@@ -1713,8 +1713,8 @@ def _case_c12(case_id: str) -> str:
 
 def _existing_host_docs(client, case_id: str, artifact_type: str, hostname: str, out: dict):
     """Record how many documents of `artifact_type` already carry `hostname`:
-    in the case's shared index, and, in a case from before 0.7, in its
-    pre-0.7 per-host index, with the notice that this ingest adds a second
+    in the case's shared index, and, in a case from before 0.6.4, in its
+    pre-0.6.4 per-host index, with the notice that this ingest adds a second
     copy (under the "notes" key)."""
     from opensearch_mcp.case_scope import CaseScopeError, scope_of
     from opensearch_mcp.paths import build_index_name, legacy_index_name
@@ -1834,7 +1834,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         resp.setdefault("warnings", []).append(f"Host detection query failed: {e}")
 
     # Artifact type: the remainder after case-<c12>- with -0 removed; for a
-    # pre-0.7 index, its type with the host tail dropped.
+    # pre-0.6.4 index, its type with the host tail dropped.
     artifacts: dict = {}
     total_docs = 0
     for idx in indices:

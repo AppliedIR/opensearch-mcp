@@ -128,7 +128,7 @@ def test_a_split_relabels_the_moved_key_back_exactly(client, case):
     assert canon(case, b) == "WKS09" and canon(case, a) == "WKS01"
 
 
-def test_pre_0_7_docs_are_relabelled_by_their_index_and_host_name(client, case):
+def test_pre_0_6_4_docs_are_relabelled_by_their_index_and_host_name(client, case):
     a = machine(client, case, "WKS01", 2)
     c12 = wc.case_identity(case)[0]
     index = f"v1-{c12}-evtx-wks01"
@@ -147,9 +147,9 @@ def test_pre_0_7_docs_are_relabelled_by_their_index_and_host_name(client, case):
     client.index(index=index, id="old1", body={"host": {"name": "wks01", "id": "WKS01"}})
     client.index(index=index, id="other", body={"host": {"name": "srv9", "id": "SRV9"}},
                  refresh=True)  # fmt: skip
-    u = hi.unit_key(f"pre-0.7 index {index}")
+    u = hi.unit_key(f"pre-0.6.4 index {index}")
     hi.append_observations(case, [
-        {"kind": "unit", "unit": u, "locator": f"pre-0.7 index {index}"},
+        {"kind": "unit", "unit": u, "locator": f"pre-0.6.4 index {index}"},
         {"kind": "name", "unit": u, "raw": "wks01", "evidence": "host.name", "origin": "artifact"},
         {"kind": "bind", "unit": u, "raw": "wks01", "key": a, "state": hi.CONFIRMED},
     ])  # fmt: skip

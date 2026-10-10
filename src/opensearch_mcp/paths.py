@@ -233,7 +233,7 @@ def sanitize_index_component(value: str) -> str:
 
 
 def legacy_index_name(case_id: str, artifact_type: str, hostname: str) -> str:
-    """A pre-0.7 index name, case-{case}-{type}-{host}: for reading old data only."""
+    """A pre-0.6.4 index name, case-{case}-{type}-{host}: for reading old data only."""
     return (
         f"case-{sanitize_index_component(case_id)}"
         f"-{sanitize_index_component(artifact_type)}"

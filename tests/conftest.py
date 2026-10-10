@@ -85,8 +85,8 @@ def _case_for_every_ingest(request, monkeypatch):
     default = wc.open_unit(
         wc.case_dir_for("test-case"), "evidence/test-host", "TEST-HOST", source="test"
     )
-    # a case made here has nothing from before 0.7: its first write doesn't
-    # ask the client (often a stand-in) for pre-0.7 indices
+    # a case made here has nothing from before 0.6.4: its first write doesn't
+    # ask the client (often a stand-in) for pre-0.6.4 indices
     wc._imported.add(default.case_dir)
     wc.set_current(default)
     try:

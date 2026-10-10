@@ -22,7 +22,7 @@ from opensearch_mcp import write_context as wc
 
 
 def c12(case: str) -> str:
-    """The case's identity, as a case made by 0.7: another row may have
+    """The case's identity, as a case made by 0.6.4: another row may have
     made the same case id first, without a naming version."""
     d = wc.case_dir_for(case)
     meta = yaml.safe_load((d / "CASE.yaml").read_text()) or {}
@@ -110,11 +110,11 @@ def _resolve(pattern: str, names) -> dict:
 
 @pytest.fixture
 def old_case_beside_a_longer_one(monkeypatch, tmp_path):
-    """A case from before 0.7 beside a case whose id is its id plus
+    """A case from before 0.6.4 beside a case whose id is its id plus
     "-hayabusa…": that case's indices fall under its alert expression, which
     then carries an exclusion."""
     old = f"old{uuid.uuid4().hex[:6]}"
-    wc.case_dir_for(old), wc.case_dir_for(f"{old}-hayabusa-review")  # pre-0.7: no case_uuid
+    wc.case_dir_for(old), wc.case_dir_for(f"{old}-hayabusa-review")  # pre-0.6.4: no case_uuid
     names = {f"case-{old}-hayabusa-wks10": 7, f"case-{old}-hayabusa-review-evtx-wks90": 50}
     client = MagicMock()
     client.indices.get.side_effect = lambda index, **kw: _resolve(index, names)
@@ -151,12 +151,12 @@ def test_a_hint_with_an_exclusion_names_indices_idx_search_accepts(old_case_besi
     assert _hinted_index(hint) == f"case-{old}-hayabusa-wks10"
 
 
-def test_a_hint_for_a_case_beside_a_0_7_case_with_a_longer_id_works(monkeypatch, tmp_path):
+def test_a_hint_for_a_case_beside_a_0_6_4_case_with_a_longer_id_works(monkeypatch, tmp_path):
     from opensearch_mcp.case_scope import confine
 
     old = f"old{uuid.uuid4().hex[:6]}"
-    wc.case_dir_for(old)  # pre-0.7: no case_uuid
-    # made by 0.7, so no pre-0.7 indices, but its id reaches under the alert prefix
+    wc.case_dir_for(old)  # pre-0.6.4: no case_uuid
+    # made by 0.6.4, so no pre-0.6.4 indices, but its id reaches under the alert prefix
     newer = wc.case_dir_for(f"{old}-hayabusa-review")
     (newer / "CASE.yaml").write_text(
         f"case_id: {old}-hayabusa-review\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"

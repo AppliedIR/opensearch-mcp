@@ -61,7 +61,7 @@ def _sbecmd(rows_for):
 
 def _scan(hosts, rows_for, case_id="c1", client=None, written=None, stored=None):
     """A scan whose writes are stamped as the real write stamps them (the
-    machine key, and the pre-0.7 import before the first name binds)."""
+    machine key, and the pre-0.6.4 import before the first name binds)."""
     from opensearch_mcp import write_context as wc
 
     audit = MagicMock()
@@ -69,7 +69,7 @@ def _scan(hosts, rows_for, case_id="c1", client=None, written=None, stored=None)
     audit._next_audit_id.side_effect = lambda: next(ids)
     if client is None:
         client = MagicMock()
-        client.indices.get.return_value = {}  # no pre-0.7 indices
+        client.indices.get.return_value = {}  # no pre-0.6.4 indices
     client.count.side_effect = Exception("no index")
 
     def write(c, actions, **k):
@@ -206,8 +206,8 @@ def test_one_host_name_on_two_units_that_are_two_machines_says_nothing(tmp_path,
     assert [w for w in warnings if "stored once" in w] == []
 
 
-def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_path, status_dir):
-    """A pre-0.7 case holds WS02 as WS02-CANON: its hosts are imported before
+def test_counting_binds_no_host_before_a_pre_0_6_4_case_s_hosts_are_imported(tmp_path, status_dir):
+    """A pre-0.6.4 case holds WS02 as WS02-CANON: its hosts are imported before
     any name of the scan binds, so counting replaced rows binds nothing first.
     The scan's own WS02 is a name it holds: it waits for the examiner, who can
     join it to WS02-CANON at the gate."""
@@ -215,7 +215,7 @@ def test_counting_binds_no_host_before_a_pre_0_7_case_s_hosts_are_imported(tmp_p
 
     from opensearch_mcp import write_context as wc
 
-    case_id = "c5-pre-0-7"
+    case_id = "c5-pre-0-6-4"
     old = f"case-{case_id}-shellbags-ws02"
     client = MagicMock()
     client.indices.get.return_value = {old: {}}

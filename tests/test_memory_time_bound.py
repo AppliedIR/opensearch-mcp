@@ -45,7 +45,7 @@ class _Client:
         self.indices = SimpleNamespace(
             get_settings=self._no,
             simulate_index_template=self._no,
-            get=lambda **kw: {},  # no index from before 0.7
+            get=lambda **kw: {},  # no index from before 0.6.4
         )
 
     @staticmethod

@@ -87,11 +87,13 @@ def test_a_merge_moves_the_other_machines_keys_under_the_kept_name(case):
     assert p["args"] == {"into": a, "from": [b]}
 
 
-def test_pre_0_7_names_go_with_their_machine_by_index_and_host_name(case):
+# "pre-0.7": what 0.6.4's builds before its release wrote; still selected
+@pytest.mark.parametrize("prefix", ["pre-0.6.4 index ", "pre-0.7 index "])
+def test_pre_0_6_4_names_go_with_their_machine_by_index_and_host_name(case, prefix):
     a = machine(case, "WKS01")
-    u = hi.unit_key("pre-0.7 index case-old-evtx-wks01")
+    u = hi.unit_key(f"{prefix}case-old-evtx-wks01")
     hi.append_observations(case, [
-        {"kind": "unit", "unit": u, "locator": "pre-0.7 index case-old-evtx-wks01"},
+        {"kind": "unit", "unit": u, "locator": f"{prefix}case-old-evtx-wks01"},
         {"kind": "name", "unit": u, "raw": "wks01", "evidence": "host.name", "origin": "artifact"},
         {"kind": "bind", "unit": u, "raw": "wks01", "key": a, "state": hi.CONFIRMED},
     ])  # fmt: skip
@@ -140,7 +142,7 @@ def test_an_own_index_without_keyword_identity_fields_is_refused(props, field):
         host_ops.check_indices(client({"case-x-evtx-1": GOOD, "case-x-odd-1": props}), "x", [])
 
 
-def test_a_pre_0_7_index_is_read_with_its_own_field_forms():
+def test_a_pre_0_6_4_index_is_read_with_its_own_field_forms():
     text_kw = {"type": "text", "fields": {"keyword": KW}}
     old = {"host": {"properties": {"name": text_kw, "id": KW}}}
     forms = host_ops.check_indices(client({}, {"case-old-1": old}), "x", ["case-old-1"])
@@ -173,7 +175,7 @@ def test_an_index_near_its_shard_limit_is_refused_before_the_journal(case):
     assert hi.read_ops(case)["ops"] == {}
 
 
-def test_a_pre_0_7_text_field_without_a_keyword_form_is_refused():
+def test_a_pre_0_6_4_text_field_without_a_keyword_form_is_refused():
     old = {"host": {"properties": {"name": {"type": "text"}, "id": KW}}}
     with pytest.raises(host_ops.HostOpRefused, match="no keyword host.name or host.id"):
         host_ops.check_indices(client({}, {"case-old-3": old}), "x", ["case-old-3"])

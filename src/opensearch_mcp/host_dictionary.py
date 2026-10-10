@@ -1,8 +1,8 @@
-"""A case's pre-0.7 host dictionary (`host-dictionary.yaml`), read only.
+"""A case's pre-0.6.4 host dictionary (`host-dictionary.yaml`), read only.
 
 Host identity now lives in the case's host logs (sift_common.host_identity);
 this file is no longer written. It is read once, when a case from before
-0.7 is first opened, to seed those logs, and parsers still resolve a raw
+0.6.4 is first opened, to seed those logs, and parsers still resolve a raw
 name through it. `resolve()` is a pure lookup: it lowercases, strips and
 drops a trailing dot, and returns the canonical or None.
 """

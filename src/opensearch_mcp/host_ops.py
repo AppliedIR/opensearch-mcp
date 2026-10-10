@@ -3,7 +3,7 @@
 Every operation relabels: it sets ``host.id`` on the docs of the machine keys
 it moves and never re-keys, creates or deletes a doc, so a doc's id keeps its
 original machine key and a merge keeps both copies of a record two machines
-both held. Pre-0.7 docs, which carry no machine key, are selected by their
+both held. Pre-0.6.4 docs, which carry no machine key, are selected by their
 index and ``host.name``.
 
 One operation runs at a time, with the case lock held exclusively, so no
@@ -34,7 +34,9 @@ from pathlib import Path
 from sift_common import host_identity as hi
 
 KINDS = ("rename", "merge", "split")
-V1_UNIT_PREFIX = "pre-0.7 index "
+# A unit seeded from a pre-0.6.4 index; "pre-0.7" is what 0.6.4's builds
+# before its release wrote, still read so those cases keep their old docs.
+V1_UNIT_PREFIXES = ("pre-0.6.4 index ", "pre-0.7 index ")
 # A doc's host.id where it stands: a flat key (every v2 doc) or an object.
 _SET_HOST_ID = (
     "if (ctx._source.containsKey('host.id') || !(ctx._source.get('host') instanceof Map))"
@@ -74,7 +76,7 @@ def _new_canonical(state: hi.HostState, canonical, own: set[str]) -> str:
 
 def plan(state: hi.HostState, op: dict) -> dict:
     """The decision args, the machine keys to relabel and the name they get,
-    and the pre-0.7 (index, host.name) pairs that go with them. Raises
+    and the pre-0.6.4 (index, host.name) pairs that go with them. Raises
     HostOpRefused when the operation doesn't fit the case as it is."""
     kind = op.get("kind")
     if kind not in KINDS:
@@ -106,9 +108,11 @@ def plan(state: hi.HostState, op: dict) -> dict:
         args = {"machine": m.id, "keys": keys, "canonical": canonical}
         pairs = [p for p in m.pairs if state.bindings.get(p) in keys]
     v1 = sorted(
-        (str(state.units.get(u, {}).get("locator", ""))[len(V1_UNIT_PREFIX) :], raw)
+        (loc[len(pre) :], raw)
         for u, raw in pairs
-        if str(state.units.get(u, {}).get("locator", "")).startswith(V1_UNIT_PREFIX)
+        for loc in [str(state.units.get(u, {}).get("locator", ""))]
+        for pre in V1_UNIT_PREFIXES
+        if loc.startswith(pre)
     )
     return {"kind": kind, "args": args, "keys": keys, "canonical": canonical, "v1": v1}
 
@@ -140,9 +144,9 @@ def _form(props: dict, dotted: str) -> str | None:
 
 
 def check_indices(client, c12: str, v1_indices: list[str]) -> dict:
-    """{index: {field: form}} for the case's own indices and the pre-0.7
+    """{index: {field: form}} for the case's own indices and the pre-0.6.4
     ones in the plan. Raises HostOpRefused on an own index that doesn't map
-    the identity fields as keyword, or a pre-0.7 index with no usable
+    the identity fields as keyword, or a pre-0.6.4 index with no usable
     host.name or host.id form."""
     forms: dict[str, dict] = {}
     try:
@@ -163,12 +167,12 @@ def check_indices(client, c12: str, v1_indices: list[str]) -> dict:
         try:
             body = client.indices.get_mapping(index=index)[index]
         except Exception as e:
-            raise HostOpRefused(f"pre-0.7 index {index} can't be read: {e}") from e
+            raise HostOpRefused(f"pre-0.6.4 index {index} can't be read: {e}") from e
         props = (body.get("mappings") or {}).get("properties") or {}
         name_f, id_f = _form(props, "host.name"), _form(props, "host.id")
         if not name_f or not id_f:
             raise HostOpRefused(
-                f"pre-0.7 index {index} has no keyword host.name or host.id to select by; "
+                f"pre-0.6.4 index {index} has no keyword host.name or host.id to select by; "
                 "nothing was changed"
             )
         forms[index] = {"host.name": name_f, "host.id": id_f}
@@ -221,7 +225,7 @@ def _count(client, index: str, query: dict) -> int:
 
 
 def counts(client, c12: str, p: dict, forms: dict) -> dict:
-    """Docs per machine key, and per pre-0.7 (index, host.name)."""
+    """Docs per machine key, and per pre-0.6.4 (index, host.name)."""
     per_key = {}
     for k in p["keys"]:
         per_key[k] = _count(client, f"case-{c12}-*", _own_query([k]))

@@ -22,7 +22,7 @@ _which = shutil.which
 
 
 def c12(case: str) -> str:
-    """The case's identity, as a case made by 0.7: another row may have
+    """The case's identity, as a case made by 0.6.4: another row may have
     made the same case id first, without a naming version."""
     d = wc.case_dir_for(case)
     meta = yaml.safe_load((d / "CASE.yaml").read_text()) or {}
