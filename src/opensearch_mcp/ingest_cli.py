@@ -743,19 +743,19 @@ def _set_units(
 
 
 def _run_summary(result) -> str:
-    """The scan's closing line: hosts, entries written, and the shadow-copy
-    entries kept because the case already held them."""
+    """The scan's closing line: hosts, entries written, and the entries kept
+    because the case already held them."""
     line = f"{len(result.hosts)} host(s), {result.total_indexed:,} entries indexed."
     if result.already_present:
         line += (
-            f" {result.already_present:,} shadow-copy entries were already in the case"
-            " (live or an earlier copy) and kept their tag."
+            f" {result.already_present:,} entries were already in the case"
+            " and kept their first ingest."
         )
     return line
 
 
 def _kept_total(result) -> dict:
-    """The status totals' count of shadow-copy entries kept, when there are any."""
+    """The status totals' count of entries kept, when there are any."""
     return {"already_present": result.already_present} if result.already_present else {}
 
 

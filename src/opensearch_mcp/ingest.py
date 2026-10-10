@@ -988,9 +988,9 @@ def _ingest_hosts(
                     hashes = [file_hash]
                 replaced = [
                     f"{n} {_row_label(artifact_name)} rows from {loser} are identical to "
-                    f"rows from {winner} (a later file in this run) and are stored once, "
-                    f"under the last file that has them; a search for {loser} won't find them"
-                    for (loser, winner), n in sorted(collided.items())
+                    f"rows {earlier} sent earlier in this run and are stored once, under "
+                    f"the first ingest that wrote them; a search for {loser} won't find them"
+                    for (loser, earlier), n in sorted(collided.items())
                 ]
                 ar.indexed = cnt
                 ar.not_read = unread

@@ -58,12 +58,15 @@ def test_a_shadow_copys_records_are_created_never_overwritten(store):
 
 
 @pytest.mark.parametrize("vss_id", ["live", ""])
-def test_live_and_plain_records_still_overwrite(vss_id):
+def test_live_and_plain_records_are_created_never_overwritten(vss_id):
+    """A record already in the case keeps its first ingest, whatever route
+    brings it again."""
     d = _case()
     ctx = _ctx(d, vss_id)
-    (a,) = _actions(ctx)
-    wc.stamp(ctx, [a])
-    assert a.get("_op_type", "index") == "index"
+    for op in (None, "index"):
+        (a,) = _actions(ctx, op)
+        wc.stamp(ctx, [a])
+        assert a["_op_type"] == "create"
 
 
 def test_another_op_type_is_left_alone():
@@ -143,8 +146,8 @@ def test_the_run_summary_says_how_many_were_kept():
     assert _run_summary(result) == "1 host(s), 0 entries indexed."
     result.already_present = 1234
     assert _run_summary(result) == (
-        "1 host(s), 0 entries indexed. 1,234 shadow-copy entries were already in the "
-        "case (live or an earlier copy) and kept their tag."
+        "1 host(s), 0 entries indexed. 1,234 entries were already in the case and "
+        "kept their first ingest."
     )
 
 
@@ -212,8 +215,7 @@ def test_the_status_says_how_many_were_already_in_the_case(tmp_path, status_dir)
     _, status = _scan(tmp_path, present=8)
     assert status["already_present"] == 8
     assert status["message"].endswith(
-        " 8 shadow-copy records were already in the case (live or an earlier copy) "
-        "and kept their tag."
+        " 8 entries were already in the case and kept their first ingest."
     )
     raw = ingest_status.read_active_ingests()
     assert [r["totals"]["already_present"] for r in raw] == [8]
@@ -288,8 +290,8 @@ def test_a_scan_says_how_many_were_kept_on_screen_and_in_its_status(
         path=str(tmp_path / "ev"), case="c1", yes=True, hostname="HOST1", all_logs=False,
         no_hayabusa=no_hayabusa, skip_triage=True))  # fmt: skip
     assert (
-        "1 host(s), 2 entries indexed. 7 shadow-copy entries were already in the case "
-        "(live or an earlier copy) and kept their tag."
+        "1 host(s), 2 entries indexed. 7 entries were already in the case and kept "
+        "their first ingest."
     ) in capsys.readouterr().out
     (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
     assert status["status"] == "complete"

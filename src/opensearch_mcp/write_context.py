@@ -476,9 +476,11 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
             action["_id"] = doc_id(key, str(rid))
         # last, over the record as it is sent: its stored _source hashes alike
         src["vhir.content_hash"] = content_hash(src)
-        if ctx.store and action.get("_op_type", "index") == "index":
-            # a shadow copy never replaces a record already in the case: the
-            # live volume's tag wins, and the first copy to hold it keeps its own
+        if action.get("_op_type", "index") == "index":
+            # a record already in the case is never replaced: its first ingest
+            # keeps its stamp (unit, step, origin, content hash), which a
+            # finding may cite. The live volume's tag wins over a shadow
+            # copy's, and the first copy to hold a record keeps its own
             action["_op_type"] = "create"
 
 

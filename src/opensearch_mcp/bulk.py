@@ -86,6 +86,67 @@ def _split_present(errors) -> tuple[int, list | None]:
     return present, rest
 
 
+def _vss_id(src) -> str:
+    src = src if isinstance(src, dict) else {}
+    vhir = src.get("vhir") if isinstance(src.get("vhir"), dict) else {}
+    return str(src.get("vhir.vss_id") or vhir.get("vss_id") or "")
+
+
+def _live_over_store(client, actions: list[dict], errors) -> tuple[list | None, int]:
+    """A live (or plain) record refused because the case already holds it
+    replaces the stored one when that one is tagged as a shadow copy only:
+    its live twin was lost by an earlier run (re-run to recover). A shadow
+    copy's record never replaces anything. Returns the errors left and how
+    many were written; on any doubt the record stays as stored."""
+    if not isinstance(errors, list) or not errors:
+        return errors, 0
+    live = {
+        (a.get("_index"), a.get("_id")): a
+        for a in actions
+        if a.get("_op_type") == "create" and _vss_id(a.get("_source")) in ("", "live")
+    }
+    refused = set()
+    for err in errors:
+        info = err.get("create") if isinstance(err, dict) else None
+        if isinstance(info, dict) and info.get("status") == 409:
+            key = (info.get("_index"), info.get("_id"))
+            if key in live:
+                refused.add(key)
+    if not refused:
+        return errors, 0
+    try:
+        docs = client.mget(
+            body={
+                "docs": [
+                    {"_index": i, "_id": d, "_source": ["vhir.vss_id", "vhir"]}
+                    for i, d in sorted(refused)
+                ]
+            }  # fmt: skip
+        ).get("docs", [])
+        held = {
+            (d.get("_index"), d.get("_id"))
+            for d in docs
+            if d.get("found") and _vss_id(d.get("_source")) not in ("", "live")
+        }
+        if not held:
+            return errors, 0
+        written, again = helpers.bulk(
+            client,
+            [{**live[k], "_op_type": "index"} for k in sorted(held)],
+            max_retries=2,
+            raise_on_error=False,
+            request_timeout=60,
+        )
+    except Exception:  # noqa: BLE001 - not checked: the record stays as stored
+        return errors, 0
+    left = [
+        e for e in errors
+        if not (isinstance(e, dict) and isinstance(e.get("create"), dict)
+                and (e["create"].get("_index"), e["create"].get("_id")) in held)
+    ]  # fmt: skip
+    return left + list(again or []), written
+
+
 def get_last_bulk_reason() -> str:
     """Return the first-error reason from the most recent bulk failure
     (thread-local). Empty string when the last batch succeeded or no
@@ -367,7 +428,10 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
             raise_on_error=False,
             request_timeout=60,
         )
-        # A shadow copy's record already in the case is kept, never a failure.
+        # A record already in the case is kept, never a failure; a live one
+        # held only by a shadow copy is written over it.
+        errors, over = _live_over_store(client, actions, errors)
+        success += over
         present, errors = _split_present(errors)
         _tls.already_present = get_already_present() + present
         for box in getattr(_tls, "present_scopes", ()):

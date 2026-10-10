@@ -2585,8 +2585,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     f"Ingest complete. {totals.get('indexed', 0):,} docs submitted "
                     f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
                     + (
-                        f" {kept:,} shadow-copy records were already in the case "
-                        "(live or an earlier copy) and kept their tag."
+                        f" {kept:,} entries were already in the case and kept their first ingest."
                         if kept
                         else ""
                     )

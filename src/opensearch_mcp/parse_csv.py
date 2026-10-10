@@ -114,14 +114,15 @@ def _doc_id(
 
 def _track_replaced(actions: list[dict], seen: dict, collided: dict, source_file: str) -> None:
     """After a write: count each row whose stored id (the stamped machine key
-    and the record id) an earlier file of the run wrote, against that file."""
+    and the record id) an earlier file of the run already sent, against this
+    file: a record in the case is never replaced, so this file's copy isn't
+    stored."""
     for action in actions:
         src = action.get("_source") or {}
         stored = (src.get("vhir.host_key"), src.get("vhir.rid", action.get("_id")))
-        earlier = seen.get(stored)
-        if earlier is not None and earlier != source_file:
-            collided[(earlier, source_file)] = collided.get((earlier, source_file), 0) + 1
-        seen[stored] = source_file  # always the newest writer
+        earlier = seen.setdefault(stored, source_file)  # the first file to send it
+        if earlier != source_file:
+            collided[(source_file, earlier)] = collided.get((source_file, earlier), 0) + 1
 
 
 def _resolve_cached(host_dict, raw: str) -> str | None:
@@ -167,13 +168,13 @@ def ingest_csv(
     Returns (count_indexed, count_skipped, count_bulk_failed).
     count_skipped = rows dropped by time range filter.
 
-    `seen` ((machine key, record id) -> the file that last wrote it, one per
-    index for a run) and `collided` ((file that lost the row, file that
-    replaced it) -> rows): a row whose stored id another file of the run
-    already wrote replaces that row, and the loss is counted against the
-    earlier file. Counted after each write, from the machine key the write
-    stamped: identical rows of two machines (one case index) are two
-    documents, never a loss, and counting resolves no host itself.
+    `seen` ((machine key, record id) -> the first file that sent it, one per
+    index for a run) and `collided` ((file whose row isn't stored, the earlier
+    file that sent it) -> rows): a row whose stored id another file of the run
+    already sent isn't stored again, and that is counted against this file.
+    Counted after each write, from the machine key the write stamped:
+    identical rows of two machines (one case index) are two documents, never
+    a loss, and counting resolves no host itself.
     """
     track = seen is not None and collided is not None and not natural_key
     count = 0
