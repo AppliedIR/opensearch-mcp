@@ -47,7 +47,7 @@ def _declare_copy(case, original, copy, sha):
         result_summary={"status": "logged", "output_files": [str(copy)]},
         extra={"declared": True, "inputs": [ops.place(original)],
                "input_registered": [{"path": str(original), "sha256": sha}],
-               "outputs": [{"path": str(copy), "sha256": f"pending:{job.job_id}"}]},
+               "outputs": [_output(copy, f"pending:{job.job_id}")]},
     )  # fmt: skip
     log = case / "audit" / "file-identity.jsonl"
     deadline = time.monotonic() + 30
@@ -120,8 +120,15 @@ def _extract(case, archive, image, sha, job_id):
         result_summary={"exit_code": 0},
         extra={"inputs": [ops.place(archive)],
                "input_registered": [{"path": str(archive), "sha256": sha}],
-               "outputs": [{"path": str(image), "sha256": f"pending:{job_id}"}]},
+               "outputs": [_output(image, f"pending:{job_id}")]},
     )  # fmt: skip
+
+
+def _output(path, sha):
+    """An output record as file_place.output_records writes it."""
+    st = path.stat()
+    return {**ops.place(path), "sha256": sha, "size": st.st_size, "st_ino": st.st_ino,
+            "mtime_ns": st.st_mtime_ns}  # fmt: skip
 
 
 def _close(case, image, job_id):
@@ -171,3 +178,29 @@ def test_the_run_names_its_input_by_the_hash_the_extraction_recorded(extracted):
     _close(case, image, "hash-00000000000000c3")
     assert ops.large_input(case, image)["sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
     assert "sha256" not in ops.large_input(case, archive)  # nothing recorded it
+
+
+def test_a_file_replaced_while_its_job_runs_never_takes_the_pending_hash(extracted):
+    """Another file put at the path before the job closes isn't the output
+    recorded: no pending hash, so no link (never a wrong FULL)."""
+    case, archive, image, sha = extracted
+    _extract(case, archive, image, sha, "hash-00000000000000d4")
+    replacement = image.with_name("other.img")
+    replacement.write_bytes(b"another memory image " * 2048)
+    replacement.replace(image)  # a new inode at the same path
+    assert "sha256" not in ops.large_input(case, image)
+    aid = _memory_step(case, image)
+    _close(case, image, "hash-00000000000000d4")  # the job hashes what's there now
+    t = pv.trace_op(pv.load_case(case), aid)
+    assert t.grade != "FULL", t.as_dict()
+
+
+def test_a_newer_pending_job_is_taken_over_an_older_closed_one(extracted):
+    """An earlier extraction's job closed and the file was written again: the
+    newer operation's pending job is the one taken."""
+    case, archive, image, sha = extracted
+    _extract(case, archive, image, sha, "hash-00000000000000e5")
+    _close(case, image, "hash-00000000000000e5")
+    image.write_bytes(b"memory image, extracted again " * 2048)
+    _extract(case, archive, image, sha, "hash-00000000000000f6")
+    assert ops.large_input(case, image)["sha256"] == "pending:hash-00000000000000f6"

@@ -368,8 +368,10 @@ def recorded_hash(case_dir, path) -> str:
     """The hash of a large file read whole and never hashed here (an image, a
     memory dump), as recorded when an earlier operation wrote it: what its
     completed background job recorded while the file is unchanged; else
-    `pending:<job>` when one operation recorded it as an output whose hash job
-    hasn't closed yet (the resolver takes it through that job); else ""."""
+    `pending:<job>` of the newest operation that recorded it as an output whose
+    job hasn't closed, while the file is still that output (its inode, size
+    and mtime as recorded: a file replaced at the path never takes it); the
+    resolver takes it through that job. Else ""."""
     if case_dir is None:
         return ""
     from sift_common import file_identity as fi
@@ -378,13 +380,21 @@ def recorded_hash(case_dir, path) -> str:
     if sha := fi.completed_hash(case_dir, path):
         return sha
     real = os.path.realpath(path)
-    if fi._completed_rows(case_dir).get(real) is not None:
-        return ""  # its job closed, and the file changed since (or it failed)
+    try:
+        st = os.stat(real)
+    except OSError:
+        return ""
+    now = (st.st_ino, st.st_size, st.st_mtime_ns)
+    closed = (fi._completed_rows(case_dir).get(real) or {}).get("job_id")
     case = pv.load_case(case_dir)
-    jobs = {h for items in case.by_id.values() for e, _ in items
-            for p, h in pv._outputs(case, e)
-            if h.startswith("pending:") and os.path.realpath(p) == real}  # fmt: skip
-    return jobs.pop() if len(jobs) == 1 else ""
+    found = [(pv._when(case, e), o["sha256"])
+             for items in case.by_id.values() for e, _ in items
+             for o in e.get("outputs") or [] if isinstance(o, dict)
+             and str(o.get("sha256") or "").startswith("pending:")
+             and o["sha256"][len("pending:"):] != closed  # its job closed: changed since
+             and os.path.realpath(str(pv._where(case, o))) == real
+             and (o.get("st_ino"), o.get("size"), o.get("mtime_ns")) == now]  # fmt: skip
+    return max(found)[1] if found else ""
 
 
 def large_input(case_dir, path) -> dict:
