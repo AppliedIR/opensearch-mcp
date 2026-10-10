@@ -306,7 +306,7 @@ def _run_step(tool: str, input_attr: str):
                 print(f"Error: {raw}: {ops.NO_ENTRY}.", file=sys.stderr)
                 sys.exit(1)
             _run.audit, _run.step = audit, step
-            ops.set_run(audit, case_dir, roots, run_op=step, folder=folder)
+            ops.set_run(audit, case_dir, roots)
             try:
                 return fn(args, *a, **kw)
             finally:

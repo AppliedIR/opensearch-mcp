@@ -265,11 +265,11 @@ def test_a_file_a_declared_action_made_is_refused(case, tmp_path, monkeypatch):
     assert "declared" in refusal["refused"]["reason"]
 
 
-def test_a_file_added_to_a_registered_folder_after_its_manifest_is_refused_and_named(
-    case, monkeypatch
-):
+def test_a_registered_folder_is_taken_with_its_members_as_they_are(case, monkeypatch):
+    """Only the input is checked: a file added to a registered folder after
+    its manifest is read with the rest, under the folder's manifest."""
     folder = case / "evidence" / "kape"
-    folder.mkdir()
+    folder.mkdir(parents=True)
     listed = folder / "part1.csv"
     listed.write_text("a,b\n1,2\n")
     (case / "evidence-manifests").mkdir()
@@ -283,15 +283,13 @@ def test_a_file_added_to_a_registered_folder_after_its_manifest_is_refused_and_n
                          "manifest_sha256": _sha(manifest), "file_count": 1})  # fmt: skip
     (case / "evidence.json").write_text(json.dumps(reg))
     (folder / "part2.csv").write_text("a,b\n3,4\n")
-    code, parsed = _delimited(monkeypatch, folder)
-    assert parsed == ["part1.csv"]
-    (run,) = _runs(case, "idx_ingest_delimited")
-    assert run["manifest_sha256"] == _sha(manifest)
-    assert run["manifest_path"] == "evidence-manifests/1.json"
-    assert run["roots"] == [{"path": str(folder.resolve()), "sha256": _sha(manifest)}]
-    (refusal,) = _refusals(case)  # the added file, named, under the run
-    assert os.path.basename(refusal["inputs"][0]["path"]) == "part2.csv"
-    assert refusal["about"] == run["audit_id"]
+    root = [{"path": str(folder.resolve()), "sha256": _sha(manifest)}]
+    assert _delimited(monkeypatch, folder) == (0, ["part1.csv", "part2.csv"])
+    assert _delimited(monkeypatch, folder / "part2.csv") == (0, ["part2.csv"])  # alone too
+    for run in _runs(case, "idx_ingest_delimited"):
+        assert run["roots"] == root and run["manifest_sha256"] == _sha(manifest)
+        assert run["manifest_path"] == "evidence-manifests/1.json"
+    assert _refusals(case) == []
 
 
 def test_with_no_case_to_trace_it_in_nothing_is_read_and_the_fix_is_named(
