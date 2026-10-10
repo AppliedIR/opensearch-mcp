@@ -148,7 +148,7 @@ def test_lower_case_logs_of_a_dirty_ntuser_are_replayed_and_its_rows_indexed(tmp
     profile = _profile(tmp_path, logs=("ntuser.dat.LOG1", "ntuser.dat.LOG2"))
     before = _digest(profile)
     status, calls = _scan(profile)
-    assert _detail(status).startswith("8 docs submitted")
+    assert _detail(status).startswith("8 new")
     assert status.get("warnings", []) == []
     assert _digest(profile) == before
     assert sorted(os.listdir(profile)) == [
@@ -162,7 +162,7 @@ def test_lower_case_logs_of_a_dirty_ntuser_are_replayed_and_its_rows_indexed(tmp
 def test_a_collector_that_lower_cased_every_name_is_also_read(tmp_path, status_dir):
     profile = _profile(tmp_path, hive_name="ntuser.dat", logs=("ntuser.dat.log1",))
     status, _ = _scan(profile)
-    assert _detail(status).startswith("8 docs submitted")
+    assert _detail(status).startswith("8 new")
     assert status.get("warnings", []) == []
 
 
@@ -170,21 +170,21 @@ def test_logs_already_in_the_hives_case_change_nothing(tmp_path, status_dir):
     profile = _profile(tmp_path, logs=("NTUSER.DAT.LOG1",))
     status, calls = _scan(profile)
     assert len(calls) == 1
-    assert _detail(status).startswith("8 docs submitted")
+    assert _detail(status).startswith("8 new")
 
 
 def test_a_clean_ntuser_is_left_to_the_one_run(tmp_path, status_dir):
     profile = _profile(tmp_path, dirty=False)
     status, calls = _scan(profile)
     assert len(calls) == 1
-    assert _detail(status).startswith("8 docs submitted")
+    assert _detail(status).startswith("8 new")
 
 
 def test_a_dirty_ntuser_without_logs_stays_named(tmp_path, status_dir):
     profile = _profile(tmp_path, logs=())
     status, calls = _scan(profile)
     assert len(calls) == 1
-    assert _detail(status).startswith("5 docs submitted")
+    assert _detail(status).startswith("5 new")
     (w,) = status["warnings"]
     assert f"{profile}/NTUSER.DAT ({ABORT})" in w
 
@@ -193,7 +193,7 @@ def test_a_replay_that_fails_is_named_by_the_evidence_path(tmp_path, status_dir)
     profile = _profile(tmp_path)
     (profile / "ntuser.dat.LOG1").write_bytes(b"BAD log")
     status, _ = _scan(profile)
-    assert _detail(status).startswith("5 docs submitted")
+    assert _detail(status).startswith("5 new")
     (w,) = status["warnings"]
     assert "1 file(s)" in w and f"({profile}/NTUSER.DAT (" in w
     assert "vhir-shellbags-" not in w
@@ -208,7 +208,7 @@ def test_an_unreadable_ntuser_keeps_the_other_hives_rows(tmp_path, status_dir):
     finally:
         (profile / "NTUSER.DAT").chmod(0o644)
     assert len(calls) == 1
-    assert _detail(status).startswith("5 docs submitted")
+    assert _detail(status).startswith("5 new")
     (w,) = status["warnings"]
     assert f"{profile}/NTUSER.DAT (There was an error processing " in w
 
@@ -227,7 +227,7 @@ def test_a_replay_that_exits_with_an_error_keeps_the_first_run_s_rows(
     profile = _profile(tmp_path)
     status, calls = _scan(profile, replay=replay)
     assert len(calls) == 2
-    assert _detail(status).startswith("5 docs submitted")  # UsrClass's rows
+    assert _detail(status).startswith("5 new")  # UsrClass's rows
     (w,) = status["warnings"]
     assert f"{profile}/NTUSER.DAT (its transaction logs couldn't be replayed: " in w
     assert "vhir-shellbags-" not in w
@@ -237,14 +237,14 @@ def test_a_replay_that_writes_to_its_logs_leaves_the_evidence_unchanged(tmp_path
     profile = _profile(tmp_path, logs=("ntuser.dat.LOG1", "ntuser.dat.LOG2"))
     before = _digest(profile)
     status, _ = _scan(profile, writes_logs=True)
-    assert _detail(status).startswith("8 docs submitted")
+    assert _detail(status).startswith("8 new")
     assert _digest(profile) == before
 
 
 def test_a_replay_s_csv_named_like_the_first_run_s_keeps_both(tmp_path, status_dir):
     status, calls = _scan(_profile(tmp_path), one_name=True)
     assert len(calls) == 2
-    assert _detail(status).startswith("8 docs submitted")  # 5 UsrClass + 3 NTUSER
+    assert _detail(status).startswith("8 new")  # 5 UsrClass + 3 NTUSER
 
 
 def test_a_replay_folder_that_can_t_be_made_is_named_and_keeps_the_first_run(
@@ -261,6 +261,6 @@ def test_a_replay_folder_that_can_t_be_made_is_named_and_keeps_the_first_run(
     profile = _profile(tmp_path)
     status, calls = _scan(profile)
     assert len(calls) == 1
-    assert _detail(status).startswith("5 docs submitted")
+    assert _detail(status).startswith("5 new")
     (w,) = status["warnings"]
     assert f"{profile}/NTUSER.DAT (its transaction logs couldn't be replayed: " in w

@@ -135,7 +135,7 @@ def test_two_good_runs_add_up(tmp_path, status_dir):
     )
     row = _row(status, "jumplists")
     assert row["status"] == "done"
-    assert row["detail"].startswith("12 docs submitted")
+    assert row["detail"].startswith("12 new")
     assert status["total_indexed"] == 12
 
 
@@ -150,7 +150,7 @@ def test_events_an_earlier_run_lost_still_warn(tmp_path, status_dir):
 
 @pytest.mark.parametrize(
     "result, status_, detail",
-    [((5, 0, 0), "done", "5 docs submitted"), (RuntimeError("boom"), "failed", "boom")],
+    [((5, 0, 0), "done", "5 new"), (RuntimeError("boom"), "failed", "boom")],
 )
 def test_a_single_run_reads_as_before(tmp_path, status_dir, result, status_, detail):
     status = _ingest(
@@ -171,7 +171,7 @@ def test_a_custom_artifact_keeps_a_failed_directory(tmp_path, status_dir):
 def test_a_custom_artifact_adds_up_its_directories(tmp_path, status_dir):
     custom = _by_user({"ReportArchive": (2, 0, 1), "ReportQueue": (3, 0, 0)})
     status = _ingest([_wer_host(tmp_path)], custom=custom)
-    assert _row(status, "wer")["detail"].startswith("5 docs submitted")
+    assert _row(status, "wer")["detail"].startswith("5 new")
     assert status["bulk_failed"] == 1
 
 

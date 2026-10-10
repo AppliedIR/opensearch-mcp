@@ -151,7 +151,7 @@ def test_a_hive_shellbags_aborted_on_is_named_and_the_exported_rows_are_kept(sta
         f"({PROFILE}/NTUSER.DAT ("
     )
     assert "UsrClass.dat" not in w
-    assert _row(status, "shellbags")["detail"].startswith("5 docs submitted")
+    assert _row(status, "shellbags")["detail"].startswith("5 new")
 
 
 def test_a_profile_whose_only_hives_were_aborted_on_is_named(status_dir):
@@ -181,7 +181,7 @@ def test_an_amcache_hive_the_tool_could_not_parse_is_named(status_dir):
         "HOST1: amcache: 1 file(s) or folder(s) were not ingested, or only in part "
         f"({hive} ({msg}))"
     ]
-    assert _row(status, "amcache")["detail"].startswith("0 docs submitted")
+    assert _row(status, "amcache")["detail"].startswith("0 new")
 
 
 def test_a_system_hive_shimcache_could_not_read_is_named_without_quotes(status_dir):
@@ -213,7 +213,7 @@ def test_each_hive_registry_could_not_read_is_named_by_its_own_path(status_dir):
     assert "HOST1: registry: 2 file(s)" in w
     assert f"{CONFIG}/SOFTWARE ({bad['SOFTWARE']})" in w and f"{CONFIG}/SAM ({bad['SAM']})" in w
     assert f"{CONFIG}/SYSTEM (" not in w
-    assert _row(status, "registry")["detail"].startswith("8 docs submitted")
+    assert _row(status, "registry")["detail"].startswith("8 new")
 
 
 def test_an_mft_the_tool_did_not_recognise_is_named(status_dir):

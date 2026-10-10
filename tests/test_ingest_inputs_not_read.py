@@ -84,7 +84,7 @@ def test_json_files_that_fail_to_parse_are_named(bg, tmp_path):
     assert str(d / "a.jsonl") in w and str(d / "b.jsonl") in w, w
     assert "Cannot detect JSON format" in w, w  # the reason is shown
     (row,) = st["checklist"]
-    assert row["status"] == "done" and row["detail"].startswith("3 docs submitted"), row
+    assert row["status"] == "done" and row["detail"].startswith("3 new"), row
 
 
 def test_a_single_json_file_that_fails_is_named(bg, tmp_path):
@@ -471,13 +471,13 @@ def test_a_prefetch_folder_with_no_pf_files_is_complete(plaso):
     files = {"Windows/Prefetch/Layout.ini": "x", "Windows/Prefetch/ReadyBoot/Trace1.fx": "x"}
     host, st, _ = plaso("prefetch", files, (0, 0))
     (row,) = st["checklist"]
-    assert row["status"] == "done" and row["detail"].startswith("0 docs"), row
+    assert row["status"] == "done" and row["detail"].startswith("0 new"), row
 
 
 def test_prefetch_that_gives_records_is_complete(plaso):
     host, st, _ = plaso("prefetch", PF, (18, 0))
     (row,) = st["checklist"]
-    assert row["status"] == "done" and row["detail"].startswith("18 docs"), row
+    assert row["status"] == "done" and row["detail"].startswith("18 new"), row
 
 
 def test_records_all_rejected_are_not_read_as_no_records(plaso):

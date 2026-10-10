@@ -127,7 +127,7 @@ def test_anchor_a_clean_run_writes_no_error(tmp_path, status_dir):
     host = _host(tmp_path, "HOST1")
     _evtx(host.evtx_dir / "Security.evtx", 1, 4096 + CHUNK)
     status = _ingest([host], lambda evtx_path, **kw: (500, 0, 0))
-    assert _evtx_rows(status)["HOST1"]["detail"] == "500 docs submitted"
+    assert _evtx_rows(status)["HOST1"]["detail"] == "500 new"
     (path,) = status_dir.glob("*.json")
     (art,) = json.loads(path.read_text())["hosts"][0]["artifacts"]
     assert "error" not in art, art

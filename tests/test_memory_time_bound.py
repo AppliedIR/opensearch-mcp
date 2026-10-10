@@ -126,4 +126,4 @@ def test_the_ingest_status_says_how_many(tmp_path, monkeypatch):
     cli.cmd_ingest_memory(args)
     (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
     (item,) = [i for i in status["checklist"] if i["artifact"] == "windows.dlllist"]
-    assert item["detail"] == "5 docs submitted; 4 with an implausible time, @timestamp not set"
+    assert item["detail"] == "5 new; 4 with an implausible time, @timestamp not set"

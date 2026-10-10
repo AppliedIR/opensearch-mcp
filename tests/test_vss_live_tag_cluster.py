@@ -1,8 +1,8 @@
 """Shadow-copy records against a cluster: the live volume's tag wins in
 either order, a record only in shadow copies keeps the first copy's tag, a
-second run changes nothing, and a case written with the stores' tags over the
-live ones is repaired by ingesting it again. Templates are the tree's, under
-this run's names. Values are synthetic."""
+second run changes nothing (every record kept, and counted), and a record a
+run left with a shadow copy's tag only is tagged live by ingesting again.
+Templates are the tree's, under this run's names. Values are synthetic."""
 
 from __future__ import annotations
 
@@ -96,20 +96,23 @@ def test_a_copy_written_before_live_still_gives_way(client, case):
 
 
 def test_a_second_run_changes_nothing(client, case, capsys):
+    """Every record is in the case already: each keeps its first ingest, and
+    all of them are counted as kept."""
     _scan(client, case)
     bulk.reset_circuit_breaker()
     counts = _scan(client, case)
     assert _tags(client, case) == TAGS
-    assert counts == {"live": (2, 0), "vss1": (0, 0), "vss2": (0, 0)}
-    assert bulk.get_already_present() == 5
+    assert counts == {"live": (0, 0), "vss1": (0, 0), "vss2": (0, 0)}
+    assert bulk.get_already_present() == 7  # every record each volume sent
     assert "WARNING" not in capsys.readouterr().err
 
 
-def test_a_case_written_with_the_copies_tags_is_repaired_by_ingesting_again(client, case):
-    # as written before the fix: every volume overwrote, the last copy's tag stayed
-    for v in ("live", "vss1", "vss2"):
-        _write(client, case, "live", VOLUMES[v], tag=v)
-    assert _tags(client, case)["alpha"] == "vss2"
+def test_a_record_left_with_a_shadow_copys_tag_is_tagged_live_by_a_rerun(client, case):
+    """A run that kept every record under a shadow copy's tag (its live batch
+    lost): ingesting again tags the live volume's records live; a copy-only
+    record keeps the copy that holds it."""
+    _write(client, case, "vss2", VOLUMES["live"] + ["old1", "old2"])
+    assert set(_tags(client, case).values()) == {"vss2"}
     _scan(client, case)
     assert _tags(client, case) == {**TAGS, "old1": "vss2"}  # copy vs copy: the one stored stays
 

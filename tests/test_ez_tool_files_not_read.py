@@ -126,7 +126,7 @@ def test_an_lnk_the_tool_could_not_read_is_named(tmp_path, status_dir, name, why
     assert w.startswith("HOST1: lnk: 1 file(s) or folder(s) were not ingested, or only in part (")
     assert why.split("{p}")[-1].strip(" .)'") in w  # the tool's reason
     (row,) = [c for c in status["checklist"] if c["artifact"] == "lnk"]
-    assert row["detail"].startswith("3 docs submitted")
+    assert row["detail"].startswith("3 new")
 
 
 def test_files_lecmd_tries_that_are_not_lnk_do_not_warn(tmp_path, status_dir):

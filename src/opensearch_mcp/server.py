@@ -2489,7 +2489,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 indexed = a.get("indexed", 0)
                 if a_status == "complete":
                     icon = "done"
-                    detail = f"{indexed:,} docs submitted" + _describe_counts(a)
+                    detail = f"{indexed:,} new" + _describe_counts(a)
                     if a.get("implausible_time"):
                         n = a["implausible_time"]
                         detail += f"; {n:,} with an implausible time, @timestamp not set"
@@ -2582,7 +2582,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
             else:
                 kept = totals.get("already_present", 0)
                 s["message"] = (
-                    f"Ingest complete. {totals.get('indexed', 0):,} docs submitted "
+                    f"Ingest complete. {totals.get('indexed', 0):,} new docs "
                     f"across {totals.get('hosts_total', 0)} host(s) in {minutes}m."
                     + (
                         f" {kept:,} entries were already in the case and kept their first ingest."

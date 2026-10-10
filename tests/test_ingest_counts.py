@@ -138,12 +138,12 @@ def _delimited(case_id: str, tmp_path, monkeypatch, run: str) -> str:
 
 class TestTheStatusSaysWhatWasStored:
     def test_identical_memory_rows(self, case, tmp_path, monkeypatch):
-        assert _memory(case, tmp_path, monkeypatch, "count-1") == "5 docs submitted, 3 stored"
+        assert _memory(case, tmp_path, monkeypatch, "count-1") == "3 new, 3 stored"
 
     def test_an_unparsed_time(self, case, tmp_path, monkeypatch):
         detail = _delimited(case, tmp_path, monkeypatch, "count-1")
         # The source column is a date in the mapping too, so it's ignored there as well.
-        assert detail.startswith("3 docs submitted, 3 stored; 1 doc with unparsed fields (e.g. ")
+        assert detail.startswith("3 new, 3 stored; 1 doc with unparsed fields (e.g. ")
         assert "@timestamp ×1" in detail, detail
 
     def test_the_unparsed_total_is_exact_and_the_names_are_examples(
@@ -159,9 +159,7 @@ class TestTheStatusSaysWhatWasStored:
         args = argparse.Namespace(path=str(data), case=case, hostname="h1", time_field="when")
         cli.cmd_ingest_delimited(args)
         detail = _detail(case, "delimited")
-        assert detail.startswith(
-            "31 docs submitted, 31 stored; 31 docs with unparsed fields (e.g. "
-        )
+        assert detail.startswith("31 new, 31 stored; 31 docs with unparsed fields (e.g. ")
         assert "@timestamp ×30" in detail, detail
         assert "ignore_above" in _status(case)["counts_note"]
 
@@ -172,20 +170,22 @@ class TestTheStatusSaysWhatWasStored:
             f.unlink()
         others = [dict(SERVICE, Name=f"svc-other-{i}") for i in range(2)]
         detail = _memory(case, tmp_path, monkeypatch, "count-2", records=others)
-        assert detail == "2 docs submitted, 2 stored"
+        assert detail == "2 new, 2 stored"
 
-    def test_a_rerun_gives_the_same_numbers(self, case, tmp_path, monkeypatch):
-        first = (
-            _memory(case, tmp_path, monkeypatch, "count-1"),
-            _delimited(case, tmp_path, monkeypatch, "count-2"),
+    def test_a_rerun_adds_nothing_new_and_says_what_it_kept(self, case, tmp_path, monkeypatch):
+        """Every record is in the case already: the artifact line says nothing
+        is new (never a failure), and the run says what it kept."""
+        _memory(case, tmp_path, monkeypatch, "count-1")
+        _delimited(case, tmp_path, monkeypatch, "count-2")
+        for f in ingest_status._STATUS_DIR.glob("*.json"):
+            f.unlink()
+        assert _memory(case, tmp_path, monkeypatch, "count-3") == "0 new, 0 stored"
+        assert _status(case)["message"].endswith(
+            " 5 entries were already in the case and kept their first ingest."
         )
         for f in ingest_status._STATUS_DIR.glob("*.json"):
             f.unlink()
-        again = (
-            _memory(case, tmp_path, monkeypatch, "count-3"),
-            _delimited(case, tmp_path, monkeypatch, "count-4"),
-        )
-        assert again == first
+        assert _delimited(case, tmp_path, monkeypatch, "count-4") == "0 new, 0 stored"
 
 
 def test_counting_never_fails_the_ingest(capsys):
@@ -242,7 +242,7 @@ class TestSubRunCountsAreSummed:
         )
         # Each host's sub-run reads its own file; the final status sums both
         # sub-runs' stored counts.
-        assert detail == "5 docs submitted, 5 stored", detail
+        assert detail == "5 new, 5 stored", detail
 
     def test_recursive(self, case, tmp_path, monkeypatch):
         top = tmp_path / "Output"
@@ -252,7 +252,7 @@ class TestSubRunCountsAreSummed:
         detail = _wrapper(
             case, monkeypatch, "count-rec", path=str(top), hostname="", recursive=True
         )
-        assert detail == "7 docs submitted, 7 stored", detail
+        assert detail == "7 new, 7 stored", detail
 
     def test_a_run_of_two_files_counts_both_files_ids(self, case, tmp_path, monkeypatch):
         """Each file has its own audit id; the run's count covers them all."""
@@ -261,7 +261,7 @@ class TestSubRunCountsAreSummed:
         _rows(folder / "Netstat-a.csv", 3, "h1")
         _rows(folder / "Netstat-b.csv", 2, "h1")
         detail = _wrapper(case, monkeypatch, "count-two", path=str(folder), hostname="h1")
-        assert detail == "5 docs submitted, 5 stored", detail
+        assert detail == "5 new, 5 stored", detail
 
     def test_no_partial_total_when_a_sub_run_has_no_counts(self, case, tmp_path, monkeypatch):
         top = tmp_path / "Output"
@@ -279,4 +279,4 @@ class TestSubRunCountsAreSummed:
         detail = _wrapper(
             case, monkeypatch, "count-mix", path=str(top), hostname="", recursive=True
         )
-        assert detail == "4 docs submitted", detail
+        assert detail == "4 new", detail

@@ -462,6 +462,7 @@ def _write_bg_status(
             "artifacts_total": 1,
             "hosts_total": 1,
             "hosts_complete": done,
+            **_kept_now(),
         },
         started=started,
         error=error,
@@ -752,6 +753,14 @@ def _run_summary(result) -> str:
             " and kept their first ingest."
         )
     return line
+
+
+def _kept_now() -> dict:
+    """The status totals' count of entries this run kept (the count is reset
+    as each run starts), when there are any."""
+    from opensearch_mcp.bulk import get_already_present
+
+    return {"already_present": n} if (n := get_already_present()) else {}
 
 
 def _kept_total(result) -> dict:
@@ -3112,6 +3121,7 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                 "artifacts_complete": n_done,
                 "hosts_total": 1,
                 "hosts_complete": 1 if n_done == len(status_plugins) else 0,
+                **_kept_now(),
             },
             started_ts,
             error=error,
