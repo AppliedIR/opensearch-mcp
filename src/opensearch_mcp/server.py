@@ -780,8 +780,14 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     return {h for h, c in suffix_counts.items() if c >= threshold}
 
 
+# Where evidence may be ingested from, beside the user's home folder
+ALLOWED_ROOTS = ("/mnt", "/media", "/run/media", "/evidence", "/cases", "/tmp")
+
+
 def _validate_path(path: str) -> str | None:
-    """Validate path is in allowed locations. Returns error string or None."""
+    """Validate path is in allowed locations, or is an original registered in
+    the active case wherever it lies (never home or its hidden folders).
+    Returns error string or None."""
     from opensearch_mcp.paths import vhir_home
 
     p = Path(path).resolve()
@@ -798,23 +804,42 @@ def _validate_path(path: str) -> str | None:
                 "folder is itself inside a hidden folder, move it to a folder that isn't "
                 "hidden first."
             )
-    allowed = [
-        home,
-        Path("/mnt").resolve(),
-        Path("/media").resolve(),
-        Path("/run/media").resolve(),
-        Path("/evidence").resolve(),
-        Path("/cases").resolve(),
-        Path("/tmp").resolve(),
-    ]
-    if not any(p.is_relative_to(a) for a in allowed):
+    allowed = [home, *(Path(a).resolve() for a in ALLOWED_ROOTS)]
+    if not any(p.is_relative_to(a) for a in allowed) and not _registered_original(p):
         return (
             f"Path not in allowed locations "
             f"(~/, /mnt/, /media/, /evidence/, /cases/, /tmp/): {path} "
             f"(resolved target: {p}). The target must be under one of these; copy it in, "
-            "or mount or bind it under /mnt, /media or /evidence."
+            "or mount or bind it under /mnt, /media or /evidence, or register it where it "
+            "lies (a link in the case's evidence/ folder) and ingest it then."
         )
     return None
+
+
+def _registered_original(p: Path) -> bool:
+    """`p` (resolved) is an original registered in the active case, wherever it
+    lies: a file, a folder, or a file in a registered folder. case-mcp records
+    the target of a link in evidence/, so evidence on read-only storage is
+    registered where it is."""
+    import json
+
+    from sift_common import resolve_case_dir
+
+    try:
+        resolved = resolve_case_dir()
+        if not resolved:  # no active case: never the working folder's registry
+            return False
+        case_dir = Path(resolved)
+        registry = json.loads((case_dir / "evidence.json").read_text())
+    except Exception:  # noqa: BLE001 - no case or registry: nothing registered
+        return False
+    files = registry.get("files") if isinstance(registry, dict) else registry
+    for e in files if isinstance(files, list) else []:
+        if isinstance(e, dict) and e.get("path"):
+            root = (case_dir / str(e["path"])).resolve()
+            if p == root or (e.get("kind") == "folder" and p.is_relative_to(root)):
+                return True
+    return False
 
 
 def _no_index_matched(result: dict, index: str) -> dict | None:
