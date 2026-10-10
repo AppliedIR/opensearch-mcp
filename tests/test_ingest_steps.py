@@ -1157,3 +1157,92 @@ def test_a_wer_file_that_cant_be_read_is_named_not_skipped(case, monkeypatch):
     (row,) = status[0]["artifacts"]
     assert row["not_indexed"] == 1 and str(f) in row["note"]
     assert "couldn't be read" in row["note"] and result.artifacts[-1].skipped == 0
+
+
+def _folder_stored(case, monkeypatch, folder) -> list[dict]:
+    """cmd_ingest_json over `folder`, as _json_stored, with each file's records
+    saying which file they came from; the records as stored."""
+    from opensearch_mcp import ingest_cli
+    from opensearch_mcp.bulk import flush_bulk
+
+    sent: list = []
+    _write_ctx(case, monkeypatch, sent)
+
+    def parse(path, client, index_name, hostname, **kw):
+        flush_bulk(client, [
+            {"_index": index_name, "_id": f"{path.name}:1",
+             "_source": {"message": f"event from {path.stem}", "host.name": "RD01"}}
+        ])  # fmt: skip
+        return 1, 0, 0, False
+
+    for name in ("_ensure_case_active", "_preflight_shard_capacity", "_write_bg_status", "_gate"):
+        monkeypatch.setattr(ingest_cli, name, MagicMock())
+    monkeypatch.setattr(ingest_cli, "_load_case_host_dict", lambda c: None)
+    monkeypatch.setattr(ingest_cli, "_resolve_case_id", lambda c: "acme")
+    monkeypatch.setattr(ingest_cli, "_case_dir_for", lambda c: case)
+    monkeypatch.setattr(ingest_cli, "get_client", MagicMock())
+    monkeypatch.setattr("opensearch_mcp.parse_json.ingest_json", parse)
+    args = argparse.Namespace(
+        path=str(folder), hostname="RD01", case=None, time_field=None, time_from=None,
+        time_to=None, batch_size=1000, dry_run=False, index_suffix=None,
+    )  # fmt: skip
+    ingest_cli.cmd_ingest_json(args)
+    return [a["_source"] for a in sent]
+
+
+def _grade(case, src: dict, quote: str):
+    """A query that returned `src`, recorded as idx_search records it, then the
+    finding's grade for `quote` from that query (sift-common's grader)."""
+    from sift_common import provenance as pv
+
+    aid = "opensearch-examiner-20261010-01m4kfqv0000000000000000aa"
+    resp = case / "extractions" / aid / "response.json"
+    resp.parent.mkdir(parents=True)
+    hit = {"_index": f"case-{C12}-json-x-0", "_id": "d1", **src}
+    resp.write_text(json.dumps({"results": [hit], "audit_id": aid}))
+    doc = {"_index": hit["_index"], "_id": hit["_id"],
+           "ingest_audit_id": src["vhir.ingest_audit_id"],
+           "content_hash": src["vhir.content_hash"],
+           "original_sha256": src.get("vhir.original.sha256", "")}  # fmt: skip
+    entry = {"audit_id": aid, "ts": "2026-10-10T18:00:00Z", "case_id": "acme",
+             "examiner": "examiner", "tool": "idx_search",
+             "params": {"query": "x", "result_docs": [doc],
+                        "result_ingests": [doc["ingest_audit_id"]]},
+             "response": {"path": str(resp), "sha256": _sha(resp)}}  # fmt: skip
+    with open(case / "audit" / "opensearch-mcp.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return pv.trace_artifact(pv.load_case(case), aid, quote)
+
+
+def test_a_folder_of_separately_registered_files_stamps_no_original_and_traces_each(
+    case, monkeypatch
+):
+    """One ingest of a folder holding two registered files has two roots: no
+    record is stamped with both. Each record still traces to its own file."""
+    folder = case / "evidence" / "pair"
+    folder.mkdir(parents=True)
+    dev = folder / "dev01.jsonl"
+    dev.write_text('{"a": 1}\n')
+    wks = folder / "wkstn05.jsonl"
+    wks.write_text('{"b": 2}\n')
+    dev_sha = _register(case, dev)
+    _register(case, wks)
+    stored = _folder_stored(case, monkeypatch, folder)
+    assert len(stored) == 2
+    assert not [k for src in stored for k in src if k.startswith("vhir.original")]
+    (src,) = [s for s in stored if s["message"] == "event from dev01"]
+    t = _grade(case, src, "event from dev01")
+    assert t.grade == "FULL", (t.grade, t.reason)
+    assert [r["sha256"] for r in t.roots] == [dev_sha]
+
+
+def test_a_single_root_run_still_stamps_its_original(case, monkeypatch):
+    folder = case / "evidence" / "one"
+    folder.mkdir(parents=True)
+    dev = folder / "dev01.jsonl"
+    dev.write_text('{"a": 1}\n')
+    dev_sha = _register(case, dev)
+    stored = _folder_stored(case, monkeypatch, folder)
+    assert [s["vhir.original.sha256"] for s in stored] == [dev_sha]
+    t = _grade(case, stored[0], "event from dev01")
+    assert t.grade == "FULL", (t.grade, t.reason)

@@ -462,10 +462,11 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         step = (steps[n] if steps and n < len(steps) else "") or open_step
         if step:  # the step that read the record's file
             src["vhir.ingest_audit_id"] = step
-        if roots:  # one value, or every root when the run has several
-            paths, shas = [r["path"] for r in roots], [r["sha256"] for r in roots]
-            src["vhir.original.path"] = paths[0] if len(paths) == 1 else paths
-            src["vhir.original.sha256"] = shas[0] if len(shas) == 1 else shas
+        # The run's one root; a run given several roots doesn't know which a
+        # record came from, so it names none (its step's chain still does)
+        if len(roots) == 1:
+            src["vhir.original.path"] = roots[0]["path"]
+            src["vhir.original.sha256"] = roots[0]["sha256"]
         raw, key, canonical = ctx.resolve(src.get("host.name"))
         src["host.name"] = raw
         src["host.id"] = canonical
