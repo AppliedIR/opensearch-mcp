@@ -97,6 +97,29 @@ def _case_for_every_ingest(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _inputs_traced(request, monkeypatch):
+    """Ingest refuses an input that doesn't trace FULL to registered evidence.
+    Rows about something else run the real gate and, where it would refuse
+    (an input they never registered), go on with no roots, as before the gate;
+    `@pytest.mark.evidence_gate` keeps its refusals."""
+    if request.node.get_closest_marker("evidence_gate"):
+        yield
+        return
+    from opensearch_mcp import ops
+
+    real = ops.gate
+
+    def gate(case_dir, path):
+        try:
+            return real(case_dir, path)
+        except ops.Refused:
+            return [], {}
+
+    monkeypatch.setattr(ops, "gate", gate)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _hosts_confirmed(request, monkeypatch):
     """Ingest waits until the examiner confirms each unit's hosts. Rows about
     something else run as if every host were confirmed; `@pytest.mark.host_gate`

@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from registry_rows import register
 
 from opensearch_mcp import ingest_status, shard_capacity
 from opensearch_mcp import server as srv
@@ -276,6 +277,7 @@ def mem(tmp_path, monkeypatch):
     def run(*members: str) -> dict:
         archive = tmp_path / "mem.zip"
         archive.write_text("\n".join(members) + "\n")
+        register(case_dir, archive)
         resp = srv.idx_ingest_memory(path=str(archive), hostname="hostA", dry_run=False)
         # a worker that already ended (no cluster here) is answered as it ended
         assert resp["status"] in ("started", "failed"), resp

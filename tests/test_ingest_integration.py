@@ -633,12 +633,14 @@ class TestFailedArtifactWarning:
         monkeypatch.setenv("VHIR_CASE_DIR", str(case_dir))  # what the summary reads
 
         from _helpers import confirm_unit
+        from registry_rows import register_tree
 
         def run(host, fail):
             config = tmp_path / host / "Windows" / "System32" / "config"
             config.mkdir(parents=True, exist_ok=True)
             for hive in ("SYSTEM", "SOFTWARE"):
                 (config / hive).write_bytes(b"regf" * 1024)
+            register_tree(case_dir, tmp_path / host)
             if not getattr(run, host, False):  # the examiner confirms the host first
                 confirm_unit(case_dir, tmp_path / host, host)
                 setattr(run, host, True)
@@ -761,8 +763,10 @@ class TestTriageSummaryAfterIngest:
         (tree / "Windows" / "AppCompat" / "Programs").mkdir(parents=True)
         (tree / "Windows" / "AppCompat" / "Programs" / "Amcache.hve").write_bytes(b"regf")
         from _helpers import confirm_unit
+        from registry_rows import register_tree
 
         confirm_unit(case_dir, tree, "h1")  # the examiner confirms the host first
+        register_tree(case_dir, tree)
 
         registry = legacy_index_name(cid, "registry", "h1")
         rows = tmp_path / "registry.csv"

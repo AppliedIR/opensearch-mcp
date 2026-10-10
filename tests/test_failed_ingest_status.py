@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from registry_rows import register
 
 from opensearch_mcp import ingest_status, shard_capacity
 from opensearch_mcp import server as srv
@@ -52,6 +53,7 @@ def case(tmp_path, monkeypatch):
     evidence.mkdir()
     (evidence / "disk.raw").write_bytes(b"\0" * 4096)
     (evidence / "mem.raw").write_bytes(b"\0" * 4096)
+    register(case_dir, evidence / "disk.raw", evidence / "mem.raw")
     monkeypatch.setattr(shard_capacity, "check_shard_headroom", lambda *a, **k: (True, ""))
     monkeypatch.setattr(srv, "get_client", lambda: mock.MagicMock())
     monkeypatch.setattr(srv, "_get_os", lambda: mock.MagicMock())
@@ -155,6 +157,7 @@ def test_an_archive_password_reaches_neither_the_log_nor_the_status(case, monkey
     monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
     monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    register(case.parent / "cases" / "c1", case / "mem.zip")
     resp = srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
     assert resp["status"] == "started", resp
     status = _final()
@@ -187,6 +190,7 @@ def test_no_piece_of_the_password_survives_the_cut(case, monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
     monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    register(case.parent / "cases" / "c1", case / "mem.zip")
     resp = srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
     status = _final()
     assert status["status"] == "failed", status
@@ -209,6 +213,7 @@ def test_a_memory_archives_password_goes_on_7zs_stdin_never_its_command_line(
     monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
     monkeypatch.setenv("VHIR_ARCHIVE_PASSWORD", secret)
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    register(case.parent / "cases" / "c1", case / "mem.zip")
     srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
     assert _final()["status"] == "failed"
     argv = Path(f"{seen}.argv").read_text()
@@ -234,6 +239,7 @@ def test_the_memory_command_gives_7z_the_password_on_stdin_in_a_new_session(case
 
     monkeypatch.setattr(subprocess, "run", run)
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    register(case.parent / "cases" / "c1", case / "mem.zip")
     args = argparse.Namespace(
         path=str(case / "mem.zip"), case="c1", hostname="h1", tier=1, plugins=None, yes=True
     )
@@ -261,6 +267,7 @@ def test_a_7z_timeout_doesnt_print_the_password(case, monkeypatch, capsys):
 
     monkeypatch.setattr(subprocess, "run", run)
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
+    register(case.parent / "cases" / "c1", case / "mem.zip")
     args = argparse.Namespace(
         path=str(case / "mem.zip"), case="c1", hostname="h1", tier=1, plugins=None, yes=True
     )

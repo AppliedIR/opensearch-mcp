@@ -159,6 +159,20 @@ class Unreadable(NoEntry):
     """The file a step reads can't be read; its failure is recorded."""
 
 
+class NotInManifest(NoEntry):
+    """A file in the run's registered folder that its manifest doesn't list:
+    refused in its own entry, never indexed."""
+
+
+class Refused(RuntimeError):
+    """An ingest's input doesn't trace FULL to registered evidence: nothing
+    of it is read or sent."""
+
+    def __init__(self, path: str, why: str, fix: str):
+        super().__init__(why)
+        self.path, self.why, self.fix = path, why, fix
+
+
 NOT_INDEXED = "not indexed"
 
 
@@ -194,6 +208,10 @@ def read_step(
     Unreadable; an entry that can't be written raises NoEntry. Either way the
     file is not indexed."""
     params = {**params, "file": str(path)}
+    if (why := _outside_manifest(path)) is not None:
+        write(audit, tool, params=params, summary=f"REFUSED: {why}", inputs=[place(path)],
+              about=getattr(_tls, "run_op", ""))  # fmt: skip
+        raise NotInManifest(why)
     try:
         entry, reg = file_input(case_dir, path, sha256, produced_by)
     except OSError as e:
@@ -424,11 +442,85 @@ def image_input(case_dir, path) -> tuple[dict, dict | None]:
     return entry, reg
 
 
-def set_run(audit, case_dir, roots: list[dict] | None = None) -> None:
-    """The run open on this thread: its writer, case and roots (the registered
-    evidence it was given, ``{path, sha256}``); None, None closes it."""
+def set_run(audit, case_dir, roots: list[dict] | None = None, run_op: str = "",
+            folder: dict | None = None) -> None:  # fmt: skip
+    """The run open on this thread: its writer, case, roots (the registered
+    evidence it was given, ``{path, sha256}``), its op and the registered
+    folder it reads in, if any; None, None closes it."""
     _tls.run = (audit, case_dir) if audit is not None else None
     _tls.roots = list(roots or []) if audit is not None else []
+    _tls.run_op = run_op if audit is not None else ""
+    _tls.folder = None
+    if audit is not None and folder:
+        from sift_common import provenance as pv
+
+        rows = pv._manifest_rows(pv.load_case(case_dir), folder)
+        _tls.folder = (folder["path"], Path(case_dir).resolve(), {r.get("path") for r in rows})
+
+
+def _outside_manifest(path) -> str | None:
+    """Why a file in the run's registered folder can't be read: its manifest
+    doesn't list it ("Partial should not be possible"); None otherwise."""
+    folder = getattr(_tls, "folder", None)
+    if not folder:
+        return None
+    root, case_dir, rows = folder
+    real = os.path.realpath(path)
+    if not real.startswith(root + os.sep) or os.path.relpath(real, case_dir) in rows:
+        return None
+    return f"{real} is in the registered folder {root} but not in its manifest"
+
+
+def gate(case_dir, path) -> tuple[list[dict], dict]:
+    """``(roots, registered folder or {})``: the registered evidence an
+    ingest's input traces to, before anything of it is read. FULL, or a
+    pending hash on a recorded output that is still that output (inode, size,
+    mtime as recorded) whose producing operation traces FULL. A folder: a
+    registered one (or one inside it) by its manifest, file by file as read;
+    any other, every file in it. Anything else raises Refused with the
+    trace's fix: DECLARED, AMBIGUOUS, BROKEN."""
+    from sift_common import provenance as pv
+
+    real = os.path.realpath(path)
+    if case_dir is None:
+        raise Refused(real, "no case to trace it in", "activate the case it is registered in")
+    case = pv.load_case(case_dir)
+    folder = next((r for r in case.roots if r.get("kind") == "folder" and (
+        real == r["path"] or real.startswith(r["path"] + os.sep))), None)  # fmt: skip
+    if not os.path.isdir(real):
+        return _gate_file(pv, case, case_dir, real), folder or {}
+    if folder is not None:
+        return [{"path": folder["path"], "sha256": folder.get("manifest_sha256", "")}], folder
+    roots: dict = {}
+    for top, dirs, names in os.walk(real):
+        dirs.sort()
+        for n in sorted(names):
+            f = os.path.join(top, n)
+            if os.path.isfile(f) and not os.path.islink(f):
+                roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f))
+    return list(roots.values()), {}
+
+
+def _gate_file(pv, case, case_dir, real: str) -> list[dict]:
+    p = place(real)
+    at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
+    t = pv.trace_file(case, real, None, **at)  # registered, or read through a mount
+    if t.grade == "FULL":
+        return [{"path": r["path"], "sha256": r.get("sha256", "")} for r in t.roots]
+    # the trace's own index (cached under this name): (entry, line, sha) each
+    outputs = pv._index(case, "outputs", lambda e, line: [
+        (os.path.realpath(o), (e, line, h)) for o, h in pv._outputs(case, e)])  # fmt: skip
+    if real not in outputs:  # no recorded origin can hold it: refused unhashed
+        raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
+    sha = recorded_hash(case_dir, real) or sha256_file(Path(real))
+    t = pv.trace_file(case, real, sha, **at)
+    if t.grade != "FULL" and sha.startswith("pending:") and (
+            (t.break_ or {}).get("kind") == "hash-pending"):  # fmt: skip
+        made = [e for e, _, h in outputs[real] if h == sha]  # its producing operation
+        t = pv.trace_op(case, made[-1]["audit_id"]) if made else t
+    if t.grade == "FULL":
+        return [{"path": r["path"], "sha256": r.get("sha256", "")} for r in t.roots]
+    raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
 
 
 def run_roots() -> list[dict]:

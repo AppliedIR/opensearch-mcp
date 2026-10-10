@@ -9,6 +9,7 @@ import uuid
 
 import _scratch_templates
 import pytest
+from registry_rows import register
 from sift_common import host_gate
 from sift_common import host_identity as hi
 
@@ -120,6 +121,7 @@ def test_a_run_whose_hosts_are_confirmed_answers_started_at_once(client, tmp_pat
     rows = case_dir / "evidence" / "events.csv"
     rows.write_text("when,what\n2026-01-01T00:00:00Z,a\n")
     confirm_unit(case_dir, rows, "h1")  # the examiner confirmed it already
+    register(case_dir, rows)
     c12 = wc.case_identity(case_dir)[0]
     created = _scratch_templates.install(client, f"gr-{c12}", c12=c12)
     try:

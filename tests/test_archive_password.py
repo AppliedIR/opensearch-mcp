@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from registry_rows import register
 
 pytestmark = pytest.mark.skipif(shutil.which("7z") is None, reason="7z isn't installed")
 
@@ -104,6 +105,7 @@ def _ingest(tmp_path: Path, password: str) -> str:
         capture_output=True,
         stdin=subprocess.DEVNULL,
     )
+    register(home / "cases" / "c1", archive)
     return _server(
         home, "ingest", str(archive), password, until=("Scanning...", "CalledProcessError")
     )

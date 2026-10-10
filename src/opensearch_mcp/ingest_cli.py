@@ -261,29 +261,52 @@ def _run_step(tool: str, input_attr: str):
             audit = AuditWriter(mcp_name=f"opensearch-ingest-{os.getpid()}")
             if case_dir is not None and hasattr(audit, "_case_dir_resolver"):
                 audit._case_dir_resolver = lambda: case_dir  # the run's case, active or not
+            params = {
+                "case_id": case_id,
+                "input": str(raw or ""),
+                "hostname": getattr(args, "hostname", "") or "",
+                "run_id": os.environ.get("VHIR_INGEST_RUN_ID", ""),
+            }
+            # only registered evidence is ingested: the input must trace FULL
+            # to it before anything of it is read or sent
+            try:
+                roots, folder = ops.gate(case_dir, raw) if raw else ([], {})
+            except ops.Refused as r:
+                ops.write(audit, tool, params=params, summary=f"REFUSED: {r.why}",
+                          inputs=[ops.place(raw)], extra={"refused": {"path": r.path,
+                          "reason": r.why, "fix": r.fix}})  # fmt: skip
+                fix = f"\n  {r.fix}" if r.fix else ""
+                if params["run_id"]:  # the status the examiner reads says why, and the fix
+                    from opensearch_mcp.ingest_status import write_status
+
+                    started = datetime.now(timezone.utc).isoformat()
+                    why = f"not ingested: {r.why}" + (f"; {r.fix}" if r.fix else "")
+                    write_status(case_id, os.getpid(), params["run_id"], "failed", [], {},
+                                 started, error=why)  # fmt: skip
+                print(f"Error: not ingested: {r.why}{fix}", file=sys.stderr)
+                sys.exit(2)
             reg = ops.registered(case_dir, raw) if raw else None
+            extra: dict = {"roots": roots}
+            if folder:  # a registered folder: the manifest its files are read by
+                extra["manifest_path"] = folder.get("manifest_path", "")
+                extra["manifest_sha256"] = folder.get("manifest_sha256", "")
             step = ops.write(
                 audit,
                 tool,
-                params={
-                    "case_id": case_id,
-                    "input": str(raw or ""),
-                    "hostname": getattr(args, "hostname", "") or "",
-                    "run_id": os.environ.get("VHIR_INGEST_RUN_ID", ""),
-                },
+                params=params,
                 summary="the run, recorded before any of its steps",
                 # an input an earlier operation wrote, by the hash it recorded
                 inputs=[ops.place(raw) if reg else ops.large_input(case_dir, raw)]
                 if raw
                 else None,
                 input_registered=[reg] if reg else None,
-                extra={"roots": [reg] if reg else []},
+                extra=extra,
             )
             if not step:
                 print(f"Error: {raw}: {ops.NO_ENTRY}.", file=sys.stderr)
                 sys.exit(1)
             _run.audit, _run.step = audit, step
-            ops.set_run(audit, case_dir, [reg] if reg else [])
+            ops.set_run(audit, case_dir, roots, run_op=step, folder=folder)
             try:
                 return fn(args, *a, **kw)
             finally:

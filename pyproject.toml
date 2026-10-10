@@ -53,4 +53,5 @@ markers = [
     "integration: tests requiring OpenSearch Docker container",
     "no_case_dirs: the test gets no automatic case directory or default write context",
     "host_gate: the test keeps the real host-confirmation gate",
+    "evidence_gate: the test keeps the real gate refusing input that doesn't trace FULL",
 ]
