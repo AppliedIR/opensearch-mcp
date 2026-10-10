@@ -385,13 +385,15 @@ def recorded_hash(case_dir, path) -> str:
     except OSError:
         return ""
     now = (st.st_ino, st.st_size, st.st_mtime_ns)
-    closed = (fi._completed_rows(case_dir).get(real) or {}).get("job_id")
     case = pv.load_case(case_dir)
+    # every job with a completion row is closed: only an open one is pending
+    closed = {str(e.get("job_id")) for items in case.by_id.values() for e, _ in items
+              if e.get("tool") in ("hash_complete", "hash_failed")}  # fmt: skip
     found = [(pv._when(case, e), o["sha256"])
              for items in case.by_id.values() for e, _ in items
              for o in e.get("outputs") or [] if isinstance(o, dict)
              and str(o.get("sha256") or "").startswith("pending:")
-             and o["sha256"][len("pending:"):] != closed  # its job closed: changed since
+             and o["sha256"][len("pending:"):] not in closed
              and os.path.realpath(str(pv._where(case, o))) == real
              and (o.get("st_ino"), o.get("size"), o.get("mtime_ns")) == now]  # fmt: skip
     return max(found)[1] if found else ""

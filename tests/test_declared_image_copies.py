@@ -204,3 +204,26 @@ def test_a_newer_pending_job_is_taken_over_an_older_closed_one(extracted):
     image.write_bytes(b"memory image, extracted again " * 2048)
     _extract(case, archive, image, sha, "hash-00000000000000f6")
     assert ops.large_input(case, image)["sha256"] == "pending:hash-00000000000000f6"
+
+
+def test_a_rewrite_with_its_mtime_set_back_never_takes_a_closed_job(extracted):
+    """Jobs A and B both closed; the file is then rewritten in place, the
+    same size, its mtime set back. Neither job is pending any more, and the
+    completed hash refuses it on ctime: no hash, never FULL."""
+    import os
+
+    case, archive, image, sha = extracted
+    _extract(case, archive, image, sha, "hash-00000000000000a7")
+    _close(case, image, "hash-00000000000000a7")
+    _extract(case, archive, image, sha, "hash-00000000000000b8")
+    _close(case, image, "hash-00000000000000b8")
+    st = image.stat()
+    data = bytearray(image.read_bytes())
+    data[0] ^= 0xFF  # other bytes, the same size
+    with open(image, "r+b") as f:  # in place: the same inode
+        f.write(data)
+    os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert "sha256" not in ops.large_input(case, image)
+    aid = _memory_step(case, image)
+    t = pv.trace_op(pv.load_case(case), aid)
+    assert t.grade != "FULL", t.as_dict()
