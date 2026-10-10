@@ -272,7 +272,10 @@ def _run_step(tool: str, input_attr: str):
                     "run_id": os.environ.get("VHIR_INGEST_RUN_ID", ""),
                 },
                 summary="the run, recorded before any of its steps",
-                inputs=[ops.place(raw)] if raw else None,
+                # an input an earlier operation wrote, by the hash it recorded
+                inputs=[ops.place(raw) if reg else ops.large_input(case_dir, raw)]
+                if raw
+                else None,
                 input_registered=[reg] if reg else None,
                 extra={"roots": [reg] if reg else []},
             )

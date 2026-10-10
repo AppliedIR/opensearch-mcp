@@ -364,16 +364,51 @@ def extraction_step(audit, case_dir, archive, dest, command: list[str], params=N
     return aid
 
 
+def recorded_hash(case_dir, path) -> str:
+    """The hash of a large file read whole and never hashed here (an image, a
+    memory dump), as recorded when an earlier operation wrote it: what its
+    completed background job recorded while the file is unchanged; else
+    `pending:<job>` when one operation recorded it as an output whose hash job
+    hasn't closed yet (the resolver takes it through that job); else ""."""
+    if case_dir is None:
+        return ""
+    from sift_common import file_identity as fi
+    from sift_common import provenance as pv
+
+    if sha := fi.completed_hash(case_dir, path):
+        return sha
+    real = os.path.realpath(path)
+    if fi._completed_rows(case_dir).get(real) is not None:
+        return ""  # its job closed, and the file changed since (or it failed)
+    case = pv.load_case(case_dir)
+    jobs = {h for items in case.by_id.values() for e, _ in items
+            for p, h in pv._outputs(case, e)
+            if h.startswith("pending:") and os.path.realpath(p) == real}  # fmt: skip
+    return jobs.pop() if len(jobs) == 1 else ""
+
+
+def large_input(case_dir, path) -> dict:
+    """A large input read whole: its place, with its recorded hash if any."""
+    entry = place(path)
+    if sha := recorded_hash(case_dir, path):
+        entry["sha256"] = sha
+    return entry
+
+
 def image_input(case_dir, path) -> tuple[dict, dict | None]:
     """An image a tool reads whole: by the registry, or by the manifest of the
-    extraction that wrote it; otherwise its place only (an image is large and
-    is not hashed here)."""
+    extraction that wrote it, or by the hash recorded when an earlier
+    operation wrote it (`recorded_hash`), so its chain links to that
+    operation; otherwise its place only (an image is large and is not hashed
+    here)."""
     entry = place(path)
     reg = registered(case_dir, path)
     if reg is None:
         made = _extracted().get(entry.get("realpath", ""))
         if made is not None:
             entry["sha256"], entry["produced_by"] = made
+        elif sha := recorded_hash(case_dir, path):
+            entry["sha256"] = sha
     return entry, reg
 
 
