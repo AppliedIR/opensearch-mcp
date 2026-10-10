@@ -115,6 +115,7 @@ class MountContext:
         self.vss_sources: dict[str, str] = {}  # shadow copy id -> the volume it came from
         self.audit = None  # the run's writer, which recorded the mounts
         self.recorded: dict[str, object] = {}  # recorded mount point realpath -> mnt_id
+        self.streams: dict[str, Path] = {}  # an E01's raw stream (ewfmount's ewf1) -> the E01
 
     def record(self, image, points: list[dict], tool: str = "mount_image") -> None:
         """Record a mount (the run's writer), and remember its points, whose
@@ -236,6 +237,7 @@ def _mount_ewf(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     subprocess.run(cmd, check=True)
     ctx.add_mount(ewf_mount)
     raw_path = ewf_mount / "ewf1"
+    ctx.streams[str(raw_path)] = path
     return _mount_raw_partitions(raw_path, dest, ctx)
 
 
@@ -530,8 +532,11 @@ def mount_vss(
         stores += [(vss_id, path, offset) for vss_id, path in found]
     from opensearch_mcp import ops
 
-    # one point per store, with the volume's offset and the store's id
-    ctx.record(raw_path, [ops.mount_point(p, off, store=v) for v, p, off in stores], "mount_vss")
+    # one point per store, with the volume's offset and the store's id; an
+    # E01's stores are read from its raw stream, so the E01 is their input, as
+    # it is its volumes' (mount_image)
+    image = ctx.streams.get(str(raw_path), raw_path)
+    ctx.record(image, [ops.mount_point(p, off, store=v) for v, p, off in stores], "mount_vss")
     return results
 
 
