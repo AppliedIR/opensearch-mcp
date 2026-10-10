@@ -260,10 +260,8 @@ def _update(client, index: str, query: dict, canonical: str) -> dict:
 
 
 # An update_by_query opens a scroll context on every shard it reads (500 at
-# most by default), and its index list rides in the request line (4 KB):
-# each chunk stays well inside both
-_CHUNK_SHARDS = 200
-_CHUNK_INDICES = 40
+# most by default): over a case's whole pattern it can't run, so each index
+# that holds the plan's docs is updated on its own
 
 
 def _holding(client, c12: str, query: dict) -> list[str]:
@@ -283,35 +281,12 @@ def _holding(client, c12: str, query: dict) -> list[str]:
     return sorted(b["key"] for b in buckets)
 
 
-def _chunks(client, c12: str, indices: list[str]) -> list[list[str]]:
-    """`indices` in runs of at most _CHUNK_INDICES indices and _CHUNK_SHARDS
-    primary shards (an index wider than that runs alone)."""
-    settings = client.indices.get_settings(
-        index=f"case-{c12}-*", name="index.number_of_shards", allow_no_indices=True
-    )
-    out: list[list[str]] = []
-    run: list[str] = []
-    shards = 0
-    for index in indices:
-        n = int(
-            ((settings.get(index) or {}).get("settings") or {})
-            .get("index", {})
-            .get("number_of_shards", 1)
-        )
-        if run and (len(run) >= _CHUNK_INDICES or shards + n > _CHUNK_SHARDS):
-            out.append(run)
-            run, shards = [], 0
-        run.append(index)
-        shards += n
-    return out + ([run] if run else [])
-
-
 def relabel(client, c12: str, p: dict, forms: dict) -> int:
     """Set host.id on every doc of the plan. Returns the docs updated. Only
-    the indices that hold the plan's docs are updated, a few at a time."""
+    the indices that hold the plan's docs are updated, one at a time."""
     updated = 0
     own = _own_query(p["keys"], p["canonical"])
-    selections = [(",".join(run), own) for run in _chunks(client, c12, _holding(client, c12, own))]
+    selections = [(index, own) for index in _holding(client, c12, own)]
     selections += [
         (index, _v1_query(forms[index], name, p["canonical"])) for index, name in p["v1"]
     ]

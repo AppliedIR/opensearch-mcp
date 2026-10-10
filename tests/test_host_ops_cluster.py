@@ -441,11 +441,10 @@ def test_the_ais_host_fix_changes_no_doc_and_no_binding(client, case, monkeypatc
     assert canon(case, a) == "WKS01"
 
 
-def test_a_rename_updates_only_its_machines_indices_in_chunks(client, case, monkeypatch):
+def test_a_rename_updates_each_of_its_machines_indices_on_its_own(client, case, monkeypatch):
     """Each artifact type its own index: the machine's docs span several, the
-    other machine's another; with one index per chunk every one of the
-    machine's indices is still relabelled and nothing else is touched."""
-    monkeypatch.setattr(host_ops, "_CHUNK_INDICES", 1)
+    other machine's another; each of the machine's indices is updated on its
+    own and nothing else is touched."""
     a = machine(client, case, "WKS01", 2, "delim-m1")
     for artifact in ("delim-m2", "delim-m3"):
         ctx = wc.open_unit(case, "evidence/WKS01", "WKS01", source="test", origin="artifact")

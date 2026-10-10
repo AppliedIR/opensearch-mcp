@@ -415,27 +415,25 @@ def test_the_access_log_command_puts_back_the_callers_write_context(tmp_path, mo
 
 class _Many:
     """A case whose pattern matches `total` indices, `holding` of which hold
-    the plan's docs; records each update_by_query's index argument."""
+    the plan's docs; records each update_by_query's index argument and
+    refuses one OpenSearch would (a wildcard or list over 500 shards, or a
+    request line past 4 KB)."""
 
-    def __init__(self, c12, total, holding, shards=1):
-        self.names = [f"case-{c12}-delim_m{i:03d}-0" for i in range(total)]
+    def __init__(self, c12, total, holding, stem=""):
+        self.names = [f"case-{c12}-delim-{stem}m{i:03d}-0" for i in range(total)]
         self.holding = self.names[:holding]
-        self.shards = shards
         self.updated: list[str] = []
-        self.indices = self
 
     def search(self, index, body, **k):
         assert body["size"] == 0 and "_index" in json.dumps(body["aggs"])
         buckets = [{"key": n, "doc_count": 2} for n in self.holding]
         return {"_shards": {"failed": 0}, "aggregations": {"i": {"buckets": buckets}}}
 
-    def get_settings(self, index, **k):
-        return {n: {"settings": {"index": {"number_of_shards": str(self.shards)}}}
-                for n in self.names}  # fmt: skip
-
     def update_by_query(self, index, **k):
-        if "*" in index or len(index.split(",")) * self.shards > 500:
+        if "*" in index or len(index.split(",")) > 500:
             raise RuntimeError("too many scroll contexts")
+        if len(f"POST /{index}/_update_by_query HTTP/1.1") > 4096:
+            raise RuntimeError("An HTTP line is larger than 4096 bytes")
         self.updated.append(index)
         return {"updated": 2 * len(index.split(","))}
 
@@ -447,13 +445,12 @@ def _plan():
 def test_a_relabel_updates_only_the_indices_that_hold_the_machine():
     c = _Many("0123456789ab", total=600, holding=3)
     assert host_ops.relabel(c, "0123456789ab", _plan(), {}) == 6
-    assert c.updated == [",".join(c.names[:3])]
+    assert c.updated == c.names[:3]
 
 
-def test_a_relabel_over_many_indices_goes_in_chunks_below_the_scroll_limit():
-    c = _Many("0123456789ab", total=600, holding=90, shards=4)
-    assert host_ops.relabel(c, "0123456789ab", _plan(), {}) == 180
-    chunks = [x.split(",") for x in c.updated]
-    assert sorted(n for ch in chunks for n in ch) == sorted(c.holding)
-    assert all(len(ch) <= 40 and len(ch) * 4 <= 200 for ch in chunks), chunks
-    assert all(len(x) < 3000 for x in c.updated)  # well inside a 4 KB request line
+def test_a_relabel_of_many_long_named_indices_names_one_index_per_update():
+    """Per-file indices carry stems up to 100 bytes: forty of them in one
+    request line would pass 4 KB."""
+    c = _Many("0123456789ab", total=600, holding=40, stem="x" * 96)
+    assert host_ops.relabel(c, "0123456789ab", _plan(), {}) == 80
+    assert c.updated == c.holding
