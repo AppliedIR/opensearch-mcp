@@ -74,10 +74,10 @@ def _final(timeout: float = 30) -> dict:
 def test_a_memory_worker_that_dies_at_argparse(case, monkeypatch):
     spawn = srv._spawn_ingest
     monkeypatch.setattr(srv, "_spawn_ingest", lambda cmd, *a: spawn(cmd + ["--no-such-flag"], *a))
-    assert (
-        srv.idx_ingest_memory(path=str(case / "mem.raw"), hostname="h1", dry_run=False)["status"]
-        == "started"
-    )
+    resp = srv.idx_ingest_memory(path=str(case / "mem.raw"), hostname="h1", dry_run=False)
+    # a worker that already failed when the launch answers is said to have
+    # failed there and then: either way the run ends failed, and its log says why
+    assert resp["status"] in ("started", "failed"), resp
     status = _final()
     assert status["status"] == "failed", status
     assert any("unrecognized arguments: --no-such-flag" in line for line in status["log_tail"]), (
