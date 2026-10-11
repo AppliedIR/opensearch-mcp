@@ -120,7 +120,10 @@ def triage(monkeypatch):
             if name != "check_file":
                 return {}
             sent.append(args["path"])
-            return dict(table.get(args["path"], UNKNOWN))
+            answer = table.get(args["path"], UNKNOWN)
+            if isinstance(answer, Exception):
+                raise answer
+            return dict(answer)
 
         monkeypatch.setattr(tr, "call_tool", call_tool)
         monkeypatch.setattr(tr, "gateway_available", lambda: True)
@@ -261,3 +264,15 @@ def test_a_run_value_too_long_to_read_is_counted_and_fails_the_step(triage, shor
     run = results["registry_run"]
     assert run["status"] == "failed" and run["too_long"] == 1, run
     assert "256" in run["reason"] and long_value not in sent
+
+
+def test_a_value_is_answered_only_when_every_lookup_for_it_answered(triage):
+    """The executable answers, the whole line times out: as when the line's
+    one lookup failed before, the step isn't complete and nothing is written
+    over the document's earlier stamp."""
+    line = "C:\\Windows\\System32\\cmd.exe /c start C:\\Users\\Public\\svchost.exe"
+    doc = {**_reg("w1", RUN, line), "triage.verdict": "SUSPICIOUS"}
+    table = {"C:\\Windows\\System32\\cmd.exe": LOLBIN, line: TimeoutError("timed out")}
+    results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
+    assert results["registry_run"]["status"] == "failed", results["registry_run"]
+    assert stamps["w1"] == ("SUSPICIOUS", False)

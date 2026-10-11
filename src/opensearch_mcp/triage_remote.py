@@ -685,20 +685,22 @@ _WORSE = {"SUSPICIOUS": 2, "UNKNOWN": 1}
 def _ask_all(values: list[str], state: dict) -> dict | None:
     """check_file on each value, flags only: the worse answer (SUSPICIOUS,
     then UNKNOWN, then the rest), with the LOLBin flag if any answer had it.
+    The values are answered only when every call answered: one that failed
+    fails them all, as one call would, and nothing is written for them.
     `state` carries the loop's consecutive call failures and whether any
-    call answered."""
+    value was answered."""
+    if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
+        return None
     answers = []
     for value in values:
-        if state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
-            break
         try:
             result = call_tool("check_file", {"path": value}, timeout=15)
         except Exception:
             state["failures"] += 1
-            continue
-        state["failures"], state["ok"] = 0, True
+            return None
         if result.get("verdict"):
             answers.append(_flags_only(result))
+    state["failures"], state["ok"] = 0, True
     if not answers:
         return None
     worst = max(answers, key=lambda a: _WORSE.get(a.get("verdict"), 0))
