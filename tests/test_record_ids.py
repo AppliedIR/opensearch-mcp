@@ -776,3 +776,50 @@ def test_the_note_names_the_index_and_gives_no_command():
         "case-x-accesslog", "accesslog"
     )
     assert "curl" not in wc.OLD_IDS_NOTE and "DELETE" not in wc.OLD_IDS_NOTE
+
+
+# An index 0.6.4's opensearch-ingest CLI made has no template: each field is
+# what dynamic mapping makes of a string, text with a keyword sub-field.
+DYNAMIC = {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
+
+
+def _accesslog_stored_by_064_cli(cluster, cases, case, source_file):
+    out, _ = ingest_all(cluster, cases, case, parsers=("accesslog",))
+    stored_before_065(cluster)
+    index = out["accesslog"]
+    fields = {f: DYNAMIC for f in ("host_key", "unit", "parse_method")}
+    cluster.mappings[index] = {"vhir": {"properties": {**fields, "source_file": source_file}}}
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING", "OLD_IDS_UNCHECKED")
+    return index
+
+
+def test_a_re_ingest_into_an_index_with_text_fields_says_it_adds_a_second_copy(
+    cluster, cases, status_dir
+):
+    index = _accesslog_stored_by_064_cli(cluster, cases, "c4t", DYNAMIC)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _, said = ingest_all(cluster, cases, "c4t", parsers=("accesslog",))
+    assert said == {"accesslog": note(index, "accesslog")}
+    assert f"WARNING: {note(index, 'accesslog')}" in err.getvalue()
+
+
+@pytest.mark.parametrize(
+    "source_file,why",
+    [
+        ({"type": "text"}, "vhir.source_file isn't exact-match"),
+        ({**DYNAMIC, "fields": {"keyword": {"type": "keyword", "ignore_above": 8}}},
+         "vhir.source_file isn't exact-match (values over 8 characters aren't indexed)"),
+    ],
+    ids=["text-only", "over-ignore_above"],
+)  # fmt: skip
+def test_a_field_that_cant_be_filtered_exactly_says_it_couldnt_check(
+    cluster, cases, status_dir, source_file, why
+):
+    index = _accesslog_stored_by_064_cli(cluster, cases, "c4u", source_file)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _, said = ingest_all(cluster, cases, "c4u", parsers=("accesslog",))
+    said_here = f"couldn't check for pre-0.6.5 copies in {index}: {why}"
+    assert said == {"accesslog": said_here}
+    assert f"WARNING: {said_here}" in err.getvalue()

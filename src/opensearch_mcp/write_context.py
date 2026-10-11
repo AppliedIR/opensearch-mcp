@@ -393,21 +393,55 @@ def _old_ids_probe(action: dict) -> tuple | None:
             method, source)  # fmt: skip
 
 
+def _exact(props: dict, field: str, value) -> str:
+    """The field a `term` on `value` matches exactly in an index mapped as
+    `props`: `field` when it's keyword (or unmapped: no record holds it), its
+    keyword sub-field when it's text (an index 0.6.4's CLI made without a
+    template). Anything else raises, never a silent zero."""
+    node = props.get(field)
+    if not isinstance(node, dict):
+        node, here = None, props
+        for part in field.split("."):
+            node = (here or {}).get(part)
+            if not isinstance(node, dict):
+                return field
+            here = node.get("properties")
+    form = field
+    if node.get("type") == "text":
+        sub = (node.get("fields") or {}).get("keyword") or {}
+        if sub.get("type") == "keyword":
+            form, node = f"{field}.keyword", sub
+    if node.get("type") != "keyword":
+        raise RuntimeError(f"{field} isn't exact-match")
+    limit = node.get("ignore_above")
+    if limit is not None and len(str(value)) > int(limit):
+        raise RuntimeError(
+            f"{field} isn't exact-match (values over {limit} characters aren't indexed)"
+        )
+    return form
+
+
 def _count_of(client, probe: tuple, marked: bool) -> int:
     """How many records of `probe`'s machine, unit, method and source the
-    index holds with the 0.6.5 ids (`marked`) or with the older ones. A
-    missing index holds none; any other failure raises."""
+    index holds with the 0.6.5 ids (`marked`) or with the older ones, each
+    field filtered in the form the index maps it. A missing index holds none;
+    any other failure raises."""
     index, host_key, unit, method, source = probe
-    flt = [
-        {"term": {"vhir.host_key": host_key}},
-        {"term": {"vhir.unit": unit}},
-        {"term": {"vhir.parse_method": method}},
-    ]
+    terms = {"vhir.host_key": host_key, "vhir.unit": unit, "vhir.parse_method": method}
     if source:
-        flt.append({"term": {"vhir.source_file": source}})
+        terms["vhir.source_file"] = source
     scheme = {"exists": {"field": "vhir.id_scheme"}}
-    query = {"filter": flt + [scheme]} if marked else {"filter": flt, "must_not": [scheme]}
     try:
+        mapped = client.indices.get_mapping(index=index)
+        forms = {
+            tuple(_exact((m.get("mappings") or {}).get("properties") or {}, f, v)
+                  for f, v in terms.items())
+            for m in mapped.values()
+        } or {tuple(terms)}  # fmt: skip
+        if len(forms) > 1:  # an alias over indices mapped differently
+            raise RuntimeError(f"{index} maps the record-id fields differently across indices")
+        flt = [{"term": {f: v}} for f, v in zip(forms.pop(), terms.values())]
+        query = {"filter": flt + [scheme]} if marked else {"filter": flt, "must_not": [scheme]}
         resp = client.count(index=index, body={"query": {"bool": query}})
     except Exception as e:
         if getattr(e, "status_code", None) == 404:  # no index yet
