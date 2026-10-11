@@ -19,7 +19,7 @@
             "match_mapping_type": "string",
             "mapping": {
               "type": "keyword",
-              "ignore_above": 1024
+              "ignore_above": 8191
             }
           }
         }
@@ -87,7 +87,7 @@
         },
         "winlog.event_data.Data.#text": {
           "type": "keyword",
-          "ignore_above": 1024
+          "ignore_above": 8191
         },
         "winlog.event_data.Data_raw": {
           "type": "text",
