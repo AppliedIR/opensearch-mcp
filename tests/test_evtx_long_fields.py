@@ -138,9 +138,16 @@ class _Cluster:
         self.state = indices
         self.closed = set(closed)
         self.refuse = set(refuse)
+        self.read_error = None
         self.calls: list[tuple[str, dict]] = []
 
     def get_mapping(self, index="", filter_path=None, expand_wildcards="open", **kw):
+        if self.read_error:
+            raise self.read_error
+        if "*" not in index and "," not in index and index not in self.state:
+            from opensearchpy.exceptions import NotFoundError
+
+            raise NotFoundError(404, "index_not_found_exception", {})
         out = {
             k: copy.deepcopy(v)
             for k, v in self.state.items()
@@ -273,9 +280,10 @@ def test_a_closed_index_isnt_read_or_patched():
 # --- An ingest into an index below the template's limits says so ---------------
 
 
-def _note(index_body, name="case-x-evtx-0"):
+def _note(index_body, name="case-x-evtx-0", read_error=None):
     fn = getattr(mappings, "evtx_limit_note", None)
     cluster = _Cluster({name: index_body} if index_body else {})
+    cluster.read_error = read_error
     return fn(cluster.client(), name) if fn else None
 
 
@@ -321,6 +329,20 @@ def test_the_lowest_limit_is_the_one_named():
 
 def test_an_index_not_made_yet_gives_no_note():
     assert _note(None) == ""
+
+
+@pytest.mark.parametrize("kind", ["forbidden", "timeout"])
+def test_a_mapping_that_cant_be_read_is_said_so(kind):
+    """Only a missing index means no note: a refusal or a timeout leaves the
+    limits unknown, and the run says it couldn't check."""
+    from opensearchpy.exceptions import AuthorizationException, ConnectionTimeout
+
+    error = {
+        "forbidden": AuthorizationException(403, "security_exception", {}),
+        "timeout": ConnectionTimeout("TIMEOUT", "read timed out", None),
+    }[kind]
+    note = _note(_index_064(), "T", read_error=error)
+    assert note == f"couldn't check T's event-data limits: {error}"
 
 
 def test_the_templates_own_lower_limits_give_no_note():

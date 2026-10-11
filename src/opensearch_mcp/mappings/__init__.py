@@ -419,12 +419,21 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
 def evtx_limit_note(client, index: str) -> str:
     """What an evtx ingest into `index` says when the index's event-data
     limits are below the template's: the fields, and the lowest limit. ""
-    when they match, or when the index isn't made yet (the template applies)."""
+    when they match, or when the index isn't made yet (the template applies).
+    A mapping that can't be read for any other reason is said so: the limits
+    are then unknown, not fine."""
+    from opensearchpy.exceptions import NotFoundError
+
     explicit, rule, _ = _evtx_limits()
     try:
         got = client.indices.get_mapping(index=index)
+    except NotFoundError:
+        return ""
+    except Exception as e:
+        return f"couldn't check {index}'s event-data limits: {e}"
+    try:
         mapping = got[index]["mappings"]
-    except Exception:
+    except (KeyError, TypeError):  # not in the reply: not made yet
         return ""
     if not isinstance(mapping, dict):
         return ""
