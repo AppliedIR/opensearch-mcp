@@ -685,21 +685,26 @@ _WORSE = {"SUSPICIOUS": 2, "UNKNOWN": 1}
 def _ask_all(values: list[str], state: dict) -> dict | None:
     """check_file on each value, flags only: the worse answer (SUSPICIOUS,
     then UNKNOWN, then the rest), with the LOLBin flag if any answer had it.
-    The values are answered only when every call answered: one that failed
-    fails them all, as one call would, and nothing is written for them.
-    `state` carries the loop's consecutive call failures and whether any
-    value was answered."""
+    One lookup behaves as it always has: a raise is a failed call, and a
+    reply with no verdict is answered with nothing to write. Two lookups are
+    answered only when both replies carry a verdict; a raise, or a reply
+    with none (an error, `{}`, not a dict), fails the value as one failed
+    call, and nothing is written. `state` carries the loop's consecutive
+    call failures and whether any value was answered."""
     if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
         return None
-    answers = []
+    replies = []
     for value in values:
         try:
-            result = call_tool("check_file", {"path": value}, timeout=15)
+            reply = call_tool("check_file", {"path": value}, timeout=15)
         except Exception:
             state["failures"] += 1
             return None
-        if result.get("verdict"):
-            answers.append(_flags_only(result))
+        replies.append(reply if isinstance(reply, dict) else {})
+    answers = [_flags_only(r) for r in replies if r.get("verdict")]
+    if len(answers) < len(replies) > 1:
+        state["failures"] += 1
+        return None
     state["failures"], state["ok"] = 0, True
     if not answers:
         return None

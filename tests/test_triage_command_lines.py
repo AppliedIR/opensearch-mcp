@@ -123,7 +123,7 @@ def triage(monkeypatch):
             answer = table.get(args["path"], UNKNOWN)
             if isinstance(answer, Exception):
                 raise answer
-            return dict(answer)
+            return dict(answer) if isinstance(answer, dict) else answer
 
         monkeypatch.setattr(tr, "call_tool", call_tool)
         monkeypatch.setattr(tr, "gateway_available", lambda: True)
@@ -275,4 +275,30 @@ def test_a_value_is_answered_only_when_every_lookup_for_it_answered(triage):
     table = {"C:\\Windows\\System32\\cmd.exe": LOLBIN, line: TimeoutError("timed out")}
     results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
     assert results["registry_run"]["status"] == "failed", results["registry_run"]
+    assert stamps["w1"] == ("SUSPICIOUS", False)
+
+
+def test_a_lookup_answered_without_a_verdict_fails_the_value(triage):
+    """A backend error comes back as a reply with no verdict: it answers
+    nothing, so the value fails as a timed-out lookup does."""
+    line = "C:\\Windows\\System32\\cmd.exe /c start C:\\Users\\Public\\svchost.exe"
+    doc = {**_reg("w1", RUN, line), "triage.verdict": "SUSPICIOUS"}
+    table = {"C:\\Windows\\System32\\cmd.exe": LOLBIN, line: {"error": "backend error"}}
+    results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
+    assert results["registry_run"]["status"] == "failed", results["registry_run"]
+    assert stamps["w1"] == ("SUSPICIOUS", False)
+
+
+@pytest.mark.parametrize("lookups", [2, 1])
+def test_a_reply_that_isnt_a_dict_never_escapes(triage, lookups):
+    """A list reply: with two lookups the value fails like any reply without
+    a verdict; with one it is answered with nothing to write, as a
+    verdict-less reply always was. Either way the run goes on."""
+    line = "C:\\Windows\\System32\\cmd.exe /c start C:\\Users\\Public\\svchost.exe"
+    value = line if lookups == 2 else "C:\\Users\\Public\\svchost.exe"
+    doc = {**_reg("w1", RUN, value), "triage.verdict": "SUSPICIOUS"}
+    table = {"C:\\Windows\\System32\\cmd.exe": LOLBIN, value: ["not", "a", "dict"]}
+    results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
+    want = "failed" if lookups == 2 else "complete"
+    assert results["registry_run"]["status"] == want, results["registry_run"]
     assert stamps["w1"] == ("SUSPICIOUS", False)
