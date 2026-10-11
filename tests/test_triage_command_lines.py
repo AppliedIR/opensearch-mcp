@@ -291,14 +291,12 @@ def test_a_lookup_answered_without_a_verdict_fails_the_value(triage):
 
 @pytest.mark.parametrize("lookups", [2, 1])
 def test_a_reply_that_isnt_a_dict_never_escapes(triage, lookups):
-    """A list reply: with two lookups the value fails like any reply without
-    a verdict; with one it is answered with nothing to write, as a
-    verdict-less reply always was. Either way the run goes on."""
+    """A list reply is a failed call, with one lookup or two: the value
+    fails, nothing is written, and the run goes on."""
     line = "C:\\Windows\\System32\\cmd.exe /c start C:\\Users\\Public\\svchost.exe"
     value = line if lookups == 2 else "C:\\Users\\Public\\svchost.exe"
     doc = {**_reg("w1", RUN, value), "triage.verdict": "SUSPICIOUS"}
     table = {"C:\\Windows\\System32\\cmd.exe": LOLBIN, value: ["not", "a", "dict"]}
     results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
-    want = "failed" if lookups == 2 else "complete"
-    assert results["registry_run"]["status"] == want, results["registry_run"]
+    assert results["registry_run"]["status"] == "failed", results["registry_run"]
     assert stamps["w1"] == ("SUSPICIOUS", False)
