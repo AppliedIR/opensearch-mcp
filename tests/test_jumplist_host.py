@@ -91,4 +91,11 @@ def test_the_csv_subcommand_also_takes_the_scanned_host_for_jumplists(tmp_path):
             )
         )
     assert {a["_source"]["host.name"] for a in sent} == {"wkstn"}
-    assert {a["_source"]["Path"]: a["_id"] for a in sent} == _ids(_ingest())
+    # The csv route keeps its ids (no id source, no 0.6.5 marker), while the
+    # scan route's now carry the profile: a jumplist ingested both ways is
+    # stored twice, until the csv route gets the same id (a 0.6.5 follow-on).
+    assert not any("vhir.id_scheme" in a["_source"] for a in sent)
+    scanned = _ids(_ingest())
+    csv_ids = {a["_source"]["Path"]: a["_id"] for a in sent}
+    assert csv_ids.keys() == scanned.keys()
+    assert all(csv_ids[p] != scanned[p] for p in scanned)

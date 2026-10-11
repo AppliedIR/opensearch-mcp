@@ -159,6 +159,7 @@ def ingest_csv(
     row_source=None,
     seen: dict | None = None,
     collided: dict | None = None,
+    id_source: str = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -251,6 +252,14 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            if id_source:  # the profile path the run read is in the id
+                _id = _doc_id(
+                    index_name,
+                    {**row, "\x00id_source": id_source},
+                    natural_key,
+                    volatile_keys=_VOLATILE_KEYS,
+                )
+                row["vhir.id_scheme"] = 2
 
             # Provenance fields (added after ID computation)
             if source_file:

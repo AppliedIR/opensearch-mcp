@@ -364,6 +364,73 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
     return note
 
 
+# Records stored before 0.6.5 whose ids 0.6.5 computes differently
+OLD_IDS: dict[tuple[str, str, str], str] = {}  # (c12, unit_raw, type) -> index
+_OLD_IDS_CHECKED: set = set()
+OLD_IDS_NOTE = (
+    "{index}: records of this machine from the evidence this run read were stored before "
+    "0.6.5 under ids that 0.6.5 computes differently, so the index now holds them under "
+    "both the old and the new ids. To keep one copy, an examiner deletes {index} outside "
+    "Valhuntir (as setup-opensearch.sh deletes its test index) and then ingests every "
+    "machine's {atype} evidence in this case again, because that index holds all of it"
+)
+
+
+def note_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
+    """For each (index, machine, unit, parse method, source) this batch writes
+    with the 0.6.5 ids, look once for records of it stored with the older ids.
+    A memory image's source path can change per run (an archive's temporary
+    copy): its unit names it."""
+    import sys
+
+    for a in actions:
+        src = a.get("_source") or {}
+        if src.get("vhir.id_scheme") != 2:
+            continue
+        index = str(a.get("_index", ""))
+        method = str(src.get("vhir.parse_method") or "")
+        source = "" if method.startswith("vol3-") else src.get("vhir.source_file")
+        probe = (index, src.get("vhir.host_key"), src.get("vhir.unit"), method, source)
+        if probe in _OLD_IDS_CHECKED:
+            continue
+        _OLD_IDS_CHECKED.add(probe)
+        flt = [
+            {"term": {"vhir.host_key": probe[1]}},
+            {"term": {"vhir.unit": probe[2]}},
+            {"term": {"vhir.parse_method": method}},
+        ]
+        if source:
+            flt.append({"term": {"vhir.source_file": source}})
+        body = {
+            "query": {
+                "bool": {"filter": flt, "must_not": [{"exists": {"field": "vhir.id_scheme"}}]}
+            }
+        }
+        try:
+            n = int(client.count(index=index, body=body)["count"])
+        except Exception:
+            continue  # no index yet, or unanswered: nothing is claimed
+        if not n:
+            continue
+        key = (ctx.c12, ctx.unit_raw, artifact_type_of(index))
+        if key not in OLD_IDS:  # one line per (case, unit, type)
+            OLD_IDS[key] = index
+            print("WARNING: " + old_ids_note(ctx.unit_raw, key[2], ctx.c12), file=sys.stderr)
+
+
+def old_ids_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
+    """The pre-0.6.5 ids note for `hostname`'s `artifact_type` (any type when "")."""
+    c12 = c12 or (current().c12 if current() is not None else "")
+    notes = [
+        OLD_IDS_NOTE.format(index=index, atype=t)
+        for (c, h, t), index in sorted(OLD_IDS.items())
+        if (not c12 or c == c12)
+        and (not hostname or h == hostname)
+        and (not artifact_type or t == artifact_type)
+    ]
+    return "; ".join(notes)
+
+
 def second_copy_types(hostname: str = "", c12: str = "") -> list[str]:
     """Artifact types that got the notice in this process: for `hostname`, in
     case `c12` (the open context's when not given)."""
@@ -381,8 +448,11 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
     """The notice for `hostname`'s `artifact_type`, or for any it got."""
     types = second_copy_types(hostname, c12)
     if artifact_type:
-        return SECOND_COPY_NOTE if artifact_type in types else ""
-    return f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
+        legacy = SECOND_COPY_NOTE if artifact_type in types else ""
+    else:
+        legacy = f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
+    # the pre-0.6.5 ids note rides on the same calls
+    return "; ".join(n for n in (legacy, old_ids_note(hostname, artifact_type, c12)) if n)
 
 
 def removed_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
@@ -427,6 +497,7 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
                 if index.startswith(f"case-{ctx.c12}-"):
                     prepare_index(client, index)
                     note_second_copy(client, ctx, index)
+            note_old_ids(client, ctx, actions)
         return
     for action in actions:
         if _V2_INDEX.match(str(action.get("_index", ""))):
