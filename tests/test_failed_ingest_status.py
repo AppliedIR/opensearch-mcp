@@ -159,7 +159,8 @@ def test_an_archive_password_reaches_neither_the_log_nor_the_status(case, monkey
     (case / "mem.zip").write_bytes(b"PK\x03\x04" + b"\0" * 60)
     register(case.parent / "cases" / "c1", case / "mem.zip")
     resp = srv.idx_ingest_memory(path=str(case / "mem.zip"), hostname="h1", dry_run=False)
-    assert resp["status"] == "started", resp
+    # the worker fails fast: the launch may say so already (see above)
+    assert resp["status"] in ("started", "failed"), resp
     status = _final()
     assert status["status"] == "failed", status
     assert secret not in json.dumps(status)
