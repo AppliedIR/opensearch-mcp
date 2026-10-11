@@ -416,44 +416,80 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
     return results
 
 
+class _Unreadable(Exception):
+    """A mapping whose event-data limits can't be read from its shape."""
+
+
+def _dict(value, what: str) -> dict:
+    if not isinstance(value, dict):
+        raise _Unreadable(f"{what} isn't an object")
+    return value
+
+
+def _read_low(props: dict, prefix: str, explicit: dict[str, int], rule: int, low: dict) -> None:
+    """Every field mapping under `prefix`, read strictly: each is an object,
+    a keyword's limit (if any) is an integer, and nested properties are an
+    object. The keyword fields below the template's limit go in `low`."""
+    for name, m in props.items():
+        path = f"{prefix}.{name}"
+        m = _dict(m, path)
+        if m.get("type") == "keyword" and "ignore_above" in m:
+            limit = m["ignore_above"]
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise _Unreadable(f"{path}'s ignore_above isn't an integer")
+            if limit < explicit.get(path, rule):
+                low[path] = limit
+        if "properties" in m:
+            _read_low(_dict(m["properties"], f"{path}'s properties"), path, explicit, rule, low)
+
+
 def evtx_limit_note(client, index: str) -> str:
     """What an evtx ingest into `index` says about its event-data limits.
 
-    "" only when the index isn't made yet (404: the template applies), or
-    when its limits were read and every one is at the template's. Limits
-    below the template's name their fields and the lowest limit. Anything
-    else (an error, or a reply the limits can't be read from) says the limits
-    couldn't be checked: they are unknown, not fine."""
+    "" only when the index isn't made yet (404: the template applies), or on
+    a positive read: the mapping is an object, every event-data field mapping
+    in it is one, and every keyword limit and the rule's are integers at
+    least the template's. Limits below the template's name their fields and
+    the lowest limit. Anything else, including any error while reading, says
+    the limits couldn't be checked: they are unknown, not fine. Nothing is
+    raised into the ingest."""
     from opensearchpy.exceptions import NotFoundError
 
-    def unknown(why) -> str:
-        return f"couldn't check {index}'s event-data limits: {why}"
-
-    explicit, rule, _ = _evtx_limits()
     try:
-        got = client.indices.get_mapping(index=index)
-    except NotFoundError:
-        return ""
-    except Exception as e:
-        return unknown(e)
-    body = got.get(index) if isinstance(got, dict) else None
-    mapping = body.get("mappings") if isinstance(body, dict) else None
-    if not isinstance(mapping, dict):
-        return unknown("the mapping reply doesn't hold this index's mappings")
-    rules = mapping.get("dynamic_templates")
-    rules = rules if isinstance(rules, list) else []
-    entries = [e[_EVTX_RULE] for e in rules if isinstance(e, dict) and _EVTX_RULE in e]
-    if not entries or not all(
-        isinstance(e, dict)
-        and isinstance(e.get("mapping"), dict)
-        and isinstance(e["mapping"].get("ignore_above"), int)
-        for e in entries
-    ):
-        return unknown(f"its mapping has no readable {_EVTX_RULE} rule")
-    low, _ = _low_event_data(_event_data(mapping), _EVENT_DATA, explicit, rule)
+        try:
+            got = client.indices.get_mapping(index=index)
+        except NotFoundError:
+            return ""
+        explicit, rule, _ = _evtx_limits()
+        body = _dict(got, "the mapping reply").get(index)
+        mapping = _dict(_dict(body, f"the reply for {index}").get("mappings"), "its mappings")
+        rules = mapping.get("dynamic_templates")
+        if not isinstance(rules, list):
+            raise _Unreadable(f"its mapping has no readable {_EVTX_RULE} rule")
+        limits_of_rule = [
+            _dict(_dict(e[_EVTX_RULE], _EVTX_RULE).get("mapping"), f"{_EVTX_RULE}'s mapping").get(
+                "ignore_above"
+            )
+            for e in rules
+            if isinstance(e, dict) and _EVTX_RULE in e
+        ]
+        if not limits_of_rule or not all(
+            isinstance(n, int) and not isinstance(n, bool) for n in limits_of_rule
+        ):
+            raise _Unreadable(f"its mapping has no readable {_EVTX_RULE} rule")
+        node = _dict(mapping.get("properties"), "its properties")
+        for key in ("winlog", "event_data"):
+            if key not in node:
+                node = {}
+                break
+            node = _dict(_dict(node[key], key).get("properties", {}), f"{key}'s properties")
+        low: dict[str, int] = {}
+        _read_low(node, _EVENT_DATA, explicit, rule, low)
+    except Exception as e:  # an unreadable shape or any error: the ingest goes on, and says so
+        return f"couldn't check {index}'s event-data limits: {e}"
     names = sorted(path[len(_EVENT_DATA) + 1 :] for path in low)
     limits = list(low.values())
-    if (rule_limit := _low_rule(rules, rule)) is not None:
+    if (rule_limit := min(limits_of_rule)) < rule:
         names.append("new fields")
         limits.append(rule_limit)
     if not names:

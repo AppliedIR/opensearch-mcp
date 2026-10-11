@@ -375,6 +375,59 @@ def test_a_reply_its_limits_cant_be_read_from_is_said_so(reply):
     assert note.startswith("couldn't check U's event-data limits: ")
 
 
+def _with(event_data=None, properties=None):
+    m = {"dynamic_templates": [rule(8191)]}
+    m["properties"] = properties if properties is not None else {
+        "winlog": {"properties": {"event_data": {"properties": event_data}}}}  # fmt: skip
+    return {"U": {"mappings": m}}
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _with(event_data=[]),
+        _with(event_data={"Payload": "keyword"}),
+        _with(event_data={"Payload": {"type": "keyword", "ignore_above": "1024"}}),
+        _with(properties=[]),
+        _with(event_data={"Data": {"properties": ["#text"]}}),
+        _with(properties={"winlog": "object"}),
+    ],
+    ids=[
+        "event_data properties a list",
+        "a field not a dict",
+        "a limit not an int",
+        "properties a list",
+        "nested properties a list",
+        "winlog not a dict",
+    ],  # fmt: skip
+)
+def test_a_field_mapping_its_limit_cant_be_read_from_is_said_so(reply):
+    """No note only on a positive read: every field mapping a dict, every
+    keyword limit an int at least the template's."""
+    client = MagicMock()
+    client.indices.get_mapping.return_value = reply
+    note = mappings.evtx_limit_note(client, "U")
+    assert note.startswith("couldn't check U's event-data limits: ")
+
+
+def test_nothing_escapes_the_check():
+    """An error anywhere in reading the reply is a note, never raised into
+    the ingest."""
+
+    class Odd(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("unreadable")
+
+        def items(self):
+            raise RuntimeError("unreadable")
+
+    client = MagicMock()
+    client.indices.get_mapping.return_value = _with(event_data=Odd(Payload=kw(8191)))
+    assert mappings.evtx_limit_note(client, "U") == (
+        "couldn't check U's event-data limits: unreadable"
+    )
+
+
 def test_the_templates_own_lower_limits_give_no_note():
     intended = _idx([rule(8191)], {"ScriptBlockText": kw(32766), "_pipeline_error": kw(512)})
     assert _note(intended) == ""
