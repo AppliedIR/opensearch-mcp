@@ -64,6 +64,8 @@ class Cluster:
         self.store: dict[tuple[str, str], dict] = {}
         self.created: set[str] = set()
         self.reject = False  # every write refused (a mapping conflict, a block)
+        self.timeout_once = False  # the next write is stored, then answered by a timeout
+        self.count_error: Exception | None = None  # what every count raises
         cluster = self
 
         class Indices:
@@ -80,6 +82,9 @@ class Cluster:
             def get_settings(self, **kw):
                 raise RuntimeError("no cluster")
 
+            def refresh(self, index=None, **kw):
+                return {}
+
         class Client:
             indices = Indices()
 
@@ -93,6 +98,8 @@ class Cluster:
                 return {"docs": out}
 
             def count(self, index=None, body=None, **kw):
+                if cluster.count_error is not None:
+                    raise cluster.count_error
                 if not self.indices.exists(index=index):
                     raise NotFoundError(404, "index_not_found_exception", {"index": index})
                 q = (body or {}).get("query", {"match_all": {}})
@@ -104,7 +111,15 @@ class Cluster:
     def bulk(self, client, actions, max_retries=None, raise_on_error=True,
              request_timeout=None, **kw):  # fmt: skip
         ok, errors = 0, []
-        for a in list(actions):
+        actions = list(actions)
+        if self.timeout_once:  # stored, but the answer never came back
+            self.timeout_once = False
+            for a in actions:
+                self.store.setdefault((a["_index"], a["_id"]), dict(a["_source"]))
+            from opensearchpy.exceptions import ConnectionTimeout
+
+            raise ConnectionTimeout("TIMEOUT", "read timed out", None)
+        for a in actions:
             key = (a["_index"], a["_id"])
             if self.reject:
                 refused = {"type": "mapper_parsing_exception", "reason": "rejected"}

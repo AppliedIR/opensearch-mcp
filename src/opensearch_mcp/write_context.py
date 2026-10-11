@@ -367,8 +367,10 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
 # Records stored before 0.6.5 whose ids 0.6.5 computes differently
 OLD_IDS: dict[tuple[str, str, str], str] = {}  # (c12, unit_raw, type) -> index
 _OLD_IDS_CHECKED: set = set()
-# what a check found older records for, until a new-id record of it is stored
+# what found older records, until a 0.6.5-id record of it is in the index too
 _OLD_IDS_PENDING: dict[tuple, tuple[str, str, str]] = {}
+# (c12, unit_raw, type) -> why the index couldn't be checked
+OLD_IDS_UNCHECKED: dict[tuple[str, str, str], str] = {}
 OLD_IDS_NOTE = (
     "{index}: records of this machine from the evidence this run read were stored before "
     "0.6.5 under ids that 0.6.5 computes differently, so the index now holds them under "
@@ -391,49 +393,72 @@ def _old_ids_probe(action: dict) -> tuple | None:
             method, source)  # fmt: skip
 
 
+def _count_of(client, probe: tuple, marked: bool) -> int:
+    """How many records of `probe`'s machine, unit, method and source the
+    index holds with the 0.6.5 ids (`marked`) or with the older ones. A
+    missing index holds none; any other failure raises."""
+    index, host_key, unit, method, source = probe
+    flt = [
+        {"term": {"vhir.host_key": host_key}},
+        {"term": {"vhir.unit": unit}},
+        {"term": {"vhir.parse_method": method}},
+    ]
+    if source:
+        flt.append({"term": {"vhir.source_file": source}})
+    scheme = {"exists": {"field": "vhir.id_scheme"}}
+    query = {"filter": flt + [scheme]} if marked else {"filter": flt, "must_not": [scheme]}
+    try:
+        return int(client.count(index=index, body={"query": {"bool": query}})["count"])
+    except Exception as e:
+        if getattr(e, "status_code", None) == 404:  # no index yet
+            return 0
+        raise
+
+
+def _unchecked(key: tuple[str, str, str], index: str, error: Exception) -> None:
+    import sys
+
+    if key not in OLD_IDS_UNCHECKED:  # one line per (case, unit, type)
+        OLD_IDS_UNCHECKED[key] = f"couldn't check for pre-0.6.5 copies in {index}: {error}"
+        print(f"WARNING: {OLD_IDS_UNCHECKED[key]}", file=sys.stderr)
+
+
 def check_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
     """Before the write: for each (index, machine, unit, parse method, source)
     this batch writes with the 0.6.5 ids, look once for records of it stored
-    with the older ids. What is found is said only once a new-id record of it
-    is actually stored (note_old_ids)."""
+    with the older ids. Found, it is said once the index also holds a 0.6.5-id
+    record of it (note_old_ids)."""
     for a in actions:
         probe = _old_ids_probe(a)
         if probe is None or probe in _OLD_IDS_CHECKED:
             continue
         _OLD_IDS_CHECKED.add(probe)
-        index, host_key, unit, method, source = probe
-        flt = [
-            {"term": {"vhir.host_key": host_key}},
-            {"term": {"vhir.unit": unit}},
-            {"term": {"vhir.parse_method": method}},
-        ]
-        if source:
-            flt.append({"term": {"vhir.source_file": source}})
-        body = {
-            "query": {
-                "bool": {"filter": flt, "must_not": [{"exists": {"field": "vhir.id_scheme"}}]}
-            }
-        }
+        key = (ctx.c12, ctx.unit_raw, artifact_type_of(probe[0]))
         try:
-            n = int(client.count(index=index, body=body)["count"])
-        except Exception:
-            continue  # no index yet, or unanswered: nothing is claimed
-        if n:
-            _OLD_IDS_PENDING[probe] = (ctx.c12, ctx.unit_raw, artifact_type_of(index))
+            if _count_of(client, probe, marked=False):
+                _OLD_IDS_PENDING[probe] = key
+        except Exception as e:
+            _unchecked(key, probe[0], e)
 
 
-def note_old_ids(actions: list[dict], written: set) -> None:
-    """After the write: once a record the check found older records for is
-    stored under its new id (its (index, _id) in `written`), the index holds
-    both, so say so, once per (case, unit, type). A write that stored nothing
-    new (refused, or already present) says nothing."""
+def note_old_ids(client, actions: list[dict]) -> None:
+    """After the write, from the index itself: once it holds both a 0.6.5-id
+    record and an older one of the same machine, unit, method and source, say
+    so, once per (case, unit, type). Whatever the bulk answered (a refusal, a
+    409, a retry after a timeout) doesn't decide it."""
     import sys
 
-    for a in actions:
-        probe = _old_ids_probe(a)
-        if probe not in _OLD_IDS_PENDING or (a.get("_index"), a.get("_id")) not in written:
+    for probe in {p for p in map(_old_ids_probe, actions) if p in _OLD_IDS_PENDING}:
+        key = _OLD_IDS_PENDING[probe]
+        try:
+            client.indices.refresh(index=probe[0])
+            if not _count_of(client, probe, marked=True):
+                continue  # nothing new stored yet: checked again after the next write
+        except Exception as e:
+            del _OLD_IDS_PENDING[probe]
+            _unchecked(key, probe[0], e)
             continue
-        key = _OLD_IDS_PENDING.pop(probe)
+        del _OLD_IDS_PENDING[probe]
         if key not in OLD_IDS:  # one line per (case, unit, type)
             OLD_IDS[key] = probe[0]
             print("WARNING: " + old_ids_note(key[1], key[2], key[0]), file=sys.stderr)
@@ -442,13 +467,18 @@ def note_old_ids(actions: list[dict], written: set) -> None:
 def old_ids_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
     """The pre-0.6.5 ids note for `hostname`'s `artifact_type` (any type when "")."""
     c12 = c12 or (current().c12 if current() is not None else "")
+
+    def mine(c, h, t):
+        return (
+            (not c12 or c == c12)
+            and (not hostname or h == hostname)
+            and (not artifact_type or t == artifact_type)
+        )
+
     notes = [
-        OLD_IDS_NOTE.format(index=index, atype=t)
-        for (c, h, t), index in sorted(OLD_IDS.items())
-        if (not c12 or c == c12)
-        and (not hostname or h == hostname)
-        and (not artifact_type or t == artifact_type)
+        OLD_IDS_NOTE.format(index=i, atype=k[2]) for k, i in sorted(OLD_IDS.items()) if mine(*k)
     ]
+    notes += [why for k, why in sorted(OLD_IDS_UNCHECKED.items()) if mine(*k)]
     return "; ".join(notes)
 
 
