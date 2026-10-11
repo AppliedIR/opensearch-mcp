@@ -367,6 +367,8 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
 # Records stored before 0.6.5 whose ids 0.6.5 computes differently
 OLD_IDS: dict[tuple[str, str, str], str] = {}  # (c12, unit_raw, type) -> index
 _OLD_IDS_CHECKED: set = set()
+# what a check found older records for, until a new-id record of it is stored
+_OLD_IDS_PENDING: dict[tuple, tuple[str, str, str]] = {}
 OLD_IDS_NOTE = (
     "{index}: records of this machine from the evidence this run read were stored before "
     "0.6.5 under ids that 0.6.5 computes differently, so the index now holds them under "
@@ -376,27 +378,33 @@ OLD_IDS_NOTE = (
 )
 
 
-def note_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
-    """For each (index, machine, unit, parse method, source) this batch writes
-    with the 0.6.5 ids, look once for records of it stored with the older ids.
-    A memory image's source path can change per run (an archive's temporary
-    copy): its unit names it."""
-    import sys
+def _old_ids_probe(action: dict) -> tuple | None:
+    """(index, machine, unit, parse method, source) of a record written with
+    the 0.6.5 ids, else None. A memory image's source path can change per run
+    (an archive's temporary copy): its unit names it."""
+    src = action.get("_source") or {}
+    if src.get("vhir.id_scheme") != 2:
+        return None
+    method = str(src.get("vhir.parse_method") or "")
+    source = "" if method.startswith("vol3-") else src.get("vhir.source_file")
+    return (str(action.get("_index", "")), src.get("vhir.host_key"), src.get("vhir.unit"),
+            method, source)  # fmt: skip
 
+
+def check_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
+    """Before the write: for each (index, machine, unit, parse method, source)
+    this batch writes with the 0.6.5 ids, look once for records of it stored
+    with the older ids. What is found is said only once a new-id record of it
+    is actually stored (note_old_ids)."""
     for a in actions:
-        src = a.get("_source") or {}
-        if src.get("vhir.id_scheme") != 2:
-            continue
-        index = str(a.get("_index", ""))
-        method = str(src.get("vhir.parse_method") or "")
-        source = "" if method.startswith("vol3-") else src.get("vhir.source_file")
-        probe = (index, src.get("vhir.host_key"), src.get("vhir.unit"), method, source)
-        if probe in _OLD_IDS_CHECKED:
+        probe = _old_ids_probe(a)
+        if probe is None or probe in _OLD_IDS_CHECKED:
             continue
         _OLD_IDS_CHECKED.add(probe)
+        index, host_key, unit, method, source = probe
         flt = [
-            {"term": {"vhir.host_key": probe[1]}},
-            {"term": {"vhir.unit": probe[2]}},
+            {"term": {"vhir.host_key": host_key}},
+            {"term": {"vhir.unit": unit}},
             {"term": {"vhir.parse_method": method}},
         ]
         if source:
@@ -410,12 +418,25 @@ def note_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
             n = int(client.count(index=index, body=body)["count"])
         except Exception:
             continue  # no index yet, or unanswered: nothing is claimed
-        if not n:
+        if n:
+            _OLD_IDS_PENDING[probe] = (ctx.c12, ctx.unit_raw, artifact_type_of(index))
+
+
+def note_old_ids(actions: list[dict], written: set) -> None:
+    """After the write: once a record the check found older records for is
+    stored under its new id (its (index, _id) in `written`), the index holds
+    both, so say so, once per (case, unit, type). A write that stored nothing
+    new (refused, or already present) says nothing."""
+    import sys
+
+    for a in actions:
+        probe = _old_ids_probe(a)
+        if probe not in _OLD_IDS_PENDING or (a.get("_index"), a.get("_id")) not in written:
             continue
-        key = (ctx.c12, ctx.unit_raw, artifact_type_of(index))
+        key = _OLD_IDS_PENDING.pop(probe)
         if key not in OLD_IDS:  # one line per (case, unit, type)
-            OLD_IDS[key] = index
-            print("WARNING: " + old_ids_note(ctx.unit_raw, key[2], ctx.c12), file=sys.stderr)
+            OLD_IDS[key] = probe[0]
+            print("WARNING: " + old_ids_note(key[1], key[2], key[0]), file=sys.stderr)
 
 
 def old_ids_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
@@ -497,7 +518,7 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
                 if index.startswith(f"case-{ctx.c12}-"):
                     prepare_index(client, index)
                     note_second_copy(client, ctx, index)
-            note_old_ids(client, ctx, actions)
+            check_old_ids(client, ctx, actions)  # said after the write
         return
     for action in actions:
         if _V2_INDEX.match(str(action.get("_index", ""))):

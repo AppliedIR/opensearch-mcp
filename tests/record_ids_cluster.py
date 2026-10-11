@@ -63,6 +63,7 @@ class Cluster:
     def __init__(self):
         self.store: dict[tuple[str, str], dict] = {}
         self.created: set[str] = set()
+        self.reject = False  # every write refused (a mapping conflict, a block)
         cluster = self
 
         class Indices:
@@ -105,6 +106,11 @@ class Cluster:
         ok, errors = 0, []
         for a in list(actions):
             key = (a["_index"], a["_id"])
+            if self.reject:
+                refused = {"type": "mapper_parsing_exception", "reason": "rejected"}
+                item = {"_index": a["_index"], "_id": a["_id"], "status": 400, "error": refused}
+                errors.append({a.get("_op_type", "index"): item})
+                continue
             if a.get("_op_type", "index") == "create" and key in self.store:
                 conflict = {"type": "version_conflict_engine_exception",
                             "reason": "document already exists"}  # fmt: skip

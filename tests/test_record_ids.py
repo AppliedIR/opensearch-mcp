@@ -68,7 +68,7 @@ def new_process(monkeypatch):
     field included: the status adds that note too)."""
     from opensearch_mcp import paths
 
-    for attr in ("OLD_IDS", "_OLD_IDS_CHECKED"):
+    for attr in ("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING"):
         if hasattr(wc, attr):
             monkeypatch.setattr(wc, attr, type(getattr(wc, attr))())
     no_time = list(paths.NO_TIME_FIELD)  # imported by name elsewhere: emptied in place
@@ -511,7 +511,7 @@ def test_a_re_ingest_of_evidence_stored_before_065_says_it_adds_a_second_copy(
 ):
     ingest_all(cluster, cases, "c4")
     old = stored_before_065(cluster)
-    new_run("OLD_IDS", "_OLD_IDS_CHECKED")
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
     err = io.StringIO()
     with contextlib.redirect_stderr(err):  # the image now read from an archive's temp copy
         out, said = ingest_all(cluster, cases, "c4", image="/home/x/tmp/vhir-mem-r2/mem.raw")
@@ -541,7 +541,7 @@ def test_no_note_unless_this_machine_unit_and_source_were_stored_before_065(
     if seeded:
         ingest_all(cluster, cases, "c4")
         stored_before_065(cluster)
-        new_run("OLD_IDS", "_OLD_IDS_CHECKED")
+        new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         _, said = ingest_all(cluster, cases, "c4" if seeded else "c4-fresh", **kw)
@@ -553,12 +553,57 @@ def test_an_unchanged_re_ingest_by_a_new_process_adds_nothing_and_says_nothing(
 ):
     ingest_all(cluster, cases, "c4-n4")
     before = len(cluster.store)
-    new_run("OLD_IDS", "_OLD_IDS_CHECKED")
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         _, said = ingest_all(cluster, cases, "c4-n4")
     assert len(cluster.store) == before
     assert not any(said.values()) and "0.6.5" not in err.getvalue()
+
+
+def test_no_note_when_the_re_ingest_stored_nothing_because_the_write_was_refused(
+    cluster, cases, status_dir, bags
+):
+    """Old records exist, but the bulk write refuses every new one: nothing
+    holds both ids, so nothing is said."""
+    ingest_all(cluster, cases, "c4r", parsers=("accesslog",))
+    stored_before_065(cluster)
+    before = dict(cluster.store)
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
+    cluster.reject = True
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _, said = ingest_all(cluster, cases, "c4r", parsers=("accesslog",))
+    assert cluster.store == before
+    assert not any(said.values()) and "0.6.5" not in err.getvalue()
+
+
+def test_no_note_when_a_row_keeps_its_id_and_is_already_present(cluster, cases, status_dir):
+    """A netscan row with no Offset keeps its content-hash id, which a
+    pre-0.6.5 run stored without the marker: the re-ingest is a 409 and
+    stores nothing new, so nothing holds two ids."""
+    no_offset = {k: v for k, v in NS.items() if k != "Offset"}
+    open_run(cases, "c4f", "evidence/web01", "web01", "evidence folder")
+    index = wc.index_name("vol-netscan")
+
+    def run():
+        s = step()
+        with wc.op(s):
+            pm._index_vol3_records([dict(no_offset)], cluster.client(), index,
+                                   "windows.netscan", "web01", "/x/mem.raw", s, "v")  # fmt: skip
+        return bulk.get_already_present()
+
+    run()
+    for key in list(cluster.store):  # as 0.6.4 stored it: the same id, no marker
+        cluster.store[key].pop("vhir.id_scheme", None)
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
+    bulk.reset_circuit_breaker()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        present = run()
+    assert (len(cluster.store), present) == (1, 1)
+    assert wc.second_copy_note("web01", "vol-netscan") == ""
+    assert "0.6.5" not in err.getvalue()
 
 
 def test_the_memory_plugin_status_entry_carries_the_note(
@@ -594,7 +639,7 @@ def test_the_memory_plugin_status_entry_carries_the_note(
     index = next(i for i, _ in cluster.store)
     cluster.store = {(i, f"old-{d}"): {k: v for k, v in s.items() if k != "vhir.id_scheme"}
                      for (i, d), s in cluster.store.items()}  # fmt: skip
-    new_run("OLD_IDS", "_OLD_IDS_CHECKED")
+    new_run("OLD_IDS", "_OLD_IDS_CHECKED", "_OLD_IDS_PENDING")
     assert run("mem-run-2").get("note", "") == note(index, "vol-netscan")
 
 

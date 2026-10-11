@@ -241,13 +241,15 @@ def flush_bulk(
     parser's own id) and an `_id` that carries the machine key. A write to a
     case index with no run open is refused.
     """
-    from opensearch_mcp.write_context import stamp_or_refuse
+    from opensearch_mcp.write_context import note_old_ids, stamp_or_refuse
 
     stamp_or_refuse(actions, client)
     refused = 0
     if depth_limit and actions:
         actions, refused = _refuse_too_deep(client, actions)
+    _tls.written = set()
     success, failed = _flush_with_retry(client, actions, attempt=0)
+    note_old_ids(actions, _tls.written)  # on what was stored, never on what was sent
     return success, failed + refused
 
 
@@ -432,6 +434,15 @@ def _flush_with_retry(client: OpenSearch, actions: list[dict], attempt: int) -> 
         # held only by a shadow copy is written over it.
         errors, over = _live_over_store(client, actions, errors)
         success += over
+        # the records this attempt stored: every one the cluster didn't answer
+        # with an error (a 409 included); unknown when it gave no item list
+        if isinstance(errors, list):
+            items = [i for e in errors if isinstance(e, dict) for i in e.values()]
+            not_stored = {(i.get("_index"), i.get("_id")) for i in items if isinstance(i, dict)}
+            _tls.written = (
+                getattr(_tls, "written", set())
+                | {(a.get("_index"), a.get("_id")) for a in actions} - not_stored
+            )
         present, errors = _split_present(errors)
         _tls.already_present = get_already_present() + present
         for box in getattr(_tls, "present_scopes", ()):
