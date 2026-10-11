@@ -435,9 +435,11 @@ def check_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
     this batch writes with the 0.6.5 ids, look once for records of it stored
     with the older ids. Found, it is said once the index also holds a 0.6.5-id
     record of it (note_old_ids)."""
-    for a in actions:
-        probe = _old_ids_probe(a)
-        if probe is None or probe in _OLD_IDS_CHECKED:
+    # each tuple once per batch, whatever the outcome: a failed count is
+    # tried again on the next write, never on the next record
+    probes = dict.fromkeys(p for p in map(_old_ids_probe, actions) if p is not None)
+    for probe in probes:
+        if probe in _OLD_IDS_CHECKED:
             continue
         key = (ctx.c12, ctx.unit_raw, artifact_type_of(probe[0]))
         try:

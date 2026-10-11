@@ -706,6 +706,33 @@ def test_a_partial_count_after_the_write_says_so_and_the_next_write_checks_again
     )
 
 
+def test_a_failing_check_is_tried_once_per_batch_however_many_records_share_it(
+    cluster, cases, status_dir, monkeypatch
+):
+    """1,000 netscan records of one machine, unit and method, and a count
+    that fails: one count request per batch (vol3 writes 500 a batch), never
+    one per record; each next batch tries again, once."""
+    index = _netscan_stored_before_065(cluster, cases, "c4n")
+    rows = [{**NS, "Offset": n} for n in range(1000)]
+    cluster.count_error = RuntimeError("search_phase_execution_exception")
+    calls = {"count": 0, "batches": 0}
+    count, flush = cluster.client.count, pm.flush_bulk
+
+    def counted(self, index=None, body=None, **kw):
+        calls["count"] += 1
+        return count(self, index=index, body=body, **kw)
+
+    def batch(client, actions, **kw):
+        calls["batches"] += 1
+        return flush(client, actions, **kw)
+
+    cluster.client.count = counted
+    monkeypatch.setattr(pm, "flush_bulk", batch)
+    with contextlib.redirect_stderr(io.StringIO()):
+        netscan(cluster, index, rows)
+    assert calls == {"count": 2, "batches": 2}
+
+
 def test_the_memory_plugin_status_entry_carries_the_note(
     cluster, cases, status_dir, tmp_path, monkeypatch
 ):
