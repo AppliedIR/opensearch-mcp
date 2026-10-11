@@ -345,6 +345,36 @@ def test_a_mapping_that_cant_be_read_is_said_so(kind):
     assert note == f"couldn't check T's event-data limits: {error}"
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"another-index": {"mappings": {}}},
+        {"U": {"settings": {}}},
+        {"U": {"mappings": "unreadable"}},
+        ["not", "a", "dict"],
+        {"U": {"mappings": {"properties": {}}}},
+        {"U": {"mappings": {"dynamic_templates": {"not": "a list"}}}},
+        {"U": {"mappings": {"dynamic_templates": [{RULE: {"mapping": {"type": "keyword"}}}]}}},
+    ],
+    ids=[
+        "index missing",
+        "no mappings",
+        "mappings not a dict",
+        "not a dict",
+        "no rule",
+        "rules not a list",
+        "rule without a limit",
+    ],  # fmt: skip
+)
+def test_a_reply_its_limits_cant_be_read_from_is_said_so(reply):
+    """Only a missing index (404) or limits read and all at the template's
+    give no note: the limits of any other reply are unknown, not fine."""
+    client = MagicMock()
+    client.indices.get_mapping.return_value = reply
+    note = mappings.evtx_limit_note(client, "U")
+    assert note.startswith("couldn't check U's event-data limits: ")
+
+
 def test_the_templates_own_lower_limits_give_no_note():
     intended = _idx([rule(8191)], {"ScriptBlockText": kw(32766), "_pipeline_error": kw(512)})
     assert _note(intended) == ""

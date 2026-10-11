@@ -417,12 +417,17 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
 
 
 def evtx_limit_note(client, index: str) -> str:
-    """What an evtx ingest into `index` says when the index's event-data
-    limits are below the template's: the fields, and the lowest limit. ""
-    when they match, or when the index isn't made yet (the template applies).
-    A mapping that can't be read for any other reason is said so: the limits
-    are then unknown, not fine."""
+    """What an evtx ingest into `index` says about its event-data limits.
+
+    "" only when the index isn't made yet (404: the template applies), or
+    when its limits were read and every one is at the template's. Limits
+    below the template's name their fields and the lowest limit. Anything
+    else (an error, or a reply the limits can't be read from) says the limits
+    couldn't be checked: they are unknown, not fine."""
     from opensearchpy.exceptions import NotFoundError
+
+    def unknown(why) -> str:
+        return f"couldn't check {index}'s event-data limits: {why}"
 
     explicit, rule, _ = _evtx_limits()
     try:
@@ -430,18 +435,25 @@ def evtx_limit_note(client, index: str) -> str:
     except NotFoundError:
         return ""
     except Exception as e:
-        return f"couldn't check {index}'s event-data limits: {e}"
-    try:
-        mapping = got[index]["mappings"]
-    except (KeyError, TypeError):  # not in the reply: not made yet
-        return ""
+        return unknown(e)
+    body = got.get(index) if isinstance(got, dict) else None
+    mapping = body.get("mappings") if isinstance(body, dict) else None
     if not isinstance(mapping, dict):
-        return ""
+        return unknown("the mapping reply doesn't hold this index's mappings")
+    rules = mapping.get("dynamic_templates")
+    rules = rules if isinstance(rules, list) else []
+    entries = [e[_EVTX_RULE] for e in rules if isinstance(e, dict) and _EVTX_RULE in e]
+    if not entries or not all(
+        isinstance(e, dict)
+        and isinstance(e.get("mapping"), dict)
+        and isinstance(e["mapping"].get("ignore_above"), int)
+        for e in entries
+    ):
+        return unknown(f"its mapping has no readable {_EVTX_RULE} rule")
     low, _ = _low_event_data(_event_data(mapping), _EVENT_DATA, explicit, rule)
     names = sorted(path[len(_EVENT_DATA) + 1 :] for path in low)
     limits = list(low.values())
-    rules = mapping.get("dynamic_templates")
-    if (rule_limit := _low_rule(rules if isinstance(rules, list) else [], rule)) is not None:
+    if (rule_limit := _low_rule(rules, rule)) is not None:
         names.append("new fields")
         limits.append(rule_limit)
     if not names:
