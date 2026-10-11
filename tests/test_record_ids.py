@@ -662,6 +662,50 @@ def test_a_count_that_fails_says_it_couldnt_check(cluster, cases, status_dir):
     assert f"WARNING: {said}" in err.getvalue()
 
 
+PARTIAL = "couldn't check for pre-0.6.5 copies in {index}: 1 of 2 shards failed"
+
+
+def test_a_partial_count_before_the_write_says_so_and_the_next_write_checks_again(
+    cluster, cases, status_dir
+):
+    """A count one shard failed is no answer: not "no older records", and
+    not settled for the run."""
+    index = _netscan_stored_before_065(cluster, cases, "c4p")
+    cluster.partial_counts = 1  # the check before the first write
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        netscan(cluster, index, NS_ROWS[:1])
+        assert wc.second_copy_note("web01", "vol-netscan") == PARTIAL.format(index=index)
+        netscan(cluster, index, NS_ROWS[1:])  # checked again: both ids are there
+    assert wc.second_copy_note("web01", "vol-netscan") == "; ".join(
+        [note(index, "vol-netscan"), PARTIAL.format(index=index)]
+    )
+    assert f"WARNING: {PARTIAL.format(index=index)}" in err.getvalue()
+
+
+def test_a_partial_count_after_the_write_says_so_and_the_next_write_checks_again(
+    cluster, cases, status_dir
+):
+    index = _netscan_stored_before_065(cluster, cases, "c4q")
+    calls = {"n": 0}
+    count = cluster.client.count
+
+    def second_is_partial(self, index=None, body=None, **kw):  # the count after the write
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return {"count": 0, "_shards": {"total": 2, "successful": 1, "failed": 1}}
+        return count(self, index=index, body=body, **kw)
+
+    cluster.client.count = second_is_partial
+    with contextlib.redirect_stderr(io.StringIO()):
+        netscan(cluster, index, NS_ROWS[:1])
+        assert wc.second_copy_note("web01", "vol-netscan") == PARTIAL.format(index=index)
+        netscan(cluster, index, NS_ROWS[1:])
+    assert wc.second_copy_note("web01", "vol-netscan") == "; ".join(
+        [note(index, "vol-netscan"), PARTIAL.format(index=index)]
+    )
+
+
 def test_the_memory_plugin_status_entry_carries_the_note(
     cluster, cases, status_dir, tmp_path, monkeypatch
 ):

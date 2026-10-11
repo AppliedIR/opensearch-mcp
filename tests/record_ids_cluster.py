@@ -66,6 +66,7 @@ class Cluster:
         self.reject = False  # every write refused (a mapping conflict, a block)
         self.timeout_once = False  # the next write is stored, then answered by a timeout
         self.count_error: Exception | None = None  # what every count raises
+        self.partial_counts = 0  # the next N counts: 0, with one of two shards failed
         cluster = self
 
         class Indices:
@@ -100,6 +101,9 @@ class Cluster:
             def count(self, index=None, body=None, **kw):
                 if cluster.count_error is not None:
                     raise cluster.count_error
+                if cluster.partial_counts:
+                    cluster.partial_counts -= 1
+                    return {"count": 0, "_shards": {"total": 2, "successful": 1, "failed": 1}}
                 if not self.indices.exists(index=index):
                     raise NotFoundError(404, "index_not_found_exception", {"index": index})
                 q = (body or {}).get("query", {"match_all": {}})

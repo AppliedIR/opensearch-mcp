@@ -408,11 +408,18 @@ def _count_of(client, probe: tuple, marked: bool) -> int:
     scheme = {"exists": {"field": "vhir.id_scheme"}}
     query = {"filter": flt + [scheme]} if marked else {"filter": flt, "must_not": [scheme]}
     try:
-        return int(client.count(index=index, body={"query": {"bool": query}})["count"])
+        resp = client.count(index=index, body={"query": {"bool": query}})
     except Exception as e:
         if getattr(e, "status_code", None) == 404:  # no index yet
             return 0
         raise
+    # a count some shards didn't answer is no answer, never a zero
+    shards = resp.get("_shards") or {}
+    failed, total = int(shards.get("failed") or 0), int(shards.get("total") or 0)
+    if failed or int(shards.get("successful", total) or 0) < total:
+        raise RuntimeError(f"{failed or total - int(shards.get('successful') or 0)} of "
+                           f"{total} shards failed")  # fmt: skip
+    return int(resp["count"])
 
 
 def _unchecked(key: tuple[str, str, str], index: str, error: Exception) -> None:
@@ -432,13 +439,14 @@ def check_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
         probe = _old_ids_probe(a)
         if probe is None or probe in _OLD_IDS_CHECKED:
             continue
-        _OLD_IDS_CHECKED.add(probe)
         key = (ctx.c12, ctx.unit_raw, artifact_type_of(probe[0]))
         try:
             if _count_of(client, probe, marked=False):
                 _OLD_IDS_PENDING[probe] = key
-        except Exception as e:
+        except Exception as e:  # said, and checked again before the next write
             _unchecked(key, probe[0], e)
+            continue
+        _OLD_IDS_CHECKED.add(probe)
 
 
 def note_old_ids(client, actions: list[dict]) -> None:
@@ -454,8 +462,7 @@ def note_old_ids(client, actions: list[dict]) -> None:
             client.indices.refresh(index=probe[0])
             if not _count_of(client, probe, marked=True):
                 continue  # nothing new stored yet: checked again after the next write
-        except Exception as e:
-            del _OLD_IDS_PENDING[probe]
+        except Exception as e:  # said, and checked again after the next write
             _unchecked(key, probe[0], e)
             continue
         del _OLD_IDS_PENDING[probe]
