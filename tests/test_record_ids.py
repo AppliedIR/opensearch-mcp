@@ -783,8 +783,8 @@ def test_the_note_names_the_index_and_gives_no_command():
 DYNAMIC = {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}}
 
 
-def _accesslog_stored_by_064_cli(cluster, cases, case, source_file):
-    out, _ = ingest_all(cluster, cases, case, parsers=("accesslog",))
+def _accesslog_stored_by_064_cli(cluster, cases, case, source_file, logs=("access.log",)):
+    out, _ = ingest_all(cluster, cases, case, logs=logs, parsers=("accesslog",))
     stored_before_065(cluster)
     index = out["accesslog"]
     fields = {f: DYNAMIC for f in ("host_key", "unit", "parse_method")}
@@ -804,22 +804,33 @@ def test_a_re_ingest_into_an_index_with_text_fields_says_it_adds_a_second_copy(
     assert f"WARNING: {note(index, 'accesslog')}" in err.getvalue()
 
 
+def _keyword_up_to(n):
+    return {**DYNAMIC, "fields": {"keyword": {"type": "keyword", "ignore_above": n}}}
+
+
+# "evidence/a\U0001F600.log": 15 code points, 16 UTF-16 units (what the keyword
+# mapper's ignore_above counts)
+WIDE = ("a\U0001f600.log",)
+
+
 @pytest.mark.parametrize(
-    "source_file,why",
+    "source_file,logs,why",
     [
-        ({"type": "text"}, "vhir.source_file isn't exact-match"),
-        ({**DYNAMIC, "fields": {"keyword": {"type": "keyword", "ignore_above": 8}}},
+        ({"type": "text"}, ("access.log",), "vhir.source_file isn't exact-match"),
+        (_keyword_up_to(8), ("access.log",),
          "vhir.source_file isn't exact-match (values over 8 characters aren't indexed)"),
+        (_keyword_up_to(15), WIDE,
+         "vhir.source_file isn't exact-match (values over 15 characters aren't indexed)"),
     ],
-    ids=["text-only", "over-ignore_above"],
+    ids=["text-only", "over-ignore_above", "over-ignore_above-in-utf16-units"],
 )  # fmt: skip
 def test_a_field_that_cant_be_filtered_exactly_says_it_couldnt_check(
-    cluster, cases, status_dir, source_file, why
+    cluster, cases, status_dir, source_file, logs, why
 ):
-    index = _accesslog_stored_by_064_cli(cluster, cases, "c4u", source_file)
+    index = _accesslog_stored_by_064_cli(cluster, cases, "c4u", source_file, logs)
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        _, said = ingest_all(cluster, cases, "c4u", parsers=("accesslog",))
+        _, said = ingest_all(cluster, cases, "c4u", logs=logs, parsers=("accesslog",))
     said_here = f"couldn't check for pre-0.6.5 copies in {index}: {why}"
     assert said == {"accesslog": said_here}
     assert f"WARNING: {said_here}" in err.getvalue()

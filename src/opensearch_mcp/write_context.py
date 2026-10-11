@@ -414,7 +414,8 @@ def _exact(props: dict, field: str, value) -> str:
     if node.get("type") != "keyword":
         raise RuntimeError(f"{field} isn't exact-match")
     limit = node.get("ignore_above")
-    if limit is not None and len(str(value)) > int(limit):
+    # the keyword mapper counts UTF-16 units (Java's String.length), not code points
+    if limit is not None and len(str(value).encode("utf-16-le")) // 2 > int(limit):
         raise RuntimeError(
             f"{field} isn't exact-match (values over {limit} characters aren't indexed)"
         )

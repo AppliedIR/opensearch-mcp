@@ -8,7 +8,8 @@
   can't pass on a query this doesn't understand. A missing index raises
   NotFoundError, as the cluster does.
 - indices.get_mapping: `mappings[index]`, else the template's keyword fields.
-  A `term` on a keyword field matches exactly (not over its ignore_above),
+  A `term` on a keyword field matches exactly (not over its ignore_above,
+  counted in UTF-16 units as the keyword mapper does),
   on a text field one of its lowercased word tokens, and on `<text>.keyword`
   the text field's value exactly (not over the sub-field's ignore_above).
 """
@@ -52,6 +53,10 @@ def _node(props, field):
     return node
 
 
+def _units(v) -> int:
+    return len(str(v).encode("utf-16-le")) // 2
+
+
 def _term(src, field, val, props):
     node, values = _node(props, field), _vals(_get(src, field))
     if node is None and field.endswith(".keyword"):  # a text field's keyword sub-field
@@ -63,7 +68,7 @@ def _term(src, field, val, props):
     if node is not None and node.get("type") == "text":
         return any(val in re.findall(r"\w+", str(v).lower()) for v in values)
     limit = (node or {}).get("ignore_above")
-    return any(v == val and (limit is None or len(str(v)) <= limit) for v in values)
+    return any(v == val and (limit is None or _units(v) <= limit) for v in values)
 
 
 def _match(src, q, props=TEMPLATE):
