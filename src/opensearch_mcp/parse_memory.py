@@ -16,7 +16,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 from opensearch_mcp.ingest_counts import stored_counts
 from opensearch_mcp.memory_tiers import TIER_1, TIER_2, TIER_3, TIERS  # noqa: F401
 
@@ -191,21 +191,30 @@ def _flatten_records(records: list[dict], _depth: int = 0) -> list[dict]:
 
 # the plugins whose ids 0.6.5 changed: their records carry vhir.id_scheme 2
 _ID_SCHEME_2 = frozenset({"windows.netscan", "windows.netstat", "windows.svcscan"})
+# 0.6.4's keys for them, for the id each record was stored under then
+_NATURAL_KEYS_064 = {
+    "windows.netscan": ["LocalAddr", "LocalPort", "ForeignAddr", "ForeignPort", "PID"],
+    "windows.netstat": ["LocalAddr", "LocalPort", "ForeignAddr", "ForeignPort", "PID"],
+    "windows.svcscan": ["Name", "PID"],
+}
 
 
-def _vol3_doc_id(index_name: str, plugin: str, record: dict, source_file: str) -> str:
+def _vol3_doc_id(
+    index_name: str, plugin: str, record: dict, source_file: str, as_064: bool = False
+) -> str:
     """Deterministic ID — natural key or content hash, with the image's
     evidence unit (its basename outside an ingest run), so two images with
-    one file name never share an id."""
+    one file name never share an id. `as_064`: the id 0.6.4 gave a record of
+    a plugin in _ID_SCHEME_2."""
     from opensearch_mcp.write_context import current
 
     ctx = current()
     source_name = ctx.unit if ctx is not None else Path(source_file).name
 
-    nk_fields = _NATURAL_KEYS.get(plugin)
+    nk_fields = _NATURAL_KEYS_064[plugin] if as_064 else _NATURAL_KEYS.get(plugin)
     if nk_fields:
         parts = [str(record.get(f, "")) for f in nk_fields]
-        if plugin in _ID_SCHEME_2:  # the object's offset keys it
+        if plugin in _ID_SCHEME_2 and not as_064:  # the object's offset keys it
             if record.get("Offset") is not None:
                 parts = ["" if record.get(f) is None else str(record.get(f)) for f in nk_fields]
                 key = f"{index_name}:{source_name}:{plugin}:{':'.join(parts)}"
@@ -275,6 +284,9 @@ def _index_vol3_records(
                 implausible += 1  # the raw field stays as vol3 gave it
 
         doc_id = _vol3_doc_id(index_name, plugin, record, source_file)
+        old_rid = plugin in _ID_SCHEME_2 and _vol3_doc_id(
+            index_name, plugin, record, source_file, as_064=True
+        )
 
         record["host.name"] = hostname
         if hostname:
@@ -292,7 +304,10 @@ def _index_vol3_records(
         if pipeline_version:
             record["pipeline_version"] = pipeline_version
 
-        actions.append({"_index": index_name, "_id": doc_id, "_source": record})
+        action = {"_index": index_name, "_id": doc_id, "_source": record}
+        if old_rid:  # the id 0.6.4 gave it
+            action[OLD_RID_KEY] = old_rid
+        actions.append(action)
 
         if len(actions) >= 500:
             flushed, failed = flush_bulk(client, actions)

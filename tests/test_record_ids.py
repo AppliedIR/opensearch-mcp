@@ -289,6 +289,10 @@ PAIRS = {
 
 @pytest.fixture
 def ez(cases, monkeypatch):
+    return ez_stub(cases, monkeypatch)
+
+
+def ez_stub(cases, monkeypatch):
     """The EZ tool stand-in: one CSV row, the same each time but for its
     SourceFile (the tool's own path into the evidence, volatile)."""
     state = {"tool": None, "runs": 0}
@@ -375,3 +379,60 @@ def test_registry_hives_keep_their_ids(cluster, ez, monkeypatch):
     stored = cluster.docs(wc.index_name("registry"))
     assert passed == ["", ""] and len(stored) == 2
     assert not any("vhir.id_scheme" in s for _, s in stored)
+
+
+# --- the id 0.6.4 stored each changed record under ----------------------------
+
+MACHINE = "0123456789abcdef"
+SINGLE = {  # one record of each changed type
+    "netscan": ("windows.netscan", {**NET_A, "PID": 4}),
+    "netstat": ("windows.netstat", {**NET_A, "PID": 4}),
+    "svcscan": ("windows.svcscan", SVC_1),  # a null PID
+}
+
+
+def one_record(cluster, cases, monkeypatch, atype) -> str:
+    """One record of `atype` from fixed evidence, case and machine key, as
+    every version ingests it: its index."""
+    from sift_common import host_identity
+
+    monkeypatch.setattr(host_identity, "new_machine_key", lambda: MACHINE)
+    if atype == "accesslog":
+        return access_run(cluster, cases, "pin", "d", "access.log", [SAME])[0]
+    if atype in SINGLE:
+        open_run(cases, "mem", "evidence/mem.raw", "HOST-M", "memory image")
+        plugin, row = SINGLE[atype]
+        return vol(cluster, plugin, [row])[0]
+    return profile(cluster, ez_stub(cases, monkeypatch), atype, PAIRS[atype][0])[0]
+
+
+# Each stored id as 0.6.4 (e0adcc0) wrote it, measured through its own
+# parsers and stamp with one_record
+STORED_064 = {
+    "accesslog": "16334c03827dc16d46a1",
+    "shellbags": "444c4ba435a573850277",
+    "jumplists": "c0eb68fff63ecf003a39",
+    "lnk": "63c58943c67d7acca64f",
+    "timeline": "b5e1c974508eb7784d70",
+    "netscan": "86a0492e7fbc018b65c4",
+    "netstat": "505a830f22967529cd1e",
+    "svcscan": "30430033e1b764e6db5b",
+}
+
+
+@pytest.mark.parametrize("atype", sorted(STORED_064))
+def test_each_changed_record_carries_the_id_0_6_4_stored_it_under(
+    cluster, cases, monkeypatch, atype
+):
+    carried = []
+    real = wc.stamp_or_refuse
+
+    def stamp_or_refuse(actions, client=None):
+        real(actions, client)
+        carried.extend(a.get("_vhir_old_id") for a in actions)  # bulk.OLD_ID_KEY
+
+    monkeypatch.setattr(wc, "stamp_or_refuse", stamp_or_refuse)
+    index = one_record(cluster, cases, monkeypatch, atype)
+    assert carried == [STORED_064[atype]]
+    ((stored, src),) = cluster.docs(index)  # sent without it, under its 0.6.5 id
+    assert stored != STORED_064[atype] and src.get("vhir.id_scheme") == 2

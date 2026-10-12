@@ -215,6 +215,11 @@ def _is_systemic_failure(success: int, total: int, errors: list | None) -> tuple
     return False, representative
 
 
+# A record whose id 0.6.5 computes differently carries the id 0.6.4 gave it:
+# the parser's (OLD_RID_KEY), then the stored one the stamp makes (OLD_ID_KEY)
+OLD_RID_KEY, OLD_ID_KEY = "_vhir_old_rid", "_vhir_old_id"
+
+
 def flush_bulk(
     client: OpenSearch, actions: list[dict], depth_limit: bool = False
 ) -> tuple[int, int]:
@@ -244,6 +249,9 @@ def flush_bulk(
     from opensearch_mcp.write_context import stamp_or_refuse
 
     stamp_or_refuse(actions, client)
+    for action in actions:  # the 0.6.4 ids ride only this far, never sent
+        action.pop(OLD_RID_KEY, None)
+        action.pop(OLD_ID_KEY, None)
     refused = 0
     if depth_limit and actions:
         actions, refused = _refuse_too_deep(client, actions)

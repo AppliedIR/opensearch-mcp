@@ -25,7 +25,7 @@ import yaml
 from sift_common import host_identity
 from sift_common.content_hash import content_hash
 
-from opensearch_mcp.bulk import ShardCapacityExhausted
+from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted
 
 _tls = threading.local()
 
@@ -475,6 +475,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
+            if action.get(OLD_RID_KEY):  # the id 0.6.4 stored it under
+                action[OLD_ID_KEY] = doc_id(key, str(action[OLD_RID_KEY]))
         # last, over the record as it is sent: its stored _source hashes alike
         src["vhir.content_hash"] = content_hash(src)
         if action.get("_op_type", "index") == "index":

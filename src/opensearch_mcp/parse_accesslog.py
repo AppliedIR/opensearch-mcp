@@ -10,7 +10,7 @@ from pathlib import Path
 from dateutil.parser import parse as dateutil_parse
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 
 _COMBINED_RE = re.compile(
     r"^(\S+) \S+ (\S+) \[([^\]]+)\] "
@@ -90,13 +90,8 @@ def ingest_accesslog(
                     pass
 
             # Dedup: content-based key
-            # the line number (as w3c's data_seq) and every parsed field
-            id_input = (
-                f"{index_name}:{source_file or path.name}"
-                f":{line_no}"
-                f":{doc.get('user.name', '')}"
-                f":{doc.get('http.version', '')}"
-                f":{doc.get('http.request.referrer', '')}"
+            head = f"{index_name}:{source_file or path.name}"
+            fields = (
                 f":{doc.get('@timestamp', '')}"
                 f":{doc.get('source.ip', '')}"
                 f":{doc.get('http.request.method', '')}"
@@ -105,7 +100,15 @@ def ingest_accesslog(
                 f":{doc.get('http.response.bytes', '')}"
                 f":{doc.get('user_agent.original', '')}"
             )
+            # the line number (as w3c's data_seq) and every parsed field
+            id_input = (
+                f"{head}:{line_no}"
+                f":{doc.get('user.name', '')}"
+                f":{doc.get('http.version', '')}"
+                f":{doc.get('http.request.referrer', '')}{fields}"
+            )
             doc_id = hashlib.sha256(id_input.encode()).hexdigest()[:20]
+            old_rid = hashlib.sha256(f"{head}{fields}".encode()).hexdigest()[:20]  # 0.6.4's
 
             doc["host.name"] = hostname
             if hostname:
@@ -123,7 +126,9 @@ def ingest_accesslog(
             if pipeline_version:
                 doc["pipeline_version"] = pipeline_version
 
-            actions.append({"_index": index_name, "_id": doc_id, "_source": doc})
+            actions.append(
+                {"_index": index_name, "_id": doc_id, "_source": doc, OLD_RID_KEY: old_rid}
+            )
             if len(actions) >= 1000:
                 flushed, failed = flush_bulk(client, actions)
                 count += flushed
