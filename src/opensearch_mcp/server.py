@@ -1581,7 +1581,7 @@ def idx_status() -> dict:
     case_indices = [
         {
             "index": idx["index"],
-            "docs": int(idx.get("docs.count", 0)),
+            "docs": _cat_doc_count(idx),  # None: unknown (a red index), never 0
             "size": idx.get("store.size", "0"),
             "status": idx.get("status", "unknown"),
         }
@@ -1602,6 +1602,7 @@ def idx_status() -> dict:
         "indices": case_indices,
         "total_indices": len(case_indices),
     }
+    _name_unknown_counts(resp, [i["index"] for i in case_indices if i["docs"] is None])
     aid = audit.log(
         tool="idx_status",
         params={},
@@ -1669,7 +1670,7 @@ def idx_shard_status() -> dict:
             "index": i.get("index"),
             "primary_shards": int(i.get("pri", 0) or 0),
             "replica_shards": int(i.get("rep", 0) or 0),
-            "doc_count": int(i.get("docs.count", 0) or 0),
+            "doc_count": _cat_doc_count(i),  # None: unknown (a red index), never 0
             "size": i.get("store.size"),
         }
         for i in top_indices
@@ -1689,6 +1690,7 @@ def idx_shard_status() -> dict:
         "status": ("ok" if headroom_pct >= 10 else "warning" if headroom_pct >= 2 else "critical"),
         "top_indices_by_shard_count": top,
     }
+    _name_unknown_counts(resp, [i["index"] for i in top if i["doc_count"] is None])
     if aid:
         resp["audit_id"] = aid
     return resp
@@ -1755,6 +1757,19 @@ def _cat_doc_count(row: dict) -> int | None:
         return int(row.get("docs.count", 0))
     except (TypeError, ValueError):
         return None
+
+
+def _name_unknown_counts(resp: dict, names: list[str]) -> None:
+    """Flag `resp` partial and name the indices whose count is unknown."""
+    if not names:
+        return
+    names = sorted(names)
+    more = f" and {len(names) - 5} more" if len(names) > 5 else ""
+    resp["partial"] = True
+    resp.setdefault("warnings", []).append(
+        f"Document counts: partial; failing indices: {', '.join(names[:5])}{more}; "
+        "their counts are unknown"
+    )
 
 
 def _failed_artifact_warnings(
