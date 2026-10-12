@@ -357,9 +357,8 @@ def _preflight_shard_capacity(
     sys.exit(1) after. Fail-open on stats-query errors (handled inside
     check_shard_headroom).
 
-    Template installation is handled at MCP server boot
-    (server._get_os) and must run before ingest — no install performed
-    here.
+    The index templates are installed by the process's first write
+    (write_context.prepare_index, once per process), not here.
     """
     from opensearch_mcp.ingest_status import HALT_SHARD_CAPACITY
     from opensearch_mcp.shard_capacity import (
