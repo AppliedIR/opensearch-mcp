@@ -238,8 +238,8 @@ def resolve_timezone(tz_name: str | None) -> str | None:
     if iana is not None:
         return iana if gettz(iana) is not None else None
 
-    # No IANA or POSIX name has a space: an unknown Windows-style name stays unknown
-    if name and " " not in name and gettz(name) is not None:
+    # No IANA or POSIX name has whitespace: an unknown Windows-style name stays unknown
+    if name and not any(c.isspace() for c in name) and gettz(name) is not None:
         return name
 
     return None

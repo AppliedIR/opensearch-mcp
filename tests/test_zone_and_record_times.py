@@ -112,6 +112,8 @@ def test_the_zone_changes_no_record_id(tmp_path, monkeypatch):
         ("UTC+12", "Etc/GMT-12"),
         ("Foo Zone 5", None),  # unknown, not read as a POSIX string
         ("Russia TZ 3 Standard Time", None),
+        ("Russia\tTime\tZone\t3", None),  # any whitespace, not only a space
+        ("Russia\u00a0Time\u00a0Zone\u00a03", None),
         ("\x00", None),
         ("  ", None),
         ("America/New_York", "America/New_York"),
