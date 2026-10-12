@@ -228,3 +228,14 @@ def test_an_extractions_folder_that_is_a_link_is_refused(case, tmp_path, monkeyp
     with pytest.raises(ValueError, match="Refusing to stage into"):
         _stage(case, _prefetch(tmp_path), "HOST1", monkeypatch)
     assert _files(elsewhere) == ["Prefetch-HOST1/keep.txt"]
+
+
+@pytest.mark.parametrize("rel", ["extractions", "extractions/.", "extractions/x/.."])
+def test_the_extractions_folder_itself_is_refused(case, rel):  # noqa: F811
+    """A run removes its staging folder first: extractions/ itself would take
+    every extraction in the case with it."""
+    (case / "extractions" / "kept").mkdir(parents=True)
+    with pytest.raises(paths.StagingRefused, match="not a folder inside"):
+        paths.check_staging(case, case / rel)
+    assert (case / "extractions" / "kept").is_dir()
+

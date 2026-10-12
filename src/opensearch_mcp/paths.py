@@ -241,14 +241,21 @@ def fs_name(name: str) -> str:
     return f"{safe}~{digest[:12]}"
 
 
+class StagingRefused(ValueError):
+    """A staging folder that isn't a folder of its own inside the case's
+    extractions/."""
+
+
 def check_staging(case_dir: Path, staging: Path) -> None:
-    """Refuse a staging folder that isn't under the case's extractions/ once
-    resolved. extractions/ itself isn't resolved, so a link there is refused."""
+    """Refuse a staging folder that isn't strictly inside the case's
+    extractions/ once resolved: extractions/ itself is refused too, as a run
+    removes its staging folder first. extractions/ isn't resolved, so a link
+    there is refused."""
     root = case_dir.resolve() / "extractions"
     real = staging.resolve()
-    if real != root and root not in real.parents:
-        raise ValueError(
-            f"Refusing to stage into {staging}: it resolves to {real}, outside {root}"
+    if root not in real.parents:
+        raise StagingRefused(
+            f"Refusing to stage into {staging}: it resolves to {real}, not a folder inside {root}."
         )
 
 
