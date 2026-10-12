@@ -5,11 +5,11 @@ from the scan route, so the same evidence ingested both ways is one record.
 The scan route puts the profile folder it ran the tool on in each id (the
 folder discovery hands it: `Users/<name>/` and the tool's own folder, as on
 disk). The csv route reads that folder from each row's SourceFile, the file
-the tool read: the `Users` nearest the file, as when the image was mounted
-under the examiner's own profile. Both routes case-fold it, as Windows paths
-are case-insensitive. A row whose SourceFile names no such folder (none, or a profile
-discovery skips) can't be given it: those rows are counted and named, because
-the same profile ingested by scan as well would be stored twice.
+the tool read. Both routes case-fold it, as Windows paths are
+case-insensitive. A row whose SourceFile names no such folder (none, a profile
+discovery skips, or more than one `Users` folder, so the scan's is unknown)
+can't be given it: those rows are counted and named, because the same profile
+ingested by scan as well would be stored twice.
 
 The routes are real: `tools.run_and_ingest` with the EZ stand-in, and
 `ingest_cli.cmd_csv`; OpenSearch is the record-id stand-in.
@@ -137,42 +137,58 @@ def test_csv_rows_from_two_profiles_get_each_profiles_scan_id(cluster, cases, mo
     assert records(cluster) == by_scan and len(by_scan) == 2
 
 
-NO_SCAN_ID = {
-    "no SourceFile": None,
-    "a profile discovery skips": ALICE.replace("\\alice\\", "\\Public\\"),
-    "outside the tool's folder": ALICE.replace(RECENT + "\\AutomaticDestinations", "Desktop"),
+HIVE = "C:\\Users\\{}\\NTUSER.DAT"
+DESKTOP = "C:\\Users\\{}\\Desktop\\x.lnk"
+NO_SCAN_ID = {  # (tool, the row that can't, a row that can)
+    "no SourceFile": ("jumplists", None, ALICE),
+    "a profile discovery skips": ("jumplists", ALICE.replace("\\alice\\", "\\Public\\"), ALICE),
+    "outside the tool's folder": (
+        "jumplists",
+        ALICE.replace(RECENT + "\\AutomaticDestinations", "Desktop"),
+        ALICE,
+    ),
+    "an image mounted in the examiner's profile": (
+        "shellbags",
+        "C:\\Users\\examiner\\case\\C\\Users\\alice\\NTUSER.DAT",
+        HIVE.format("alice"),
+    ),
+    "a profile copied into another": (
+        "lnk",
+        "C:\\Users\\alice\\Desktop\\archive\\Users\\bob\\Desktop\\x.lnk",
+        DESKTOP.format("alice"),
+    ),
 }
+
+
+def twice(n, tool):
+    return (
+        f"{n} rows of {tool} couldn't be given the scan route's id; if the same profile is "
+        "also ingested by scan, they're stored twice"
+    )
 
 
 @pytest.mark.parametrize("name", list(NO_SCAN_ID))
 def test_a_row_that_cant_get_the_scan_id_is_counted_and_named(
     cluster, cases, monkeypatch, ez, name
 ):
-    out = csv_route(cluster, cases, monkeypatch, [NO_SCAN_ID[name], ALICE])
-    assert (
-        "1 rows of jumplists couldn't be given the scan route's id; if the same profile is "
-        "also ingested by scan, they're stored twice"
-    ) in out
-    assert len(records(cluster)) == 2  # each stored once
+    tool, odd, good = NO_SCAN_ID[name]
+    out = csv_route(cluster, cases, monkeypatch, [odd, good], tool)
+    assert twice(1, tool) in out
+    assert len(records(cluster, tool)) == 2  # each stored once
 
 
-MOUNTED = "C:\\Users\\examiner\\case\\C\\Users\\{}\\NTUSER.DAT"  # an image mounted in a profile
 BOTH = {
     "a jumplist path spelled in other case": (
         "jumplists",
         [PAIRS["jumplists"][0]],
         [ALICE.replace("C:\\Users\\alice", "C:\\users\\ALICE").replace(RECENT, RECENT.upper())],
     ),
-    "shellbags of an image mounted in the examiner's profile": (
-        "shellbags",
-        [PAIRS["shellbags"][0]],
-        [MOUNTED.format("alice")],
-    ),
-    "two profiles' shellbags of an image mounted in the examiner's profile": (
+    "shellbags": (
         "shellbags",
         list(PAIRS["shellbags"]),
-        [MOUNTED.format("alice"), MOUNTED.format("bob")],
+        [HIVE.format("alice"), HIVE.format("bob")],
     ),
+    "lnk": ("lnk", [PAIRS["lnk"][1]], [DESKTOP.format("alice")]),
 }
 
 
@@ -218,3 +234,15 @@ def test_case_folding_leaves_the_id_0_6_4_stored_it_under(cluster, cases, monkey
     csv_route(cluster, cases, monkeypatch, [ALICE, upper])
     assert carried == [STORED_064["jumplists"]] * 2
     assert len(records(cluster)) == 1
+
+
+def test_the_same_row_from_two_copied_profiles_is_counted(cluster, cases, monkeypatch, ez):
+    """Identical rows under alice's and carol's copies of a profile: neither
+    says which profile the scan would read, so both are counted, and they keep
+    the one id 0.6.4 gave them."""
+    copied = "C:\\Users\\{}\\Desktop\\archive\\Users\\bob\\Desktop\\x.lnk"
+    out = csv_route(
+        cluster, cases, monkeypatch, [copied.format("alice"), copied.format("carol")], "lnk"
+    )
+    assert twice(2, "lnk") in out
+    assert records(cluster, "lnk") == [STORED_064["lnk"]]

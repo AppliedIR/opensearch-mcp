@@ -331,22 +331,24 @@ def scan_id_source(tool: str, source_file: str) -> str:
     """The profile folder the scan route runs `tool` on, as its id source, for
     a row whose tool read `source_file`: `Users/<name>` and the tool's own
     folder (discovery's), "/"-separated; "" when the path holds no such folder
-    the scan route would read. The `Users` nearest the file is the profile's,
-    as when the image was mounted under another profile."""
+    the scan route would read. A path with more than one `Users` folder (an
+    image mounted under a profile, a profile copied into another) can't say
+    which is the scan's, so it gets "" too."""
     import re
 
     from opensearch_mcp.discover import USER_ARTIFACTS
 
     parts = [p for p in re.split(r"[\\/]+", source_file or "") if p]
+    users = [i for i in range(len(parts) - 1) if parts[i].lower() == "users"]
+    if len(users) != 1 or parts[users[0] + 1].lower() in _SKIPPED_PROFILES:
+        return ""
+    i = users[0]
+    rest = parts[i + 2 :]
     rels = USER_ARTIFACTS.get(tool, [])
-    for i in reversed(range(len(parts) - 2)):
-        if parts[i].lower() != "users" or parts[i + 1].lower() in _SKIPPED_PROFILES:
-            continue
-        rest = parts[i + 2 :]
-        for rel in rels if isinstance(rels, list) else [rels]:
-            want = [w.lower() for w in rel.split("/") if w]
-            if len(rest) > len(want) and [r.lower() for r in rest[: len(want)]] == want:
-                return "/".join(parts[i : i + 2 + len(want)])
+    for rel in rels if isinstance(rels, list) else [rels]:
+        want = [w.lower() for w in rel.split("/") if w]
+        if len(rest) > len(want) and [r.lower() for r in rest[: len(want)]] == want:
+            return "/".join(parts[i : i + 2 + len(want)])
     return ""
 
 
