@@ -161,6 +161,11 @@ def cluster_case(tmp_path, monkeypatch):
             body["composed_of"] = [f"{base}-comp"]
         body["priority"] = 900
         client.indices.put_index_template(name=f"{base}-{kind}", body=body)
+    # the case's copies outrank vhir's templates by design: the check before a
+    # create would refuse every index (see _scratch_templates)
+    from opensearch_mcp import write_context as wc
+
+    monkeypatch.setattr(wc, "_outranked", lambda client, index, template: False)
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     monkeypatch.setenv("VHIR_AUDIT_DIR", str(tmp_path / "audit"))
     (tmp_path / "audit").mkdir()

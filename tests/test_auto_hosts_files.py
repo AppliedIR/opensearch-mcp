@@ -63,6 +63,9 @@ def ingest(tmp_path, monkeypatch):
         body["composed_of"] = [f"{base}-comp"]
     body["priority"] = 900
     client.indices.put_index_template(name=f"{base}-delim", body=body)
+    # the case's copy outranks vhir's template by design: the check before a
+    # create would refuse every index (see _scratch_templates)
+    monkeypatch.setattr(wc, "_outranked", lambda client, index, template: False)
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     monkeypatch.setenv("VHIR_AUDIT_DIR", str(tmp_path / "audit"))
     (tmp_path / "audit").mkdir()
