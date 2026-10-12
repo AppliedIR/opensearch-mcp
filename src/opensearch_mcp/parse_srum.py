@@ -118,9 +118,10 @@ def _parse_srum_wintools(
     case_dir = Path(case_dir_str)
 
     from opensearch_mcp import ops
+    from opensearch_mcp.paths import fs_name
 
     # Stage SRUM to case extractions (on the SMB share) for ESE recovery
-    srum_workdir = case_dir / "extractions" / "srum" / hostname
+    srum_workdir = case_dir / "extractions" / "srum" / fs_name(hostname)
     srum_workdir.mkdir(parents=True, exist_ok=True)
     copied = [(srum_path, srum_workdir / "SRUDB.dat")]
     shutil.copy2(srum_path, srum_workdir / "SRUDB.dat")

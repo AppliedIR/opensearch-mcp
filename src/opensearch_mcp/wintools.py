@@ -91,8 +91,10 @@ def run_tool_and_get_csv(
     if needs_staging:
         # Stage to extractions (on the SMB share)
         # Clean staging dir first to prevent stale data contamination
+        from opensearch_mcp.paths import fs_name
+
         artifact_name = evidence.name
-        suffix = f"-{hostname}" if hostname else ""
+        suffix = f"-{fs_name(hostname)}" if hostname else ""
         staging = case_dir / "extractions" / f"{artifact_name}{suffix}"
         if staging.exists():
             shutil.rmtree(staging)

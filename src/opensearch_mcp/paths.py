@@ -225,6 +225,22 @@ def no_time_field_note() -> str:
     return "; ".join(notes)
 
 
+def fs_name(name: str) -> str:
+    """A host name from evidence as one file or folder name: `[A-Za-z0-9._-]`
+    kept, anything else `_`, `.` and `..` as `_` and `__`, at most 64 kept.
+    When that changed anything, `~` and a hash of the original follow: the
+    mapping never keeps `~`, so two names never share one."""
+    import hashlib
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64]
+    safe = "_" * len(safe) if safe in (".", "..") else safe
+    if safe == name:
+        return safe
+    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{safe}~{digest[:12]}"
+
+
 def sanitize_index_component(value: str) -> str:
     """Sanitize a hostname or case_id for use in OpenSearch index names."""
     import re
