@@ -184,27 +184,19 @@ class TestEnsureWinlogPipeline:
             "so the evtx template never references a missing pipeline"
         )
 
-    def test_refuses_on_priority_collision(self):
+    def test_an_operator_template_outranking_ours_is_an_operator_return(self):
+        """As OpenSearch 3.5.0 answers (measured): _simulate_index names no
+        priority; vhir's template is in `overlapping` when another outranks
+        it, read after our PUT. Was: a `priority` in the reply (never there)
+        and nothing evtx PUT; now ours is PUT, then found outranked."""
         client = self._mock_client_ok()
         client.indices.simulate_index_template.return_value = {
-            "template": {
-                "priority": _TEMPLATE_PRIORITY + 1,
-                "settings": {"index": {}},
-            }
+            "template": {"settings": {"index": {}}},
+            "overlapping": [{"name": _TEMPLATE_NAME, "index_patterns": ["case-*-evtx-*"]}],
         }
         result = ensure_winlog_pipeline(client)
-        assert result["status"] == "error"
-        assert "priority" in result["error"].lower()
-        # Evtx-specific artifacts (pipeline + evtx template) must NOT
-        # install on collision. Non-evtx templates DO install — they
-        # have no dependency on the evtx pipeline (CR 2026-04-21 fix).
-        client.ingest.put_pipeline.assert_not_called()
-        evtx_puts = [
-            c
-            for c in client.mock_calls
-            if c[0] == "indices.put_index_template" and c.kwargs.get("name") == _TEMPLATE_NAME
-        ]
-        assert evtx_puts == [], "evtx template must not install on priority collision"
+        assert (result["status"], result["operator_template"]) == ("error", True)
+        assert "outranks ours" in result["error"]
 
     def test_refuses_on_existing_default_pipeline(self):
         client = self._mock_client_ok()
@@ -585,12 +577,12 @@ class TestInstallAllTemplates:
         the 14 non-evtx templates installed — they don't depend on
         the evtx pipeline. CR 2026-04-21 fix."""
         client = MagicMock()
-        client.indices.simulate_index_template.return_value = {
-            "template": {"priority": 200, "settings": {"index": {}}}  # higher than ours
+        client.indices.simulate_index_template.return_value = {  # as 3.5.0 answers
+            "template": {"settings": {"index": {}}},
+            "overlapping": [{"name": _TEMPLATE_NAME, "index_patterns": ["case-*-evtx-*"]}],
         }
         result = ensure_winlog_pipeline(client)
-        assert result["status"] == "error"
-        assert "priority" in result["error"].lower()
+        assert (result["status"], result.get("operator_template")) == ("error", True)
         # Non-evtx templates installed despite the evtx refuse.
         assert "other_templates" in result
         assert len(result["other_templates"]["installed"]) == 15

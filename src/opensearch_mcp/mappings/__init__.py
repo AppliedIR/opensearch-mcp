@@ -339,15 +339,7 @@ def install_all_templates(client, audit=None, stamp_indices: str = "") -> dict[s
                 continue
             body = with_host_key_fields(_load_json(path))
             loading = False
-            # what decides an index's template is the registry: a file that
-            # says otherwise would govern other indices, or none
-            priority, patterns = _TEMPLATE_PATTERNS[tpl_name]
-            pats = body.get("index_patterns")
-            same = isinstance(pats, list) and sorted(map(str, pats)) == sorted(patterns)
-            for field, ok in (("priority", body.get("priority") == priority),
-                              ("index_patterns", same)):  # fmt: skip
-                if not ok:
-                    raise ValueError(f"{filename}: its {field} doesn't match what vhir expects")
+            _check_registry(body, filename, *_TEMPLATE_PATTERNS[tpl_name])
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
@@ -364,6 +356,17 @@ def install_all_templates(client, audit=None, stamp_indices: str = "") -> dict[s
     # the case's indices made before the stamp fields were mapped
     results["stamp_fields"] = put_stamp_fields(client, audit, stamp_indices)
     return results
+
+
+def _check_registry(body: dict, filename: str, priority: int, patterns) -> None:
+    """Raise when a template file's priority or patterns aren't the ones vhir
+    decides an index's template by: it would govern other indices, or none."""
+    pats = body.get("index_patterns")
+    same = isinstance(pats, list) and sorted(map(str, pats)) == sorted(patterns)
+    for field, ok in (("priority", body.get("priority") == priority),
+                      ("index_patterns", same)):  # fmt: skip
+        if not ok:
+            raise ValueError(f"{filename}: its {field} doesn't match what vhir expects")
 
 
 def _composing_index_patterns(bodies: list[Any]) -> list[str]:
@@ -468,26 +471,14 @@ def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[
         }
 
     try:
-        # 1. Collision check — does anyone outrank us on the pattern?
+        # 1. Collision check — another template's default_pipeline on the
+        # pattern. (A template outranking ours is found after our PUT, step 4:
+        # _simulate_index names no priority, measured on 3.5.0.)
+        probe = _TEMPLATE_PATTERN.replace("*", "PROBE")
         try:
-            sim = client.indices.simulate_index_template(
-                name=f"{_TEMPLATE_PATTERN.replace('*', 'PROBE')}"
-            )
+            sim = client.indices.simulate_index_template(name=probe)
         except Exception:
             sim = {}
-        existing_priority = (sim.get("template", {}) or {}).get("priority", 0) or 0
-        if existing_priority > _TEMPLATE_PRIORITY:
-            return {
-                "status": "error",
-                "error": (
-                    f"Existing index template with priority "
-                    f"{existing_priority} preempts ours "
-                    f"({_TEMPLATE_PRIORITY}) for pattern "
-                    f"{_TEMPLATE_PATTERN}. Resolve before install."
-                ),
-                "other_templates": other_templates_result,
-                "operator_template": True,  # it governs evtx indices: they're still written
-            }
         existing_dp = (
             (sim.get("template", {}) or {})
             .get("settings", {})
@@ -590,7 +581,30 @@ def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[
         except Exception as _legacy_e:
             logger.debug("legacy evtx template delete non-fatal: %s", _legacy_e)
         template_body = with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE))
+        _check_registry(template_body, _EVTX_TEMPLATE_FILE.name, _TEMPLATE_PRIORITY,
+                        (_TEMPLATE_PATTERN,))  # fmt: skip
         client.indices.put_index_template(name=_TEMPLATE_NAME, body=template_body)
+        # Ours is in `overlapping` when another template outranks it (as
+        # write_context._outranked reads it): an operator's, so its indices
+        # are written under it
+        try:
+            after = client.indices.simulate_index_template(name=probe)
+        except Exception:
+            after = {}
+        overlapping = after.get("overlapping") if isinstance(after, dict) else None
+        if isinstance(overlapping, list) and any(
+            isinstance(t, dict) and t.get("name") == _TEMPLATE_NAME for t in overlapping
+        ):
+            return {
+                "status": "error",
+                "error": (
+                    f"Another index template outranks ours ({_TEMPLATE_NAME}, "
+                    f"priority {_TEMPLATE_PRIORITY}) for pattern "
+                    f"{_TEMPLATE_PATTERN}. Resolve before install."
+                ),
+                "other_templates": other_templates_result,
+                "operator_template": True,  # it governs evtx indices: they're still written
+            }
 
         # 5. Legacy re-ingest guard (non-fatal).
         legacy_count = 0
