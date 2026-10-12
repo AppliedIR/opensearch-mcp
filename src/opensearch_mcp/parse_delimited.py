@@ -10,7 +10,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 from opensearch_mcp.hostname import extract_host_from_record
 from opensearch_mcp.parse_csv import _detect_encoding, _doc_id
 from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, auto_detect_time_field
@@ -261,6 +261,7 @@ def ingest_delimited(
         ts_field = "mtime"
 
     for record in _iter_delimited(path, fmt, delimiter):
+        literal = record.get("@timestamp")  # the row's own, before a time field overwrites it
         if ts_field is None:
             ts_field = auto_detect_time_field(record)
 
@@ -311,7 +312,11 @@ def ingest_delimited(
             record["source_host"] = record.pop("host")
             host_renamed += 1
 
-        doc_id = _doc_id(index_name, _id_input(record, id_root), volatile_keys=_DELIM_VOLATILE)
+        id_input = _id_input(record, id_root)
+        doc_id = old_rid = _doc_id(index_name, id_input, volatile_keys=_DELIM_VOLATILE)
+        if literal not in (None, ""):  # rows that differ only in their own time stay apart
+            stamped = {**id_input, "@timestamp": literal}
+            doc_id = _doc_id(index_name, stamped, volatile_keys=_DELIM_VOLATILE - {"@timestamp"})
 
         # The row's machine by the shared host-column rule (Hayabusa and EvtxECmd
         # `Computer`, MDE `DeviceName`, any case of a machine-only name), else the
@@ -336,7 +341,10 @@ def ingest_delimited(
         if pipeline_version:
             record["pipeline_version"] = pipeline_version
 
-        actions.append({"_index": index_name, "_id": doc_id, "_source": record})
+        action = {"_index": index_name, "_id": doc_id, "_source": record}
+        if doc_id != old_rid:  # the id 0.6.4 gave it
+            action[OLD_RID_KEY] = old_rid
+        actions.append(action)
         if len(actions) >= batch_size:
             flushed, failed = flush_bulk(client, actions, depth_limit=True)
             count += flushed

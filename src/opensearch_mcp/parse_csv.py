@@ -259,7 +259,6 @@ def ingest_csv(
                     natural_key,
                     volatile_keys=_VOLATILE_KEYS,
                 )
-                row["vhir.id_scheme"] = 2
 
             # Provenance fields (added after ID computation)
             if source_file:

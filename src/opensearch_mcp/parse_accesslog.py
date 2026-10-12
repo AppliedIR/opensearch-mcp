@@ -118,7 +118,6 @@ def ingest_accesslog(
                 else:
                     doc["host.id"] = hostname
             doc["vhir.parse_method"] = "accesslog"
-            doc["vhir.id_scheme"] = 2  # marker
             if source_file:
                 doc["vhir.source_file"] = source_file
             if ingest_audit_id:

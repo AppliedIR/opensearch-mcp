@@ -86,7 +86,8 @@ def new_process(monkeypatch):
 
 
 # what a process remembers: the fill-in's, and the indices it prepared
-FILL_STATE = ("FILL", "_FILL_CLAIMED", "FILL_UNCHECKED", "_FILL_SAID", "_MARKED", "_prepared")
+FILL_STATE = ("FILL", "_FILL_CLAIMED", "FILL_UNCHECKED", "FILL_AGAIN", "_FILL_SAID", "_MARKED",
+              "_prepared")  # fmt: skip
 
 
 def open_run(cases, name, locator, host, source):

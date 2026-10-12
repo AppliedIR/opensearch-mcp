@@ -10,7 +10,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 from opensearch_mcp.parse_csv import _doc_id
 from opensearch_mcp.parse_delimited import _EPOCH_TEXT as _DIGITS
 from opensearch_mcp.parse_delimited import _epoch_text, _is_a_number_not_zero
@@ -169,6 +169,12 @@ def ingest_json(
         host_dict._resolve_cache = {}
 
     for record in _iter_json_records(path, fmt):
+        # the source's own @timestamp (a _source's, when one is merged below),
+        # read before a time field can overwrite it
+        inner = record.get("_source")
+        literal = (inner if isinstance(inner, dict) and "@timestamp" in inner else record).get(
+            "@timestamp"
+        )
         if ts_field is None and not time_field:
             ts_field = auto_detect_time_field(record, extra=_JSON_TIME_FIELDS)
 
@@ -229,7 +235,10 @@ def ingest_json(
             inner = record.pop("_source")
             record.update(inner)
 
-        doc_id = _doc_id(index_name, record, volatile_keys=_JSON_VOLATILE)
+        doc_id = old_rid = _doc_id(index_name, record, volatile_keys=_JSON_VOLATILE)
+        if literal not in (None, ""):  # rows that differ only in their own time stay apart
+            stamped = {**record, "@timestamp": literal}
+            doc_id = _doc_id(index_name, stamped, volatile_keys=_JSON_VOLATILE - {"@timestamp"})
 
         # Per spec Rev 5 Fix C: prefer a per-doc hostname from the
         # shared priority list (Velociraptor "Hostname" + nested
@@ -258,7 +267,10 @@ def ingest_json(
         if pipeline_version:
             record["pipeline_version"] = pipeline_version
 
-        actions.append({"_index": index_name, "_id": doc_id, "_source": record})
+        action = {"_index": index_name, "_id": doc_id, "_source": record}
+        if doc_id != old_rid:  # the id 0.6.4 gave it
+            action[OLD_RID_KEY] = old_rid
+        actions.append(action)
         if len(actions) >= batch_size:
             flushed, failed = flush_bulk(client, actions, depth_limit=True)
             count += flushed

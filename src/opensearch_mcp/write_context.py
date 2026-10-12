@@ -396,6 +396,7 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
 _FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
 FILL: dict[tuple[str, str, str], int] = {}  # (c12, unit_raw, type) -> records kept
 FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
+FILL_AGAIN: set[tuple[str, str, str]] = set()  # sent records with their own @timestamp
 _FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
 # An index this version creates carries IDS_MARK in its mapping: every record
 # in it has its 0.6.5 id, so there's nothing stored before 0.6.5 to look up
@@ -425,11 +426,19 @@ def _vss_class(src: dict) -> str:
     return "" if tag == "live" else tag
 
 
+def _own_time(action: dict) -> bool:
+    """A json or delimited record whose id changed: its 0.6.5 id hashes the
+    row's own @timestamp, which its 0.6.4 id left out, so a record stored
+    under that id may be another row's. It's never kept onto it: written."""
+    method = str(action["_source"].get("vhir.parse_method") or "")
+    return method == "json-ingest" or method.startswith("delimited-")
+
+
 def _same_evidence(stored: dict, src: dict) -> bool:
     """Whether the stored record came from the same evidence: the same
-    shadow copy (or both from the live volume), and what its 0.6.4 id leaves out (an access-log
-    line's user, version and referrer), the source file, or a vol3 object's
-    offset, which both must have."""
+    shadow copy (or both from the live volume), the source file, and what its
+    0.6.4 id leaves out (an access-log line's user, version and referrer), or
+    a vol3 object's offset, which both must have."""
     if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
         return False
     method = str(src.get("vhir.parse_method") or "")
@@ -480,11 +489,14 @@ def fill_in(client, actions: list[dict]) -> list[dict]:
     looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
     marked = {i for i in {a["_index"] for a in looked} if _marked(client, i)}
     looked = [a for a in looked if a["_index"] not in marked]
-    if not looked:
-        return actions
 
     def key(a: dict) -> tuple[str, str, str]:
         return ctx.c12, ctx.unit_raw, artifact_type_of(a["_index"])
+
+    FILL_AGAIN.update(key(a) for a in looked if _own_time(a))
+    looked = [a for a in looked if not _own_time(a)]
+    if not looked:
+        return actions
 
     matched = []
     try:
@@ -531,6 +543,12 @@ def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str
         for k, kept in sorted(FILL.items())
         if mine(*k)
     ]
+    notes += [
+        f"{k[2]}: records with their own @timestamp aren't matched against copies stored "
+        "before 0.6.5; those copies may remain"
+        for k in sorted(FILL_AGAIN)
+        if mine(*k)
+    ]
     notes += [why for k, why in sorted(FILL_UNCHECKED.items()) if mine(*k)]
     return "; ".join(notes)
 
@@ -540,7 +558,7 @@ def print_fill_report() -> None:
     yet printed in this process (the CLI route writes no status)."""
     import sys
 
-    for k in sorted({*FILL, *FILL_UNCHECKED} - _FILL_SAID):
+    for k in sorted({*FILL, *FILL_AGAIN, *FILL_UNCHECKED} - _FILL_SAID):
         _FILL_SAID.add(k)
         print(f"NOTE: {fill_note(k[1], k[2], k[0])}", file=sys.stderr)
 
@@ -615,6 +633,9 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         resent = rid is not None and _stamped_here(action, src)
         if resent:
             rid = src["vhir.rid"]  # a batch sent again: its parser id, not the stored one
+        # a record whose id 0.6.5 changed carries the id 0.6.4 gave it: the
+        # stamp marks it, never the evidence (a batch sent again keeps its mark)
+        changed = bool(action.get(OLD_RID_KEY)) or (resent and src.get("vhir.id_scheme") == 2)
         removed = _drop_owned(src, resent)  # evidence never sets a record's machine
         if removed:
             key = (ctx.c12, ctx.unit_raw, artifact_type_of(action["_index"]))
@@ -632,6 +653,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         src["host.id"] = canonical
         src["vhir.host_key"] = key
         src["vhir.unit"] = ctx.unit
+        if changed:
+            src["vhir.id_scheme"] = 2
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
@@ -650,7 +673,7 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
 # What the stamp owns, dotted and nested: evidence that carries them is restamped.
 _OWNED = (
     "host.id", "vhir.host_key", "vhir.unit", "vhir.rid", "vhir.prev_ids",
-    "vhir.original.path", "vhir.original.sha256", "vhir.content_hash",
+    "vhir.original.path", "vhir.original.sha256", "vhir.content_hash", "vhir.id_scheme",
 )  # fmt: skip
 
 
@@ -664,7 +687,7 @@ def _stamped_here(action: dict, src: dict) -> bool:
 
 # Field names the stamp owns, at any depth of the subtree they belong to.
 _RESERVED = {
-    "vhir": {"host_key", "unit", "rid", "prev_ids", "original", "content_hash"},
+    "vhir": {"host_key", "unit", "rid", "prev_ids", "original", "content_hash", "id_scheme"},
     "host": {"id"},
 }
 
