@@ -154,3 +154,15 @@ def test_two_hosts_into_one_index_are_said_once(ez_scan):
 
 def test_a_scan_into_indices_made_from_this_template_says_nothing(ez_scan):
     assert _said(ez_scan(mapping(FORMAT), 10)) == []
+
+
+def test_a_mapping_that_cant_be_read_is_said_once_per_index(ez_scan):
+    client = MagicMock()
+    client.indices.get_mapping.side_effect = RuntimeError("stand-in cluster: mapping refused")
+    status = ez_scan(client, 10, hosts=("dev01", "dev02"))
+    said = [w for w in status.get("warnings", []) if "couldn't check" in w]
+    assert len(said) == len(EXAMPLE)  # once per index, though two hosts wrote to each
+    for artifact in EXAMPLE:
+        (line,) = [w for w in said if f"-{artifact}-0's date mapping" in w]
+        assert line.startswith("dev01: couldn't check case-")
+        assert line.endswith(f"-{artifact}-0's date mapping: stand-in cluster: mapping refused")

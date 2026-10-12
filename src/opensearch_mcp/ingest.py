@@ -998,8 +998,11 @@ def _ingest_hosts(
                     stale_checked.add(index_name)
                     from opensearch_mcp.mappings import stale_date_fields
 
-                    stale = stale_date_fields(client, index_name) or []
-                    if stale:
+                    why: list = []
+                    stale = stale_date_fields(client, index_name, why)
+                    if stale is None:  # never read as "made from this template"
+                        replaced.append(f"couldn't check {index_name}'s date mapping: {why[0]}")
+                    elif stale:
                         example = TOOLS[tool_name].time_field
                         example = example if example in stale else stale[0]
                         replaced.append(
