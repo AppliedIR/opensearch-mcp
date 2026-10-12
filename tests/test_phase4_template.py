@@ -99,11 +99,12 @@ class TestDynamicTemplates:
         dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
         assert dt["mapping"]["type"] == "keyword"
 
-    def test_ignore_above_1024(self, mappings):
-        """Default ignore_above for EventData keyword fields is 1024.
-        Matches Winlogbeat's model. Handles long paths, registry keys."""
+    def test_ignore_above_8191(self, mappings):
+        """EventData keyword fields are indexed up to 8,191 characters, the
+        JSON catch-all's limit: a 4103 Payload or a Sysmon 13 Details longer
+        than 1,024 is found by its field."""
         dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
-        assert dt["mapping"]["ignore_above"] == 1024
+        assert dt["mapping"]["ignore_above"] == 8191
 
     def test_not_text_type(self, mappings):
         """Dynamic template must map to keyword, NOT text.

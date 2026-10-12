@@ -289,6 +289,219 @@ def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]
     return results
 
 
+_EVENT_DATA = "winlog.event_data"
+_EVTX_RULE = "winlog_event_data_strings"
+
+
+def _evtx_limits() -> tuple[dict[str, int], int, dict]:
+    """The evtx template's event-data keyword limits: each explicit
+    property's ({dotted path: limit}), the dynamic rule's, and the rule's
+    entry as the template gives it."""
+    m = _load_json(_EVTX_TEMPLATE_FILE)["template"]["mappings"]
+    explicit = {
+        path: body["ignore_above"]
+        for path, body in m.get("properties", {}).items()
+        if path.startswith(_EVENT_DATA + ".")
+        and body.get("type") == "keyword"
+        and "ignore_above" in body
+    }
+    entry = next(e for e in m["dynamic_templates"] if _EVTX_RULE in e)
+    return explicit, entry[_EVTX_RULE]["mapping"]["ignore_above"], entry
+
+
+def _event_data(mapping: dict) -> dict:
+    """The `winlog.event_data` properties of an index's mapping."""
+    for key in ("winlog", "event_data"):
+        mapping = mapping.get("properties", {}).get(key, {})
+        if not isinstance(mapping, dict):
+            return {}
+    props = mapping.get("properties", {})
+    return props if isinstance(props, dict) else {}
+
+
+def _low_event_data(
+    props: dict, prefix: str, explicit: dict[str, int], rule: int
+) -> tuple[dict[str, int], dict]:
+    """The keyword fields under `prefix` whose `ignore_above` is below the
+    template's limit for their path (its explicit property, else the rule):
+    ({dotted path: current limit}, the put_mapping properties raising them).
+    A field without a limit, or of another type, is left as it is."""
+    low: dict[str, int] = {}
+    body: dict[str, Any] = {}
+    for name, m in props.items():
+        if not isinstance(m, dict):
+            continue
+        path = f"{prefix}.{name}"
+        limit = m.get("ignore_above")
+        want = explicit.get(path, rule)
+        if m.get("type") == "keyword" and isinstance(limit, int) and limit < want:
+            low[path] = limit
+            body[name] = {**m, "ignore_above": want}
+        if isinstance(m.get("properties"), dict):
+            sub_low, sub_body = _low_event_data(m["properties"], path, explicit, rule)
+            low.update(sub_low)
+            if sub_body:
+                body[name] = {"properties": sub_body}
+    return low, body
+
+
+def _low_rule(rules: list, rule: int) -> int | None:
+    """The index's own event-data rule's limit, when below the template's."""
+    for entry in rules:
+        if not isinstance(entry, dict):
+            continue
+        limit = (entry.get(_EVTX_RULE) or {}).get("mapping", {}).get("ignore_above")
+        if isinstance(limit, int) and limit < rule:
+            return limit
+    return None
+
+
+def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
+    """Raise the event-data limits on every open evtx index to the template's.
+
+    A template applies only when an index is made, and a dynamic rule maps
+    only fields not mapped yet: so each index's full mapping is read, and one
+    `put_mapping` replaces its event-data rule and raises each keyword field
+    below the template's limit for its path. A limit is never lowered, and an
+    index already at the template's limits is sent nothing. Records already
+    stored keep the limit they were indexed with."""
+    results: dict[str, Any] = {"patched": {}, "unchanged": [], "failed": []}
+    explicit, rule, entry = _evtx_limits()
+    try:
+        current = client.indices.get_mapping(
+            index=_TEMPLATE_PATTERN,
+            expand_wildcards="open",
+            allow_no_indices=True,
+            ignore_unavailable=True,
+        )
+    except Exception as e:
+        logger.warning("patch_evtx_indices: reading mappings failed: %s", e)
+        results["failed"].append({"index": _TEMPLATE_PATTERN, "error": str(e)})
+        return results
+    if not isinstance(current, dict):
+        return results
+    for index, body in sorted(current.items()):
+        mapping = body.get("mappings", {}) if isinstance(body, dict) else {}
+        low, props = _low_event_data(_event_data(mapping), _EVENT_DATA, explicit, rule)
+        rules = mapping.get("dynamic_templates") or []
+        raised = rules
+        if _low_rule(rules, rule) is not None:
+            raised = [entry if _EVTX_RULE in e else e for e in rules]
+        if not props and raised == rules:
+            results["unchanged"].append(index)
+            continue
+        put: dict[str, Any] = {}
+        if raised != rules:
+            put["dynamic_templates"] = raised
+        if props:
+            put["properties"] = {"winlog": {"properties": {"event_data": {"properties": props}}}}
+        try:
+            client.indices.put_mapping(index=index, body=put)
+            results["patched"][index] = sorted(low) + ([_EVTX_RULE] if raised != rules else [])
+        except Exception as e:  # one index's refusal doesn't stop the others
+            logger.warning("patch_evtx_indices: %s failed: %s", index, e)
+            results["failed"].append({"index": index, "error": str(e)})
+    if audit is not None and (results["patched"] or results["failed"]):
+        from opensearch_mcp import ops
+
+        ops.write(
+            audit,
+            "patch_evtx_indices",
+            params={"indices": results["patched"]},
+            summary=f"{len(results['patched'])} evtx index(es) given the template's "
+            "event-data limits"
+            + (f", {len(results['failed'])} failed" if results["failed"] else ""),
+            extra={"failed": results["failed"]} if results["failed"] else None,
+        )
+    return results
+
+
+class _Unreadable(Exception):
+    """A mapping whose event-data limits can't be read from its shape."""
+
+
+def _dict(value, what: str) -> dict:
+    if not isinstance(value, dict):
+        raise _Unreadable(f"{what} isn't an object")
+    return value
+
+
+def _read_low(props: dict, prefix: str, explicit: dict[str, int], rule: int, low: dict) -> None:
+    """Every field mapping under `prefix`, read strictly: each is an object,
+    a keyword's limit (if any) is an integer, and nested properties are an
+    object. The keyword fields below the template's limit go in `low`."""
+    for name, m in props.items():
+        path = f"{prefix}.{name}"
+        m = _dict(m, path)
+        if m.get("type") == "keyword" and "ignore_above" in m:
+            limit = m["ignore_above"]
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise _Unreadable(f"{path}'s ignore_above isn't an integer")
+            if limit < explicit.get(path, rule):
+                low[path] = limit
+        if "properties" in m:
+            _read_low(_dict(m["properties"], f"{path}'s properties"), path, explicit, rule, low)
+
+
+def evtx_limit_note(client, index: str) -> str:
+    """What an evtx ingest into `index` says about its event-data limits.
+
+    "" only when the index isn't made yet (404: the template applies), or on
+    a positive read: the mapping is an object, every event-data field mapping
+    in it is one, and every keyword limit and the rule's are integers at
+    least the template's. Limits below the template's name their fields and
+    the lowest limit. Anything else, including any error while reading, says
+    the limits couldn't be checked: they are unknown, not fine. Nothing is
+    raised into the ingest."""
+    from opensearchpy.exceptions import NotFoundError
+
+    try:
+        try:
+            got = client.indices.get_mapping(index=index)
+        except NotFoundError:
+            return ""
+        explicit, rule, _ = _evtx_limits()
+        body = _dict(got, "the mapping reply").get(index)
+        mapping = _dict(_dict(body, f"the reply for {index}").get("mappings"), "its mappings")
+        rules = mapping.get("dynamic_templates")
+        if not isinstance(rules, list):
+            raise _Unreadable(f"its mapping has no readable {_EVTX_RULE} rule")
+        limits_of_rule = [
+            _dict(_dict(e[_EVTX_RULE], _EVTX_RULE).get("mapping"), f"{_EVTX_RULE}'s mapping").get(
+                "ignore_above"
+            )
+            for e in rules
+            if isinstance(e, dict) and _EVTX_RULE in e
+        ]
+        if not limits_of_rule or not all(
+            isinstance(n, int) and not isinstance(n, bool) for n in limits_of_rule
+        ):
+            raise _Unreadable(f"its mapping has no readable {_EVTX_RULE} rule")
+        node = _dict(mapping.get("properties"), "its properties")
+        for key in ("winlog", "event_data"):
+            if key not in node:
+                node = {}
+                break
+            node = _dict(_dict(node[key], key).get("properties", {}), f"{key}'s properties")
+        low: dict[str, int] = {}
+        _read_low(node, _EVENT_DATA, explicit, rule, low)
+    except Exception as e:  # an unreadable shape or any error: the ingest goes on, and says so
+        return f"couldn't check {index}'s event-data limits: {e}"
+    names = sorted(path[len(_EVENT_DATA) + 1 :] for path in low)
+    limits = list(low.values())
+    if (rule_limit := min(limits_of_rule)) < rule:
+        names.append("new fields")
+        limits.append(rule_limit)
+    if not names:
+        return ""
+    shown = ", ".join(names[:10]) + (", …" if len(names) > 10 else "")
+    return (
+        f"{index}: winlog.event_data values longer than {min(limits):,} characters in "
+        f"{shown} are stored but not indexed, so a search on those fields doesn't find "
+        "them (the index's mapping predates 0.6.5 and wasn't updated)"
+    )
+
+
 def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
     """Install winlog_data_normalize_v1 pipeline + update evtx template.
 
@@ -447,6 +660,8 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
             logger.debug("legacy evtx template delete non-fatal: %s", _legacy_e)
         template_body = with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE))
         client.indices.put_index_template(name=_TEMPLATE_NAME, body=template_body)
+        # Existing evtx indices get the template's event-data limits too
+        evtx_indices = patch_evtx_indices(client, audit)
 
         # 5. Legacy re-ingest guard (non-fatal).
         legacy_count = 0
@@ -479,13 +694,16 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
         # 13-of-14 broken templates behind a green light.
         success_status = "ok"
         patched = other_templates_result.get("patched_indices") or {}
-        if other_templates_result.get("failed") or patched.get("failed"):
+        if other_templates_result.get("failed") or patched.get("failed") or evtx_indices["failed"]:
             success_status = "partial"
         return {
             "status": success_status,
             "pipeline": _PIPELINE_ID,
             "template": _TEMPLATE_NAME,
             "legacy_indices_without_data_raw": legacy_count,
+            "evtx_patched": evtx_indices["patched"],
+            "evtx_unchanged": evtx_indices["unchanged"],
+            "evtx_failed": evtx_indices["failed"],
             "other_templates": other_templates_result,
         }
 

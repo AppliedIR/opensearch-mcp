@@ -744,6 +744,21 @@ def _ingest_hosts(
                     evtx_status["files_total"] = len(evtx_files)
                     _update_status()
 
+                # An index made before its limits were raised, and not patched
+                # since, says so: its long event-data values aren't searchable
+                from opensearch_mcp.mappings import evtx_limit_note
+
+                limit_note = evtx_limit_note(client, index_name)
+                if limit_note:
+                    import sys
+
+                    print(f"NOTE: {limit_note}", file=sys.stderr)
+                    if evtx_status:
+                        evtx_status["note"] = "; ".join(
+                            filter(None, [evtx_status.get("note"), limit_note])
+                        )
+                        _update_status()
+
                 for file_idx, evtx_file in enumerate(evtx_files):
                     params = {"hostname": host.hostname, "index_name": index_name,
                               "run_id": run_id}  # fmt: skip
