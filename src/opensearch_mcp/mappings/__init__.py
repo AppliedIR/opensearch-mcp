@@ -8,9 +8,11 @@ paths and tests).
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +171,61 @@ def put_stamp_fields(client, audit=None) -> dict[str, Any]:
     return results
 
 
+_INSTALLED_LOCK = threading.Lock()
+_INSTALLED: dict | None = None  # this process's ensure_winlog_pipeline result
+
+
+def ensure_installed_once(client, audit=None) -> dict:
+    """ensure_winlog_pipeline, once per process (whatever the cluster already
+    holds: an older release's templates are replaced), from the process's
+    first write. What wasn't installed is printed once."""
+    global _INSTALLED
+    with _INSTALLED_LOCK:
+        if _INSTALLED is None:
+            try:
+                _INSTALLED = ensure_winlog_pipeline(client, audit)
+            except Exception as e:
+                _INSTALLED = {"status": "error", "error": str(e)}
+            other = _INSTALLED.get("other_templates") or {}
+            failed = (other.get("components") or {}).get("failed", []) + other.get("failed", [])
+            bad = [f"{f.get('template')}: {f.get('error')}" for f in failed]
+            if _INSTALLED.get("status") not in ("ok", "partial"):
+                bad.append(f"{_TEMPLATE_NAME}: {_INSTALLED.get('error')}")
+            if bad:
+                print("WARNING: index templates not installed: " + "; ".join(bad),
+                      file=sys.stderr)  # fmt: skip
+        return _INSTALLED
+
+
+def template_for(index: str) -> str | None:
+    """The shipped non-evtx template OpenSearch would apply to `index`: of
+    those whose patterns match, the one of highest priority. None for evtx
+    (ensure_winlog_pipeline's) and for an index none matches."""
+    best: tuple[int, str] | None = None
+    for name, filename in _TEMPLATES_REGISTRY:
+        path = _MAPPINGS_DIR / filename
+        if not path.exists():
+            continue
+        body = _load_json(path)
+        if any(fnmatch.fnmatchcase(index, p) for p in body.get("index_patterns", [])):
+            priority = int(body.get("priority") or 0)
+            if best is None or priority > best[0]:
+                best = (priority, name)
+    return best[1] if best else None
+
+
+def not_installed(result: dict, template: str) -> str:
+    """Why non-evtx `template` isn't on the cluster after the install
+    `result`, or "" when it is."""
+    other = result.get("other_templates") or {}
+    for f in other.get("failed", []):
+        if f.get("template") in (template, "*"):
+            return str(f.get("error") or "failed")
+    if template not in other.get("installed", []):
+        return str(result.get("error") or "not installed")
+    return ""
+
+
 def install_all_templates(client, audit=None) -> dict[str, Any]:
     """Idempotent install of all non-evtx case-* index templates.
 
@@ -178,8 +235,9 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
     returned; a single failure does NOT abort the remaining installs —
     a typo in one template file should not strand the others.
 
-    Called from the same sites as ensure_winlog_pipeline (server
-    first-connection, ingest pre-flight, idx_install_pipelines tool).
+    Called from ensure_winlog_pipeline, so from the same sites: the server's
+    first connection, idx_install_pipelines, and every ingest process's first
+    write (ensure_installed_once, from write_context.prepare_index).
     Without this, edits to csv/prefetch/srum/transcripts/w3c/defender/
     tasks/wer/ssh/vol3/json/delimited/accesslog/hayabusa templates on
     disk never reach the cluster after initial setup-opensearch.sh run.

@@ -285,15 +285,32 @@ def shard_headroom(client, index: str, adding: int = 0) -> str:
     return ""
 
 
+class TemplateNotInstalled(RuntimeError):
+    """A non-evtx index's own template isn't on the cluster: it isn't created."""
+
+
 def prepare_index(client, index: str) -> None:
-    """Before this process's first write to a case index: create it (four
-    primaries for host-scaled types) and refuse when a shard has no headroom."""
+    """Before this process's first write to a case index: install the index
+    templates (once per process), create it (four primaries for host-scaled
+    types) and refuse when a shard has no headroom. A new non-evtx index
+    whose template wasn't installed is refused, never mapped by guess."""
     if index in _prepared or not _V2_INDEX.match(index):
         return
+    from opensearch_mcp import mappings, ops
+
+    run = ops.current_run()
+    installed = mappings.ensure_installed_once(client, run[0] if run else None)
     try:
         exists = client.indices.exists(index=index)
     except Exception:
         exists = None  # unanswered: the bulk request creates it, and says why if it can't
+    template = mappings.template_for(index) if exists is not True else None
+    why = mappings.not_installed(installed, template) if template else ""
+    if why:
+        raise TemplateNotInstalled(
+            f"index template {template} is not installed ({why[:200]}): {index} was not "
+            "created, so its fields aren't mapped by guess"
+        )
     if exists is False:
         body = {}
         if artifact_type_of(index) in HOST_SCALED_TYPES:
