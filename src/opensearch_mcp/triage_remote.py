@@ -486,6 +486,8 @@ def _batch_stamp_verdicts(
         params: dict = {"verdict": verdict_str, "confidence": confidence}
         if is_lolbin:
             script_lines.append("ctx._source['triage.lolbin'] = true")
+        else:  # an earlier run's flag, from an answer that no longer gives it
+            script_lines.append("ctx._source.remove('triage.lolbin')")
 
         # For batched paths, stamp a generic reason (individual reasons
         # vary per path but the verdict is the same for all in this group)
@@ -850,7 +852,8 @@ def _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash) -> tu
         "if (r == null) { ctx.op = 'noop' } else { "
         "ctx._source['triage.verdict'] = r.v; ctx._source['triage.checked'] = true; "
         "ctx._source['triage.confidence'] = r.c; ctx._source['triage.reason'] = r.r; "
-        "if (r.l) { ctx._source['triage.lolbin'] = true } }"
+        "if (r.l) { ctx._source['triage.lolbin'] = true } "
+        "else { ctx._source.remove('triage.lolbin') } }"
     )
     updated = failed = 0
     paths = list(by_hash)
@@ -1083,6 +1086,8 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
                 params["reason"] = "; ".join(reasons)
             if verdict.get("is_lolbin"):
                 script_lines.append("ctx._source['triage.lolbin'] = true")
+            else:  # an earlier run's flag, from an answer that no longer gives it
+                script_lines.append("ctx._source.remove('triage.lolbin')")
             try:
                 resp = client.update_by_query(
                     index=index,
@@ -1216,6 +1221,8 @@ def _enrich_registry_check_file(
                 params["reason"] = "; ".join(reasons)
             if verdict.get("is_lolbin"):
                 script_lines.append("ctx._source['triage.lolbin'] = true")
+            else:  # an earlier run's flag, from an answer that no longer gives it
+                script_lines.append("ctx._source.remove('triage.lolbin')")
             resp = _ubq(
                 client,
                 index=index,
