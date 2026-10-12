@@ -349,3 +349,65 @@ def test_a_command_that_writes_nothing_sends_no_write(monkeypatch, capsys, argv)
     with contextlib.suppress(SystemExit):
         ingest_cli.main()
     assert client.writes() == []
+
+
+# --------------------------------------------------------------------------
+# The template an index gets is decided by pattern, not by reading every file:
+# a missing or broken file refuses its own indices and no others
+
+
+@pytest.fixture
+def files(monkeypatch, tmp_path):
+    """A copy of the shipped template files the row can break."""
+    import shutil
+
+    d = tmp_path / "mappings"
+    shutil.copytree(mp._MAPPINGS_DIR, d, ignore=shutil.ignore_patterns("*.py", "__pycache__"))
+    monkeypatch.setattr(mp, "_MAPPINGS_DIR", d)
+    return d
+
+
+@pytest.mark.parametrize(
+    "broken,how,artifact_type,refused",
+    [
+        ("ssh_template.json", "garbled", "json", None),
+        ("ssh_template.json", "missing", "json", None),
+        ("ssh_template.json", "garbled", "ssh",
+         "vhir-ssh is not installed (ssh_template.json doesn't parse: Expecting value"),
+        ("json_template.json", "garbled",  "json",
+         "vhir-json is not installed (json_template.json doesn't parse: Expecting value"),
+        ("json_template.json", "missing", "json",
+         "vhir-json is not installed (its file json_template.json is missing)"),
+        ("srum_template.json", "missing", "srum",
+         "vhir-srum is not installed (its file srum_template.json is missing)"),
+    ],
+    ids=["other-garbled", "other-missing", "own-garbled-ssh", "own-garbled", "own-missing",
+         "own-missing-where-another-template-also-matches"],
+)  # fmt: skip
+def test_a_broken_template_file_refuses_its_own_indices_only(
+    sent, files, broken, how, artifact_type, refused
+):
+    if how == "missing":
+        (files / broken).unlink()
+    else:
+        (files / broken).write_text("not json {")
+    client = Client()
+    if refused is None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            index = write(client, artifact_type)
+        assert client.named("_bulk") == [index]
+        return
+    said, _ = _refused_write(client, artifact_type)
+    assert f"index template {refused}" in said
+    assert client.named("indices.create") == [] and client.named("_bulk") == []
+
+
+def test_each_templates_patterns_and_priority_are_its_files():
+    """What selection decides from is what each shipped file says."""
+    files = {
+        name: mp._load_json(mp._MAPPINGS_DIR / filename)
+        for name, filename in mp._TEMPLATES_REGISTRY
+    }
+    assert mp._TEMPLATE_PATTERNS == {
+        name: (body["priority"], tuple(body["index_patterns"])) for name, body in files.items()
+    }

@@ -68,6 +68,55 @@ _TEMPLATES_REGISTRY: list[tuple[str, str]] = [
     ("vhir-accesslog", "accesslog_template.json"),
     ("vhir-hayabusa", "hayabusa_template.json"),
 ]
+# What each template governs, as its file says (a test keeps them equal), so
+# the template an index gets is decided without reading every file: one whose
+# file is missing or doesn't parse refuses its own indices and no others.
+_TEMPLATE_PATTERNS: dict[str, tuple[int, tuple[str, ...]]] = {
+    "vhir-csv": (
+        10,
+        (
+            "case-*-amcache-*",
+            "case-*-shimcache-*",
+            "case-*-mft-*",
+            "case-*-usn-*",
+            "case-*-registry-*",
+            "case-*-shellbags-*",
+            "case-*-jumplists-*",
+            "case-*-lnk-*",
+            "case-*-recyclebin-*",
+            "case-*-timeline-*",
+            "case-*-srum-*",
+        ),
+    ),
+    "vhir-prefetch": (20, ("case-*-prefetch-*",)),
+    "vhir-plaso": (29, ("case-*-plaso-*",)),
+    "vhir-srum": (21, ("case-*-srum-*",)),
+    "vhir-transcripts": (22, ("case-*-transcripts-*",)),
+    "vhir-w3c": (
+        23,
+        (
+            "case-*-iis-*",
+            "case-*-httperr-*",
+            "case-*-firewall-*",
+        ),
+    ),
+    "vhir-defender": (24, ("case-*-defender-*",)),
+    "vhir-tasks": (25, ("case-*-tasks-*",)),
+    "vhir-wer": (26, ("case-*-wer-*",)),
+    "vhir-ssh": (27, ("case-*-ssh-*",)),
+    "vhir-vol3": (15, ("case-*-vol-*",)),
+    "vhir-json": (12, ("case-*-json-*",)),
+    "vhir-delimited": (
+        11,
+        (
+            "case-*-delim-*",
+            "case-*-zeek-*",
+            "case-*-bodyfile-*",
+        ),
+    ),
+    "vhir-accesslog": (28, ("case-*-accesslog-*",)),
+    "vhir-hayabusa": (18, ("case-*-hayabusa-*",)),
+}
 
 
 def _load_json(path: Path) -> dict:
@@ -202,13 +251,8 @@ def template_for(index: str) -> str | None:
     those whose patterns match, the one of highest priority. None for evtx
     (ensure_winlog_pipeline's) and for an index none matches."""
     best: tuple[int, str] | None = None
-    for name, filename in _TEMPLATES_REGISTRY:
-        path = _MAPPINGS_DIR / filename
-        if not path.exists():
-            continue
-        body = _load_json(path)
-        if any(fnmatch.fnmatchcase(index, p) for p in body.get("index_patterns", [])):
-            priority = int(body.get("priority") or 0)
+    for name, (priority, patterns) in _TEMPLATE_PATTERNS.items():
+        if any(fnmatch.fnmatchcase(index, p) for p in patterns):
             if best is None or priority > best[0]:
                 best = (priority, name)
     return best[1] if best else None
@@ -218,6 +262,8 @@ def not_installed(result: dict, template: str) -> str:
     """Why non-evtx `template` isn't on the cluster after the install
     `result`, or "" when it is."""
     other = result.get("other_templates") or {}
+    if template in other.get("skipped", []):
+        return f"its file {dict(_TEMPLATES_REGISTRY).get(template)} is missing"
     for f in other.get("failed", []):
         if f.get("template") in (template, "*"):
             return str(f.get("error") or "failed")
@@ -266,6 +312,13 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
             continue
         try:
             body = with_host_key_fields(_load_json(path))
+        except ValueError as e:  # the file doesn't parse
+            logger.warning("install_all_templates: %s doesn't parse: %s", filename, e)
+            results["failed"].append(
+                {"template": tpl_name, "error": f"{filename} doesn't parse: {e}"}
+            )
+            continue
+        try:
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
