@@ -45,9 +45,10 @@ class Cluster:
     hits and these `buckets`; `counts` maps a count query's field to its count."""
 
     def __init__(self, shards, total=0, buckets=(), timed_out=False, counts=None, indices=(),
-                 count_shards=None):  # fmt: skip
+                 count_shards=None, count_replies=()):  # fmt: skip
         self.shards, self.total, self.buckets = shards, total, list(buckets)
         self.count_shards = count_shards or {}  # a count query's field -> its own _shards
+        self.count_replies = list(count_replies)  # the next counts' _shards, in call order
         self.timed_out, self.counts = timed_out, counts or {}
         self.cat = SimpleNamespace(indices=self._cat)
         self.rows = [{"index": i, "docs.count": "1", "health": "green"} for i in indices]
@@ -85,6 +86,8 @@ class Cluster:
         reply = {**self._reply(), "count": self.counts.get(field, 0)}
         if field in self.count_shards:
             reply["_shards"] = copy.deepcopy(self.count_shards[field])
+        elif self.count_replies:
+            reply["_shards"] = copy.deepcopy(self.count_replies.pop(0))
         return reply
 
 
@@ -309,39 +312,40 @@ def test_a_text_field_with_no_keyword_form_gets_the_neutral_repair(run):
     assert f"{field}.keyword" not in warning and "256" not in warning
 
 
-def test_two_failing_indices_in_one_summary_part_are_both_named(run, monkeypatch):
+def summary(run, monkeypatch, cluster):
     from opensearch_mcp import case_scope
 
     monkeypatch.setattr(case_scope, "case_read_scope", lambda *a, **k: "case-acac00000001-*")
-    one = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
-           "failures": failures(EVTX, "first failure")}  # fmt: skip
-    other = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
-             "failures": failures(SHIM, "second failure")}  # fmt: skip
-    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM, SHIM],
+    return run(cluster, "idx_case_summary", case="acme")
+
+
+def failed_in(index, unavailable=0):
+    """One reply: 1 of 3 shards failed in `index`, `unavailable` more unanswered."""
+    return {"total": 3, "successful": 2 - unavailable, "skipped": 0, "failed": 1,
+            "failures": failures(index, f"{index} refused")}  # fmt: skip
+
+
+def test_a_summary_part_names_every_failing_index_of_its_replies(run, monkeypatch):
+    """Four intel counts, each failing in another index, two with shards
+    unavailable: all four are named, the unavailable clause once, no numbers."""
+    names = [f"case-acac00000001-t{i}-0" for i in "abcd"]
+    replies = [WHOLE, failed_in(names[0], 1), failed_in(names[1]), failed_in(names[2], 1),
+               failed_in(names[3])]  # the triage count, then the four intel counts  # fmt: skip
+    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM], count_replies=replies)
+    (intel,) = [w for w in summary(run, monkeypatch, cluster)["warnings"]
+                if w.startswith("Intel stats")]  # fmt: skip
+    assert intel == ("Intel stats: partial; failing indices: " + ", ".join(names)
+                     + "; some shards were unavailable; the counts are lower bounds")  # fmt: skip
+
+
+def test_a_summary_part_names_five_failing_indices_and_counts_the_rest(run, monkeypatch):
+    names = [f"case-acac00000001-t{i}-0" for i in "abcdef"]
+    six = {"total": 7, "successful": 1, "skipped": 0, "failed": 6,
+           "failures": [f for n in names for f in failures(n, "refused")]}  # fmt: skip
+    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM],
                       counts={"triage.checked": 1, "triage.verdict": 1},
-                      count_shards={"triage.checked": one, "triage.verdict": other})  # fmt: skip
-    reply = run(cluster, "idx_case_summary", case="acme")
-    (triage,) = [w for w in reply["warnings"] if w.startswith("Triage stats")]
-    assert EVTX in triage and SHIM in triage
-    assert "first failure" in triage and "second failure" in triage
-
-
-def test_each_reply_of_a_summary_part_keeps_its_own_numbers(run, monkeypatch):
-    """No arithmetic across replies: (3 shards, 1 failed, 2 unavailable) and
-    (3 shards, 1 failed) are each said with their own numbers."""
-    from opensearch_mcp import case_scope
-
-    monkeypatch.setattr(case_scope, "case_read_scope", lambda *a, **k: "case-acac00000001-*")
-    first = {"total": 3, "successful": 0, "skipped": 0, "failed": 1,
-             "failures": failures(EVTX, "first failure")}  # fmt: skip
-    second = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
-              "failures": failures(SHIM, "second failure")}  # fmt: skip
-    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM, SHIM],
-                      counts={"triage.checked": 1, "triage.verdict": 1},
-                      count_shards={"triage.checked": first,
-                                    "triage.verdict": second})  # fmt: skip
-    reply = run(cluster, "idx_case_summary", case="acme")
-    (triage,) = [w for w in reply["warnings"] if w.startswith("Triage stats")]
-    assert f"1 of 3 shard(s) failed in {EVTX}: first failure" in triage
-    assert "2 of 3 shard(s) unavailable" in triage
-    assert f"1 of 3 shard(s) failed in {SHIM}: second failure" in triage
+                      count_shards={"triage.checked": six})  # fmt: skip
+    (triage,) = [w for w in summary(run, monkeypatch, cluster)["warnings"]
+                 if w.startswith("Triage stats")]  # fmt: skip
+    assert triage == ("Triage stats: partial; failing indices: " + ", ".join(names[:5])
+                      + " and 1 more; the counts are lower bounds")  # fmt: skip

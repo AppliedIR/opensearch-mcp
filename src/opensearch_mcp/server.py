@@ -1946,30 +1946,38 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     index_hosts: dict = {}
     ingested: dict = {}  # which ingests the summarised records came from
 
-    said: dict[str, list] = {}  # part -> what its replies didn't answer, each with its counts
+    gaps: dict[str, dict] = {}  # part -> its failing indices, and whether any were unavailable
 
     def shard_gap(what: str, result: dict) -> None:  # a part only some shards answered
-        new = [c for c in _gap_parts(result, cid)[0] if c not in said.get(what, [])]
-        if not new:
+        parts, numbers = _gap_parts(result, cid)
+        if not parts:
             return
-        clauses = said.setdefault(what, [])
-        clauses += new  # each reply's own numbers: never added across replies
-        shown = "; ".join(clauses[:5]) + (
-            f"; and {len(clauses) - 5} more" if len(clauses) > 5 else ""
-        )
-        low = _PARTIAL_LOW
+        gap = gaps.setdefault(what, {"indices": set(), "unavailable": False, "timed_out": False})
+        gap["indices"].update(numbers["failed_indices"])
+        gap["unavailable"] |= bool(numbers["shards"].get("unavailable"))
+        gap["timed_out"] |= numbers["timed_out"]
+        # names only, no numbers: each tool's own reply has the counts
+        names = sorted(gap["indices"])
+        clauses = ["partial"]
+        if names:
+            more = f" and {len(names) - 5} more" if len(names) > 5 else ""
+            clauses.append(f"failing indices: {', '.join(names[:5])}{more}")
+        if gap["unavailable"]:
+            clauses.append("some shards were unavailable")
+        if gap["timed_out"]:
+            clauses.append("the search timed out")
         if what == "Time range":  # a partial min/max is narrower, not lower
-            low = (
-                "The earliest and latest cover only the shards that answered and may be narrower."
-            )
-        text = f"Incomplete answer: {shown}. {low}"
+            clauses.append("the earliest and latest may be narrower")
+        else:
+            clauses.append("the counts are lower bounds")
+        text = f"{what}: {'; '.join(clauses)}"
         resp["partial"] = True
         warnings = resp.setdefault("warnings", [])
         mine = [i for i, w in enumerate(warnings) if w.startswith(f"{what}: ")]
-        if mine:  # every failing index of the part, in its one warning
-            warnings[mine[0]] = f"{what}: {text}"
+        if mine:  # one warning per part
+            warnings[mine[0]] = text
         else:
-            warnings.append(f"{what}: {text}")
+            warnings.append(text)
 
     try:
         host_agg = client.search(
