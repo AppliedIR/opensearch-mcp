@@ -25,7 +25,13 @@ import yaml
 from sift_common import host_identity
 from sift_common.content_hash import content_hash
 
-from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted, _vss_id
+from opensearch_mcp.bulk import (
+    ID_TIME_KEY,
+    OLD_ID_KEY,
+    OLD_RID_KEY,
+    ShardCapacityExhausted,
+    _vss_id,
+)
 
 _tls = threading.local()
 
@@ -425,12 +431,15 @@ def _vss_class(src: dict) -> str:
     return "" if tag == "live" else tag
 
 
-def _same_evidence(stored: dict, src: dict) -> bool:
+def _same_evidence(stored: dict, action: dict) -> bool:
     """Whether the stored record came from the same evidence: the same
     shadow copy (or both from the live volume), the source file, and what its
     0.6.4 id leaves out (an access-log line's user, version and referrer, a
-    json or delimited row's @timestamp), or a vol3 object's offset, which both
-    must have."""
+    json or delimited row's own @timestamp), or a vol3 object's offset, which
+    both must have. A row's own @timestamp is the one its new id hashed: a
+    time field may have overwritten it, here or in the stored record, which
+    then isn't the same (written again, never lost)."""
+    src = action["_source"]
     if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
         return False
     method = str(src.get("vhir.parse_method") or "")
@@ -440,7 +449,8 @@ def _same_evidence(stored: dict, src: dict) -> bool:
     if method == "accesslog":
         fields += ["user.name", "http.version", "http.request.referrer"]
     elif method == "json-ingest" or method.startswith("delimited-"):
-        fields.append("@timestamp")
+        if stored.get("@timestamp") != action.get(ID_TIME_KEY):
+            return False
     return all(stored.get(f) == src.get(f) for f in fields)
 
 
@@ -497,7 +507,7 @@ def fill_in(client, actions: list[dict]) -> list[dict]:
                 continue
             FILL.setdefault(key(a), 0)  # said, "kept 0" when nothing matches
             claim = _FILL_CLAIMED.get((a["_index"], a[OLD_ID_KEY]), a["_id"])
-            if claim == a["_id"] and _same_evidence(stored, a["_source"]):
+            if claim == a["_id"] and _same_evidence(stored, a):
                 matched.append(a)
         # one already stored under its 0.6.5 id (a lookup failed when it was
         # written) is that copy: it doesn't take the stored record too
