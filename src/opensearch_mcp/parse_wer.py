@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from opensearchpy import OpenSearch
@@ -20,7 +20,8 @@ def _file_sha256(path: Path) -> str:
 
 
 def parse_wer_file(file_path: Path) -> dict:
-    """Parse a single Report.wer file."""
+    """Parse a single Report.wer file. @timestamp is its EventTime when that
+    reads as a FILETIME; otherwise unset (parse_wer_dir uses the file's mtime)."""
     doc: dict = {}
     sig: dict = {}
 
@@ -42,6 +43,8 @@ def parse_wer_file(file_path: Path) -> dict:
 
             if key == "EventType":
                 doc["wer.event_type"] = value
+            elif key == "EventTime" and (when := _filetime(value)):
+                doc["@timestamp"] = when
             elif key.startswith("Sig[") and ".Name" in key:
                 idx = key.split("[")[1].split("]")[0]
                 sig[f"name_{idx}"] = value
@@ -64,11 +67,19 @@ def parse_wer_file(file_path: Path) -> dict:
     # Full text for searchability
     doc["wer.full_text"] = file_path.read_text(encoding=encoding, errors="replace")
 
-    # Timestamp from file mtime (preserved on NTFS read-only mount)
-    mtime = file_path.stat().st_mtime
-    doc["@timestamp"] = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
-
     return doc
+
+
+def _filetime(value: str) -> str | None:
+    """EventTime, a FILETIME (UTC, 100 ns since 1601), as UTC ISO; None when
+    it isn't one or falls outside 1990 to a day from now."""
+    try:
+        when = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=int(value) // 10)
+    except (ValueError, OverflowError):
+        return None
+    earliest = datetime(1990, 1, 1, tzinfo=timezone.utc)
+    latest = datetime.now(timezone.utc) + timedelta(days=1)
+    return when.isoformat() if earliest <= when <= latest else None
 
 
 def parse_wer_dir(
@@ -87,11 +98,16 @@ def parse_wer_dir(
     count = 0
     skipped = 0
     bulk_failed = 0
+    by_mtime = 0  # reports with no readable EventTime
     actions: list[dict] = []
 
     for wer_file in sorted(wer_dir.rglob("Report.wer")):
         try:
             doc = parse_wer_file(wer_file)
+            by_mt = not doc.get("@timestamp")
+            if by_mt:  # no readable EventTime: the file's mtime, counted in a note
+                mtime = wer_file.stat().st_mtime
+                doc["@timestamp"] = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
         except OSError as e:  # unreadable: named, never an ordinary skip
             ops.not_indexed(notes, wer_file, ops.Unreadable(str(e)))
             continue
@@ -103,6 +119,7 @@ def parse_wer_dir(
         except ops.NoEntry as e:
             ops.not_indexed(notes, wer_file, e)
             continue
+        by_mtime += by_mt
 
         from opensearch_mcp.paths import relative_evidence_path
 
@@ -138,4 +155,9 @@ def parse_wer_dir(
         count += flushed
         bulk_failed += failed
 
+    if by_mtime and notes is not None:
+        notes.append(
+            f"{by_mtime} WER report(s) have no readable EventTime: "
+            "@timestamp is the file's modified time"
+        )
     return count, skipped, bulk_failed
