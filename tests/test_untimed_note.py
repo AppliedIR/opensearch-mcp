@@ -175,3 +175,23 @@ def test_a_page_past_the_end_is_not_said_to_have_no_event_time(client):
     r = srv.idx_search(query="*", time_from="2023-01-21T00:00:00Z", offset=5)
     assert r["total"] == 5 and "time_note" in r
     assert not r.get("hint", "").startswith("No results with an event time")
+
+
+def test_the_time_range_reads_epoch_ms_when_the_cluster_gives_no_string(monkeypatch):
+    """OpenSearch 3.5.0, over a case pattern where some indices lack
+    @timestamp, gives min/max as `value` (epoch ms) with no
+    `value_as_string`: the range is that time, as the evtx-only case shows it."""
+    mft = f"case-{host_identity.ensure_case_uuid(wc.case_dir_for('acme'), 2)[0]}-mft-0"
+    c = MagicMock()
+    c.cat.indices.return_value = [{"index": mft, "docs.count": "4"}]
+    c.search.return_value = {"aggregations": {
+        "min_ts": {"value": 1674309600000.0}, "max_ts": {"value": 1675242000000.0},
+        "hosts": {"buckets": []}, "by_index": {"buckets": []}}}  # fmt: skip
+    c.count.return_value = {"count": 0}
+    c.indices.get_field_mapping.return_value = _mapping(untimed=[mft])
+    monkeypatch.setattr(srv, "_get_os", lambda: c)
+    r = srv.idx_case_summary(case_id="acme")
+    assert r["time_range"] == {
+        "earliest": "2023-01-21T14:00:00.000Z",
+        "latest": "2023-02-01T09:00:00.000Z",
+    }

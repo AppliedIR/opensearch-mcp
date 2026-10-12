@@ -1049,6 +1049,20 @@ def _untimed_note(client, index: str, why: str) -> str:
     )
 
 
+def _agg_time(agg: dict) -> str | None:
+    """A min/max date aggregation's time, as OpenSearch writes it. Over indices
+    some of which lack the field, 3.5.0 gives only `value` (epoch ms): that time
+    is written the same way."""
+    if agg.get("value_as_string"):
+        return agg["value_as_string"]
+    if not isinstance(agg.get("value"), (int, float)):
+        return None
+    from datetime import datetime, timezone
+
+    t = datetime.fromtimestamp(agg["value"] / 1000, tz=timezone.utc)
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 _WINDOW = "are left out of time_from/time_to"
 _UNCHECKED = "couldn't check which indices lack an event time"  # the failed-read note's start
 
@@ -2034,8 +2048,8 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 },
             },
         )
-        min_val = ts_result["aggregations"]["min_ts"].get("value_as_string")
-        max_val = ts_result["aggregations"]["max_ts"].get("value_as_string")
+        min_val = _agg_time(ts_result["aggregations"]["min_ts"])
+        max_val = _agg_time(ts_result["aggregations"]["max_ts"])
         if min_val:
             time_range["earliest"] = min_val
         if max_val:
