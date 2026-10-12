@@ -44,42 +44,52 @@
         },
         "FileKeyLastWriteTimestamp": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "LastModifiedTimeUTC": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "LastWriteTimestamp": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "LastInteracted": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "LastModified": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "TargetModified": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "DeletedOn": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "Created0x10": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "UpdateTimestamp": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "LastModifiedTime": {
           "type": "date",
+          "format": "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSSS||yyyy-MM-dd HH:mm:ss||epoch_millis",
           "ignore_malformed": true
         },
         "triage.verdict": {

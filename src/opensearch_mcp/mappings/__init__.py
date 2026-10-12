@@ -104,6 +104,25 @@ def template_type_tokens() -> frozenset[str]:
     return frozenset(tokens)
 
 
+def stale_date_fields(client, index: str) -> list[str] | None:
+    """The csv template's date fields (the EZ tools' date columns) that `index`
+    maps as dates without the template's format: an index made before 0.6.5,
+    whose EZ dates go unparsed until it is rebuilt from the template. None when
+    the mapping can't be read."""
+    props = _load_json(_MAPPINGS_DIR / "csv_template.json")["template"]["mappings"]["properties"]
+    want = {
+        f: p["format"] for f, p in props.items() if p.get("type") == "date" and p.get("format")
+    }
+    try:
+        got = client.indices.get_mapping(index=index)[index]["mappings"].get("properties", {})
+    except Exception:
+        return None
+    return sorted(
+        f for f, fmt in want.items()
+        if (got.get(f) or {}).get("type") == "date" and got[f].get("format") != fmt
+    )  # fmt: skip
+
+
 def install_component_templates(client) -> dict[str, Any]:
     """Idempotent install of shared component templates.
 
