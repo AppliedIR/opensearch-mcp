@@ -28,6 +28,7 @@ from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import (
     NO_TIME_FIELD,
     TIME_NOT_UNDERSTOOD,
+    members,
     no_time_field_note,
     vhir_dir,
 )
@@ -110,9 +111,7 @@ def _delim_files(input_path: Path, only_files=None) -> list:
     files = (
         [input_path]
         if input_path.is_file()
-        else sorted(  # a link isn't read: the gate's walk skips it
-            f for f in input_path.iterdir() if f.suffix.lower() in exts and not f.is_symlink()
-        )
+        else sorted(f for f in members(input_path) if f.suffix.lower() in exts)
     )
     if only_files is not None:  # an auto-hosts sub-run: this host's files only
         files = [f for f in files if f in only_files]
@@ -2075,9 +2074,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         [input_path]
         if input_path.is_file()
         else sorted(
-            f
-            for f in input_path.iterdir()
-            if f.suffix.lower() in (".json", ".jsonl", ".ndjson") and not f.is_symlink()
+            f for f in members(input_path) if f.suffix.lower() in (".json", ".jsonl", ".ndjson")
         )
     )
 
@@ -2277,9 +2274,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         flat = (
             []
             if is_recursive
-            else sorted(
-                f for f in input_path.iterdir() if f.suffix.lower() in exts and not f.is_symlink()
-            )
+            else sorted(f for f in members(input_path) if f.suffix.lower() in exts)
         )
         wanted = {h.lower() for h in auto_hosts}
         unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
@@ -2348,11 +2343,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         subdirs = sorted(
             d
-            for d in input_path.iterdir()
+            for d in members(input_path)
             if d.is_dir()
-            and not d.is_symlink()  # the gate's walk doesn't follow it
             and not d.name.startswith(".")
-            and any(f.suffix.lower() in exts for f in d.iterdir() if f.is_file())
+            and any(f.suffix.lower() in exts for f in members(d) if f.is_file())
         )
         import copy
 
@@ -2683,9 +2677,8 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         if input_path.is_file()
         else sorted(
             f
-            for f in input_path.iterdir()
-            if (f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower())
-            and not f.is_symlink()
+            for f in members(input_path)
+            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
         )
     )
 

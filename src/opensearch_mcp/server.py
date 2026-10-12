@@ -21,6 +21,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
+from opensearch_mcp.paths import members
 
 logger = logging.getLogger(__name__)
 
@@ -766,7 +767,7 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     from collections import Counter
 
     exts = {".csv", ".tsv"}
-    files = [f for f in path.iterdir() if f.suffix.lower() in exts][:50]
+    files = [f for f in members(path) if f.suffix.lower() in exts][:50]
     if not files:
         return set()
     # Suffix pattern: tool-hostname.csv
@@ -2669,7 +2670,7 @@ def idx_ingest_json(
         if p.is_file():
             fmt = _detect_json_format(p)
             return {"status": "preview", "file": p.name, "format": fmt}
-        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
+        files = sorted(f.name for f in members(p) if f.suffix.lower() in (".json", ".jsonl"))
         return {"status": "preview", "files": files, "count": len(files)}
 
     return _launch_background("json", path, hostname, index_suffix, time_field)
@@ -2738,14 +2739,14 @@ def idx_ingest_delimited(
         p = Path(path)
         if not p.is_dir():
             return {"error": "recursive requires a directory path"}
-        subdirs = sorted(d for d in p.iterdir() if d.is_dir() and not d.name.startswith("."))
+        subdirs = sorted(d for d in members(p) if d.is_dir() and not d.name.startswith("."))
         if not subdirs:
             return {"error": f"No subdirectories found in {path}"}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         if dry_run:
             hosts_preview = []
             for d in subdirs:
-                files = [f.name for f in d.iterdir() if f.suffix.lower() in exts]
+                files = [f.name for f in members(d) if f.suffix.lower() in exts]
                 if files:
                     hosts_preview.append(
                         {
@@ -2799,7 +2800,7 @@ def idx_ingest_delimited(
             fmt = _detect_delimited_format(p)
             return {"status": "preview", "file": p.name, "format": fmt.get("format")}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
-        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in exts)
+        files = sorted(f.name for f in members(p) if f.suffix.lower() in exts)
         return {"status": "preview", "files": files, "count": len(files)}
 
     return _launch_background(
@@ -2837,7 +2838,7 @@ def idx_ingest_accesslog(
             return {"status": "preview", "file": p.name}
         files = sorted(
             f.name
-            for f in p.iterdir()
+            for f in members(p)
             if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
         )
         return {"status": "preview", "files": files, "count": len(files)}

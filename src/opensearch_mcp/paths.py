@@ -29,6 +29,13 @@ def vhir_dir() -> Path:
     return vhir_home() / ".vhir"
 
 
+def members(folder) -> list[Path]:
+    """A folder's entries that a folder ingest reads: never a link, which the
+    gate's walk skips. Host detection, previews and the worker all list a
+    folder through this, so they see the same files."""
+    return [p for p in Path(folder).iterdir() if not p.is_symlink()]
+
+
 def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:
     """Resolve a relative path case-insensitively under base.
 

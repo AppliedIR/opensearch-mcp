@@ -241,3 +241,41 @@ def test_a_recursive_walk_skips_a_linked_host_folder_and_linked_files(worker):
     args = argparse.Namespace(path=str(worker.folder), case=None, hostname="", time_field="when",
                               recursive=True)  # fmt: skip
     assert worker.run(cli.cmd_ingest_delimited, args)["leaves"] == [("host1", ["a.csv"])]
+
+
+# --- detection and previews see the files the worker reads ----------------------
+
+
+@pytest.fixture
+def linked_hosts(tmp_path):
+    """One regular events-host01.csv, and three linked *-host02.csv."""
+    folder = tmp_path / "evidence" / "multi"
+    outside = tmp_path / "elsewhere"
+    folder.mkdir(parents=True)
+    outside.mkdir()
+    (folder / "events-host01.csv").write_text("when,x\n2026-10-01T00:00:00Z,1\n")
+    for tool in ("a", "b", "c"):
+        (outside / f"{tool}-host02.csv").write_text("when,x\n2026-10-01T00:00:00Z,2\n")
+        os.symlink(outside / f"{tool}-host02.csv", folder / f"{tool}-host02.csv")
+    return folder
+
+
+def test_auto_host_detection_counts_no_linked_file(env, linked_hosts):
+    assert srv._detect_hostnames_from_filenames(linked_hosts) == {"host01"}
+    preview = srv.idx_ingest_delimited(path=str(linked_hosts), hostname="auto", dry_run=True)
+    assert preview["detected_hostnames"] == ["host01"], preview
+
+
+def test_previews_list_no_linked_file(env, linked_hosts):
+    flat = srv.idx_ingest_delimited(path=str(linked_hosts), hostname="h1", dry_run=True)
+    assert "a-host02.csv" not in str(flat) and "events-host01.csv" in str(flat), flat
+    (linked_hosts / "j.json").write_text("{}\n")
+    os.symlink(linked_hosts / "a-host02.csv", linked_hosts / "k.json")
+    js = srv.idx_ingest_json(path=str(linked_hosts), hostname="h1", dry_run=True)
+    assert js["files"] == ["j.json"], js
+    walk = linked_hosts.parent / "walk"
+    (walk / "host1").mkdir(parents=True)
+    (walk / "host1" / "a.csv").write_text("when\n")
+    os.symlink(linked_hosts.parent.parent / "elsewhere", walk / "host2")
+    rec = srv.idx_ingest_delimited(path=str(walk), hostname="", recursive=True, dry_run=True)
+    assert [h["hostname"] for h in rec["hosts"]] == ["host1"], rec
