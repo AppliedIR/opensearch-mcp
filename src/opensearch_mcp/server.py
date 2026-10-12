@@ -21,6 +21,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
+from opensearch_mcp.paths import members
 
 logger = logging.getLogger(__name__)
 
@@ -754,7 +755,20 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
     return " ".join(parts) if parts else None
 
 
-def _detect_hostnames_from_filenames(path: Path) -> set[str]:
+def _kept(folder: Path, keep, skipped: list, prefix: str = "") -> list[Path]:
+    """A folder's entries `keep` takes, never a link; each link `keep` would
+    take is added to `skipped` (as `prefix` + its name), to be named."""
+    kept, links = members(folder)
+    skipped += [prefix + f.name for f in links if keep(f)]
+    return [f for f in kept if keep(f)]
+
+
+def _named(skipped: list) -> dict:
+    """`{"skipped_links": [...]}` for a preview, {} when nothing was skipped."""
+    return {"skipped_links": sorted(skipped)} if skipped else {}
+
+
+def _detect_hostnames_from_filenames(path: Path, skipped: list | None = None) -> set[str]:
     """Best-effort hostname detection from forensic CSV naming.
 
     Supports two patterns:
@@ -766,7 +780,8 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     from collections import Counter
 
     exts = {".csv", ".tsv"}
-    files = [f for f in path.iterdir() if f.suffix.lower() in exts][:50]
+    files = _kept(path, lambda f: f.suffix.lower() in exts, [] if skipped is None else skipped)
+    files = files[:50]
     if not files:
         return set()
     # Suffix pattern: tool-hostname.csv
@@ -782,6 +797,21 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
 
 # Where evidence may be ingested from, beside the user's home folder
 ALLOWED_ROOTS = ("/mnt", "/media", "/run/media", "/evidence", "/cases", "/tmp")
+
+
+def _case_path(path: str) -> tuple[str, str | None]:
+    """(path, refusal): a relative path is read in the active case's folder,
+    joined as case-mcp's evidence_register joins it (not normalised, no
+    realpath: a `..` after a link is the kernel's), never in this server's
+    cwd. An absolute path is returned as given."""
+    if os.path.isabs(path):
+        return path, None
+    from opensearch_mcp.write_context import case_dir_for
+
+    case_dir = case_dir_for(_get_active_case() or "")
+    if case_dir is None:
+        return path, "No active case. Run 'vhir case activate' first."
+    return str(Path(case_dir) / path), None
 
 
 def _validate_path(path: str) -> str | None:
@@ -2084,7 +2114,8 @@ def idx_ingest(
     from opensearch_mcp.containers import detect_container
     from opensearch_mcp.ingest import discover
 
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     evidence_path = Path(path).resolve()
@@ -2642,7 +2673,8 @@ def idx_ingest_json(
         time_field: Timestamp field name (default: auto-detect).
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     if dry_run:
@@ -2652,8 +2684,10 @@ def idx_ingest_json(
         if p.is_file():
             fmt = _detect_json_format(p)
             return {"status": "preview", "file": p.name, "format": fmt}
-        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in (".json", ".jsonl"))
-        return {"status": "preview", "files": files, "count": len(files)}
+        skipped: list = []
+        files = sorted(f.name for f in _kept(p, lambda f: f.suffix.lower() in (".json", ".jsonl"),
+                                             skipped))  # fmt: skip
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background("json", path, hostname, index_suffix, time_field)
 
@@ -2685,7 +2719,8 @@ def idx_ingest_delimited(
             per-host call or `hostname="auto"` for flat layouts.
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
 
@@ -2694,15 +2729,17 @@ def idx_ingest_delimited(
         p = Path(path)
         if not p.is_dir():
             return {"error": "hostname='auto' requires a directory path"}
-        detected = _detect_hostnames_from_filenames(p)
+        skipped: list = []
+        detected = _detect_hostnames_from_filenames(p, skipped)
         if not detected:
-            return {"error": "Could not auto-detect hostnames from filenames."}
+            return {"error": "Could not auto-detect hostnames from filenames.", **_named(skipped)}
         if dry_run:
             return {
                 "status": "preview",
                 "auto_detect": True,
                 "detected_hostnames": sorted(detected),
                 "total_hosts": len(detected),
+                **_named(skipped),
             }
         # Single background process iterates all detected hosts sequentially
         return _launch_background(
@@ -2720,14 +2757,17 @@ def idx_ingest_delimited(
         p = Path(path)
         if not p.is_dir():
             return {"error": "recursive requires a directory path"}
-        subdirs = sorted(d for d in p.iterdir() if d.is_dir() and not d.name.startswith("."))
+        skipped: list = []
+        subdirs = sorted(d for d in _kept(p, lambda d: d.is_dir(), skipped)
+                         if not d.name.startswith("."))  # fmt: skip
         if not subdirs:
-            return {"error": f"No subdirectories found in {path}"}
+            return {"error": f"No subdirectories found in {path}", **_named(skipped)}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         if dry_run:
             hosts_preview = []
             for d in subdirs:
-                files = [f.name for f in d.iterdir() if f.suffix.lower() in exts]
+                files = [f.name for f in _kept(d, lambda f: f.suffix.lower() in exts, skipped,
+                                               f"{d.name}/")]  # fmt: skip
                 if files:
                     hosts_preview.append(
                         {
@@ -2740,6 +2780,7 @@ def idx_ingest_delimited(
                 "recursive": True,
                 "hosts": hosts_preview,
                 "total_hosts": len(hosts_preview),
+                **_named(skipped),
             }
         # Single background process iterates all hosts sequentially
         return _launch_background(
@@ -2781,8 +2822,9 @@ def idx_ingest_delimited(
             fmt = _detect_delimited_format(p)
             return {"status": "preview", "file": p.name, "format": fmt.get("format")}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
-        files = sorted(f.name for f in p.iterdir() if f.suffix.lower() in exts)
-        return {"status": "preview", "files": files, "count": len(files)}
+        skipped: list = []
+        files = sorted(f.name for f in _kept(p, lambda f: f.suffix.lower() in exts, skipped))
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background(
         "delimited",
@@ -2809,19 +2851,24 @@ def idx_ingest_accesslog(
         index_suffix: Index suffix (default: accesslog).
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     if dry_run:
         p = Path(path)
         if p.is_file():
             return {"status": "preview", "file": p.name}
+        skipped: list = []
         files = sorted(
             f.name
-            for f in p.iterdir()
-            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+            for f in _kept(
+                p,
+                lambda f: f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower(),
+                skipped,
+            )
         )
-        return {"status": "preview", "files": files, "count": len(files)}
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background("accesslog", path, hostname, index_suffix)
 
@@ -3381,7 +3428,8 @@ def idx_ingest_memory(
         plugins: Override tier — run only these specific plugins.
         dry_run: Preview plugins (default True). Set False to execute.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     from opensearch_mcp.memory_tiers import TIERS
