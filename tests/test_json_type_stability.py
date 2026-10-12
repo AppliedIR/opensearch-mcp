@@ -543,7 +543,7 @@ class TestAnUnreadableTemplateFile:
     def test_null_index_patterns_fail_that_template_only(self, scratch_mappings):
         """Was (as index_patterns-null above): installed, and the patch step
         failed on the null. The file no longer matches the registry, so its
-        install fails (cli-templates follow-ons) and the patch runs for the
+        install fails and the patch runs for the
         other composing patterns."""
         path = scratch_mappings / "json_template.json"
         path.write_text(json.dumps({**json.loads(path.read_text()), "index_patterns": None}))

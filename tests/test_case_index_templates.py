@@ -1,5 +1,5 @@
-"""cli-templates follow-ons (0.6.5): a case index is never created under a
-template that isn't vhir's own, and the install says what it didn't install.
+"""A case index is never created under a template that isn't vhir's own,
+and the install says what it didn't install.
 
 - An evtx index isn't created when its template didn't install, except where
   an operator's template already governs the evtx pattern (the install's own
@@ -85,7 +85,7 @@ OPERATOR = {
 
 
 # --------------------------------------------------------------------------
-# SPEC-001: an evtx index without its template
+# An evtx index without its template
 
 
 @pytest.mark.usefixtures("sent")
@@ -119,7 +119,7 @@ def test_an_operator_return_is_marked_and_an_evtx_failure_is_not():
 
 
 # --------------------------------------------------------------------------
-# SPEC-002: another template outranks vhir's
+# Another template outranks vhir's
 
 
 @pytest.mark.parametrize(
@@ -159,7 +159,7 @@ def test_an_index_that_exists_is_not_simulated():
 
 
 # --------------------------------------------------------------------------
-# SPEC-003: the stamp-field patch stays in the run's case
+# The stamp-field patch stays in the run's case
 
 
 @pytest.mark.usefixtures("sent")
@@ -204,7 +204,7 @@ def test_the_servers_install_patches_only_the_active_case(monkeypatch, active):
 
 
 # --------------------------------------------------------------------------
-# SPEC-004: a file that disagrees with the registry fails its install
+# A file that disagrees with the registry fails its install
 
 
 def _edit(folder, name, **changes):
@@ -240,7 +240,7 @@ def test_a_file_that_differs_from_the_registry_is_a_failed_install(
 
 
 # --------------------------------------------------------------------------
-# SPEC-005: non-ASCII stems
+# Non-ASCII stems
 
 
 @pytest.mark.parametrize(
@@ -267,7 +267,7 @@ def test_ascii_stems_are_unchanged(stem, expected):
 
 
 # --------------------------------------------------------------------------
-# SPEC-007: the server retries a failed install, at most once a minute
+# The server retries a failed install, at most once a minute
 
 
 @pytest.fixture
@@ -327,7 +327,7 @@ def test_a_new_connection_installs_again(server_install):
 
 
 # --------------------------------------------------------------------------
-# SPEC-008 and SPEC-009: what the install says
+# What the install says
 
 
 @pytest.mark.usefixtures("sent", "files")
@@ -378,7 +378,7 @@ def test_a_garbled_evtx_template_prints_one_line(tmp_path):
 
 @pytest.mark.usefixtures("files")
 def test_a_broken_template_retried_n_times_writes_one_stamp_entry(monkeypatch):
-    """SPEC-007's stated deviation: the retry installs again, but only a
+    """By design, the retry installs again, but only a
     connection's first attempt gives the active case's indices the stamp
     fields, so a template file that stays broken writes one put_stamp_fields
     entry into the case's audit, not one a minute."""
@@ -400,7 +400,7 @@ def test_a_broken_template_retried_n_times_writes_one_stamp_entry(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# SPEC-009: every caller of ensure_winlog_pipeline says what failed, in one
+# Every caller of ensure_winlog_pipeline says what failed, in one
 # line, now that its own log of the error is debug. The CLI's caller,
 # ensure_installed_once, is the garbled-evtx row above.
 
@@ -443,7 +443,7 @@ def test_idx_install_pipelines_answers_with_a_broken_evtx_template(monkeypatch):
 @pytest.mark.parametrize("ours_before", [False, True], ids=["fresh cluster", "ours installed"])
 def test_an_operator_template_above_ours_is_an_operator_return(ours_before):
     """Was: read from a priority the reply never has, so missed; the evtx index
-    was then refused as outranked (SPEC-001's exemption lost)."""
+    was then refused as outranked (the operator template's exemption lost)."""
     client = Cluster(**OPERATOR["priority"], templates={EVTX} if ours_before else set())
     result = mp.ensure_winlog_pipeline(client)
     assert (result["status"], result.get("operator_template")) == ("error", True), result
