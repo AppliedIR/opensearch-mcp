@@ -198,3 +198,33 @@ def test_a_file_system_name_is_one_safe_component(name):
     assert re.fullmatch(r"[A-Za-z0-9._-]{0,64}(~[0-9a-f]{12})?", got), got
     plain = re.fullmatch(r"[A-Za-z0-9._-]{0,64}", name) is not None and name not in (".", "..")
     assert (got == name) == plain
+
+
+# --- the backstop -------------------------------------------------------------------
+
+
+def test_a_staging_path_outside_extractions_is_refused_by_name(case, tmp_path, monkeypatch):  # noqa: F811
+    """A site that forgot the helper: the check refuses before rmtree or copy."""
+    victim, prefetch = _outside(case), _prefetch(tmp_path)
+    monkeypatch.setattr(paths, "fs_name", lambda name: name, raising=False)
+    with pytest.raises(ValueError, match="Refusing to stage into .*outside/victim"):
+        _stage(case, prefetch, CLIMB, monkeypatch)
+    assert _files(victim) == ["keep.txt"]
+
+
+def test_srum_staging_outside_extractions_is_refused(case, monkeypatch):  # noqa: F811
+    victim = _outside(case)
+    monkeypatch.setattr(paths, "fs_name", lambda name: name, raising=False)
+    with pytest.raises(ValueError, match="Refusing to stage into"):
+        _srum(case, "a/../../../../outside/victim", monkeypatch)
+    assert _files(victim) == ["keep.txt"] and not (victim / "SRUDB.dat").exists()
+
+
+def test_an_extractions_folder_that_is_a_link_is_refused(case, tmp_path, monkeypatch):  # noqa: F811
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "Prefetch-HOST1").mkdir(parents=True)
+    (elsewhere / "Prefetch-HOST1" / "keep.txt").write_text("not the case's")
+    (case / "extractions").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ValueError, match="Refusing to stage into"):
+        _stage(case, _prefetch(tmp_path), "HOST1", monkeypatch)
+    assert _files(elsewhere) == ["Prefetch-HOST1/keep.txt"]

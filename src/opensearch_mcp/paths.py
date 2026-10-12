@@ -241,6 +241,17 @@ def fs_name(name: str) -> str:
     return f"{safe}~{digest[:12]}"
 
 
+def check_staging(case_dir: Path, staging: Path) -> None:
+    """Refuse a staging folder that isn't under the case's extractions/ once
+    resolved. extractions/ itself isn't resolved, so a link there is refused."""
+    root = case_dir.resolve() / "extractions"
+    real = staging.resolve()
+    if real != root and root not in real.parents:
+        raise ValueError(
+            f"Refusing to stage into {staging}: it resolves to {real}, outside {root}"
+        )
+
+
 def sanitize_index_component(value: str) -> str:
     """Sanitize a hostname or case_id for use in OpenSearch index names."""
     import re
