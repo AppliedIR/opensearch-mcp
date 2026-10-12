@@ -44,8 +44,10 @@ class Cluster:
     """Every search and count answers with `shards` (and `timed_out`), `total`
     hits and these `buckets`; `counts` maps a count query's field to its count."""
 
-    def __init__(self, shards, total=0, buckets=(), timed_out=False, counts=None, indices=()):
+    def __init__(self, shards, total=0, buckets=(), timed_out=False, counts=None, indices=(),
+                 count_shards=None):  # fmt: skip
         self.shards, self.total, self.buckets = shards, total, list(buckets)
+        self.count_shards = count_shards or {}  # a count query's field -> its own _shards
         self.timed_out, self.counts = timed_out, counts or {}
         self.cat = SimpleNamespace(indices=self._cat)
         self.rows = [{"index": i, "docs.count": "1", "health": "green"} for i in indices]
@@ -80,7 +82,10 @@ class Cluster:
     def count(self, index=None, body=None, **kw):
         query = (body or {}).get("query") or {}
         field = (query.get("exists") or {}).get("field") or next(iter(query.get("term", {})), "")
-        return {**self._reply(), "count": self.counts.get(field, 0)}
+        reply = {**self._reply(), "count": self.counts.get(field, 0)}
+        if field in self.count_shards:
+            reply["_shards"] = copy.deepcopy(self.count_shards[field])
+        return reply
 
 
 @pytest.fixture
@@ -151,7 +156,10 @@ def test_an_aggregation_on_a_text_field_in_one_index_keeps_the_other_buckets(run
         True, {"total": 4, "failed": 1}, [SHIM])  # fmt: skip
     warning = reply["partial_warning"]
     assert "Text fields are not optimised" in warning and LOW in warning
-    assert "Path is text there: aggregate Path.keyword" in warning
+    assert (
+        "Path is text there: aggregate on a keyword form of Path if the index has one" in warning
+    )
+    assert "256" not in warning
     kept = reply.get("buckets") or reply.get("values")
     assert [(b.get("key", b.get("value")), b["count"]) for b in kept] == buckets
     if tool == "idx_aggregate":
@@ -281,3 +289,36 @@ def test_the_hints_name_no_index_pattern(monkeypatch):
     srv._add_field_hint(again, "case-acac00000001-*", None)
     assert first["field_hint"].endswith(EVTXECMD) and again["field_hint"] == POINTER
     assert "case-*" not in str([usn, first, again])
+
+
+def test_a_text_field_with_no_keyword_form_gets_the_neutral_repair(run):
+    """The evtx template maps ScriptBlockText as text with no .keyword."""
+    field = "winlog.event_data.ScriptBlockText"
+    shards = {"total": 2, "successful": 1, "skipped": 0, "failed": 1,
+              "failures": failures(EVTX, TEXT_AGG.format(f=field),
+                                   "illegal_argument_exception")}  # fmt: skip
+    reply = run(Cluster(shards, total=1, buckets=[("x", 1)]), "idx_aggregate", field=field,
+                index=f"{EVTX},{DELIM}")  # fmt: skip
+    warning = reply["partial_warning"]
+    assert (
+        f"{field} is text there: aggregate on a keyword form of {field} if the index has one"
+        in warning
+    )
+    assert f"{field}.keyword" not in warning and "256" not in warning
+
+
+def test_two_failing_indices_in_one_summary_part_are_both_named(run, monkeypatch):
+    from opensearch_mcp import case_scope
+
+    monkeypatch.setattr(case_scope, "case_read_scope", lambda *a, **k: "case-acac00000001-*")
+    one = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
+           "failures": failures(EVTX, "first failure")}  # fmt: skip
+    other = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
+             "failures": failures(SHIM, "second failure")}  # fmt: skip
+    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM, SHIM],
+                      counts={"triage.checked": 1, "triage.verdict": 1},
+                      count_shards={"triage.checked": one, "triage.verdict": other})  # fmt: skip
+    reply = run(cluster, "idx_case_summary", case="acme")
+    (triage,) = [w for w in reply["warnings"] if w.startswith("Triage stats")]
+    assert EVTX in triage and SHIM in triage
+    assert "first failure" in triage and "second failure" in triage

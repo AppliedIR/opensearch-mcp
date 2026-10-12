@@ -903,7 +903,7 @@ _TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
 def _repair(reason: str, case: str) -> str:
     """What repairs a shard failure: a field that is text where a keyword was
     meant. A vhir.* field is text only in an index made without its template;
-    any other is aggregated through its .keyword sub-field."""
+    any other is aggregated through a keyword form, where the index has one."""
     m = _TEXT_FIELD.search(reason)
     if not m:
         return ""
@@ -914,10 +914,26 @@ def _repair(reason: str, case: str) -> str:
             f"; {field} is text there: the index was made without its template, "
             f"repair it with opensearch-ingest repair-index --case {case}"
         )
-    return (
-        f"; {field} is text there: aggregate {field}.keyword "
-        "(values over 256 characters are left out)"
-    )
+    return f"; {field} is text there: aggregate on a keyword form of {field} if the index has one"
+
+
+def _merged_shards(replies: list[dict]) -> dict:
+    """Several replies of one part as one: every failure (each index named
+    once by _shard_gap), and the largest counts, since the replies read the
+    same shards."""
+    shards = [r.get("_shards") or {} for r in replies]
+    total = max(int(s.get("total") or 0) for s in shards)
+    failed = max(int(s.get("failed") or 0) for s in shards)
+    lost = max(
+        max(0, int(s.get("total") or 0) - int(s.get("successful", s.get("total")) or 0)
+            - int(s.get("failed") or 0))
+        for s in shards
+    )  # fmt: skip
+    return {
+        "timed_out": any(r.get("timed_out") for r in replies),
+        "_shards": {"total": total, "failed": failed, "successful": max(0, total - failed - lost),
+                    "failures": [f for s in shards for f in s.get("failures") or []]},
+    }  # fmt: skip
 
 
 def _shard_gap(result: dict, case: str = "") -> dict:
@@ -1942,16 +1958,24 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     index_hosts: dict = {}
     ingested: dict = {}  # which ingests the summarised records came from
 
+    replies: dict[str, list] = {}  # part -> its replies, for one warning per part
+
     def shard_gap(what: str, result: dict) -> None:  # a part only some shards answered
-        gap = _shard_gap(result, cid)
-        if not gap or any(w.startswith(f"{what}: ") for w in resp.get("warnings", [])):
+        replies.setdefault(what, []).append(result)
+        gap = _shard_gap(_merged_shards(replies[what]), cid)
+        if not gap:
             return
         text = gap["partial_warning"]
         if what == "Time range":  # a partial min/max is narrower, not lower
             text = text.replace(_PARTIAL_LOW, "The earliest and latest cover only the shards "
                                 "that answered and may be narrower.")  # fmt: skip
         resp["partial"] = True
-        resp.setdefault("warnings", []).append(f"{what}: {text}")
+        warnings = resp.setdefault("warnings", [])
+        mine = [i for i, w in enumerate(warnings) if w.startswith(f"{what}: ")]
+        if mine:  # every failing index of the part, in its one warning
+            warnings[mine[0]] = f"{what}: {text}"
+        else:
+            warnings.append(f"{what}: {text}")
 
     try:
         host_agg = client.search(
