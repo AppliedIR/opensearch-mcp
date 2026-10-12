@@ -7,6 +7,7 @@ passwords are synthetic.
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,9 @@ from opensearch_mcp.containers import _extract_7z
 
 pytestmark = pytest.mark.skipif(shutil.which("7z") is None, reason="7z isn't installed")
 
-PASSWORD = "Synth-Pw-4c19"
+# A new one each run: `_archive` puts it on 7z's command line, so a run's
+# poller would otherwise see another run's archives being made.
+PASSWORD = f"Synth-Pw-{secrets.token_hex(6)}"
 
 
 def _archive(tmp_path, name, *args, files=("a.txt",), password=PASSWORD):
