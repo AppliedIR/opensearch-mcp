@@ -112,3 +112,18 @@ def test_a_per_host_count_some_shards_didnt_give_is_unknown(
     own.activate(root, "a")
     (warning,) = own.incomplete("a")
     assert warning == own._warning("a").replace("1,000 docs from host1", shown)
+
+
+def test_a_per_host_reply_without_a_count_falls_back_as_before(root, monkeypatch):  # noqa: F811
+    """A count reply with no "count" is no answer: the index's own count is shown."""
+
+    class Client(own._Client):
+        def count(self, index, body):
+            if "host.name" in str(body):
+                return {"_shards": dict(ALL_ANSWERED)}
+            return {"count": 0}
+
+    monkeypatch.setattr(faw.server, "_get_os", lambda: Client())
+    own.activate(root, "a")
+    (warning,) = own.incomplete("a")
+    assert warning == own._warning("a").replace("1,000 docs from host1", "1,000 docs")

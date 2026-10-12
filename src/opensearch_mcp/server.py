@@ -2204,10 +2204,10 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
             try:
                 body = {"query": {"term": {"host.name": host}}}
                 reply = client.count(index=index, body=body)
+                shards = reply.get("_shards") or {}
+                return reply["count"], shards.get("successful", 0) >= shards.get("total", 0)
             except Exception:
                 return None, True
-            shards = reply.get("_shards") or {}
-            return reply["count"], shards.get("successful", 0) >= shards.get("total", 0)
 
         partial = _failed_artifact_warnings(cid, docs_by_index, host_docs)
     except OSError as e:
