@@ -784,6 +784,21 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
 ALLOWED_ROOTS = ("/mnt", "/media", "/run/media", "/evidence", "/cases", "/tmp")
 
 
+def _case_path(path: str) -> tuple[str, str | None]:
+    """(path, refusal): a relative path is read in the active case's folder,
+    joined as case-mcp's evidence_register joins it (not normalised, no
+    realpath: a `..` after a link is the kernel's), never in this server's
+    cwd. An absolute path is returned as given."""
+    if os.path.isabs(path):
+        return path, None
+    from opensearch_mcp.write_context import case_dir_for
+
+    case_dir = case_dir_for(_get_active_case() or "")
+    if case_dir is None:
+        return path, "No active case. Run 'vhir case activate' first."
+    return str(Path(case_dir) / path), None
+
+
 def _validate_path(path: str) -> str | None:
     """Validate path is in allowed locations, or is an original registered in
     the active case wherever it lies (never home or its hidden folders).
@@ -2084,7 +2099,8 @@ def idx_ingest(
     from opensearch_mcp.containers import detect_container
     from opensearch_mcp.ingest import discover
 
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     evidence_path = Path(path).resolve()
@@ -2642,7 +2658,8 @@ def idx_ingest_json(
         time_field: Timestamp field name (default: auto-detect).
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     if dry_run:
@@ -2685,7 +2702,8 @@ def idx_ingest_delimited(
             per-host call or `hostname="auto"` for flat layouts.
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
 
@@ -2809,7 +2827,8 @@ def idx_ingest_accesslog(
         index_suffix: Index suffix (default: accesslog).
         dry_run: Preview (default True). Set False to execute immediately.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     if dry_run:
@@ -3381,7 +3400,8 @@ def idx_ingest_memory(
         plugins: Override tier — run only these specific plugins.
         dry_run: Preview plugins (default True). Set False to execute.
     """
-    path_err = _validate_path(path)
+    path, path_err = _case_path(path)
+    path_err = path_err or _validate_path(path)
     if path_err:
         return {"error": path_err}
     from opensearch_mcp.memory_tiers import TIERS

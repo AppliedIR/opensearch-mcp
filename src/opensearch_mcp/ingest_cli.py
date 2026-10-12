@@ -110,7 +110,9 @@ def _delim_files(input_path: Path, only_files=None) -> list:
     files = (
         [input_path]
         if input_path.is_file()
-        else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+        else sorted(  # a link isn't read: the gate's walk skips it
+            f for f in input_path.iterdir() if f.suffix.lower() in exts and not f.is_symlink()
+        )
     )
     if only_files is not None:  # an auto-hosts sub-run: this host's files only
         files = [f for f in files if f in only_files]
@@ -2073,7 +2075,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         [input_path]
         if input_path.is_file()
         else sorted(
-            f for f in input_path.iterdir() if f.suffix.lower() in (".json", ".jsonl", ".ndjson")
+            f
+            for f in input_path.iterdir()
+            if f.suffix.lower() in (".json", ".jsonl", ".ndjson") and not f.is_symlink()
         )
     )
 
@@ -2273,7 +2277,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         flat = (
             []
             if is_recursive
-            else sorted(f for f in input_path.iterdir() if f.suffix.lower() in exts)
+            else sorted(
+                f for f in input_path.iterdir() if f.suffix.lower() in exts and not f.is_symlink()
+            )
         )
         wanted = {h.lower() for h in auto_hosts}
         unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
@@ -2344,6 +2350,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             d
             for d in input_path.iterdir()
             if d.is_dir()
+            and not d.is_symlink()  # the gate's walk doesn't follow it
             and not d.name.startswith(".")
             and any(f.suffix.lower() in exts for f in d.iterdir() if f.is_file())
         )
@@ -2677,7 +2684,8 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         else sorted(
             f
             for f in input_path.iterdir()
-            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+            if (f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower())
+            and not f.is_symlink()
         )
     )
 
