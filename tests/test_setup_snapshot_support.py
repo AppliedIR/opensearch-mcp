@@ -158,7 +158,7 @@ def test_the_snapshot_folder_is_given_to_uid_1000_when_its_owner_differs(
     if exists:
         d.mkdir()
     text = SCRIPT.read_text()
-    block = text[text.index("# --- 2b.") : text.index('if [ ! -f "$OVERRIDE_FILE" ]')]
+    block = text[text.index("# --- 2b.") : text.index("# --- 3. Start OpenSearch ---")]
     assert f'SNAPSHOTS_DIR="{FOLDER}"' in block
     prog = tmp_path / "chown.sh"
     prog.write_text(
@@ -179,3 +179,31 @@ def test_the_snapshot_folder_is_given_to_uid_1000_when_its_owner_differs(
     assert r.returncode == 0, r.stderr
     calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
     assert calls == [w.format(d=d) for w in want]
+
+
+def test_no_override_file_is_made_or_named():
+    """docker-compose.yml carries the bind and path.repo; an override file is
+    a second place setup's own `-f` run never reads."""
+    assert not (ROOT / "docker" / "docker-compose.override.yml").exists()
+    assert "override" not in SCRIPT.read_text()
+
+
+def _docker_paragraph() -> str:
+    text = (ROOT / "README.md").read_text()
+    (para,) = [p for p in text.split("\n\n") if p.startswith("**Docker container data:**")]
+    return para
+
+
+def test_the_readme_says_the_volume_survives_the_container():
+    para = _docker_paragraph()
+    assert "destroys" not in para
+    assert "The volume survives removing or recreating the container (`docker rm -f`" in para
+    assert "`docker volume rm`" in para and "another project name" in para
+
+
+def test_the_readme_backs_up_every_case_not_one():
+    para = _docker_paragraph()
+    assert (
+        "vhir backup <destination> --case <case-id> --include-opensearch`, once per case" in para
+    )
+    assert "`vhir backup --all` covers only the one case" in para
