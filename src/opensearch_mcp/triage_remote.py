@@ -672,25 +672,64 @@ def _executable_of(value: str) -> str | None:
     return s if _a_path(s) else None
 
 
+# A path argument: quoted, or from a drive, \ or %NAME% to an executable
+# extension followed by a space, a comma (rundll32's ",Entry") or the end
+_ARG_PATH = re.compile(
+    r'(?<!\S)(?:"([^"]+)"|((?:[A-Za-z]:|\\|%[^%\s]+%)[^"]*?(?:'
+    + "|".join(map(re.escape, _EXE_EXTS))
+    + r"))(?=[\s,]|$))",
+    re.I,
+)
+_MORE_THAN_ONE = re.compile(r"[&|]|\s(?:[A-Za-z]:|\\|%[^%\s]+%)")
+_MAX_TARGETS = 3
+
+
+def _targets_of(value: str) -> list[str]:
+    """The path arguments with an executable extension, at most three: what
+    a LOLBin such as rundll32 or cmd /c start runs (x.dll in "rundll32
+    x.dll,Start"). A quoted argument holding more than one command or path
+    is none of them."""
+    s = (value or "").strip()
+    if not s or "|" in s:
+        return []
+    exe = _executable_of(s)
+    if s.startswith('"'):
+        rest = s[1:].split('"', 1)[1] if '"' in s[1:] else ""
+    elif exe and s.startswith(exe):
+        rest = s[len(exe) :]
+    else:
+        rest = s.split(None, 1)[1] if len(s.split(None, 1)) > 1 else ""
+    found = []
+    for m in _ARG_PATH.finditer(rest):
+        t = m[1] or m[2]
+        if m[1] and _MORE_THAN_ONE.search(t):
+            continue
+        if t.lower().endswith(_EXE_EXTS) and _a_path(t) and t not in found:
+            found.append(t)
+    return found[:_MAX_TARGETS]
+
+
 def _sends(value: str, raw: bool = True) -> list[str]:
-    """What check_file is given for a command line: its executable, and the
-    value itself when `raw` (as it was sent before, so no answer is lost)."""
-    exe = _executable_of(value)
-    return list(dict.fromkeys(([exe] if exe else []) + ([value] if raw else [])))
+    """What check_file is given for a command line: its executable, the
+    targets it runs, and the value itself when `raw` (as it was sent
+    before, so no answer is lost)."""
+    picks = [_executable_of(value), *_targets_of(value), value if raw else None]
+    return list(dict.fromkeys(p for p in picks if p))
 
 
 _WORSE = {"SUSPICIOUS": 2, "UNKNOWN": 1}
+_SURER = {"high": 3, "medium": 2, "low": 1}
 
 
 def _ask_all(values: list[str], state: dict) -> dict | None:
     """check_file on each value, flags only: the worse answer (SUSPICIOUS,
-    then UNKNOWN, then the rest), with the LOLBin flag if any answer had it.
-    A raise or a reply that isn't a dict is a failed call. One lookup
-    behaves as it always has: a reply with no verdict is answered with
-    nothing to write. Two lookups are answered only when both replies carry
-    a verdict; otherwise the value fails as one failed call, and nothing is
-    written. `state` carries the loop's consecutive
-    call failures and whether any value was answered."""
+    then UNKNOWN, then the rest; of equal verdicts, the higher confidence),
+    with the LOLBin flag if any answer had it. A raise or a reply that isn't
+    a dict is a failed call. One lookup behaves as it always has: a reply
+    with no verdict is answered with nothing to write. Several lookups are
+    answered only when every reply carries a verdict; otherwise the value
+    fails as one failed call, and nothing is written. `state` carries the
+    loop's consecutive call failures and whether any value was answered."""
     if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
         return None
     replies = []
@@ -710,7 +749,10 @@ def _ask_all(values: list[str], state: dict) -> dict | None:
     state["failures"], state["ok"] = 0, True
     if not answers:
         return None
-    worst = max(answers, key=lambda a: _WORSE.get(a.get("verdict"), 0))
+    worst = max(
+        answers,
+        key=lambda a: (_WORSE.get(a.get("verdict"), 0), _SURER.get(a.get("confidence"), 0)),
+    )
     return dict(worst, is_lolbin=True) if any(a.get("is_lolbin") for a in answers) else worst
 
 
@@ -1047,7 +1089,10 @@ def _too_long(result: dict, n: int) -> dict:
     """A result that also says how many Run-key values were too long to read."""
     if not n:
         return result
-    why = f"{n} Run-key values are over 256 characters and were not checked"
+    why = (
+        f"{n} Run-key values are over 256 characters and were not checked; "
+        "find them with exists ValueData and not exists ValueData.keyword under the Run keys"
+    )
     reason = f"{result['reason']}; {why}" if result.get("reason") else why
     return {**result, "status": "failed", "reason": reason, "too_long": n}
 
@@ -1104,7 +1149,8 @@ def _enrich_registry_check_file(
             continue
         if dll_filter and not value.lower().endswith(".dll"):
             continue
-        # a StubPath is a command line: its executable too; a NetSh value is the DLL
+        # a StubPath is a command line: its executable and what it runs too; a NetSh
+        # value is the DLL
         verdict = _ask_all([value] if dll_filter else _sends(value), state)
         if not verdict:
             continue
@@ -1113,11 +1159,17 @@ def _enrich_registry_check_file(
             script_lines = [
                 "ctx._source['triage.verdict'] = params.verdict",
                 "ctx._source['triage.checked'] = true",
+                "ctx._source['triage.confidence'] = params.confidence",
             ]
-            params: dict = {"verdict": verdict["verdict"]}
+            params: dict = {
+                "verdict": verdict["verdict"],
+                "confidence": verdict.get("confidence", "low"),
+            }
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
+            if verdict.get("is_lolbin"):
+                script_lines.append("ctx._source['triage.lolbin'] = true")
             resp = _ubq(
                 client,
                 index=index,
