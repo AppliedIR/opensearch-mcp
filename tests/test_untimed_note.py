@@ -154,3 +154,24 @@ def test_usn_hint_says_no_event_time_only_for_the_ez_index(keys, own_field):
         if own_field
         else "USN Journal indexed. Use time_from/time_to. "
     )
+
+
+def test_a_failed_mapping_read_makes_no_have_none_claim(client):
+    """An empty window whose mapping read timed out: the note says it couldn't
+    check, and the hint claims nothing about which indices have no time."""
+    client.indices.get_field_mapping.side_effect = ConnectionTimeout(
+        "TIMEOUT", "read timed out", None
+    )
+    r = srv.idx_search(query="event.code:4624", time_from="2023-01-21T00:00:00Z")
+    assert r["time_note"].startswith("couldn't check which indices lack an event time")
+    assert "have none" not in r["hint"]
+    assert r["hint"].startswith("No results. If searching for filenames")
+
+
+def test_a_page_past_the_end_is_not_said_to_have_no_event_time(client):
+    """total 5, offset 5: the page is empty but the window found records."""
+    client.search.return_value = {"hits": {"total": {"value": 5}, "hits": []}}
+    client.indices.get_field_mapping.return_value = _mapping(untimed=[f"{C}-mft-0"])
+    r = srv.idx_search(query="*", time_from="2023-01-21T00:00:00Z", offset=5)
+    assert r["total"] == 5 and "time_note" in r
+    assert not r.get("hint", "").startswith("No results with an event time")

@@ -1031,10 +1031,7 @@ def _untimed_note(client, index: str, why: str) -> str:
             index=index, fields="@timestamp", allow_no_indices=True, ignore_unavailable=True
         )
     except Exception as e:
-        return (
-            f"couldn't check which indices lack an event time ({type(e).__name__}); "
-            f"EZ-tool CSV indices {why}"
-        )
+        return f"{_UNCHECKED} ({type(e).__name__}); EZ-tool CSV indices {why}"
     names = sorted(n for n, m in (got or {}).items() if not (m or {}).get("mappings"))
     if not names:
         return ""
@@ -1053,6 +1050,7 @@ def _untimed_note(client, index: str, why: str) -> str:
 
 
 _WINDOW = "are left out of time_from/time_to"
+_UNCHECKED = "couldn't check which indices lack an event time"  # the failed-read note's start
 
 
 @server.tool()
@@ -1157,7 +1155,9 @@ def idx_search(
         resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
     if (time_from or time_to) and (note := _untimed_note(client, index, _WINDOW)):
         resp["time_note"] = note
-    if not docs and "time_note" in resp:
+    # "have none" only when the window found nothing and the note names the indices:
+    # never on a failed read, nor on a page past the end of what the window found
+    if not total and not resp.get("time_note", _UNCHECKED).startswith(_UNCHECKED):
         resp["hint"] = (
             "No results with an event time in the window. The indices in time_note "
             "have none, so the window left them out."
