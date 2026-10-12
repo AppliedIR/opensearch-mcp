@@ -13,8 +13,8 @@ from opensearch_mcp.bulk import flush_bulk
 
 _SSH_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+[\d:.]+)\s+sshd[:\[]\s*(.+)")
 # Win32-OpenSSH's own log (ProgramData/ssh/logs): "<pid> <YYYY-MM-DD> <HH:MM:SS.mmm> <message>",
-# in local time
-_WIN32_LINE = re.compile(r"^(\d+)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(.+)")
+# in local time. A pid is a DWORD, at most 10 digits
+_WIN32_LINE = re.compile(r"^(\d{1,10})\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(.+)")
 _AUTH_ACCEPTED = re.compile(r"Accepted\s+(\w+)\s+for\s+(\S+)\s+from\s+(\S+)\s+port\s+(\d+)")
 # "Failed password for invalid user X from ..." is a failed logon by X too
 _AUTH_FAILED = re.compile(

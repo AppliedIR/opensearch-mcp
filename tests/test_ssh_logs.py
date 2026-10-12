@@ -221,3 +221,18 @@ def test_with_no_time_zone_each_ssh_log_is_named_not_indexed(scan):
     warnings, docs, root = scan({LOG: WIN32}, tz=None)
     assert [d for d in docs if "ssh.event_type" in d] == []
     assert warnings == [f"WKS01: 1 file(s) not indexed; not indexed: {root / LOG}: {NO_ZONE}"]
+
+
+def test_a_line_with_an_impossibly_long_pid_is_counted_unread_and_the_rest_are_kept(parse):
+    """Past Python's int limit (4,300 digits) a pid can't be read: the line
+    isn't a Win32 line, so it is counted like any other unread line."""
+    text = (
+        "4120 2021-03-23 16:50:12.345 Accepted password for alice from 10.0.0.5 port 50123 ssh2\n"
+        + "9" * 4301
+        + " 2021-03-23 16:50:13.000 Accepted password for mallory from 10.0.0.9 port 1 ssh2\n"
+        "4188 2021-03-23 16:51:02.001 Failed password for bob from 203.0.113.9 port 50200 ssh2\n"
+    )
+    res, docs, notes = parse({LOG: text})
+    assert sorted(d["user.name"] for _, d in docs) == ["alice", "bob"]
+    assert res == (2, 1, 0)
+    assert notes == [f"{LOG}: 1 of 3 line(s) not in a known sshd log format, not indexed"]
