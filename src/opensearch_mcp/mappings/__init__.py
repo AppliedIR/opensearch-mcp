@@ -145,13 +145,14 @@ def with_host_key_fields(body: dict) -> dict:
 
 
 def template_type_tokens() -> frozenset[str]:
-    """The artifact type of every shipped template pattern (`case-*-<type>-*`)."""
+    """The artifact type of every shipped template pattern (`case-*-<type>-*`),
+    from the pattern table (a test keeps it equal to the files), so a template
+    file that is missing, unreadable or doesn't parse can't change an index name."""
     tokens = set()
-    for path in [_EVTX_TEMPLATE_FILE] + [_MAPPINGS_DIR / f for _, f in _TEMPLATES_REGISTRY]:
-        for pattern in _load_json(path).get("index_patterns", []):
-            parts = pattern.split("-")
-            if len(parts) == 4 and parts[0] == "case" and parts[1] == "*" and parts[3] == "*":
-                tokens.add(parts[2])
+    for pattern in [_TEMPLATE_PATTERN] + [p for _, ps in _TEMPLATE_PATTERNS.values() for p in ps]:
+        parts = pattern.split("-")
+        if len(parts) == 4 and parts[0] == "case" and parts[1] == "*" and parts[3] == "*":
+            tokens.add(parts[2])
     return frozenset(tokens)
 
 
