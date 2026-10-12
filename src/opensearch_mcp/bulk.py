@@ -246,10 +246,10 @@ def flush_bulk(
     parser's own id) and an `_id` that carries the machine key. A write to a
     case index with no run open is refused.
     """
-    from opensearch_mcp.write_context import fill_added, fill_in, stamp_or_refuse
+    from opensearch_mcp.write_context import fill_in, stamp_or_refuse
 
     stamp_or_refuse(actions, client)
-    sent, looked_up = fill_in(client, actions)  # stored before 0.6.5: not again
+    sent = fill_in(client, actions)  # stored before 0.6.5: not again
     for action in actions:  # the 0.6.4 ids ride only this far, never sent
         action.pop(OLD_RID_KEY, None)
         action.pop(OLD_ID_KEY, None)
@@ -258,7 +258,6 @@ def flush_bulk(
     if depth_limit and actions:
         actions, refused = _refuse_too_deep(client, actions)
     success, failed = _flush_with_retry(client, actions, attempt=0)
-    fill_added(looked_up, success)
     return success, failed + refused
 
 

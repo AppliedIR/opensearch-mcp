@@ -15,8 +15,8 @@ what 0.6.4 missed: each changed record carries the id 0.6.4 stored it under
 (pinned to e0adcc0's own writes below), one lookup per batch finds it, and a
 stored record without the marker, from the same evidence and not yet claimed
 by another record of this process, is that record. Each (case, unit, type)
-says "kept N … already stored; added M …", and a lookup that fails says
-"couldn't check".
+says "kept N … already stored", and a lookup that fails says "couldn't
+check". A record of a shadow copy is never taken for a live one.
 
 The parsers, the write stamp and the bulk path are real; the cluster is an
 in-memory stand-in (record_ids_cluster), and the EZ tools and vol3 are
@@ -526,9 +526,8 @@ def report() -> dict:
     return {t: note(artifact_type=t) for t in TYPES}
 
 
-def kept(n, m):
-    s = "" if n == 1 else "s"
-    return f"kept {n} record{s} already stored; added {m} not stored before"
+def kept(n):
+    return f"kept {n} record{'' if n == 1 else 's'} already stored"
 
 
 ONCE = {  # each record exactly once: accesslog [-, -, bob], EZ [alice, bob], vol3 2 objects
@@ -536,7 +535,7 @@ ONCE = {  # each record exactly once: accesslog [-, -, bob], EZ [alice, bob], vo
     **{t: sorted(PAIRS[t]) for t in PAIRS},
     **{f"vol-{p.split('.')[1]}": sorted(str(r["Offset"]) for r in rs) for p, rs in VOL.items()},
 }
-SAID = {t: f"{t}: {kept(1, 2 if t == 'accesslog' else 1)}" for t in TYPES}
+SAID = {t: f"{t}: {kept(1)}" for t in TYPES}
 
 
 NO_OFFSET = {
@@ -599,7 +598,7 @@ def test_a_second_re_ingest_adds_nothing(cluster, cases, monkeypatch):
     new_run(*FILL_STATE)
     ingest_all(cluster, cases, monkeypatch, reverse=True)
     assert evidence(cluster, out) == ONCE
-    assert report() == {t: f"{t}: {kept(1, 0)}" for t in TYPES}
+    assert report() == {t: f"{t}: {kept(1)}" for t in TYPES}
 
 
 def test_the_same_evidence_twice_in_one_process_is_kept_once(cluster, cases, monkeypatch):
@@ -625,7 +624,7 @@ def test_vol3_objects_with_no_offset_are_written_and_said(cluster, cases, monkey
         assert len(held) == 3  # the first object stored by 0.6.4 and again, the second once
         key = "Binary" if "svcscan" in plugin else "State"
         assert sorted({s[key] for s in held}) == sorted({r[key] for r in rs})  # none lost
-        assert report()[t] == f"{t}: {kept(0, 2)}"
+        assert report()[t] == f"{t}: {kept(0)}"
 
 
 @pytest.mark.parametrize("fail", ["request", "items", "short"])
@@ -773,7 +772,7 @@ def test_the_memory_plugin_status_entry_and_done_line_carry_the_report(
 ):
     rows = VOL["windows.netscan"]
     stored_by_064(cluster, "memory")
-    said = f"vol-netscan: {kept(1, 1)}"
+    said = f"vol-netscan: {kept(1)}"
     note, printed = memory_cli(cluster, cases, monkeypatch, "mem-run-2", rows[::-1], status_dir)
     held = [s for _, s in cluster.docs(next(i for i, _ in cluster.store))]
     assert sorted(s["Offset"] for s in held) == sorted(r["Offset"] for r in rows)
@@ -806,17 +805,17 @@ SEEDED = ("000000000000", "web01", "accesslog")
 def test_the_accesslog_command_prints_the_report_at_its_done_line(run, capsys):  # noqa: F811
     from test_accesslog_status import GOOD
 
-    wc.FILL[SEEDED] = [1, 2]
+    wc.FILL[SEEDED] = 1
     run({"a.log": GOOD})
     out, err = capsys.readouterr()
-    assert "Done." in out and f"NOTE: accesslog: {kept(1, 2)}" in err.splitlines()
+    assert "Done." in out and f"NOTE: accesslog: {kept(1)}" in err.splitlines()
 
 
 def test_the_scan_command_prints_the_report_at_its_done_line(scan, capsys):  # noqa: F811
-    wc.FILL[("000000000000", "dev01", "shellbags")] = [1, 1]
+    wc.FILL[("000000000000", "dev01", "shellbags")] = 1
     scan(unmount=False)
     out, err = capsys.readouterr()
-    assert "Done in" in out and f"NOTE: shellbags: {kept(1, 1)}" in err.splitlines()
+    assert "Done in" in out and f"NOTE: shellbags: {kept(1)}" in err.splitlines()
 
 
 def test_after_a_failed_lookup_a_later_run_adds_no_copy(cluster, cases, monkeypatch):
@@ -845,7 +844,7 @@ def test_after_a_failed_lookup_a_later_run_adds_no_copy(cluster, cases, monkeypa
     access_run(cluster, cases, "fill", "d", "access.log", SPLIT)
     assert len(cluster.docs(index)) == after_failure
     # the first batch's records are already stored under their 0.6.5 ids
-    assert report()["accesslog"] == f"accesslog: {kept(1, 0)}"
+    assert report()["accesslog"] == f"accesslog: {kept(1)}"
 
 
 def test_an_index_this_version_created_isnt_looked_up(cluster, cases, monkeypatch):
@@ -865,3 +864,17 @@ def test_an_index_whose_mapping_cant_be_read_is_looked_up(cluster, cases, monkey
     cluster.mapping_error = RuntimeError("stand-in cluster: mapping refused")
     out = ingest_all(cluster, cases, monkeypatch, reverse=True)
     assert evidence(cluster, out) == ONCE and report() == SAID
+
+
+def test_a_live_record_is_not_taken_for_a_stored_shadow_copy(cluster, cases, monkeypatch):
+    """A record 0.6.4 stored from a shadow copy (vhir.vss_id) isn't the live
+    one: the live record is written, so the live evidence is there as such."""
+    stored_by_064(cluster, "evidence")
+    for src in cluster.store.values():
+        src["vhir.vss_id"] = "vss1"
+    out = ingest_all(cluster, cases, monkeypatch, reverse=True)
+    live = {
+        t: sorted(str(s.get("vhir.vss_id")) for _, s in cluster.docs(i)) for t, i in out.items()
+    }
+    assert live == {t: sorted(["vss1"] + ["None"] * len(ONCE[t])) for t in TYPES}
+    assert report() == {t: f"{t}: {kept(0)}" for t in TYPES}

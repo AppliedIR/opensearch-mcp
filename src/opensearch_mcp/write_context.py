@@ -25,7 +25,7 @@ import yaml
 from sift_common import host_identity
 from sift_common.content_hash import content_hash
 
-from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted
+from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted, _vss_id
 
 _tls = threading.local()
 
@@ -394,7 +394,7 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
 # is that stored record and isn't written again. Each stored record stands
 # for one record: the first to match claims it for this process.
 _FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
-FILL: dict[tuple[str, str, str], list[int]] = {}  # (c12, unit_raw, type) -> [kept, added]
+FILL: dict[tuple[str, str, str], int] = {}  # (c12, unit_raw, type) -> records kept
 FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
 _FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
 # An index this version creates carries IDS_MARK in its mapping: every record
@@ -419,9 +419,12 @@ def _marked(client, index: str) -> bool:
 
 
 def _same_evidence(stored: dict, src: dict) -> bool:
-    """Whether the stored record came from the same evidence: what its 0.6.4
-    id leaves out (an access-log line's user, version and referrer), the
-    source file, or a vol3 object's offset, which both must have."""
+    """Whether the stored record came from the same evidence: the same
+    shadow copy (or none), and what its 0.6.4 id leaves out (an access-log
+    line's user, version and referrer), the source file, or a vol3 object's
+    offset, which both must have."""
+    if _vss_id(stored) != _vss_id(src):  # a shadow copy's record isn't the live one
+        return False
     method = str(src.get("vhir.parse_method") or "")
     if method.startswith("vol3-"):
         return stored.get("Offset") is not None and stored.get("Offset") == src.get("Offset")
@@ -461,17 +464,17 @@ def _stored(answer, key: tuple[str, str, str], index: str) -> dict | None:
     return {} if error or not answer.get("found") else answer.get("_source") or {}
 
 
-def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
+def fill_in(client, actions: list[dict]) -> list[dict]:
     """Before the write: one lookup of the batch's 0.6.4 ids, and the actions
     to send, without those already stored. A lookup that fails, or a record
     it didn't answer, is written under its 0.6.5 id and said; nothing raises.
-    Returns (the actions to send, the (case, unit, type)s looked up)."""
+    Returns the actions to send."""
     ctx = current()
     looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
     marked = {i for i in {a["_index"] for a in looked} if _marked(client, i)}
     looked = [a for a in looked if a["_index"] not in marked]
     if not looked:
-        return actions, set()
+        return actions
 
     def key(a: dict) -> tuple[str, str, str]:
         return ctx.c12, ctx.unit_raw, artifact_type_of(a["_index"])
@@ -482,7 +485,7 @@ def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
             stored = _stored(d, key(a), a["_index"])
             if not stored or "vhir.id_scheme" in stored:
                 continue
-            FILL.setdefault(key(a), [0, 0])  # said, "kept 0" when nothing matches
+            FILL.setdefault(key(a), 0)  # said, "kept 0" when nothing matches
             claim = _FILL_CLAIMED.get((a["_index"], a[OLD_ID_KEY]), a["_id"])
             if claim == a["_id"] and _same_evidence(stored, a["_source"]):
                 matched.append(a)
@@ -492,7 +495,7 @@ def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
     except Exception as e:
         for a in looked:
             _unchecked(key(a), a["_index"], e)
-        return actions, {key(a) for a in looked}
+        return actions
     kept = set()
     for a, d in zip(matched, now):
         claim = (a["_index"], a[OLD_ID_KEY])
@@ -500,16 +503,9 @@ def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
             continue  # stored under its 0.6.5 id, unanswered, or its twin took the record
         if claim not in _FILL_CLAIMED:  # the same record read again counts once
             _FILL_CLAIMED[claim] = a["_id"]
-            FILL[key(a)][0] += 1
+            FILL[key(a)] += 1
         kept.add(id(a))
-    return [a for a in actions if id(a) not in kept], {key(a) for a in looked}
-
-
-def fill_added(keys: set, stored: int) -> None:
-    """After the write: what a batch of one looked-up (case, unit, type)
-    stored, once a record stored before 0.6.5 was found there."""
-    if len(keys) == 1 and stored and next(iter(keys)) in FILL:
-        FILL[next(iter(keys))][1] += stored
+    return [a for a in actions if id(a) not in kept]
 
 
 def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
@@ -524,9 +520,8 @@ def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str
         )
 
     notes = [
-        f"{k[2]}: kept {kept} record{'' if kept == 1 else 's'} already stored; "
-        f"added {added} not stored before"
-        for k, (kept, added) in sorted(FILL.items())
+        f"{k[2]}: kept {kept} record{'' if kept == 1 else 's'} already stored"
+        for k, kept in sorted(FILL.items())
         if mine(*k)
     ]
     notes += [why for k, why in sorted(FILL_UNCHECKED.items()) if mine(*k)]
