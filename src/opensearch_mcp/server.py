@@ -900,10 +900,11 @@ _PARTIAL_LOW = (
 _TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
 
 
-def _repair(reason: str, case: str) -> str:
+def _repair(reason: str, case: str, index: str) -> str:
     """What repairs a shard failure: a field that is text where a keyword was
     meant. A vhir.* field is text only in an index made without its template;
-    any other is aggregated through a keyword form, where the index has one."""
+    any other is aggregated through a keyword form, in that index alone (a
+    case-wide aggregation leaves out every index without it)."""
     m = _TEXT_FIELD.search(reason)
     if not m:
         return ""
@@ -914,7 +915,10 @@ def _repair(reason: str, case: str) -> str:
             f"; {field} is text there: the index was made without its template, "
             f"repair it with opensearch-ingest repair-index --case {case}"
         )
-    return f"; {field} is text there: aggregate on a keyword form of {field} if the index has one"
+    return (
+        f"; {field} is text there: aggregate on a keyword form of {field} "
+        f"with index={index}, if that index has one"
+    )
 
 
 def _gap_parts(result: dict, case: str = "") -> tuple[list[str], dict]:
@@ -933,7 +937,7 @@ def _gap_parts(result: dict, case: str = "") -> tuple[list[str], dict]:
             continue
         reason = str((f.get("reason") or {}).get("reason", ""))
         names.append(index)
-        why.append(f"{index}: {reason.split('. ')[0][:200]}{_repair(reason, case)}")
+        why.append(f"{index}: {reason.split('. ')[0][:200]}{_repair(reason, case, index)}")
     parts = []
     if failed:
         named = f" in {'; '.join(why[:5])}" if why else ""

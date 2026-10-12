@@ -160,13 +160,33 @@ def test_an_aggregation_on_a_text_field_in_one_index_keeps_the_other_buckets(run
     warning = reply["partial_warning"]
     assert "Text fields are not optimised" in warning and LOW in warning
     assert (
-        "Path is text there: aggregate on a keyword form of Path if the index has one" in warning
+        f"Path is text there: aggregate on a keyword form of Path with index={SHIM}, "
+        "if that index has one" in warning
     )
     assert "256" not in warning
     kept = reply.get("buckets") or reply.get("values")
     assert [(b.get("key", b.get("value")), b["count"]) for b in kept] == buckets
     if tool == "idx_aggregate":
         assert reply["total_docs"] == 9
+
+
+AMCACHE = "case-acac00000001-amcache-0"
+TWO_TEXT_INDICES = {"total": 6, "successful": 4, "skipped": 0, "failed": 2,
+                    "failures": [f for i in (SHIM, AMCACHE) for f in failures(
+                        i, TEXT_AGG.format(f="Path"), "illegal_argument_exception")]}  # fmt: skip
+
+
+def test_the_keyword_hint_names_the_index_it_is_for(run):
+    """A case-wide aggregation on a keyword form leaves out every index without
+    one: the hint names the index to aggregate it in, each its own."""
+    reply = run(Cluster(TWO_TEXT_INDICES, total=1, buckets=[("x", 1)]), "idx_aggregate",
+                field="Path", index=f"{SHIM},{AMCACHE},{DELIM}")  # fmt: skip
+    assert reply["failed_indices"] == [SHIM, AMCACHE]
+    warning = reply["partial_warning"]
+    for index in (SHIM, AMCACHE):
+        hint = f"aggregate on a keyword form of Path with index={index}, if that index has one"
+        assert f"{index}: Text fields are not optimised" in warning and hint in warning
+    assert "if the index has one" not in warning
 
 
 CLI_TEXT = {"total": 2, "successful": 1, "skipped": 0, "failed": 1,
@@ -306,8 +326,8 @@ def test_a_text_field_with_no_keyword_form_gets_the_neutral_repair(run):
                 index=f"{EVTX},{DELIM}")  # fmt: skip
     warning = reply["partial_warning"]
     assert (
-        f"{field} is text there: aggregate on a keyword form of {field} if the index has one"
-        in warning
+        f"{field} is text there: aggregate on a keyword form of {field} with index={EVTX}, "
+        "if that index has one" in warning
     )
     assert f"{field}.keyword" not in warning and "256" not in warning
 
