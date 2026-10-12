@@ -418,12 +418,19 @@ def _marked(client, index: str) -> bool:
     return _MARKED[index]
 
 
+def _vss_class(src: dict) -> str:
+    """The shadow copy a record came from, "" for the live volume: a --vss run
+    tags live records "live", a default run leaves them untagged."""
+    tag = _vss_id(src)
+    return "" if tag == "live" else tag
+
+
 def _same_evidence(stored: dict, src: dict) -> bool:
     """Whether the stored record came from the same evidence: the same
-    shadow copy (or none), and what its 0.6.4 id leaves out (an access-log
+    shadow copy (or both from the live volume), and what its 0.6.4 id leaves out (an access-log
     line's user, version and referrer), the source file, or a vol3 object's
     offset, which both must have."""
-    if _vss_id(stored) != _vss_id(src):  # a shadow copy's record isn't the live one
+    if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
         return False
     method = str(src.get("vhir.parse_method") or "")
     if method.startswith("vol3-"):

@@ -878,3 +878,32 @@ def test_a_live_record_is_not_taken_for_a_stored_shadow_copy(cluster, cases, mon
     }
     assert live == {t: sorted(["vss1"] + ["None"] * len(ONCE[t])) for t in TYPES}
     assert report() == {t: f"{t}: {kept(0)}" for t in TYPES}
+
+
+def tag_live(monkeypatch):
+    """This process's records as a --vss run writes them: tagged "live"."""
+    real = wc.stamp_or_refuse
+
+    def stamp_or_refuse(actions, client=None):
+        for a in actions:
+            a["_source"]["vhir.vss_id"] = "live"
+        real(actions, client)
+
+    monkeypatch.setattr(wc, "stamp_or_refuse", stamp_or_refuse)
+
+
+@pytest.mark.parametrize(
+    "stored_tag", ["live", None], ids=["vss-run-then-default", "default-then-vss-run"]
+)
+def test_live_records_tagged_or_not_are_one_class(cluster, cases, monkeypatch, stored_tag):
+    """A --vss run tags live records "live"; a default run leaves them untagged.
+    Either way round, the re-ingest keeps the stored live record."""
+    stored_by_064(cluster, "evidence")
+    for src in cluster.store.values():
+        if stored_tag:
+            src["vhir.vss_id"] = stored_tag
+    if not stored_tag:
+        tag_live(monkeypatch)
+    out = ingest_all(cluster, cases, monkeypatch, reverse=True)
+    assert {t: len(cluster.docs(i)) for t, i in out.items()} == {t: len(ONCE[t]) for t in TYPES}
+    assert report() == SAID
