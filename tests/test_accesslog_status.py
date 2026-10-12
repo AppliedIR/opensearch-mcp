@@ -22,7 +22,7 @@ GOOD = "".join(LINE.format(i=i) for i in range(1, 6))
 @pytest.fixture
 def run(tmp_path, monkeypatch):
     """`run(files, rejected=False, **args)` ingests a folder of logs; returns
-    the status."""
+    the status (and keeps the exit code in `run.exit`)."""
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-al")
     monkeypatch.setattr(ingest_status, "_is_process_alive", lambda pid, run_id: True)
@@ -46,9 +46,13 @@ def run(tmp_path, monkeypatch):
 
         monkeypatch.setattr(parse_accesslog, "flush_bulk", flush)
         bulk.reset_circuit_breaker()
-        cli.cmd_ingest_accesslog(argparse.Namespace(
-            path=str(folder), case="c1", hostname="web01", time_from=time_from, time_to=None,
-            dry_run=False, index_suffix=None))  # fmt: skip
+        go.exit = 0
+        try:
+            cli.cmd_ingest_accesslog(argparse.Namespace(
+                path=str(folder), case="c1", hostname="web01", time_from=time_from, time_to=None,
+                dry_run=False, index_suffix=None))  # fmt: skip
+        except SystemExit as e:  # a `failed` run exits 1
+            go.exit = e.code
         (status,) = srv.idx_ingest_status(case_id="c1")["ingests"]
         return status, folder
 
@@ -81,7 +85,7 @@ def test_a_log_that_cant_be_read_is_named_beside_the_one_that_was(run, tmp_path)
 
 def test_records_all_rejected_fail_the_run_with_the_reason(run):
     status, _ = run({"good.log": GOOD}, rejected=True)
-    assert status["status"] == "failed"
+    assert status["status"] == "failed" and run.exit == 1  # was exit 0
     assert status["bulk_failed"] == 5
     (row,) = status["checklist"]
     assert row["status"] == "failed"

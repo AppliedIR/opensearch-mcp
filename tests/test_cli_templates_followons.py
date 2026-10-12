@@ -182,7 +182,7 @@ def test_the_servers_install_patches_only_the_active_case(monkeypatch, active):
     seen = []
     monkeypatch.setattr(server, "_client", Cluster())
     monkeypatch.setattr(server, "_client_verified", False)
-    monkeypatch.setattr(server, "_install_ok", False, raising=False)
+    monkeypatch.setattr(server, "_install_settled", False, raising=False)
     monkeypatch.setattr(server, "_install_at", None, raising=False)
     monkeypatch.setattr(server, "_get_active_case", lambda: "CASE-A" if active else None)
     monkeypatch.setattr(server, "_case_c12", lambda cid: "0123456789ab" if cid else "")
@@ -254,3 +254,171 @@ def test_non_ascii_stems_never_share_an_index(a, b):
 def test_ascii_stems_are_unchanged(stem, expected):
     assert stem_type("json", stem) == expected
     assert build_index_name("0123456789ab", expected).startswith("case-0123456789ab-json-")
+
+
+# --------------------------------------------------------------------------
+# SPEC-007: the server retries a failed install, at most once a minute
+
+
+@pytest.fixture
+def server_install(monkeypatch):
+    """The server's first connection, with ensure_winlog_pipeline answering
+    from `answers` in turn and its clock under the row's control."""
+    calls, answers, clock = [], [], [1000.0]
+    monkeypatch.setattr(server, "_client", Cluster())
+    monkeypatch.setattr(server, "_client_verified", False)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server, "_get_active_case", lambda: "CASE-A")
+    monkeypatch.setattr(server, "_case_c12", lambda cid: "0123456789ab" if cid else "")
+
+    def install(c, audit=None, stamp_indices=""):
+        calls.append(stamp_indices)
+        return answers.pop(0) if answers else {"status": "ok"}
+
+    monkeypatch.setattr(mp, "ensure_winlog_pipeline", install)
+    return calls, answers, clock
+
+
+def test_a_failed_install_is_retried_after_a_minute_until_ok(server_install):
+    """Was: one attempt in the server's life."""
+    calls, answers, clock = server_install
+    answers.extend([{"status": "error", "error": "simulate failed"}, {"status": "partial"}])
+    server._get_os()
+    clock[0] += 30
+    server._get_os()  # within the minute: not again
+    assert len(calls) == 1
+    clock[0] += 31
+    server._get_os()  # partial
+    clock[0] += 61
+    server._get_os()  # ok
+    clock[0] += 61
+    server._get_os()  # settled
+    assert len(calls) == 3
+    # only the first attempt gives the active case's indices the stamp fields
+    assert calls == ["case-0123456789ab-*", "", ""]
+
+
+def test_an_operator_template_return_is_not_retried(server_install):
+    calls, answers, clock = server_install
+    answers.append({"status": "error", "error": "priority 500", "operator_template": True})
+    server._get_os()
+    clock[0] += 120
+    server._get_os()
+    assert len(calls) == 1
+
+
+def test_a_new_connection_installs_again(server_install):
+    """As before: each verified connection (after a lost one) installs."""
+    calls, _, _ = server_install
+    server._get_os()
+    server._client_verified = False  # what _os_call does on a lost connection
+    server._get_os()
+    assert calls == ["case-0123456789ab-*", "case-0123456789ab-*"]
+
+
+# --------------------------------------------------------------------------
+# SPEC-008 and SPEC-009: what the install says
+
+
+@pytest.mark.usefixtures("sent", "files")
+def test_a_missing_template_file_is_named_in_the_warning():
+    """Was: nothing said, except by its own type's refusal."""
+    (mp._MAPPINGS_DIR / "plaso_template.json").unlink()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        write(Cluster(), "json")
+    (line,) = err.getvalue().splitlines()
+    assert line == (
+        "WARNING: index templates not installed: "
+        "vhir-plaso: its file plaso_template.json is missing"
+    )
+
+
+GARBLED_EVTX = """
+import pathlib, sys
+from opensearch_mcp import mappings as mp
+from test_cli_templates import Client
+d = pathlib.Path(sys.argv[1])
+mp._MAPPINGS_DIR, mp._EVTX_TEMPLATE_FILE = d, d / "evtx_ecs_template.json"
+mp.ensure_installed_once(Client())
+"""
+
+
+def test_a_garbled_evtx_template_prints_one_line(tmp_path):
+    """A new process, as a CLI ingest: nothing configures logging, so a logged
+    traceback reaches stderr. Was: 14 lines, a traceback before the WARNING."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    d = tmp_path / "mappings"
+    shutil.copytree(mp._MAPPINGS_DIR, d, ignore=shutil.ignore_patterns("*.py", "__pycache__"))
+    (d / "evtx_ecs_template.json").write_text('{"index_patterns": [')
+    tests = str(Path(__file__).parent)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([tests, os.environ.get("PYTHONPATH", "")])}
+    run = subprocess.run([sys.executable, "-c", GARBLED_EVTX, str(d)], env=env,
+                         capture_output=True, text=True, timeout=60)  # fmt: skip
+    assert run.returncode == 0, run.stderr
+    assert "Traceback" not in run.stderr
+    (line,) = run.stderr.splitlines()
+    assert line.startswith(f"WARNING: index templates not installed: {EVTX}: Expecting value")
+
+
+@pytest.mark.usefixtures("files")
+def test_a_broken_template_retried_n_times_writes_one_stamp_entry(monkeypatch):
+    """SPEC-007's stated deviation: the retry installs again, but only a
+    connection's first attempt gives the active case's indices the stamp
+    fields, so a template file that stays broken writes one put_stamp_fields
+    entry into the case's audit, not one a minute."""
+    (mp._MAPPINGS_DIR / "ssh_template.json").write_text("not json {")  # status partial
+    case = "case-0123456789ab-json-x-0"
+    client, audit, clock = Cluster(indices={case}), Audit(), [1000.0]
+    monkeypatch.setattr(server, "_client", client)
+    monkeypatch.setattr(server, "_client_verified", False)
+    monkeypatch.setattr(server, "audit", audit)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server, "_get_active_case", lambda: "CASE-A")
+    monkeypatch.setattr(server, "_case_c12", lambda cid: "0123456789ab")
+    for _ in range(5):
+        server._get_os()
+        clock[0] += 61
+    assert len(client.named("ingest.put_pipeline")) == 5  # installed on each attempt
+    entries = [e for e in audit.entries if e["tool"] == "put_stamp_fields"]
+    assert len(entries) == 1 and entries[0]["params"]["indices"] == [case]
+
+
+# --------------------------------------------------------------------------
+# SPEC-009: every caller of ensure_winlog_pipeline says what failed, in one
+# line, now that its own log of the error is debug. The CLI's caller,
+# ensure_installed_once, is the garbled-evtx row above.
+
+
+@pytest.fixture
+def garbled_evtx(request, monkeypatch):
+    path = request.getfixturevalue("files") / "evtx_ecs_template.json"
+    path.write_text('{"index_patterns": [')
+    monkeypatch.setattr(mp, "_EVTX_TEMPLATE_FILE", path)
+
+
+@pytest.mark.usefixtures("garbled_evtx")
+def test_the_servers_install_warns_of_a_broken_evtx_template(monkeypatch, caplog):
+    monkeypatch.setattr(server, "_client", Cluster())
+    monkeypatch.setattr(server, "_client_verified", False)
+    monkeypatch.setattr(server, "_get_active_case", lambda: None)
+    with caplog.at_level("DEBUG"):
+        server._get_os()
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    (line,) = [m for m in warned if m.startswith("winlog pipeline install reported error")]
+    assert "Expecting value" in line and "\n" not in line
+
+
+@pytest.mark.usefixtures("garbled_evtx")
+def test_idx_install_pipelines_answers_with_a_broken_evtx_template(monkeypatch):
+    monkeypatch.setattr(server, "_client", Cluster())
+    monkeypatch.setattr(server, "_client_verified", True)
+    monkeypatch.setattr(server, "audit", Audit())
+    monkeypatch.setattr(server, "_get_active_case", lambda: None)
+    result = server.idx_install_pipelines()
+    assert result["status"] == "error" and "Expecting value" in result["error"]

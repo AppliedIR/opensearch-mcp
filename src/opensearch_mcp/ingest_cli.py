@@ -495,20 +495,37 @@ def _filename_host(path: Path) -> str:
     return parts[1].lower() if len(parts) == 2 and len(parts[1]) >= 2 else ""
 
 
-def _terminal_status(indexed: int, bulk_failed: int, reason: str) -> tuple[str, str]:
+def _terminal_status(
+    indexed: int, bulk_failed: int, reason: str, files: int = 0, not_read: list | tuple = ()
+) -> tuple[str, str]:
     """(status, error) for a finished run: `failed` when no record was
-    indexed and some failed, else `complete`. The token says which: records
-    OpenSearch rejected, or batches the transport gave up on — an outage
-    must not read as a rejection. The status reader takes the text before
-    the first colon as the reason token, so the reason goes after it."""
+    indexed and some failed, or when `files` were given and every one is in
+    `not_read` ("path (why)": none was read), else `complete`. The token says
+    which: records OpenSearch rejected, batches the transport gave up on (an
+    outage must not read as a rejection), or no file read. The status reader
+    takes the text before the first colon as the reason token, so the reason
+    goes after it."""
     from opensearch_mcp.bulk import TRANSPORT_REASON_PREFIX
-    from opensearch_mcp.ingest_status import ALL_RECORDS_REJECTED, TRANSPORT_FAILED
+    from opensearch_mcp.ingest_status import ALL_RECORDS_REJECTED, NOTHING_READ, TRANSPORT_FAILED
 
     if bulk_failed > 0 and indexed == 0:
         if reason.startswith(TRANSPORT_REASON_PREFIX):
             return "failed", f"{TRANSPORT_FAILED}: {reason[len(TRANSPORT_REASON_PREFIX) :]}"
         return "failed", f"{ALL_RECORDS_REJECTED}: {reason or 'no reason recorded'}"
+    if files and indexed == 0 and len(not_read) >= files:
+        return "failed", f"{NOTHING_READ}: none of {files} file(s) was read, e.g. {not_read[0]}"
     return "complete", ""
+
+
+def _exit_if_failed(status: str, error: str) -> None:
+    """A run whose terminal status is `failed` (no file read, every record
+    rejected, the transport gave up) exits 1, once its status is written (a
+    walk's leaf leaves that to the walk), so a script or an MCP caller never
+    reads a run that ingested nothing as success. A partial run is
+    `complete`."""
+    if status == "failed" and not getattr(_walking, "active", False):
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 _VHIR_CONFIG = vhir_dir() / "config.yaml"
@@ -2203,10 +2220,13 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             print(f"  {path}: {err}")
         if len(_json_failed_files) > 10:
             print(f"  ... and {len(_json_failed_files) - 10} more")
-    if run_id:
-        from opensearch_mcp.bulk import get_last_bulk_reason
+    from opensearch_mcp.bulk import get_last_bulk_reason
 
-        final_status, final_error = _terminal_status(total, total_bf, get_last_bulk_reason())
+    not_read = [f"{p} ({e})" for p, e in _json_failed_files]
+    final_status, final_error = _terminal_status(
+        total, total_bf, get_last_bulk_reason(), len(files), not_read
+    )
+    if run_id:
         _write_bg_status(
             case_id,
             run_id,
@@ -2218,8 +2238,9 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             indexed=total,
             error=final_error,
             bulk_failed=total_bf,
-            not_read=[f"{p} ({e})" for p, e in _json_failed_files],
+            not_read=not_read,
         )
+    _exit_if_failed(final_status, final_error)
 
 
 # ---------------------------------------------------------------------------
@@ -2281,7 +2302,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 f"Skipped {len(unattributed)} file(s) whose name gives none of the hosts "
                 f"({', '.join(sorted(wanted))}): {', '.join(unattributed)}"
             )
-        hosts_indexed = hosts_failed = 0
+        hosts_indexed = hosts_failed = hosts_files = 0
         hosts_reason = ""
         host_counts: list[tuple] = []
         missed: list[str] = []  # each sub-run starts its own list
@@ -2311,14 +2332,17 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 hosts_reason = hosts_reason or result[2]
                 host_counts.append((result[0], result[3]))
                 not_read.extend(result[4])
+                hosts_files += result[5]
         _walking.active = was_walking
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
         # no-op (no hosts) still ends `complete`.
         NO_TIME_FIELD[:] = list(dict.fromkeys(missed))
         TIME_NOT_UNDERSTOOD[:] = not_understood
+        final_status, final_error = _terminal_status(
+            hosts_indexed, hosts_failed, hosts_reason, hosts_files, not_read
+        )
         if run_id:
-            final_status, final_error = _terminal_status(hosts_indexed, hosts_failed, hosts_reason)
             _write_bg_status(
                 case_id,
                 run_id,
@@ -2334,7 +2358,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 skipped_files=unattributed,
                 not_read=not_read,
             )
-        return hosts_indexed, hosts_failed, hosts_reason, _sum_counts(host_counts), not_read
+        _exit_if_failed(final_status, final_error)
+        counts = _sum_counts(host_counts)
+        return hosts_indexed, hosts_failed, hosts_reason, counts, not_read, hosts_files
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -2351,7 +2377,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         from opensearch_mcp.bulk import ShardCapacityExhausted as _SCE
 
         _failed_subdirs: list[tuple[str, str]] = []  # (path, error[:200])
-        walk_indexed = walk_failed = 0
+        walk_indexed = walk_failed = walk_files = 0  # a failed subdir counts as one
         walk_reason = ""
         walk_counts: list[tuple] = []
         walk_missed: list[str] = []  # each sub-run starts its own list
@@ -2376,6 +2402,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                     walk_reason = walk_reason or result[2]
                     walk_counts.append((result[0], result[3]))
                     not_read.extend(result[4])
+                    walk_files += result[5]
             except _SCE:
                 # Cluster capacity exhausted: halt the entire recursive
                 # walk, not just the current subdir. Re-raise past the
@@ -2390,6 +2417,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 # this wrapper covers subdir-level catastrophic failure.
                 _failed_subdirs.append((str(d), str(e)[:200]))
                 not_read.append(f"{d} ({str(e)[:200]})")
+                walk_files += 1
                 print(f"  SUBDIR SKIPPED ({d.name}): {e}", file=sys.stderr)
         _walking.active = was_walking
         if _failed_subdirs:
@@ -2405,10 +2433,12 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # any terminal status and the atexit guard mislabels it failed.
         NO_TIME_FIELD[:] = list(dict.fromkeys(walk_missed))
         TIME_NOT_UNDERSTOOD[:] = walk_not_understood
+        final_status, final_error = _terminal_status(
+            walk_indexed, walk_failed, walk_reason, walk_files, not_read
+        )
         if run_id:
             # Each subdir's own final write lands in this same status file,
             # so the last one would stand for the whole walk; write the sum.
-            final_status, final_error = _terminal_status(walk_indexed, walk_failed, walk_reason)
             _write_bg_status(
                 case_id,
                 run_id,
@@ -2423,8 +2453,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 counts=_sum_counts(walk_counts),
                 not_read=not_read,
             )
+        _exit_if_failed(final_status, final_error)
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
-        return walk_indexed, walk_failed, walk_reason, _sum_counts(walk_counts), not_read
+        counts = _sum_counts(walk_counts)
+        return walk_indexed, walk_failed, walk_reason, counts, not_read, walk_files
     NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
     TIME_NOT_UNDERSTOOD.clear()
     time_field = getattr(args, "time_field", None)
@@ -2603,8 +2635,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     reason = get_last_bulk_reason()
     not_read = [f"{p} ({e})" for p, e in _delim_failed_files]
+    final_status, final_error = _terminal_status(total, total_bf, reason, len(files), not_read)
     if run_id:
-        final_status, final_error = _terminal_status(total, total_bf, reason)
         _write_bg_status(
             case_id,
             run_id,
@@ -2619,8 +2651,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             counts=counts,
             not_read=not_read,
         )
+    _exit_if_failed(final_status, final_error)
     # The recursive walk shares this run's status file and sums these.
-    return total, total_bf, reason, counts, not_read
+    return total, total_bf, reason, counts, not_read, len(files)
 
 
 # ---------------------------------------------------------------------------
@@ -2785,11 +2818,12 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             print(f"  {path}: {err}")
         if len(_alog_failed_files) > 10:
             print(f"  ... and {len(_alog_failed_files) - 10} more")
-    if run_id:
-        from opensearch_mcp.bulk import get_last_bulk_reason
+    from opensearch_mcp.bulk import get_last_bulk_reason
 
-        reason = get_last_bulk_reason()
-        final_status, error = _terminal_status(total, total_bf, reason)
+    reason = get_last_bulk_reason()
+    failed = [f"{path} ({err})" for path, err in _alog_failed_files]
+    final_status, error = _terminal_status(total, total_bf, reason, len(files), failed)
+    if run_id:
         _write_bg_status(
             case_id,
             run_id,
@@ -2802,8 +2836,9 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             error=error,
             bulk_failed=total_bf,
             bulk_failed_reason=reason,
-            not_read=[f"{path} ({err})" for path, err in _alog_failed_files] + _alog_unindexed,
+            not_read=failed + _alog_unindexed,
         )
+    _exit_if_failed(final_status, error)
 
 
 # ---------------------------------------------------------------------------
