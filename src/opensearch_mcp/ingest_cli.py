@@ -28,7 +28,6 @@ from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import (
     NO_TIME_FIELD,
     TIME_NOT_UNDERSTOOD,
-    linked,
     members,
     no_time_field_note,
     vhir_dir,
@@ -115,14 +114,15 @@ def _listed(folder: Path, keep) -> list[Path]:
     """`folder`'s entries a folder ingest reads: `keep(entry)`, and not a link
     (the gate's walk skips links). A link `keep` would take is skipped and
     named, never dropped silently."""
-    skipped = sorted(str(p) for p in linked(folder) if keep(p) and str(p) not in _linked_skipped)
+    kept, links = members(folder)
+    skipped = sorted(str(p) for p in links if keep(p) and str(p) not in _linked_skipped)
     if skipped:
         _linked_skipped.extend(skipped)
         print(
             f"Skipped {len(skipped)} linked file(s) in {folder}: a link isn't followed, "
             f"as the case's evidence walk skips it: {', '.join(Path(p).name for p in skipped)}"
         )
-    return [p for p in members(folder) if keep(p)]
+    return [p for p in kept if keep(p)]
 
 
 def _delim_files(input_path: Path, only_files=None) -> list:
@@ -2112,13 +2112,20 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     # `datastore/clients/C.*/collections/F.*/` returns zero matches
     # when pointed at `datastore/`. Operator sees the reason without
     # having to re-read the docstring.
-    if input_path.is_dir() and not files and not linked(input_path):
-        subdirs = [d for d in input_path.iterdir() if d.is_dir()]
-        total_entries = len(list(input_path.iterdir()))
+    if input_path.is_dir() and not files:
+        kept, links = members(input_path)
+        subdirs = [d for d in kept if d.is_dir()]
+        json_links = [p for p in links if p.suffix.lower() in (".json", ".jsonl", ".ndjson")]
         print(
             f"No .json/.jsonl/.ndjson files directly under {input_path} "
-            f"(non-recursive walker: {total_entries} entries, "
-            f"{len(subdirs)} subdirectories ignored). "
+            f"(non-recursive walker: {len(kept)} entries, "
+            f"{len(subdirs)} subdirectories ignored"
+            + (
+                f"; {len(json_links)} linked file(s) skipped: a link isn't followed"
+                if json_links
+                else ""
+            )  # fmt: skip
+            + "). "
             "Point at a directory that contains JSON files directly, "
             "or ingest per-subdirectory.",
             file=sys.stderr,
@@ -2370,7 +2377,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             for d in _listed(input_path, lambda d: d.is_dir())
             if d.is_dir()
             and not d.name.startswith(".")
-            and any(f.suffix.lower() in exts for f in members(d) if f.is_file())
+            and any(f.is_file() for f in _listed(d, lambda f: f.suffix.lower() in exts))
         )
         import copy
 

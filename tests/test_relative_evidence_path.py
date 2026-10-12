@@ -327,8 +327,74 @@ def test_the_worker_names_the_links_it_skips_in_its_output_and_status(
     out = capsys.readouterr()
     said = out.out + out.err
     assert "Skipped 2 linked file(s)" in said and "l1.json, l2.json" in said, said
-    if not regular:  # not "no .json files": there are two, and they are links
-        assert "No .json/.jsonl/.ndjson files directly under" not in said, said
+    if not regular:  # the two files are links, and the diagnostic says so
+        assert "2 linked file(s) skipped" in said, said
     (status,) = [w for w in written if isinstance(w, dict)]
     note = status["hosts"][0]["artifacts"][0].get("note", "")
     assert "2 linked file(s) or folder(s) skipped" in note and "l1.json" in note, note
+
+
+# --- every level of every walk names the links it skips -------------------------
+
+
+@pytest.fixture
+def two_levels(tmp_path):
+    """host1: a.csv and a linked l.csv; host2: only linked CSVs; host3: a
+    linked folder."""
+    root = tmp_path / "evidence" / "hosts"
+    outside = tmp_path / "elsewhere-h"
+    outside.mkdir()
+    (outside / "x.csv").write_text("when,Computer\n2026-10-01T00:00:00Z,HIDDEN\n")
+    (root / "host1").mkdir(parents=True)
+    (root / "host1" / "a.csv").write_text("when,x\n2026-10-01T00:00:00Z,1\n")
+    os.symlink(outside / "x.csv", root / "host1" / "l.csv")
+    (root / "host2").mkdir()
+    os.symlink(outside / "x.csv", root / "host2" / "m.csv")
+    os.symlink(outside / "x.csv", root / "host2" / "n.csv")
+    os.symlink(outside, root / "host3")
+    return root
+
+
+WANT_SKIPPED = ["host1/l.csv", "host2/m.csv", "host2/n.csv", "host3"]
+
+
+def test_a_recursive_preview_names_every_link_it_skips(env, two_levels):
+    rec = srv.idx_ingest_delimited(path=str(two_levels), hostname="", recursive=True, dry_run=True)
+    assert [h["hostname"] for h in rec["hosts"]] == ["host1"], rec
+    assert rec.get("skipped_links") == WANT_SKIPPED, rec
+
+
+def test_a_recursive_walk_names_every_link_it_skips(worker, two_levels, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_linked_skipped", [], raising=False)
+    args = argparse.Namespace(path=str(two_levels), case=None, hostname="", time_field="when",
+                              recursive=True)  # fmt: skip
+    assert worker.run(cli.cmd_ingest_delimited, args)["leaves"] == [("host1", ["a.csv"])]
+    names = sorted(str(Path(p).relative_to(two_levels)) for p in cli._linked_skipped)
+    assert names == WANT_SKIPPED, names
+    said = capsys.readouterr().out
+    assert "m.csv, n.csv" in said and "host3" in said, said
+
+
+def test_an_unrelated_link_doesnt_hide_the_no_json_diagnostic(worker, tmp_path, capsys):
+    folder = tmp_path / "evidence" / "nojson"
+    folder.mkdir(parents=True)
+    (tmp_path / "readme.txt").write_text("x")
+    os.symlink(tmp_path / "readme.txt", folder / "readme.txt")
+    (folder / "notes.txt").write_text("x")
+    args = argparse.Namespace(path=str(folder), case=None, hostname="h1")
+    worker.run(cli.cmd_ingest_json, args)
+    err = capsys.readouterr().err
+    assert "No .json/.jsonl/.ndjson files directly under" in err, err
+
+
+def test_a_links_only_json_folder_says_the_files_are_skipped_links(worker, tmp_path, capsys):
+    folder = _with_links(tmp_path, ())
+    worker.run(cli.cmd_ingest_json, argparse.Namespace(path=str(folder), case=None, hostname="h1"))
+    err = capsys.readouterr().err
+    assert "2 linked file(s) skipped" in err, err
+
+
+def test_auto_host_detection_names_the_links_it_skips(env, linked_hosts):
+    preview = srv.idx_ingest_delimited(path=str(linked_hosts), hostname="auto", dry_run=True)
+    assert preview["detected_hostnames"] == ["host01"], preview
+    assert preview.get("skipped_links") == ["a-host02.csv", "b-host02.csv", "c-host02.csv"]

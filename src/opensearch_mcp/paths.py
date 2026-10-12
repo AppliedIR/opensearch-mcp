@@ -29,16 +29,16 @@ def vhir_dir() -> Path:
     return vhir_home() / ".vhir"
 
 
-def members(folder) -> list[Path]:
-    """A folder's entries that a folder ingest reads: never a link, which the
-    gate's walk skips. Host detection, previews and the worker all list a
-    folder through this, so they see the same files."""
-    return [p for p in Path(folder).iterdir() if not p.is_symlink()]
-
-
-def linked(folder) -> list[Path]:
-    """The links in a folder: what `members` leaves out, to be named."""
-    return [p for p in Path(folder).iterdir() if p.is_symlink()]
+def members(folder) -> tuple[list[Path], list[Path]]:
+    """(kept, skipped links): a folder's entries a folder ingest reads, never
+    a link (the gate's walk skips links), and the links, to be named. Every
+    walk lists every folder at every level through this, so host detection,
+    previews and the worker see the same files and skip the same links."""
+    kept: list[Path] = []
+    links: list[Path] = []
+    for p in Path(folder).iterdir():
+        (links if p.is_symlink() else kept).append(p)
+    return kept, links
 
 
 def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:

@@ -21,7 +21,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
-from opensearch_mcp.paths import linked, members
+from opensearch_mcp.paths import members
 
 logger = logging.getLogger(__name__)
 
@@ -755,14 +755,20 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
     return " ".join(parts) if parts else None
 
 
-def _skipped_links(folder: Path, keep) -> dict:
-    """`{"skipped_links": [names]}` for the links in a folder a preview's
-    filter would take, which the ingest skips; {} when there are none."""
-    names = sorted(f.name for f in linked(folder) if keep(f))
-    return {"skipped_links": names} if names else {}
+def _kept(folder: Path, keep, skipped: list, prefix: str = "") -> list[Path]:
+    """A folder's entries `keep` takes, never a link; each link `keep` would
+    take is added to `skipped` (as `prefix` + its name), to be named."""
+    kept, links = members(folder)
+    skipped += [prefix + f.name for f in links if keep(f)]
+    return [f for f in kept if keep(f)]
 
 
-def _detect_hostnames_from_filenames(path: Path) -> set[str]:
+def _named(skipped: list) -> dict:
+    """`{"skipped_links": [...]}` for a preview, {} when nothing was skipped."""
+    return {"skipped_links": sorted(skipped)} if skipped else {}
+
+
+def _detect_hostnames_from_filenames(path: Path, skipped: list | None = None) -> set[str]:
     """Best-effort hostname detection from forensic CSV naming.
 
     Supports two patterns:
@@ -774,7 +780,8 @@ def _detect_hostnames_from_filenames(path: Path) -> set[str]:
     from collections import Counter
 
     exts = {".csv", ".tsv"}
-    files = [f for f in members(path) if f.suffix.lower() in exts][:50]
+    files = _kept(path, lambda f: f.suffix.lower() in exts, [] if skipped is None else skipped)
+    files = files[:50]
     if not files:
         return set()
     # Suffix pattern: tool-hostname.csv
@@ -2677,13 +2684,10 @@ def idx_ingest_json(
         if p.is_file():
             fmt = _detect_json_format(p)
             return {"status": "preview", "file": p.name, "format": fmt}
-        files = sorted(f.name for f in members(p) if f.suffix.lower() in (".json", ".jsonl"))
-        return {
-            "status": "preview",
-            "files": files,
-            "count": len(files),
-            **_skipped_links(p, lambda f: f.suffix.lower() in (".json", ".jsonl")),
-        }
+        skipped: list = []
+        files = sorted(f.name for f in _kept(p, lambda f: f.suffix.lower() in (".json", ".jsonl"),
+                                             skipped))  # fmt: skip
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background("json", path, hostname, index_suffix, time_field)
 
@@ -2725,15 +2729,17 @@ def idx_ingest_delimited(
         p = Path(path)
         if not p.is_dir():
             return {"error": "hostname='auto' requires a directory path"}
-        detected = _detect_hostnames_from_filenames(p)
+        skipped: list = []
+        detected = _detect_hostnames_from_filenames(p, skipped)
         if not detected:
-            return {"error": "Could not auto-detect hostnames from filenames."}
+            return {"error": "Could not auto-detect hostnames from filenames.", **_named(skipped)}
         if dry_run:
             return {
                 "status": "preview",
                 "auto_detect": True,
                 "detected_hostnames": sorted(detected),
                 "total_hosts": len(detected),
+                **_named(skipped),
             }
         # Single background process iterates all detected hosts sequentially
         return _launch_background(
@@ -2751,14 +2757,17 @@ def idx_ingest_delimited(
         p = Path(path)
         if not p.is_dir():
             return {"error": "recursive requires a directory path"}
-        subdirs = sorted(d for d in members(p) if d.is_dir() and not d.name.startswith("."))
+        skipped: list = []
+        subdirs = sorted(d for d in _kept(p, lambda d: d.is_dir(), skipped)
+                         if not d.name.startswith("."))  # fmt: skip
         if not subdirs:
-            return {"error": f"No subdirectories found in {path}"}
+            return {"error": f"No subdirectories found in {path}", **_named(skipped)}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         if dry_run:
             hosts_preview = []
             for d in subdirs:
-                files = [f.name for f in members(d) if f.suffix.lower() in exts]
+                files = [f.name for f in _kept(d, lambda f: f.suffix.lower() in exts, skipped,
+                                               f"{d.name}/")]  # fmt: skip
                 if files:
                     hosts_preview.append(
                         {
@@ -2771,7 +2780,7 @@ def idx_ingest_delimited(
                 "recursive": True,
                 "hosts": hosts_preview,
                 "total_hosts": len(hosts_preview),
-                **_skipped_links(p, lambda d: d.is_dir()),
+                **_named(skipped),
             }
         # Single background process iterates all hosts sequentially
         return _launch_background(
@@ -2813,13 +2822,9 @@ def idx_ingest_delimited(
             fmt = _detect_delimited_format(p)
             return {"status": "preview", "file": p.name, "format": fmt.get("format")}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
-        files = sorted(f.name for f in members(p) if f.suffix.lower() in exts)
-        return {
-            "status": "preview",
-            "files": files,
-            "count": len(files),
-            **_skipped_links(p, lambda f: f.suffix.lower() in exts),
-        }
+        skipped: list = []
+        files = sorted(f.name for f in _kept(p, lambda f: f.suffix.lower() in exts, skipped))
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background(
         "delimited",
@@ -2854,19 +2859,16 @@ def idx_ingest_accesslog(
         p = Path(path)
         if p.is_file():
             return {"status": "preview", "file": p.name}
+        skipped: list = []
         files = sorted(
             f.name
-            for f in members(p)
-            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+            for f in _kept(
+                p,
+                lambda f: f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower(),
+                skipped,
+            )
         )
-        return {
-            "status": "preview",
-            "files": files,
-            "count": len(files),
-            **_skipped_links(
-                p, lambda f: f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
-            ),
-        }
+        return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
     return _launch_background("accesslog", path, hostname, index_suffix)
 
