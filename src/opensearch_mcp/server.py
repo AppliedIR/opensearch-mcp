@@ -1748,8 +1748,17 @@ def idx_install_pipelines() -> dict:
     return result
 
 
+def _cat_doc_count(row: dict) -> int | None:
+    """A `_cat/indices` row's document count, or None when it has none: a red
+    index's docs.count is null."""
+    try:
+        return int(row.get("docs.count", 0))
+    except (TypeError, ValueError):
+        return None
+
+
 def _failed_artifact_warnings(
-    cid: str, docs_by_index: dict[str, int], host_docs=None
+    cid: str, docs_by_index: dict[str, int | None], host_docs=None
 ) -> list[str]:
     """One warning per (host, artifact) whose most recent ingest failed and left
     an index: it may hold only part of the artifact. Read from the case audit
@@ -1808,7 +1817,12 @@ def _failed_artifact_warnings(
         if rs.startswith("FAILED") and index in docs_by_index:
             # a shared index holds every host's records: count this host's
             n = host_docs(index, host) if host_docs and index.endswith("-0") else None
-            docs = f"{docs_by_index[index]:,} docs" if n is None else f"{n:,} docs from {host}"
+            if n is not None:
+                docs = f"{n:,} docs from {host}"
+            elif docs_by_index[index] is not None:
+                docs = f"{docs_by_index[index]:,} docs"
+            else:  # a red index: its count is unknown
+                docs = "document count unknown"
             warnings.append(
                 f"{index} ({docs}) may be incomplete: the most"
                 f" recent ingest of {tool} on {host} failed ({rs[:200]})"
@@ -1960,6 +1974,10 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         gap["indices"].update(numbers["failed_indices"])
         gap["unavailable"] |= bool(numbers["shards"].get("unavailable"))
         gap["timed_out"] |= numbers["timed_out"]
+        say(what)
+
+    def say(what: str) -> None:  # the part's one warning, from all its gaps so far
+        gap = gaps[what]
         # names only, no numbers: each tool's own reply has the counts
         names = sorted(gap["indices"])
         clauses = ["partial"]
@@ -2022,7 +2040,13 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     total_docs = 0
     for idx in indices:
         name = idx["index"]
-        docs = int(idx.get("docs.count", 0))
+        docs = _cat_doc_count(idx)
+        if docs is None:  # unknown, not 0: named, and the counts are lower bounds
+            gap = gaps.setdefault("Document counts", {"indices": set(), "unavailable": False,
+                                                      "timed_out": False})  # fmt: skip
+            gap["indices"].add(name)
+            say("Document counts")
+            continue
         total_docs += docs
         atype = _artifact_type(name, scope)
         if atype not in artifacts:
@@ -2169,7 +2193,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
             f"{len(unclaimed)} case indices belong to no case directory on this machine, "
             "so no case reads them: " + ", ".join(unclaimed[:10])
         )
-    docs_by_index = {i["index"]: int(i.get("docs.count", 0)) for i in indices}
+    docs_by_index = {i["index"]: _cat_doc_count(i) for i in indices}
     try:
 
         def host_docs(index, host):
