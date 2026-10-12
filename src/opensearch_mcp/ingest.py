@@ -687,6 +687,7 @@ def _ingest_hosts(
     # earlier. Tracked only for an index more than one file fills.
     shared = _indices_filled_by_several_files(hosts, active_names)
     id_seen: dict[str, dict] = {}
+    stale_checked: set[str] = set()  # indices whose EZ date mapping this run checked
     for host_idx, host in enumerate(hosts):
         ctx = wc.host_context(case_dir, case_id, host, run_id)
         wc.set_current(ctx)
@@ -1007,6 +1008,24 @@ def _ingest_hosts(
                     f"the first ingest that wrote them; a search for {loser} won't find them"
                     for (loser, earlier), n in sorted(collided.items())
                 ]
+                # once per index the run targets, whether or not it stored a record
+                if index_name not in stale_checked:
+                    stale_checked.add(index_name)
+                    from opensearch_mcp.mappings import stale_date_fields
+
+                    why: list = []
+                    stale = stale_date_fields(client, index_name, why)
+                    if stale is None:  # never read as "made from this template"
+                        replaced.append(f"couldn't check {index_name}'s date mapping: {why[0]}")
+                    elif stale:
+                        example = TOOLS[tool_name].time_field
+                        example = example if example in stale else stale[0]
+                        replaced.append(
+                            f"{index_name} was made before 0.6.5, so its EZ date fields "
+                            f"(e.g. {example}) aren't read as dates: date-range queries and "
+                            f"timelines on them miss its records. Fix: delete the index and "
+                            f"re-ingest, then re-run idx_enrich_triage/intel"
+                        )
                 ar.indexed = cnt
                 ar.not_read = unread
                 ar.skipped = sk
