@@ -7,6 +7,7 @@ Gateway-independent: registry persistence R1-R17 via update_by_query.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 
@@ -175,6 +176,7 @@ def enrich_remote(
             on_progress=on_progress,
             flags_only=(name == "tasks"),
             hash_field="SHA1.keyword" if name == "amcache" else None,
+            command_line=(name == "tasks"),
         )
 
     # Service enrichment (check_service): name plus executable, each doc's own pair
@@ -289,11 +291,15 @@ def _enrich_file_artifact(
     on_progress=None,
     flags_only: bool = False,
     hash_field: str | None = None,
+    command_line: bool = False,
 ) -> dict:
     """Enrich file-based artifacts in batch via check_file.
 
     hash_field (Amcache's SHA1): check_file runs once per path and hash, so
-    each hash gets its own answer; a missing or empty hash is one more value."""
+    each hash gets its own answer; a missing or empty hash is one more value.
+    command_line (a task's command): check_file gets the executable it starts
+    and the command itself as before; `checked` counts the values sent and
+    `not_checked` those that name no executable."""
     paths_agg: dict = {"terms": {"field": path_field, "size": 5000}}
     if hash_field:
         paths_agg["aggs"] = {
@@ -336,6 +342,10 @@ def _enrich_file_artifact(
     verdicts: dict = {}
     consecutive_failures = 0
     succeeded = False
+    counts = {"checked": len(buckets)}
+    if command_line:  # the values with something to send, and those with none
+        sendable = sum(1 for b in buckets if _sends(b["key"], raw=_heads_sent(b["key"])))
+        counts = {"checked": sendable, "not_checked": len(buckets) - sendable}
     for bucket in buckets:
         if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
             print(
@@ -345,8 +355,16 @@ def _enrich_file_artifact(
             )
             break
         path = bucket["key"]
+        if command_line:  # its executable, and the command as it was sent before
+            sends = _sends(path, raw=_heads_sent(path))
+            state = {"failures": consecutive_failures, "ok": succeeded}
+            answer = _ask_all(sends, state)
+            consecutive_failures, succeeded = state["failures"], state["ok"]
+            if answer:
+                verdicts[path] = answer
+            continue
         # Skip non-path entries (AppX metadata, hex strings, empty)
-        if not path or not (path[0] in ("\\", "/") or (len(path) > 1 and path[1] == ":")):
+        if not _heads_sent(path):
             continue
         hashes = bucket.get("hashes", {}).get("buckets") if hash_field else None
         if hash_field:  # a path's hashes past the first 100 aren't read
@@ -385,9 +403,7 @@ def _enrich_file_artifact(
 
     if not verdicts:
         return _hashes_unread(
-            _loop_result(
-                consecutive_failures, succeeded, 0, unchecked, checked=len(buckets), enriched=0
-            ),
+            _loop_result(consecutive_failures, succeeded, 0, unchecked, **counts, enriched=0),
             hashes_unread,
         )
 
@@ -404,7 +420,7 @@ def _enrich_file_artifact(
         on_progress(
             "triage_done",
             artifact=artifact_name,
-            checked=len(buckets),
+            checked=counts["checked"],
             enriched=enriched,
         )
 
@@ -414,7 +430,7 @@ def _enrich_file_artifact(
             succeeded,
             write_failures,
             unchecked,
-            checked=len(buckets),
+            **counts,
             enriched=enriched,
         ),
         hashes_unread,
@@ -624,6 +640,78 @@ def _ubq_to_completion(client, index, body, wait=_CLEAR_WAIT, poll=1.0) -> int:
         if time.monotonic() > deadline:
             raise TimeoutError(f"still running after {wait} s (task {task})")
         time.sleep(poll)
+
+
+# What check_file can be given for a command line: the executable it starts
+_EXE_EXTS = (".exe", ".com", ".bat", ".cmd", ".scr", ".dll", ".cpl", ".msc", ".ps1",
+             ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".pif", ".msi")  # fmt: skip
+_EXE_END = re.compile("(" + "|".join(map(re.escape, _EXE_EXTS)) + r")(?=\s)", re.I)
+
+
+def _heads_sent(value: str) -> bool:
+    """A value check_file is given as it is: one starting with \\, / or X:."""
+    return bool(value) and (value[0] in "\\/" or (len(value) > 1 and value[1] == ":"))
+
+
+def _a_path(value: str) -> bool:
+    """A path windows-triage can read: rooted, on a drive, or %NAME%-led."""
+    return _heads_sent(value) or bool(re.match(r"%[^%\s]+%", value))
+
+
+def _executable_of(value: str) -> str | None:
+    """The executable a command line starts (a RunOnceEx "||cmd" or
+    "file|Function", a quoted path, or the shortest prefix ending in an
+    executable extension before a space), or None when that isn't a path."""
+    s = (value or "").strip()
+    if "|" in s:
+        s = s.lstrip("|").split("|", 1)[0].strip()
+    if s.startswith('"'):
+        s = s[1:].split('"', 1)[0]
+    elif m := _EXE_END.search(s):
+        s = s[: m.end()]
+    return s if _a_path(s) else None
+
+
+def _sends(value: str, raw: bool = True) -> list[str]:
+    """What check_file is given for a command line: its executable, and the
+    value itself when `raw` (as it was sent before, so no answer is lost)."""
+    exe = _executable_of(value)
+    return list(dict.fromkeys(([exe] if exe else []) + ([value] if raw else [])))
+
+
+_WORSE = {"SUSPICIOUS": 2, "UNKNOWN": 1}
+
+
+def _ask_all(values: list[str], state: dict) -> dict | None:
+    """check_file on each value, flags only: the worse answer (SUSPICIOUS,
+    then UNKNOWN, then the rest), with the LOLBin flag if any answer had it.
+    A raise or a reply that isn't a dict is a failed call. One lookup
+    behaves as it always has: a reply with no verdict is answered with
+    nothing to write. Two lookups are answered only when both replies carry
+    a verdict; otherwise the value fails as one failed call, and nothing is
+    written. `state` carries the loop's consecutive
+    call failures and whether any value was answered."""
+    if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
+        return None
+    replies = []
+    for value in values:
+        try:
+            reply = call_tool("check_file", {"path": value}, timeout=15)
+        except Exception:
+            reply = None
+        if not isinstance(reply, dict):
+            state["failures"] += 1
+            return None
+        replies.append(reply)
+    answers = [_flags_only(r) for r in replies if r.get("verdict")]
+    if len(answers) < len(replies) > 1:
+        state["failures"] += 1
+        return None
+    state["failures"], state["ok"] = 0, True
+    if not answers:
+        return None
+    worst = max(answers, key=lambda a: _WORSE.get(a.get("verdict"), 0))
+    return dict(worst, is_lolbin=True) if any(a.get("is_lolbin") for a in answers) else worst
 
 
 def _flags_only(result: dict) -> dict:
@@ -839,12 +927,16 @@ def _enrich_services(client, index, query, extract, artifact_name, on_progress=N
 
 
 def _enrich_registry_run_keys(client, case_ix, on_progress=None):
-    """Enrich registry Run key entries with check_file."""
+    """Enrich registry Run key entries (Run, RunOnce, RunOnceEx, RunServices,
+    RunServicesOnce) with check_file: each value, and the executable it starts.
+    A value over 256 characters has no keyword term, so the aggregation can't
+    read it: those are counted (`too_long`) and fail the step."""
     index = _index(case_ix, "registry")
     run_keys = [
-        {"wildcard": {"KeyPath.keyword": "*\\\\Run\\\\*"}},
-        {"wildcard": {"KeyPath.keyword": "*\\\\Run"}},
-    ]
+        {"wildcard": {"KeyPath.keyword": f"*\\\\{key}"}}
+        for key in ("Run\\\\*", "Run", "RunOnce", "RunOnce\\\\*", "RunOnceEx\\\\*",
+                    "RunServices", "RunServicesOnce")
+    ]  # fmt: skip
     try:
         result = client.search(
             index=index,
@@ -858,6 +950,7 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
                     }
                 },
                 "size": 0,
+                "track_total_hits": True,
                 "aggs": {"values": {"terms": {"field": "ValueData.keyword", "size": 5000}}},
             },
         )
@@ -867,28 +960,26 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
     values_agg = result.get("aggregations", {}).get("values", {})
     buckets = values_agg.get("buckets", [])
     unchecked = values_agg.get("sum_other_doc_count", 0)
+    total = (result.get("hits") or {}).get("total") or 0
+    total = total.get("value", 0) if isinstance(total, dict) else total
+    too_long = max(0, total - sum(b.get("doc_count", 0) for b in buckets) - unchecked)
     if not buckets:
-        return {"status": "empty", "checked": 0}
+        return _too_long({"status": "empty", "checked": 0}, too_long)
 
     if on_progress:
         on_progress("triage_start", artifact="registry_run", unique_values=len(buckets))
 
     enriched = 0
     write_failures = 0
-    consecutive_failures = 0
-    succeeded = False
+    state = {"failures": 0, "ok": False}
     for bucket in buckets:
-        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        if state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
             break
         value_data = bucket["key"]
         if not value_data.strip():
             continue
-        try:
-            verdict = _flags_only(call_tool("check_file", {"path": value_data}, timeout=15))
-            consecutive_failures = 0
-            succeeded = True
-            if not verdict.get("verdict"):
-                continue
+        verdict = _ask_all(_sends(value_data), state)
+        if verdict:
             reasons = verdict.get("reasons", [])
             script_lines = [
                 "ctx._source['triage.verdict'] = params.verdict",
@@ -931,8 +1022,6 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
                     f"  WARNING: update_by_query failed for Run key: {e}",
                     file=sys.stderr,
                 )
-        except Exception:
-            consecutive_failures += 1
 
     if on_progress:
         on_progress(
@@ -941,14 +1030,26 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
             checked=len(buckets),
             enriched=enriched,
         )
-    return _loop_result(
-        consecutive_failures,
-        succeeded,
-        write_failures,
-        unchecked,
-        checked=len(buckets),
-        enriched=enriched,
+    return _too_long(
+        _loop_result(
+            state["failures"],
+            state["ok"],
+            write_failures,
+            unchecked,
+            checked=len(buckets),
+            enriched=enriched,
+        ),  # fmt: skip
+        too_long,
     )
+
+
+def _too_long(result: dict, n: int) -> dict:
+    """A result that also says how many Run-key values were too long to read."""
+    if not n:
+        return result
+    why = f"{n} Run-key values are over 256 characters and were not checked"
+    reason = f"{result['reason']}; {why}" if result.get("reason") else why
+    return {**result, "status": "failed", "reason": reason, "too_long": n}
 
 
 # ---------------------------------------------------------------------------
@@ -994,22 +1095,20 @@ def _enrich_registry_check_file(
 
     enriched = 0
     write_failures = 0
-    consecutive_failures = 0
-    succeeded = False
+    state = {"failures": 0, "ok": False}
     for bucket in buckets:
-        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        if state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
             break
         value = bucket["key"]
         if not value.strip():
             continue
         if dll_filter and not value.lower().endswith(".dll"):
             continue
+        # a StubPath is a command line: its executable too; a NetSh value is the DLL
+        verdict = _ask_all([value] if dll_filter else _sends(value), state)
+        if not verdict:
+            continue
         try:
-            verdict = _flags_only(call_tool("check_file", {"path": value}, timeout=15))
-            consecutive_failures = 0
-            succeeded = True
-            if not verdict.get("verdict"):
-                continue
             reasons = verdict.get("reasons", [])
             script_lines = [
                 "ctx._source['triage.verdict'] = params.verdict",
@@ -1042,8 +1141,6 @@ def _enrich_registry_check_file(
             enriched += resp.get("updated", 0)
         except _WriteFailed:
             write_failures += 1
-        except Exception:
-            consecutive_failures += 1
 
     if on_progress:
         on_progress(
@@ -1053,8 +1150,8 @@ def _enrich_registry_check_file(
             enriched=enriched,
         )
     return _loop_result(
-        consecutive_failures,
-        succeeded,
+        state["failures"],
+        state["ok"],
         write_failures,
         unchecked,
         checked=len(buckets),
