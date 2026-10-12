@@ -372,16 +372,23 @@ def files(monkeypatch, tmp_path):
     [
         ("ssh_template.json", "garbled", "json", None),
         ("ssh_template.json", "missing", "json", None),
+        ("ssh_template.json", "unreadable", "json", None),
+        ("ssh_template.json", "null-template", "json", None),
+        ("json_template.json", "unreadable", "json",
+         "vhir-json is not installed (json_template.json couldn't be loaded: [Errno 13]"),
+        ("json_template.json", "null-template", "json",
+         "vhir-json is not installed (json_template.json couldn't be loaded: "),
         ("ssh_template.json", "garbled", "ssh",
-         "vhir-ssh is not installed (ssh_template.json doesn't parse: Expecting value"),
+         "vhir-ssh is not installed (ssh_template.json couldn't be loaded: Expecting value"),
         ("json_template.json", "garbled",  "json",
-         "vhir-json is not installed (json_template.json doesn't parse: Expecting value"),
+         "vhir-json is not installed (json_template.json couldn't be loaded: Expecting value"),
         ("json_template.json", "missing", "json",
          "vhir-json is not installed (its file json_template.json is missing)"),
         ("srum_template.json", "missing", "srum",
          "vhir-srum is not installed (its file srum_template.json is missing)"),
     ],
-    ids=["other-garbled", "other-missing", "own-garbled-ssh", "own-garbled", "own-missing",
+    ids=["other-garbled", "other-missing", "other-unreadable", "other-null-template",
+         "own-unreadable", "own-null-template", "own-garbled-ssh", "own-garbled", "own-missing",
          "own-missing-where-another-template-also-matches"],
 )  # fmt: skip
 def test_a_broken_template_file_refuses_its_own_indices_only(
@@ -389,6 +396,10 @@ def test_a_broken_template_file_refuses_its_own_indices_only(
 ):
     if how == "missing":
         (files / broken).unlink()
+    elif how == "unreadable":
+        (files / broken).chmod(0)
+    elif how == "null-template":
+        (files / broken).write_text('{"index_patterns": ["case-*-x-*"], "template": null}')
     else:
         (files / broken).write_text("not json {")
     client = Client()
@@ -396,6 +407,8 @@ def test_a_broken_template_file_refuses_its_own_indices_only(
         with contextlib.redirect_stderr(io.StringIO()):
             index = write(client, artifact_type)
         assert client.named("_bulk") == [index]
+        own = mp.template_for(index)  # and its own template was installed
+        assert own in client.named("indices.put_index_template") and own in client.templates
         return
     said, _ = _refused_write(client, artifact_type)
     assert f"index template {refused}" in said

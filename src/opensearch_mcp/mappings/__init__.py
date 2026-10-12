@@ -306,25 +306,23 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
     }
     loaded: list[Any] = []
     for tpl_name, filename in _TEMPLATES_REGISTRY:
-        path = _MAPPINGS_DIR / filename
-        if not path.exists():
-            results["skipped"].append(tpl_name)
-            continue
+        # one template's whole load and install: whatever goes wrong is that
+        # template's failure, and the others are still installed
+        loading = True
         try:
+            path = _MAPPINGS_DIR / filename
+            if not path.exists():
+                results["skipped"].append(tpl_name)
+                continue
             body = with_host_key_fields(_load_json(path))
-        except ValueError as e:  # the file doesn't parse
-            logger.warning("install_all_templates: %s doesn't parse: %s", filename, e)
-            results["failed"].append(
-                {"template": tpl_name, "error": f"{filename} doesn't parse: {e}"}
-            )
-            continue
-        try:
+            loading = False
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
         except Exception as e:
-            logger.warning("install_all_templates: %s failed: %s", tpl_name, e)
-            results["failed"].append({"template": tpl_name, "error": str(e)})
+            why = f"{filename} couldn't be loaded: {e}" if loading else str(e)
+            logger.warning("install_all_templates: %s failed: %s", tpl_name, why)
+            results["failed"].append({"template": tpl_name, "error": why})
     try:
         patterns = _composing_index_patterns(loaded)
         results["patched_indices"] = patch_flattened_indices(client, patterns)
