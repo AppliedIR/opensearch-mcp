@@ -9,7 +9,8 @@ the tool read. Both routes case-fold it, as Windows paths are
 case-insensitive. A row whose SourceFile names no such folder (none, a profile
 discovery skips, or more than one `Users` folder, so the scan's is unknown)
 can't be given it: those rows are counted and named, because the same profile
-ingested by scan as well would be stored twice.
+ingested by scan as well would be stored twice, and identical rows from
+different profiles are stored as one.
 
 The routes are real: `tools.run_and_ingest` with the EZ stand-in, and
 `ingest_cli.cmd_csv`; OpenSearch is the record-id stand-in.
@@ -162,8 +163,9 @@ NO_SCAN_ID = {  # (tool, the row that can't, a row that can)
 
 def twice(n, tool):
     return (
-        f"{n} rows of {tool} couldn't be given the scan route's id; if the same profile is "
-        "also ingested by scan, they're stored twice"
+        f"{n} rows of {tool} couldn't be given a per-profile id: if the same profile is also "
+        "ingested by scan they're stored twice, and identical rows from different profiles are "
+        "stored as one"
     )
 
 

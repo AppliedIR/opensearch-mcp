@@ -2010,8 +2010,9 @@ def cmd_csv(args: argparse.Namespace) -> None:
 
     outcome = f"{count} indexed, {sk} skipped, {bf} bulk failed"
     twice = (
-        f"{no_scan_id[0]} rows of {tool_name} couldn't be given the scan route's id; if the "
-        "same profile is also ingested by scan, they're stored twice"
+        f"{no_scan_id[0]} rows of {tool_name} couldn't be given a per-profile id: if the same "
+        "profile is also ingested by scan they're stored twice, and identical rows from "
+        "different profiles are stored as one"
     )
     _file_outcome(audit, aid, entry, f"{outcome}; {twice}" if no_scan_id[0] else outcome, csv_path)
     print(
