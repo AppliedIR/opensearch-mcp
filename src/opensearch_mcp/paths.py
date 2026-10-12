@@ -36,6 +36,11 @@ def members(folder) -> list[Path]:
     return [p for p in Path(folder).iterdir() if not p.is_symlink()]
 
 
+def linked(folder) -> list[Path]:
+    """The links in a folder: what `members` leaves out, to be named."""
+    return [p for p in Path(folder).iterdir() if p.is_symlink()]
+
+
 def resolve_case_insensitive(base: Path, rel_path: str) -> Path | None:
     """Resolve a relative path case-insensitively under base.
 

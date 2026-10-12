@@ -268,7 +268,7 @@ def test_auto_host_detection_counts_no_linked_file(env, linked_hosts):
 
 def test_previews_list_no_linked_file(env, linked_hosts):
     flat = srv.idx_ingest_delimited(path=str(linked_hosts), hostname="h1", dry_run=True)
-    assert "a-host02.csv" not in str(flat) and "events-host01.csv" in str(flat), flat
+    assert flat["files"] == ["events-host01.csv"], flat
     (linked_hosts / "j.json").write_text("{}\n")
     os.symlink(linked_hosts / "a-host02.csv", linked_hosts / "k.json")
     js = srv.idx_ingest_json(path=str(linked_hosts), hostname="h1", dry_run=True)
@@ -279,3 +279,56 @@ def test_previews_list_no_linked_file(env, linked_hosts):
     os.symlink(linked_hosts.parent.parent / "elsewhere", walk / "host2")
     rec = srv.idx_ingest_delimited(path=str(walk), hostname="", recursive=True, dry_run=True)
     assert [h["hostname"] for h in rec["hosts"]] == ["host1"], rec
+
+
+# --- a skipped link is named, never dropped silently ----------------------------
+
+
+def _with_links(tmp_path, regular=("a.json",), linked=("l1.json", "l2.json")):
+    folder = tmp_path / "evidence" / "lj"
+    outside = tmp_path / "elsewhere-j"
+    folder.mkdir(parents=True)
+    outside.mkdir()
+    for n in regular:
+        (folder / n).write_text("{}\n")
+    for n in linked:
+        (outside / n).write_text('{"Computer": "HIDDEN"}\n')
+        os.symlink(outside / n, folder / n)
+    return folder
+
+
+@pytest.mark.parametrize("regular", [("a.json",), ()], ids=["mixed", "links only"])
+def test_a_json_preview_names_the_links_it_skips(env, tmp_path, regular):
+    folder = _with_links(tmp_path, regular)
+    preview = srv.idx_ingest_json(path=str(folder), hostname="h1", dry_run=True)
+    assert preview["files"] == list(regular), preview
+    assert preview.get("skipped_links") == ["l1.json", "l2.json"], preview
+
+
+def test_a_delimited_and_an_accesslog_preview_name_the_links_they_skip(env, linked_hosts):
+    flat = srv.idx_ingest_delimited(path=str(linked_hosts), hostname="h1", dry_run=True)
+    assert flat.get("skipped_links") == ["a-host02.csv", "b-host02.csv", "c-host02.csv"], flat
+    os.symlink(linked_hosts / "a-host02.csv", linked_hosts / "access.log")
+    log = srv.idx_ingest_accesslog(path=str(linked_hosts), hostname="w", dry_run=True)
+    assert log.get("skipped_links") == ["access.log"], log
+
+
+@pytest.mark.parametrize("regular", [("a.json",), ()], ids=["mixed", "links only"])
+def test_the_worker_names_the_links_it_skips_in_its_output_and_status(
+    worker, tmp_path, monkeypatch, capsys, regular
+):
+    folder = _with_links(tmp_path, regular)
+    written = []
+    monkeypatch.setattr(cli, "write_status", lambda *a, **k: written.append(k or a))
+    monkeypatch.setattr(cli, "_linked_skipped", [], raising=False)
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-l")
+    args = argparse.Namespace(path=str(folder), case=None, hostname="h1")
+    assert worker.run(cli.cmd_ingest_json, args)["files"] == list(regular)
+    out = capsys.readouterr()
+    said = out.out + out.err
+    assert "Skipped 2 linked file(s)" in said and "l1.json, l2.json" in said, said
+    if not regular:  # not "no .json files": there are two, and they are links
+        assert "No .json/.jsonl/.ndjson files directly under" not in said, said
+    (status,) = [w for w in written if isinstance(w, dict)]
+    note = status["hosts"][0]["artifacts"][0].get("note", "")
+    assert "2 linked file(s) or folder(s) skipped" in note and "l1.json" in note, note

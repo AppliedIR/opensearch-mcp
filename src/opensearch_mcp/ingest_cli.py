@@ -28,6 +28,7 @@ from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import (
     NO_TIME_FIELD,
     TIME_NOT_UNDERSTOOD,
+    linked,
     members,
     no_time_field_note,
     vhir_dir,
@@ -105,13 +106,32 @@ def _gate_walk(case_id: str, leaves: list[tuple], run_id: str = "") -> None:
     _gated.units = set(units) | set(getattr(_gated, "units", ()))
 
 
+# Every link a folder listing skipped in this run, by path: said once each as
+# it is skipped, and named in the run's status
+_linked_skipped: list[str] = []
+
+
+def _listed(folder: Path, keep) -> list[Path]:
+    """`folder`'s entries a folder ingest reads: `keep(entry)`, and not a link
+    (the gate's walk skips links). A link `keep` would take is skipped and
+    named, never dropped silently."""
+    skipped = sorted(str(p) for p in linked(folder) if keep(p) and str(p) not in _linked_skipped)
+    if skipped:
+        _linked_skipped.extend(skipped)
+        print(
+            f"Skipped {len(skipped)} linked file(s) in {folder}: a link isn't followed, "
+            f"as the case's evidence walk skips it: {', '.join(Path(p).name for p in skipped)}"
+        )
+    return [p for p in members(folder) if keep(p)]
+
+
 def _delim_files(input_path: Path, only_files=None) -> list:
     """The files a delimited ingest of `input_path` reads."""
     exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
     files = (
         [input_path]
         if input_path.is_file()
-        else sorted(f for f in members(input_path) if f.suffix.lower() in exts)
+        else sorted(_listed(input_path, lambda f: f.suffix.lower() in exts))
     )
     if only_files is not None:  # an auto-hosts sub-run: this host's files only
         files = [f for f in files if f in only_files]
@@ -438,6 +458,12 @@ def _write_bg_status(
     notes.append(second_copy_note(hostname))
     notes.append(removed_note(hostname))
     notes.append(note)  # appended, never replacing a note already there
+    if _linked_skipped:
+        shown = ", ".join(_linked_skipped[:10]) + (", …" if len(_linked_skipped) > 10 else "")
+        notes.append(
+            f"{len(_linked_skipped)} linked file(s) or folder(s) skipped: a link "
+            f"isn't followed, as the case's evidence walk skips it ({shown})"
+        )
     if any(notes):
         art["note"] = "; ".join(n for n in notes if n)
     if error:
@@ -2074,7 +2100,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         [input_path]
         if input_path.is_file()
         else sorted(
-            f for f in members(input_path) if f.suffix.lower() in (".json", ".jsonl", ".ndjson")
+            _listed(input_path, lambda f: f.suffix.lower() in (".json", ".jsonl", ".ndjson"))
         )
     )
 
@@ -2086,7 +2112,7 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
     # `datastore/clients/C.*/collections/F.*/` returns zero matches
     # when pointed at `datastore/`. Operator sees the reason without
     # having to re-read the docstring.
-    if input_path.is_dir() and not files:
+    if input_path.is_dir() and not files and not linked(input_path):
         subdirs = [d for d in input_path.iterdir() if d.is_dir()]
         total_entries = len(list(input_path.iterdir()))
         print(
@@ -2272,9 +2298,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # its hosts from its subdirectories instead.)
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         flat = (
-            []
-            if is_recursive
-            else sorted(f for f in members(input_path) if f.suffix.lower() in exts)
+            [] if is_recursive else sorted(_listed(input_path, lambda f: f.suffix.lower() in exts))
         )
         wanted = {h.lower() for h in auto_hosts}
         unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
@@ -2343,7 +2367,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         subdirs = sorted(
             d
-            for d in members(input_path)
+            for d in _listed(input_path, lambda d: d.is_dir())
             if d.is_dir()
             and not d.name.startswith(".")
             and any(f.suffix.lower() in exts for f in members(d) if f.is_file())
@@ -2677,8 +2701,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         if input_path.is_file()
         else sorted(
             f
-            for f in members(input_path)
-            if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+            for f in _listed(
+                input_path,
+                lambda f: f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower(),
+            )
         )
     )
 

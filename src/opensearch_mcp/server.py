@@ -21,7 +21,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
-from opensearch_mcp.paths import members
+from opensearch_mcp.paths import linked, members
 
 logger = logging.getLogger(__name__)
 
@@ -753,6 +753,13 @@ def _detect_preparsed_csvs(path: Path) -> str | None:
             "idx_ingest_delimited(path=..., hostname=...)."
         )
     return " ".join(parts) if parts else None
+
+
+def _skipped_links(folder: Path, keep) -> dict:
+    """`{"skipped_links": [names]}` for the links in a folder a preview's
+    filter would take, which the ingest skips; {} when there are none."""
+    names = sorted(f.name for f in linked(folder) if keep(f))
+    return {"skipped_links": names} if names else {}
 
 
 def _detect_hostnames_from_filenames(path: Path) -> set[str]:
@@ -2671,7 +2678,12 @@ def idx_ingest_json(
             fmt = _detect_json_format(p)
             return {"status": "preview", "file": p.name, "format": fmt}
         files = sorted(f.name for f in members(p) if f.suffix.lower() in (".json", ".jsonl"))
-        return {"status": "preview", "files": files, "count": len(files)}
+        return {
+            "status": "preview",
+            "files": files,
+            "count": len(files),
+            **_skipped_links(p, lambda f: f.suffix.lower() in (".json", ".jsonl")),
+        }
 
     return _launch_background("json", path, hostname, index_suffix, time_field)
 
@@ -2759,6 +2771,7 @@ def idx_ingest_delimited(
                 "recursive": True,
                 "hosts": hosts_preview,
                 "total_hosts": len(hosts_preview),
+                **_skipped_links(p, lambda d: d.is_dir()),
             }
         # Single background process iterates all hosts sequentially
         return _launch_background(
@@ -2801,7 +2814,12 @@ def idx_ingest_delimited(
             return {"status": "preview", "file": p.name, "format": fmt.get("format")}
         exts = {".csv", ".tsv", ".log", ".txt", ".dat"}
         files = sorted(f.name for f in members(p) if f.suffix.lower() in exts)
-        return {"status": "preview", "files": files, "count": len(files)}
+        return {
+            "status": "preview",
+            "files": files,
+            "count": len(files),
+            **_skipped_links(p, lambda f: f.suffix.lower() in exts),
+        }
 
     return _launch_background(
         "delimited",
@@ -2841,7 +2859,14 @@ def idx_ingest_accesslog(
             for f in members(p)
             if f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
         )
-        return {"status": "preview", "files": files, "count": len(files)}
+        return {
+            "status": "preview",
+            "files": files,
+            "count": len(files),
+            **_skipped_links(
+                p, lambda f: f.suffix.lower() in (".log", ".txt") or "access" in f.name.lower()
+            ),
+        }
 
     return _launch_background("accesslog", path, hostname, index_suffix)
 
