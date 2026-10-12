@@ -917,37 +917,15 @@ def _repair(reason: str, case: str) -> str:
     return f"; {field} is text there: aggregate on a keyword form of {field} if the index has one"
 
 
-def _merged_shards(replies: list[dict]) -> dict:
-    """Several replies of one part as one: every failure (each index named
-    once by _shard_gap), and the largest counts, since the replies read the
-    same shards."""
-    shards = [r.get("_shards") or {} for r in replies]
-    total = max(int(s.get("total") or 0) for s in shards)
-    failed = max(int(s.get("failed") or 0) for s in shards)
-    lost = max(
-        max(0, int(s.get("total") or 0) - int(s.get("successful", s.get("total")) or 0)
-            - int(s.get("failed") or 0))
-        for s in shards
-    )  # fmt: skip
-    return {
-        "timed_out": any(r.get("timed_out") for r in replies),
-        "_shards": {"total": total, "failed": failed, "successful": max(0, total - failed - lost),
-                    "failures": [f for s in shards for f in s.get("failures") or []]},
-    }  # fmt: skip
-
-
-def _shard_gap(result: dict, case: str = "") -> dict:
-    """{} when every shard answered in time (a skipped shard answered: it
-    can't match). Otherwise `partial: true`, the shard counts, the indices
-    that failed, and a warning naming each with its reason and what repairs
-    it: an answer from only some shards is a lower bound."""
+def _gap_parts(result: dict, case: str = "") -> tuple[list[str], dict]:
+    """What a reply's shards didn't answer, as clauses with this reply's own
+    counts (none when every shard answered in time: a skipped shard answered,
+    it can't match), and its shard numbers."""
     shards = result.get("_shards") or {}
     total, failed = int(shards.get("total") or 0), int(shards.get("failed") or 0)
     # a red index's shards are neither successful nor failed, with no failures entry
     lost = max(0, total - int(shards.get("successful", total) or 0) - failed)
     timed_out = bool(result.get("timed_out"))
-    if not (failed or lost or timed_out):
-        return {}
     names, why = [], []
     for f in shards.get("failures") or []:  # grouped: one per index and reason
         index = str(f.get("index", "?"))
@@ -965,11 +943,21 @@ def _shard_gap(result: dict, case: str = "") -> dict:
         parts.append(f"{lost} of {total} shard(s) unavailable")
     if timed_out:
         parts.append("the search timed out")
+    numbers = {"total": total, "failed": failed, **({"unavailable": lost} if lost else {})}
+    return parts, {"shards": numbers, "failed_indices": names, "timed_out": timed_out}
+
+
+def _shard_gap(result: dict, case: str = "") -> dict:
+    """{} when every shard answered in time. Otherwise `partial: true`, the
+    shard counts, the indices that failed, and a warning naming each with its
+    reason and what repairs it: an answer from only some shards is a lower
+    bound."""
+    parts, numbers = _gap_parts(result, case)
+    if not parts:
+        return {}
     return {
         "partial": True,
-        "shards": {"total": total, "failed": failed, **({"unavailable": lost} if lost else {})},
-        "failed_indices": names,
-        "timed_out": timed_out,
+        **numbers,
         "partial_warning": f"Incomplete answer: {'; '.join(parts)}. {_PARTIAL_LOW}",
     }
 
@@ -1958,17 +1946,23 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     index_hosts: dict = {}
     ingested: dict = {}  # which ingests the summarised records came from
 
-    replies: dict[str, list] = {}  # part -> its replies, for one warning per part
+    said: dict[str, list] = {}  # part -> what its replies didn't answer, each with its counts
 
     def shard_gap(what: str, result: dict) -> None:  # a part only some shards answered
-        replies.setdefault(what, []).append(result)
-        gap = _shard_gap(_merged_shards(replies[what]), cid)
-        if not gap:
+        new = [c for c in _gap_parts(result, cid)[0] if c not in said.get(what, [])]
+        if not new:
             return
-        text = gap["partial_warning"]
+        clauses = said.setdefault(what, [])
+        clauses += new  # each reply's own numbers: never added across replies
+        shown = "; ".join(clauses[:5]) + (
+            f"; and {len(clauses) - 5} more" if len(clauses) > 5 else ""
+        )
+        low = _PARTIAL_LOW
         if what == "Time range":  # a partial min/max is narrower, not lower
-            text = text.replace(_PARTIAL_LOW, "The earliest and latest cover only the shards "
-                                "that answered and may be narrower.")  # fmt: skip
+            low = (
+                "The earliest and latest cover only the shards that answered and may be narrower."
+            )
+        text = f"Incomplete answer: {shown}. {low}"
         resp["partial"] = True
         warnings = resp.setdefault("warnings", [])
         mine = [i for i, w in enumerate(warnings) if w.startswith(f"{what}: ")]

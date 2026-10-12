@@ -232,6 +232,8 @@ def test_the_case_summary_says_which_parts_are_partial(run, monkeypatch):
     assert reply["partial"] is True
     parts = sorted(w.split(":")[0] for w in reply["warnings"])
     assert parts == ["Host detection", "Intel stats", "Time range", "Triage stats"]
+    # the intel part's four counts fail alike: said once
+    assert all(w.count(EVTX) == 1 for w in reply["warnings"])
     (time_range,) = [w for w in reply["warnings"] if w.startswith("Time range")]
     assert "may be narrower" in time_range and "lower bound" not in time_range
     assert sorted(reply["hosts"]) == ["WKS1"] and reply["total_docs"] == 3
@@ -322,3 +324,24 @@ def test_two_failing_indices_in_one_summary_part_are_both_named(run, monkeypatch
     (triage,) = [w for w in reply["warnings"] if w.startswith("Triage stats")]
     assert EVTX in triage and SHIM in triage
     assert "first failure" in triage and "second failure" in triage
+
+
+def test_each_reply_of_a_summary_part_keeps_its_own_numbers(run, monkeypatch):
+    """No arithmetic across replies: (3 shards, 1 failed, 2 unavailable) and
+    (3 shards, 1 failed) are each said with their own numbers."""
+    from opensearch_mcp import case_scope
+
+    monkeypatch.setattr(case_scope, "case_read_scope", lambda *a, **k: "case-acac00000001-*")
+    first = {"total": 3, "successful": 0, "skipped": 0, "failed": 1,
+             "failures": failures(EVTX, "first failure")}  # fmt: skip
+    second = {"total": 3, "successful": 2, "skipped": 0, "failed": 1,
+              "failures": failures(SHIM, "second failure")}  # fmt: skip
+    cluster = Cluster(WHOLE, buckets=[("WKS1", 3)], indices=[EVTX, DELIM, SHIM],
+                      counts={"triage.checked": 1, "triage.verdict": 1},
+                      count_shards={"triage.checked": first,
+                                    "triage.verdict": second})  # fmt: skip
+    reply = run(cluster, "idx_case_summary", case="acme")
+    (triage,) = [w for w in reply["warnings"] if w.startswith("Triage stats")]
+    assert f"1 of 3 shard(s) failed in {EVTX}: first failure" in triage
+    assert "2 of 3 shard(s) unavailable" in triage
+    assert f"1 of 3 shard(s) failed in {SHIM}: second failure" in triage
