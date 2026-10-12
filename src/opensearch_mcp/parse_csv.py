@@ -253,8 +253,9 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = old_rid = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
-            # the profile path the run read is in the id (a row's own, when given per row)
-            src = id_source(row) if callable(id_source) else id_source
+            # the profile path the run read is in the id (a row's own, when given
+            # per row), case-folded: Windows paths are case-insensitive
+            src = (id_source(row) if callable(id_source) else id_source).lower()
             if src:
                 _id = _doc_id(
                     index_name,

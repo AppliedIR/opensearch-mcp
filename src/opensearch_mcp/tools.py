@@ -330,15 +330,16 @@ _SKIPPED_PROFILES = {"public", "default", "default user", "all users"}  # as dis
 def scan_id_source(tool: str, source_file: str) -> str:
     """The profile folder the scan route runs `tool` on, as its id source, for
     a row whose tool read `source_file`: `Users/<name>` and the tool's own
-    folder (discovery's), in the file's own case, "/"-separated; "" when the
-    path holds no such folder the scan route would read."""
+    folder (discovery's), "/"-separated; "" when the path holds no such folder
+    the scan route would read. The `Users` nearest the file is the profile's,
+    as when the image was mounted under another profile."""
     import re
 
     from opensearch_mcp.discover import USER_ARTIFACTS
 
     parts = [p for p in re.split(r"[\\/]+", source_file or "") if p]
     rels = USER_ARTIFACTS.get(tool, [])
-    for i in range(len(parts) - 2):
+    for i in reversed(range(len(parts) - 2)):
         if parts[i].lower() != "users" or parts[i + 1].lower() in _SKIPPED_PROFILES:
             continue
         rest = parts[i + 2 :]
