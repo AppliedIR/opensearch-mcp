@@ -25,13 +25,7 @@ import yaml
 from sift_common import host_identity
 from sift_common.content_hash import content_hash
 
-from opensearch_mcp.bulk import (
-    ID_TIME_KEY,
-    OLD_ID_KEY,
-    OLD_RID_KEY,
-    ShardCapacityExhausted,
-    _vss_id,
-)
+from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted, _vss_id
 
 _tls = threading.local()
 
@@ -402,6 +396,7 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
 _FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
 FILL: dict[tuple[str, str, str], int] = {}  # (c12, unit_raw, type) -> records kept
 FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
+FILL_AGAIN: set[tuple[str, str, str]] = set()  # wrote records with their own @timestamp
 _FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
 # An index this version creates carries IDS_MARK in its mapping: every record
 # in it has its 0.6.5 id, so there's nothing stored before 0.6.5 to look up
@@ -431,15 +426,19 @@ def _vss_class(src: dict) -> str:
     return "" if tag == "live" else tag
 
 
-def _same_evidence(stored: dict, action: dict) -> bool:
+def _own_time(action: dict) -> bool:
+    """A json or delimited record whose id changed: its 0.6.5 id hashes the
+    row's own @timestamp, which its 0.6.4 id left out, so a record stored
+    under that id may be another row's. It's never kept onto it: written."""
+    method = str(action["_source"].get("vhir.parse_method") or "")
+    return method == "json-ingest" or method.startswith("delimited-")
+
+
+def _same_evidence(stored: dict, src: dict) -> bool:
     """Whether the stored record came from the same evidence: the same
     shadow copy (or both from the live volume), the source file, and what its
-    0.6.4 id leaves out (an access-log line's user, version and referrer, a
-    json or delimited row's own @timestamp), or a vol3 object's offset, which
-    both must have. A row's own @timestamp is the one its new id hashed: a
-    time field may have overwritten it, here or in the stored record, which
-    then isn't the same (written again, never lost)."""
-    src = action["_source"]
+    0.6.4 id leaves out (an access-log line's user, version and referrer), or
+    a vol3 object's offset, which both must have."""
     if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
         return False
     method = str(src.get("vhir.parse_method") or "")
@@ -448,9 +447,6 @@ def _same_evidence(stored: dict, action: dict) -> bool:
     fields = ["vhir.source_file"]
     if method == "accesslog":
         fields += ["user.name", "http.version", "http.request.referrer"]
-    elif method == "json-ingest" or method.startswith("delimited-"):
-        if stored.get("@timestamp") != action.get(ID_TIME_KEY):
-            return False
     return all(stored.get(f) == src.get(f) for f in fields)
 
 
@@ -493,11 +489,14 @@ def fill_in(client, actions: list[dict]) -> list[dict]:
     looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
     marked = {i for i in {a["_index"] for a in looked} if _marked(client, i)}
     looked = [a for a in looked if a["_index"] not in marked]
-    if not looked:
-        return actions
 
     def key(a: dict) -> tuple[str, str, str]:
         return ctx.c12, ctx.unit_raw, artifact_type_of(a["_index"])
+
+    FILL_AGAIN.update(key(a) for a in looked if _own_time(a))
+    looked = [a for a in looked if not _own_time(a)]
+    if not looked:
+        return actions
 
     matched = []
     try:
@@ -507,7 +506,7 @@ def fill_in(client, actions: list[dict]) -> list[dict]:
                 continue
             FILL.setdefault(key(a), 0)  # said, "kept 0" when nothing matches
             claim = _FILL_CLAIMED.get((a["_index"], a[OLD_ID_KEY]), a["_id"])
-            if claim == a["_id"] and _same_evidence(stored, a):
+            if claim == a["_id"] and _same_evidence(stored, a["_source"]):
                 matched.append(a)
         # one already stored under its 0.6.5 id (a lookup failed when it was
         # written) is that copy: it doesn't take the stored record too
@@ -544,6 +543,12 @@ def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str
         for k, kept in sorted(FILL.items())
         if mine(*k)
     ]
+    notes += [
+        f"{k[2]}: records with their own @timestamp were written again; their copies "
+        "stored before 0.6.5 may also remain"
+        for k in sorted(FILL_AGAIN)
+        if mine(*k)
+    ]
     notes += [why for k, why in sorted(FILL_UNCHECKED.items()) if mine(*k)]
     return "; ".join(notes)
 
@@ -553,7 +558,7 @@ def print_fill_report() -> None:
     yet printed in this process (the CLI route writes no status)."""
     import sys
 
-    for k in sorted({*FILL, *FILL_UNCHECKED} - _FILL_SAID):
+    for k in sorted({*FILL, *FILL_AGAIN, *FILL_UNCHECKED} - _FILL_SAID):
         _FILL_SAID.add(k)
         print(f"NOTE: {fill_note(k[1], k[2], k[0])}", file=sys.stderr)
 

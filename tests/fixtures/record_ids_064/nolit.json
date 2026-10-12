@@ -1,0 +1,82 @@
+[
+ [
+  "case-6a2f00c0ffee-delim-plain-0",
+  "82e6ca7eb8263d19ff84",
+  1,
+  {
+   "@timestamp": "2026-10-01T00:00:00Z",
+   "event.action": "a",
+   "host.id": "srv1",
+   "host.name": "srv1",
+   "timestamp": "2026-10-01T00:00:00Z",
+   "user": "bob",
+   "vhir.content_hash": "1642a19a4d92b480a4e25ad9cff1d753b23ce27936f1df1837ec88823cbaa488",
+   "vhir.host_key": "0123456789abcdef",
+   "vhir.ingest_audit_id": "aud-1159539-6",
+   "vhir.parse_method": "delimited-csv",
+   "vhir.rid": "49da01d946ef8e1ebeee",
+   "vhir.source_file": "evidence/plain.csv",
+   "vhir.unit": "1fb1118f33a17c34"
+  }
+ ],
+ [
+  "case-6a2f00c0ffee-delim-plain-0",
+  "f967afd72d41b0c661f0",
+  1,
+  {
+   "@timestamp": "2026-10-01T00:01:00Z",
+   "event.action": "a",
+   "host.id": "srv1",
+   "host.name": "srv1",
+   "timestamp": "2026-10-01T00:01:00Z",
+   "user": "bob",
+   "vhir.content_hash": "dc6c73dd9c853b30999fc1bf0776b1c4c7362adfb55e63c0b32c5f69e8122f5a",
+   "vhir.host_key": "0123456789abcdef",
+   "vhir.ingest_audit_id": "aud-1159539-6",
+   "vhir.parse_method": "delimited-csv",
+   "vhir.rid": "40d2237c9dd5785f1ec6",
+   "vhir.source_file": "evidence/plain.csv",
+   "vhir.unit": "1fb1118f33a17c34"
+  }
+ ],
+ [
+  "case-6a2f00c0ffee-json-plain-0",
+  "2876474e08d33e4d5a9a",
+  1,
+  {
+   "@timestamp": "2026-10-01T00:01:00Z",
+   "event.action": "a",
+   "host.id": "srv1",
+   "host.name": "srv1",
+   "timestamp": "2026-10-01T00:01:00Z",
+   "user": "bob",
+   "vhir.content_hash": "ad7d339f9e42ac1140f0a10670ccbc4af76dd76ede10363091f1b3b106232c13",
+   "vhir.host_key": "0123456789abcdef",
+   "vhir.ingest_audit_id": "aud-1159539-5",
+   "vhir.parse_method": "json-ingest",
+   "vhir.rid": "86576d67379b530d7b03",
+   "vhir.source_file": "evidence/plain.jsonl",
+   "vhir.unit": "1fb1118f33a17c34"
+  }
+ ],
+ [
+  "case-6a2f00c0ffee-json-plain-0",
+  "b168965a15fb247ed602",
+  1,
+  {
+   "@timestamp": "2026-10-01T00:00:00Z",
+   "event.action": "a",
+   "host.id": "srv1",
+   "host.name": "srv1",
+   "timestamp": "2026-10-01T00:00:00Z",
+   "user": "bob",
+   "vhir.content_hash": "71aeeda50ed345a7bf5d729bf4ac9d104ef8425583991e71599a0e0a5e3d3c5d",
+   "vhir.host_key": "0123456789abcdef",
+   "vhir.ingest_audit_id": "aud-1159539-5",
+   "vhir.parse_method": "json-ingest",
+   "vhir.rid": "95e4dd5c9a100d6507d4",
+   "vhir.source_file": "evidence/plain.jsonl",
+   "vhir.unit": "1fb1118f33a17c34"
+  }
+ ]
+]

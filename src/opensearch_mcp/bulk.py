@@ -218,9 +218,6 @@ def _is_systemic_failure(success: int, total: int, errors: list | None) -> tuple
 # A record whose id 0.6.5 computes differently carries the id 0.6.4 gave it:
 # the parser's (OLD_RID_KEY), then the stored one the stamp makes (OLD_ID_KEY)
 OLD_RID_KEY, OLD_ID_KEY = "_vhir_old_rid", "_vhir_old_id"
-# a json or delimited row's own @timestamp, which its 0.6.5 id hashes and its
-# 0.6.4 id left out: the fill-in compares it with the stored record's
-ID_TIME_KEY = "_vhir_id_time"
 
 
 def flush_bulk(
@@ -256,7 +253,6 @@ def flush_bulk(
     for action in actions:  # the 0.6.4 ids ride only this far, never sent
         action.pop(OLD_RID_KEY, None)
         action.pop(OLD_ID_KEY, None)
-        action.pop(ID_TIME_KEY, None)
     actions = sent
     refused = 0
     if depth_limit and actions:

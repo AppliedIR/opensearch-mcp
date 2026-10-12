@@ -10,7 +10,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import ID_TIME_KEY, OLD_RID_KEY, flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 from opensearch_mcp.hostname import extract_host_from_record
 from opensearch_mcp.parse_csv import _detect_encoding, _doc_id
 from opensearch_mcp.paths import NO_TIME_FIELD, TIME_NOT_UNDERSTOOD, auto_detect_time_field
@@ -342,8 +342,8 @@ def ingest_delimited(
             record["pipeline_version"] = pipeline_version
 
         action = {"_index": index_name, "_id": doc_id, "_source": record}
-        if doc_id != old_rid:  # the id 0.6.4 gave it, and the time this one hashed
-            action[OLD_RID_KEY], action[ID_TIME_KEY] = old_rid, literal
+        if doc_id != old_rid:  # the id 0.6.4 gave it
+            action[OLD_RID_KEY] = old_rid
         actions.append(action)
         if len(actions) >= batch_size:
             flushed, failed = flush_bulk(client, actions, depth_limit=True)

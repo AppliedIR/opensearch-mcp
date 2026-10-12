@@ -112,6 +112,7 @@ def test_rows_that_differ_only_in_their_own_time_are_two_records(
     held = [s for _, s in cluster.docs(index)]
     assert len(held) == 2 and all(s.get("vhir.id_scheme") == 2 for s in held)
     assert rids(cluster, index) == RIDS[case]
+    assert wc.fill_note(artifact_type=wc.artifact_type_of(index)) == ""  # this version's index
 
 
 def test_the_same_file_again_adds_nothing(cluster, cases, monkeypatch):
@@ -171,53 +172,109 @@ def test_evidence_cannot_carry_the_marker(cluster, cases, monkeypatch):
 
 
 # --- a re-ingest of json and delimited evidence stored before 0.6.5 ---------
+# A row's 0.6.4 id left its own @timestamp out, so the record stored under it
+# may be another row's (and a time field may have overwritten its time). A row
+# with its own @timestamp is never kept onto it: it's written, and the run says
+# the copy stored before 0.6.5 may remain beside it.
 
 FIXTURES = Path(__file__).parent / "fixtures" / "record_ids_064"
+AGAIN = (
+    "records with their own @timestamp were written again; their copies stored before "
+    "0.6.5 may also remain"
+)
+W = "2026-10-01T05:00:00Z"
+LITERAL = {"json": FILES["a-json"][:2], "csv": FILES["b-csv"][:2]}
+# own times 00:00 and 05:00, both with when=05:00: with time_field="when", 0.6.4
+# stored one record, the first row's, holding 05:00
+SHARED_WHEN = {
+    "json": ("shared_when.jsonl",
+             jl([dict(ECS[0], when=W), {**ECS[0], "@timestamp": W, "when": W}])),
+    "csv": ("shared_when.csv", "@timestamp,when,event.action,user\n"
+            f"2026-10-01T00:00:00Z,{W},logon-failed,bob\n{W},{W},logon-failed,bob\n"),
+}  # fmt: skip
+NO_LIT = {
+    "json": ("plain.jsonl", NO_LITERAL[("plain.jsonl", None)][0]),
+    "csv": ("plain.csv", "timestamp,event.action,user\n"
+            "2026-10-01T00:00:00Z,a,bob\n2026-10-01T00:01:00Z,a,bob\n"),
+}  # fmt: skip
 
 
-def step_064(
-    cluster, cases, monkeypatch, reverse=False, which=("a-json", "b-csv"), time_field=None
-) -> dict:
+def step_064(cluster, cases, monkeypatch, files, reverse=False, time_field=None) -> dict:
     """Step 1, as every version runs it (run under e0adcc0 to make the
-    fixtures): the json and csv twins, the rows differing only in time, each
-    file's index by its case. `reverse`: the same rows in the other order."""
+    fixtures): each file into its own index, by key. `reverse`: the same
+    rows in the other order."""
     out = {}
-    for case in which:
-        name, text, _ = FILES[case]
+    for key, (name, text) in files.items():
         if reverse:  # a csv keeps its header first
             lines = text.splitlines(keepends=True)
             head = [] if name.endswith(".jsonl") else lines[:1]
             text = "".join(head + lines[len(head) :][::-1])
-        out[case] = ingest(cluster, cases, monkeypatch, name, text, time_field)
+        out[key] = ingest(cluster, cases, monkeypatch, name, text, time_field)
     return out
 
 
-def load_064(cluster, fixture: str) -> set:
-    """Put a 0.6.4 store in the cluster; its keys."""
+def re_ingest(cluster, cases, monkeypatch, fixture, files, reverse=False, time_field=None):
+    """`files` re-ingested over 0.6.4's store: each index's parser ids, by
+    key, and the fill-in note of each index's type."""
     for index, _id, version, src in json.loads((FIXTURES / fixture).read_text()):
         cluster.store[(index, _id)] = src
         cluster.versions[(index, _id)] = version
         cluster.created.add(index)
-    return set(cluster.store)
+    stored = set(cluster.store)
+    new_run(*FILL_STATE)
+    out = step_064(cluster, cases, monkeypatch, files, reverse, time_field)
+    assert stored <= set(cluster.store)  # 0.6.4's records are never removed
+    notes = {k: wc.fill_note(artifact_type=wc.artifact_type_of(i)) for k, i in out.items()}
+    return {k: rids(cluster, i) for k, i in out.items()}, notes
 
 
-@pytest.mark.parametrize("reverse", [False, True], ids=["same-order", "other-order"])
-def test_a_re_ingest_of_json_and_csv_stored_by_0_6_4_keeps_each_record(
+ORDERS = pytest.mark.parametrize("reverse", [False, True], ids=["same-order", "other-order"])
+OLD = {  # 0.6.4's parser id, the stored record's vhir.rid
+    "literal.json": {"json": "6bb03d57c0ed4c1d09f5", "csv": "ffa33333be70f50c6315"},
+    "shared_when.json": {"json": "0dfe37fb085382e4596c", "csv": "93bbc24725ed71e3637f"},
+}
+NEW_SHARED = {  # the two rows' parser ids, the same with the time field or without
+    "json": ["195a64445164377fc9c7", "5dcf387197f6e548c98e"],
+    "csv": ["411121f9fbde6312e28d", "b6bfc36ac6055e525e90"],
+}
+NOLIT_CSV = ["40d2237c9dd5785f1ec6", "49da01d946ef8e1ebeee"]  # e0adcc0's, as stored
+
+
+@ORDERS
+def test_a_re_ingest_of_json_and_csv_stored_by_0_6_4_writes_each_row(
     cluster, cases, monkeypatch, reverse
 ):
-    """0.6.4 kept the first of the two rows (one id); the re-ingest keeps
-    that stored record and adds the other, so each row is stored once."""
-    stored = load_064(cluster, "literal.json")
-    new_run(*FILL_STATE)
-    out = step_064(cluster, cases, monkeypatch, reverse)
-    assert stored <= set(cluster.store)
-    for index in out.values():
-        times = sorted(s["@timestamp"] for _, s in cluster.docs(index))
-        assert times == ["2026-10-01T00:00:00Z", "2026-10-01T00:01:00Z"]
-    note = {
-        t: wc.fill_note(artifact_type=t) for t in (wc.artifact_type_of(i) for i in out.values())
-    }
-    assert note == {t: f"{t}: {kept(1)}" for t in note}
+    """0.6.4 kept the first of the two rows (one id); the re-ingest writes
+    both rows, and its copy may remain beside them."""
+    got, notes = re_ingest(cluster, cases, monkeypatch, "literal.json", LITERAL, reverse)
+    old = OLD["literal.json"]
+    assert got == {"json": sorted([*RIDS["a-json"], old["json"]]),
+                   "csv": sorted([*RIDS["b-csv"], old["csv"]])}  # fmt: skip
+    assert all(n.endswith(f": {AGAIN}") for n in notes.values())
+
+
+@ORDERS
+@pytest.mark.parametrize("time_field", ["when", None], ids=["with-when", "without"])
+def test_a_row_is_never_kept_onto_a_record_stored_under_its_0_6_4_id(
+    cluster, cases, monkeypatch, reverse, time_field
+):
+    """Own times 00:00 and 05:00, both with when=05:00: 0.6.4 stored the
+    first as 05:00, and the second matches it on every field. Both rows are
+    written, in either order, with the time field or without."""
+    got, notes = re_ingest(
+        cluster, cases, monkeypatch, "shared_when.json", SHARED_WHEN, reverse, time_field
+    )
+    old = OLD["shared_when.json"]
+    assert got == {k: sorted([*NEW_SHARED[k], old[k]]) for k in SHARED_WHEN}
+    assert all(n.endswith(f": {AGAIN}") for n in notes.values())
+
+
+def test_a_re_ingest_without_its_own_time_is_unchanged(cluster, cases, monkeypatch):
+    """No literal @timestamp: the 0.6.5 id is the 0.6.4 one, the stored
+    record is the record, and nothing is said."""
+    got, notes = re_ingest(cluster, cases, monkeypatch, "nolit.json", NO_LIT)
+    assert got == {"json": NO_LITERAL[("plain.jsonl", None)][1], "csv": NOLIT_CSV}
+    assert notes == {"json": "", "csv": ""}
 
 
 def test_a_batch_sent_again_keeps_its_mark(cluster, cases, monkeypatch):
@@ -230,77 +287,10 @@ def test_a_batch_sent_again_keeps_its_mark(cluster, cases, monkeypatch):
     (case / "CASE.yaml").write_text(f"case_id: g2\ncase_uuid: {CASE_UUID}\nnaming_version: 2\n")
     wc.set_current(wc.open_unit(case, "evidence/srv1", "srv1", source="evidence folder"))
     index = wc.index_name("json-ecs")
-    action = {"_index": index, "_id": "rid-1", "_source": dict(ECS[0]), "_vhir_old_rid": "old-1",
-              "_vhir_id_time": ECS[0]["@timestamp"]}  # fmt: skip
+    action = {"_index": index, "_id": "rid-1", "_source": dict(ECS[0]), "_vhir_old_rid": "old-1"}
     with wc.op(step()):
         bulk.flush_bulk(cluster.client(), [action])
         cluster.store.clear()
         bulk.flush_bulk(cluster.client(), [action])  # the same batch, sent again
     ((_, src),) = cluster.docs(index)
-    assert src["vhir.id_scheme"] == 2
-    assert "_vhir_old_rid" not in action and "_vhir_id_time" not in action  # never sent
-
-
-# --- a time field overwrote a row's own @timestamp, here or in 0.6.4 ----------
-# The twins share `when` (05:00) and differ only in their own @timestamp. 0.6.4
-# stored the first: with time_field="when" its record holds 05:00, without it
-# the row's own 00:00.
-
-TWINS = ("d-json-timefield", "d-csv-timefield")
-OLD_WHEN = {  # 0.6.4's parser id for the twins (the stored record's vhir.rid)
-    "d-json-timefield": {"fcd6755c659915428632"},
-    "d-csv-timefield": {"408c122b7b6bd0e53491"},
-}
-# the 00:01 row's parser id (0.6.4 stored the 00:00 row)
-SECOND = {"d-json-timefield": "069a9de92a5f19db83d1", "d-csv-timefield": "2c310286b9adf77ab5d5"}
-ORDERS = pytest.mark.parametrize("reverse", [False, True], ids=["same-order", "other-order"])
-
-
-def re_ingest(cluster, cases, monkeypatch, fixture, reverse, time_field):
-    """The twins re-ingested over 0.6.4's store: each index's parser ids and
-    record count, and each type's fill-in note."""
-    stored = load_064(cluster, fixture)
-    new_run(*FILL_STATE)
-    out = step_064(cluster, cases, monkeypatch, reverse, TWINS, time_field)
-    assert stored <= set(cluster.store)
-    got = {case: (set(rids(cluster, i)), len(cluster.docs(i))) for case, i in out.items()}
-    notes = [wc.fill_note(artifact_type=wc.artifact_type_of(i)) for i in out.values()]
-    return got, notes
-
-
-@ORDERS
-def test_a_row_is_never_kept_onto_a_record_whose_own_time_was_overwritten(
-    cluster, cases, monkeypatch, reverse
-):
-    """Both runs with time_field="when": every row compares as 05:00, so the
-    stored record's own time is unknown. Each row is written (the first a
-    second time), never kept onto a record from another row."""
-    got, notes = re_ingest(cluster, cases, monkeypatch, "literal_when.json", reverse, "when")
-    assert got == {case: (set(RIDS[case]) | old, 3) for case, old in OLD_WHEN.items()}
-    assert all(n.endswith(kept(0)) for n in notes) and len(notes) == 2
-
-
-@ORDERS
-def test_a_row_whose_own_time_0_6_4_stored_is_kept_when_a_time_field_is_added(
-    cluster, cases, monkeypatch, reverse
-):
-    """0.6.4 stored the row's own 00:00; the re-ingest with time_field="when"
-    compares the time its id hashed, so that row keeps the stored record and
-    the other is added."""
-    got, notes = re_ingest(cluster, cases, monkeypatch, "literal_nowhen.json", reverse, "when")
-    assert {case: n for case, (_, n) in got.items()} == {case: 2 for case in TWINS}
-    assert {case: ids for case, (ids, _) in got.items()} == {
-        case: old | {SECOND[case]} for case, old in OLD_WHEN.items()
-    }  # 00:00 is the stored record; 00:01 is added
-    assert all(n.endswith(kept(1)) for n in notes) and len(notes) == 2
-
-
-@ORDERS
-def test_a_record_whose_own_time_was_overwritten_isnt_kept_when_the_time_field_is_dropped(
-    cluster, cases, monkeypatch, reverse
-):
-    """0.6.4 stored 05:00 from `when`; the re-ingest without it can't tell
-    which row that was: both are written (a second copy, never a loss)."""
-    got, notes = re_ingest(cluster, cases, monkeypatch, "literal_when.json", reverse, None)
-    assert {case: n for case, (_, n) in got.items()} == {case: 3 for case in TWINS}
-    assert all(n.endswith(kept(0)) for n in notes) and len(notes) == 2
+    assert src["vhir.id_scheme"] == 2 and "_vhir_old_rid" not in action
