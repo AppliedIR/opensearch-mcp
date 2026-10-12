@@ -6,10 +6,13 @@ services:
       - discovery.type=single-node
       - OPENSEARCH_JAVA_OPTS=-Xms4g -Xmx4g
       - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${VHIR_OS_PASSWORD}
+      # vhir backup's snapshots: a node setting, so it is set here, not through the cluster API
+      - path.repo=/usr/share/opensearch/snapshots
     ports:
       - "127.0.0.1:9200:9200"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
+      - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots
     mem_limit: 6g
     restart: unless-stopped
 
