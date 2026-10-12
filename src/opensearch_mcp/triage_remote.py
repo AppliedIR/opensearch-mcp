@@ -672,48 +672,88 @@ def _executable_of(value: str) -> str | None:
     return s if _a_path(s) else None
 
 
-# A path argument: quoted, or from a drive, \ or %NAME% to an executable
-# extension followed by a space, a comma (rundll32's ",Entry") or the end
-_ARG_PATH = re.compile(
-    r'(?<!\S)(?:"([^"]+)"|((?:[A-Za-z]:|\\|%[^%\s]+%)[^"]*?(?:'
-    + "|".join(map(re.escape, _EXE_EXTS))
-    + r")))(?=[\s,]|$)",
-    re.I,
-)
-_MORE_THAN_ONE = re.compile(r"[&|]|\s(?:[A-Za-z]:|\\|%[^%\s]+%)")
-_MAX_TARGETS = 3
-
-
-def _targets_of(value: str) -> list[str]:
-    """The path arguments with an executable extension, at most three: what
-    a LOLBin such as rundll32 or cmd /c start runs (x.dll in "rundll32
-    x.dll,Start"). A quoted argument holding more than one command or path
-    is none of them."""
-    s = (value or "").strip()
-    if not s or "|" in s:
-        return []
-    exe = _executable_of(s)
-    if s.startswith('"'):
-        rest = s[1:].split('"', 1)[1] if '"' in s[1:] else ""
-    elif exe and s.startswith(exe):
-        rest = s[len(exe) :]
+def _argv(command: str) -> list[str]:
+    """A command line's arguments as Windows splits them (CommandLineToArgvW).
+    The program runs to its closing quote, or to the first space or tab, with
+    no escapes. Each later argument runs to a space or tab outside quotes:
+    2n backslashes before a quote are n, and the quote opens or closes a
+    quoted part; 2n+1 are n and a literal quote; other backslashes are
+    literal; and "" inside a quoted part is one quote."""
+    s, i, out = command, 0, []
+    n = len(s)
+    while i < n and s[i] in " \t":
+        i += 1
+    if i >= n:
+        return out
+    if s[i] == '"':
+        end = s.find('"', i + 1)
+        end = n if end < 0 else end
+        out.append(s[i + 1 : end])
+        i = end + 1
     else:
-        rest = s.split(None, 1)[1] if len(s.split(None, 1)) > 1 else ""
-    found = []
-    for m in _ARG_PATH.finditer(rest):
-        t = m[1] or m[2]
-        if m[1] and _MORE_THAN_ONE.search(t):
-            continue
-        if t.lower().endswith(_EXE_EXTS) and _a_path(t) and t not in found:
-            found.append(t)
-    return found[:_MAX_TARGETS]
+        end = i
+        while end < n and s[end] not in " \t":
+            end += 1
+        out.append(s[i:end])
+        i = end
+    while True:
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            return out
+        arg, quoted = [], False
+        while i < n and (quoted or s[i] not in " \t"):
+            if s[i] == "\\":
+                k = i
+                while k < n and s[k] == "\\":
+                    k += 1
+                if k < n and s[k] == '"':  # backslashes before a quote: halved
+                    arg.append("\\" * ((k - i) // 2))
+                    if (k - i) % 2:
+                        arg.append('"')
+                        k += 1
+                else:
+                    arg.append("\\" * (k - i))
+                i = k
+            elif s[i] == '"':
+                if quoted and s[i + 1 : i + 2] == '"':
+                    arg.append('"')
+                    i += 2
+                else:
+                    quoted, i = not quoted, i + 1
+            else:
+                arg.append(s[i])
+                i += 1
+        out.append("".join(arg))
+
+
+def _rundll32_runs(args: list[str]) -> str | None:
+    """rundll32 loads its first argument, up to the comma before ",Entry" or
+    ",#1"."""
+    return args[0].split(",", 1)[0] if args else None
+
+
+# The file a program runs, by the program's name: one rule each. A program
+# with no rule here runs no file of its own (its line is still checked)
+_RUNS = {"rundll32": _rundll32_runs, "rundll32.exe": _rundll32_runs}
+
+
+def _target_of(value: str) -> str | None:
+    """The file a command line runs, by its program's rule, when that is a
+    path with an executable extension."""
+    argv = _argv((value or "").strip())
+    if not argv:
+        return None
+    rule = _RUNS.get(argv[0].replace("/", "\\").rsplit("\\", 1)[-1].lower())
+    target = rule(argv[1:]) if rule else None
+    return target if target and target.lower().endswith(_EXE_EXTS) and _a_path(target) else None
 
 
 def _sends(value: str, raw: bool = True) -> list[str]:
-    """What check_file is given for a command line: its executable, the
-    targets it runs, and the value itself when `raw` (as it was sent
-    before, so no answer is lost)."""
-    picks = [_executable_of(value), *_targets_of(value), value if raw else None]
+    """What check_file is given for a command line: its executable, the file
+    it runs by its program's rule, and the value itself when `raw` (as it was
+    sent before, so no answer is lost)."""
+    picks = [_executable_of(value), _target_of(value), value if raw else None]
     return list(dict.fromkeys(p for p in picks if p))
 
 

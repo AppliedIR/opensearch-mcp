@@ -3,9 +3,10 @@ Run-key variant, and says when a Run value is too long to read.
 
 check_file gets the executable a command line starts (a quoted path, the
 shortest prefix ending in an executable extension before a space, a RunOnceEx
-"||cmd" or "file|Function"), up to three path arguments with an executable
-extension (what rundll32 or cmd /c start runs; a quoted argument holding more
-than one command is none) and, as before, the value itself; each document gets
+"||cmd" or "file|Function"), the file rundll32 loads (its first argument as
+Windows splits a command line, ",Entry" or ",#n" cut, a path with an
+executable extension; no other line names a file it runs) and, as before, the
+value itself; each document gets
 the worst answer at its highest confidence, flagged LOLBin if any answer was.
 Tasks count the values sent (`checked`) and those that name no executable
 (`not_checked`). RunOnce, RunOnceEx, RunServices and RunServicesOnce are read
@@ -167,11 +168,10 @@ TASK_ANSWERS = {
 def test_a_task_is_checked_by_the_executable_it_starts_and_as_before(triage):
     docs = [{"_id": i, "task.command": v} for i, v in TASKS.items()]
     results, sent, stamps = triage({"case-cmdline-tasks-h1": docs}, TASK_ANSWERS)
-    # the executables (a bare name is none), the file t8 runs, and each command
-    # sent before that differs
+    # the executables (a bare name is none), and each command sent before
+    # that differs
     assert sent == (set(TASK_ANSWERS) - {"powershell.exe"}) | {
         TASKS["t8"],
-        "C:\\Users\\Public\\evil.bat",
         TASKS["t9"],
         TASKS["t10"],
     }
@@ -355,42 +355,110 @@ ANSWERS = {
 }  # fmt: skip
 
 
-def test_the_files_a_command_line_runs_are_checked_and_the_worst_answer_is_kept(triage):
+def test_the_file_rundll32_loads_is_checked_and_the_worst_answer_is_kept(triage):
     docs = [_reg(i, RUN, v) for i, v in LINES.items()]
     docs.append({**_reg("stub-dll", SETUP + "{C}", STUB_LINE), "ValueName": "StubPath"})
     _, sent, _ = triage({"case-cmdline-registry-h1": docs}, ANSWERS)
-    runs = {SVCHOST, "C:\\Program Files\\Vendor App\\x.dll", "C:\\Users\\Public\\p.cpl",
-            "C:\\ProgramData\\x\\y.dll", "C:\\Users\\Public\\x2.dll", f"{S32}shell32.dll",
-            f"{S32}notepad.exe", "C:\\Users\\Public\\w3.dll"}  # fmt: skip
-    # never an entry point, an argument, a quoted multi-command or a part of one
+    loads = {SVCHOST, "C:\\Program Files\\Vendor App\\x.dll", "C:\\Users\\Public\\p.cpl",
+             "C:\\ProgramData\\x\\y.dll", "C:\\Users\\Public\\x2.dll", f"{S32}shell32.dll",
+             "C:\\Users\\Public\\w3.dll"}  # fmt: skip
+    # never an entry point, a later argument, or anything a non-rundll32 line names
     never = {f"{SVCHOST},Start", "C:\\ProgramData\\x\\y.dll,Install", f"{SVCHOST} -hidden",
              f"{SVCHOST} & C:\\x\\b.exe", "C:\\x\\b.exe", "C:\\x\\a.txt",
-             "C:\\Users\\Public\\x2.dll,Run"}  # fmt: skip
-    assert runs <= sent and not never & sent, (runs - sent, never & sent)
+             "C:\\Users\\Public\\x2.dll,Run", f"{S32}notepad.exe"}  # fmt: skip
+    assert loads <= sent and not never & sent, (loads - sent, never & sent)
     high, flagged = ("SUSPICIOUS", False, "high"), ("SUSPICIOUS", True, "high")
+    unknown, unknown_flagged = ("UNKNOWN", False, "low"), ("UNKNOWN", True, "low")
     assert full(docs) == {
-        "start": high, "cmd-start": high, "quoted-exe": high, "stub-dll": high,
-        "quoted-dll": flagged, "cpl": flagged, "nested": flagged, "cmd-nested": flagged,
-        "benign-first": flagged, "payload-first": flagged, "last-path": flagged, "tie": flagged,
-        "quoted-multi": ("UNKNOWN", False, "low"), "txt-arg": ("UNKNOWN", False, "low"),
+        "start": high, "quoted-exe": high, "stub-dll": high,
+        "quoted-dll": flagged, "cpl": flagged, "payload-first": flagged, "last-path": flagged,
+        "tie": flagged,
+        # cmd and start lines name no file of their own: as they were before
+        "cmd-start": unknown, "nested": unknown, "cmd-nested": unknown_flagged,
+        "benign-first": unknown_flagged,  # rundll32 loads shell32.dll, a baseline file
+        "quoted-multi": unknown, "txt-arg": unknown,
     }  # fmt: skip
 
 
-def test_at_most_three_files_a_line_runs_are_checked(triage):
-    line = f"{S32}cmd.exe /c C:\\a\\1.exe C:\\a\\2.exe C:\\a\\3.exe C:\\a\\4.exe"
-    _, sent, _ = triage({"case-cmdline-registry-h1": [_reg("m4", RUN, line)]}, {})
-    assert sent == {f"{S32}cmd.exe", "C:\\a\\1.exe", "C:\\a\\2.exe", "C:\\a\\3.exe", line}
+RUNS = {  # how rundll32 can be written; each loads the svchost.exe in Public
+    "o1": f"rundll32.exe {SVCHOST},Start",
+    "bare": f"rundll32 {SVCHOST},Start",
+    "ordinal": f"rundll32.exe {SVCHOST},#1",
+    "quoted-upper": f'"C:\\Windows\\System32\\RUNDLL32.EXE" {SVCHOST},Start',
+    "space-entry": f"rundll32.exe {SVCHOST} Start",
+}
+
+
+@pytest.mark.parametrize("line", list(RUNS.values()), ids=list(RUNS))
+def test_every_way_of_writing_rundll32_checks_the_file_it_loads(triage, line):
+    docs = [_reg("r", RUN, line)]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
+    assert SVCHOST in sent and full(docs)["r"] == ("SUSPICIOUS", False, "high")
+
+
+NAMES_NO_TARGET = {  # a file these name isn't one they run
+    "echo-quoted": f'cmd /c echo "Checking {SVCHOST} now">NUL',
+    "echo": f"cmd /c echo {SVCHOST} > NUL",
+    "del-quoted": 'cmd.exe /q /c del /q "C:\\Users\\bob\\AppData\\Local\\Microsoft\\OneDrive'
+                  '\\Update\\OneDriveSetup.exe"',
+    "del": f"cmd /c del {SVCHOST}",
+    "control-panel": "rundll32.exe shell32.dll,Control_RunDLL C:\\Users\\Public\\x.cpl",
+    "editor": f"notepad.exe {SVCHOST}",  # opened, not run: only rundll32's argument is
+    "rundll32-text": "rundll32.exe C:\\Users\\Public\\notes.txt,Start",  # no executable extension
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("line", list(NAMES_NO_TARGET.values()), ids=list(NAMES_NO_TARGET))
+def test_a_file_a_line_only_names_isnt_checked_as_one_it_runs(triage, line):
+    table = {SVCHOST: SUSP, "C:\\Users\\Public\\x.cpl": SUSP, "C:\\Users\\Public\\notes.txt": SUSP}
+    docs = [_reg("n", RUN, line)]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, table)
+    assert sent == {line}  # the line itself, as before: nothing it names
+    assert full(docs)["n"] == ("UNKNOWN", False, "low")
+
+
+@pytest.mark.parametrize("dll", ["C:\\Users\\Public\\R&D\\svchost.exe",
+                                 "C:\\Program Files (x86)\\AT&T\\x.dll"],
+                         ids=["R&D", "AT&T"])  # fmt: skip
+def test_a_quoted_rundll32_file_with_an_ampersand_is_checked(triage, dll):
+    docs = [_reg("amp", RUN, f'rundll32.exe "{dll}",Start')]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {dll: SUSP})
+    assert dll in sent and full(docs)["amp"] == ("SUSPICIOUS", False, "high")
 
 
 @pytest.mark.parametrize("tail", [".dll,Start", "x.dll"])
-def test_a_quoted_path_glued_to_more_text_isnt_a_target(triage, tail):
-    """`"…svchost.exe".dll` names no file that ends at the quote: the quoted
-    part isn't sent, and its verdict isn't stamped on the entry."""
+def test_a_quoted_path_glued_to_more_text_is_one_file(triage, tail):
+    """Windows joins `"…svchost.exe".dll` into one argument: that file is
+    checked, never the quoted part alone."""
     line = f'rundll32.exe "{SVCHOST}"{tail}'
     docs = [_reg("glued", RUN, line)]
     _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
-    assert SVCHOST not in sent, sent
+    assert SVCHOST not in sent and SVCHOST + tail.split(",")[0] in sent, sent
     assert full(docs)["glued"] == ("UNKNOWN", False, "low")
+
+
+# Microsoft's table for CommandLineToArgvW ("Parsing C++ command-line
+# arguments"), the arguments after the program, and the program's own rule
+ARGV = [
+    ('"abc" d e', ["abc", "d", "e"]),
+    ('a\\\\b d"e f"g h', ["a\\\\b", "de fg", "h"]),
+    ('a\\\\\\"b c d', ['a\\"b', "c", "d"]),
+    ('a\\\\\\\\"b c" d e', ["a\\\\b c", "d", "e"]),
+    ('a"b"" c d', ['ab" c d']),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("line,args", ARGV, ids=[a for a, _ in ARGV])
+def test_a_command_line_is_split_as_windows_splits_it(line, args):
+    assert tr._argv(f"p {line}") == ["p", *args]
+    # the program: to its closing quote, no escapes; or to the first space
+    assert tr._argv(f'"C:\\dir\\a b.exe" {line}')[0] == "C:\\dir\\a b.exe"
+
+
+def test_only_a_program_with_a_rule_has_a_file_it_runs():
+    assert set(tr._RUNS) == {"rundll32", "rundll32.exe"}
+    assert tr._target_of(f"C:\\Windows\\System32\\rundll32.exe {SVCHOST},Start") == SVCHOST
+    assert tr._target_of(f"C:\\Windows\\System32\\regsvr32.exe {SVCHOST}") is None
 
 
 LONG = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -nop -w hidden -c "
