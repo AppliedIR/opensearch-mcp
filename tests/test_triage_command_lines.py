@@ -3,10 +3,10 @@ Run-key variant, and says when a Run value is too long to read.
 
 check_file gets the executable a command line starts (a quoted path, the
 shortest prefix ending in an executable extension before a space, a RunOnceEx
-"||cmd" or "file|Function"), the file rundll32 loads (its first argument as
-Windows splits a command line, ",Entry" or ",#n" cut, a path with an
-executable extension; no other line names a file it runs) and, as before, the
-value itself; each document gets
+"||cmd" or "file|Function"), the file rundll32 loads (its command tail read
+as rundll32 reads it: a quoted name to its closing quote, an unquoted one to
+a space or comma; a path with an executable extension; no other line names a
+file it runs) and, as before, the value itself; each document gets
 the worst answer at its highest confidence, flagged LOLBin if any answer was.
 Tasks count the values sent (`checked`) and those that name no executable
 (`not_checked`). RunOnce, RunOnceEx, RunServices and RunServicesOnce are read
@@ -23,7 +23,9 @@ by exact string, so what was sent shows in each stamp.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -331,7 +333,8 @@ LINES = {
     "start": f"rundll32.exe {SVCHOST},Start",
     "quoted-dll": f'{S32}rundll32.exe "C:\\Program Files\\Vendor App\\x.dll",Start',
     "cmd-start": f"cmd /c start {SVCHOST} -hidden",
-    "cpl": f"{S32}rundll32.exe C:\\Users\\Public\\p.cpl",
+    "cpl": f"{S32}rundll32.exe C:\\Users\\Public\\p.cpl",  # no entry point: Wine loads
+    # nothing, but it is the file the line names, so it is checked
     "nested": f"cmd /c start {S32}rundll32.exe {SVCHOST},Start",
     "cmd-nested": f"{S32}cmd.exe /c {S32}rundll32.exe {SVCHOST},Start",
     "benign-first": f"{S32}rundll32.exe {S32}shell32.dll,ShellExec_RunDLL {SVCHOST} -q",
@@ -426,25 +429,52 @@ def test_a_quoted_rundll32_file_with_an_ampersand_is_checked(triage, dll):
     assert dll in sent and full(docs)["amp"] == ("SUSPICIOUS", False, "high")
 
 
-@pytest.mark.parametrize("tail", [".dll,Start", "x.dll"])
-def test_a_quoted_path_glued_to_more_text_is_one_file(triage, tail):
-    """Windows joins `"…svchost.exe".dll` into one argument: that file is
-    checked, never the quoted part alone."""
-    line = f'rundll32.exe "{SVCHOST}"{tail}'
-    docs = [_reg("glued", RUN, line)]
+@pytest.mark.parametrize("tail", [".dll,Start", "x.dll", '"x.dll",Start'])
+def test_a_quoted_dll_name_ends_at_its_closing_quote(triage, tail):
+    """rundll32 reads a quoted DLL name to its closing quote, whatever follows
+    it (Wine-documented; Windows reasoned): `"…svchost.exe".dll` loads
+    svchost.exe."""
+    docs = [_reg("glued", RUN, f'rundll32.exe "{SVCHOST}"{tail}')]
     _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
-    assert SVCHOST not in sent and SVCHOST + tail.split(",")[0] in sent, sent
-    assert full(docs)["glued"] == ("UNKNOWN", False, "low")
+    assert SVCHOST in sent and full(docs)["glued"] == ("SUSPICIOUS", False, "high")
 
 
-# Microsoft's table for CommandLineToArgvW ("Parsing C++ command-line
-# arguments"), the arguments after the program, and the program's own rule
+def test_a_quoted_dll_name_keeps_its_commas(triage):
+    """The comma inside the quotes is part of the name, not the entry point's."""
+    dll = f"{SVCHOST},backup.dll"
+    docs = [_reg("comma", RUN, f'rundll32.exe "{dll}",Start')]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
+    assert dll in sent and SVCHOST not in sent
+    assert full(docs)["comma"] == ("UNKNOWN", False, "low")
+
+
+@pytest.mark.parametrize("tail", [",Start", ""], ids=["entry point", "none"])
+def test_an_unclosed_quote_names_no_dll(triage, tail):
+    line = f'rundll32.exe "{SVCHOST}{tail}'
+    docs = [_reg("open", RUN, line)]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
+    assert sent == {line} and full(docs)["open"] == ("UNKNOWN", False, "low")
+
+
+def test_a_command_line_splits_as_windows_11_splits_it():
+    """Every synthetic line, with the argv shell32.CommandLineToArgvW gave it
+    on Windows 11 (10.0.22631): doubled quotes, backslash runs, a quoted or
+    glued program, tabs and a leading space."""
+    measured = json.loads((Path(__file__).parent / "fixtures" / "argv_windows11.json").read_text())
+    rows = measured["rows"]
+    assert len(rows) == 79
+    assert [r["s"] for r in rows if tr._argv(r["s"]) != r["argv"]] == []
+
+
+# Microsoft's table ("Parsing C++ command-line arguments"), as shell32's
+# CommandLineToArgvW splits it on Windows 11: in the last row "" inside quotes
+# is one quote that ends the quoted part (the C runtime's rule keeps it open)
 ARGV = [
     ('"abc" d e', ["abc", "d", "e"]),
     ('a\\\\b d"e f"g h', ["a\\\\b", "de fg", "h"]),
     ('a\\\\\\"b c d', ['a\\"b', "c", "d"]),
     ('a\\\\\\\\"b c" d e', ["a\\\\b c", "d", "e"]),
-    ('a"b"" c d', ['ab" c d']),
+    ('a"b"" c d', ['ab"', "c", "d"]),
 ]  # fmt: skip
 
 

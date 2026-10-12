@@ -672,30 +672,31 @@ def _executable_of(value: str) -> str | None:
     return s if _a_path(s) else None
 
 
+def _program(command: str) -> tuple[str, int]:
+    """The program a command line starts, and where the rest of the line
+    begins: to its closing quote, or to the first space or tab, with no
+    escapes. A line that starts with a space has an empty program."""
+    if command[:1] == '"':
+        end = command.find('"', 1)
+        end = len(command) if end < 0 else end
+        return command[1:end], end + 1
+    end = 0
+    while end < len(command) and command[end] not in " \t":
+        end += 1
+    return command[:end], end
+
+
 def _argv(command: str) -> list[str]:
-    """A command line's arguments as Windows splits them (CommandLineToArgvW).
-    The program runs to its closing quote, or to the first space or tab, with
-    no escapes. Each later argument runs to a space or tab outside quotes:
-    2n backslashes before a quote are n, and the quote opens or closes a
-    quoted part; 2n+1 are n and a literal quote; other backslashes are
-    literal; and "" inside a quoted part is one quote."""
-    s, i, out = command, 0, []
-    n = len(s)
-    while i < n and s[i] in " \t":
-        i += 1
-    if i >= n:
-        return out
-    if s[i] == '"':
-        end = s.find('"', i + 1)
-        end = n if end < 0 else end
-        out.append(s[i + 1 : end])
-        i = end + 1
-    else:
-        end = i
-        while end < n and s[end] not in " \t":
-            end += 1
-        out.append(s[i:end])
-        i = end
+    """A command line's arguments as Windows splits them (CommandLineToArgvW,
+    as measured on Windows 11): the program (`_program`), then each argument
+    to a space or tab outside quotes. 2n backslashes before a quote are n,
+    and the quote opens or closes a quoted part; 2n+1 are n and a literal
+    quote; other backslashes are literal; and "" inside a quoted part is one
+    quote that ends the part."""
+    if not command:
+        return []
+    program, i = _program(command)
+    s, n, out = command, len(command), [program]
     while True:
         while i < n and s[i] in " \t":
             i += 1
@@ -716,9 +717,9 @@ def _argv(command: str) -> list[str]:
                     arg.append("\\" * (k - i))
                 i = k
             elif s[i] == '"':
-                if quoted and s[i + 1 : i + 2] == '"':
+                if quoted and s[i + 1 : i + 2] == '"':  # one quote, and the part ends
                     arg.append('"')
-                    i += 2
+                    quoted, i = False, i + 2
                 else:
                     quoted, i = not quoted, i + 1
             else:
@@ -727,25 +728,30 @@ def _argv(command: str) -> list[str]:
         out.append("".join(arg))
 
 
-def _rundll32_runs(args: list[str]) -> str | None:
-    """rundll32 loads its first argument, up to the comma before ",Entry" or
-    ",#1"."""
-    return args[0].split(",", 1)[0] if args else None
+def _rundll32_runs(tail: str) -> str | None:
+    """The DLL rundll32 loads, read from its command tail as rundll32 reads it
+    (Wine's parse_arguments): a quoted name to its closing quote, commas and
+    all; an unquoted one to the first space, comma or tab."""
+    tail = tail.lstrip(" \t")
+    if tail.startswith('"'):
+        end = tail.find('"', 1)
+        return tail[1:end] if end > 0 else None  # an unclosed quote names nothing
+    return re.split(r"[ ,\t]", tail, maxsplit=1)[0] or None
 
 
-# The file a program runs, by the program's name: one rule each. A program
-# with no rule here runs no file of its own (its line is still checked)
+# The file a program runs, by the program's name: one rule each, given the
+# line after the program as the program itself reads it. A program with no
+# rule here runs no file of its own (its line is still checked)
 _RUNS = {"rundll32": _rundll32_runs, "rundll32.exe": _rundll32_runs}
 
 
 def _target_of(value: str) -> str | None:
     """The file a command line runs, by its program's rule, when that is a
     path with an executable extension."""
-    argv = _argv((value or "").strip())
-    if not argv:
-        return None
-    rule = _RUNS.get(argv[0].replace("/", "\\").rsplit("\\", 1)[-1].lower())
-    target = rule(argv[1:]) if rule else None
+    line = (value or "").strip()
+    program, end = _program(line)
+    rule = _RUNS.get(program.replace("/", "\\").rsplit("\\", 1)[-1].lower())
+    target = rule(line[end:]) if rule else None
     return target if target and target.lower().endswith(_EXE_EXTS) and _a_path(target) else None
 
 

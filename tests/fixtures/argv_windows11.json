@@ -1,0 +1,597 @@
+{
+ "measured": "shell32.CommandLineToArgvW on Windows 11 (10.0.22631, shell32 10.0.22621.3810)",
+ "rows": [
+  {
+   "s": "%windir%\\Temp\\svchost.exe",
+   "argv": [
+    "%windir%\\Temp\\svchost.exe"
+   ]
+  },
+  {
+   "s": "powershell.exe",
+   "argv": [
+    "powershell.exe"
+   ]
+  },
+  {
+   "s": "\"C:\\Users\\Public\\svchost.exe\"",
+   "argv": [
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "C:\\Program Files\\Vendor App\\upd.exe",
+   "argv": [
+    "C:\\Program",
+    "Files\\Vendor",
+    "App\\upd.exe"
+   ]
+  },
+  {
+   "s": "\"C:\\Program Files\\Vendor App\\upd.exe\"",
+   "argv": [
+    "C:\\Program Files\\Vendor App\\upd.exe"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe"
+   ]
+  },
+  {
+   "s": "UpdaterTask",
+   "argv": [
+    "UpdaterTask"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\cmd.exe /c C:\\Users\\Public\\evil.bat",
+   "argv": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "/c",
+    "C:\\Users\\Public\\evil.bat"
+   ]
+  },
+  {
+   "s": "C:\\Users\\Public\\run.vbs /x",
+   "argv": [
+    "C:\\Users\\Public\\run.vbs",
+    "/x"
+   ]
+  },
+  {
+   "s": "\\\\fileserver\\share\\evil.exe /q",
+   "argv": [
+    "\\\\fileserver\\share\\evil.exe",
+    "/q"
+   ]
+  },
+  {
+   "s": "\\??\\C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "\\??\\C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "\"C:\\Users\\Public\\svchost.exe\" -k netsvcs",
+   "argv": [
+    "C:\\Users\\Public\\svchost.exe",
+    "-k",
+    "netsvcs"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Users\\bob\\AppData\\Roaming\\x.dll,Start",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\bob\\AppData\\Roaming\\x.dll,Start"
+   ]
+  },
+  {
+   "s": "C:\\Program Files\\Vendor App\\agent.exe /background",
+   "argv": [
+    "C:\\Program",
+    "Files\\Vendor",
+    "App\\agent.exe",
+    "/background"
+   ]
+  },
+  {
+   "s": "%ProgramFiles%\\Windows Defender\\MSASCuiL.exe",
+   "argv": [
+    "%ProgramFiles%\\Windows",
+    "Defender\\MSASCuiL.exe"
+   ]
+  },
+  {
+   "s": "C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\cmd.exe /c start C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "/c",
+    "start",
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "cmd /c start C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "cmd",
+    "/c",
+    "start",
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "C:\\Users\\Public\\run.ps1 -x",
+   "argv": [
+    "C:\\Users\\Public\\run.ps1",
+    "-x"
+   ]
+  },
+  {
+   "s": "\"C:\\ProgramData\\x\\svchost.exe\" /install",
+   "argv": [
+    "C:\\ProgramData\\x\\svchost.exe",
+    "/install"
+   ]
+  },
+  {
+   "s": "%SystemRoot%\\system32\\unregmp2.exe /FirstLogon /Shortcuts",
+   "argv": [
+    "%SystemRoot%\\system32\\unregmp2.exe",
+    "/FirstLogon",
+    "/Shortcuts"
+   ]
+  },
+  {
+   "s": "C:\\Users\\Public\\k1.exe",
+   "argv": [
+    "C:\\Users\\Public\\k1.exe"
+   ]
+  },
+  {
+   "s": "||C:\\Users\\Public\\k5.exe",
+   "argv": [
+    "||C:\\Users\\Public\\k5.exe"
+   ]
+  },
+  {
+   "s": "C:\\Users\\Public\\k9.dll|DllRegisterServer",
+   "argv": [
+    "C:\\Users\\Public\\k9.dll|DllRegisterServer"
+   ]
+  },
+  {
+   "s": "rundll32.exe C:\\Users\\Public\\svchost.exe,Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe \"C:\\Program Files\\Vendor App\\x.dll\",Start",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Program Files\\Vendor App\\x.dll,Start"
+   ]
+  },
+  {
+   "s": "cmd /c start C:\\Users\\Public\\svchost.exe -hidden",
+   "argv": [
+    "cmd",
+    "/c",
+    "start",
+    "C:\\Users\\Public\\svchost.exe",
+    "-hidden"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\p.cpl",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\p.cpl"
+   ]
+  },
+  {
+   "s": "cmd /c start C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\svchost.exe,Start",
+   "argv": [
+    "cmd",
+    "/c",
+    "start",
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\cmd.exe /c C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\svchost.exe,Start",
+   "argv": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "/c",
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Windows\\System32\\shell32.dll,ShellExec_RunDLL C:\\Users\\Public\\svchost.exe -q",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Windows\\System32\\shell32.dll,ShellExec_RunDLL",
+    "C:\\Users\\Public\\svchost.exe",
+    "-q"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\x2.dll,Run C:\\Windows\\System32\\notepad.exe",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\x2.dll,Run",
+    "C:\\Windows\\System32\\notepad.exe"
+   ]
+  },
+  {
+   "s": "cmd /c \"C:\\Users\\Public\\svchost.exe & C:\\x\\b.exe\"",
+   "argv": [
+    "cmd",
+    "/c",
+    "C:\\Users\\Public\\svchost.exe & C:\\x\\b.exe"
+   ]
+  },
+  {
+   "s": "C:\\Program Files\\Vendor App\\agent.exe /background C:\\x\\a.txt",
+   "argv": [
+    "C:\\Program",
+    "Files\\Vendor",
+    "App\\agent.exe",
+    "/background",
+    "C:\\x\\a.txt"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\rundll32.exe C:\\Users\\Public\\w3.dll",
+   "argv": [
+    "C:\\Windows\\System32\\rundll32.exe",
+    "C:\\Users\\Public\\w3.dll"
+   ]
+  },
+  {
+   "s": "rundll32.exe C:\\ProgramData\\x\\y.dll,Install",
+   "argv": [
+    "rundll32.exe",
+    "C:\\ProgramData\\x\\y.dll,Install"
+   ]
+  },
+  {
+   "s": "C:\\Windows\\System32\\cmd.exe /c C:\\a\\1.exe C:\\a\\2.exe C:\\a\\3.exe C:\\a\\4.exe",
+   "argv": [
+    "C:\\Windows\\System32\\cmd.exe",
+    "/c",
+    "C:\\a\\1.exe",
+    "C:\\a\\2.exe",
+    "C:\\a\\3.exe",
+    "C:\\a\\4.exe"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\Users\\Public\\svchost.exe\".dll,Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe.dll,Start"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\Users\\Public\\svchost.exe\"x.dll",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exex.dll"
+   ]
+  },
+  {
+   "s": "cmd /c echo \"Checking C:\\Users\\Public\\svchost.exe now\">NUL",
+   "argv": [
+    "cmd",
+    "/c",
+    "echo",
+    "Checking C:\\Users\\Public\\svchost.exe now>NUL"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\Users\\Public\\R&D\\svchost.exe\",Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\R&D\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\R&D\\x.dll\",Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\R&D\\x.dll,Start"
+   ]
+  },
+  {
+   "s": "cmd /c \"C:\\Users\\Public\\a.exe\"&calc.exe",
+   "argv": [
+    "cmd",
+    "/c",
+    "C:\\Users\\Public\\a.exe&calc.exe"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\Program Files (x86)\\AT&T\\x.dll\",Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Program Files (x86)\\AT&T\\x.dll,Start"
+   ]
+  },
+  {
+   "s": "rundll32 C:\\Users\\Public\\svchost.exe,Start",
+   "argv": [
+    "rundll32",
+    "C:\\Users\\Public\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "rundll32.exe shell32.dll,Control_RunDLL x.cpl",
+   "argv": [
+    "rundll32.exe",
+    "shell32.dll,Control_RunDLL",
+    "x.cpl"
+   ]
+  },
+  {
+   "s": "cmd /c echo C:\\Users\\Public\\svchost.exe > NUL",
+   "argv": [
+    "cmd",
+    "/c",
+    "echo",
+    "C:\\Users\\Public\\svchost.exe",
+    ">",
+    "NUL"
+   ]
+  },
+  {
+   "s": "cmd /c del C:\\Users\\Public\\svchost.exe",
+   "argv": [
+    "cmd",
+    "/c",
+    "del",
+    "C:\\Users\\Public\\svchost.exe"
+   ]
+  },
+  {
+   "s": "rundll32.exe C:\\Users\\Public\\svchost.exe,#1",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe,#1"
+   ]
+  },
+  {
+   "s": "\"C:\\Windows\\System32\\RUNDLL32.EXE\" \"C:\\Users\\Public\\svchost.exe\",Start",
+   "argv": [
+    "C:\\Windows\\System32\\RUNDLL32.EXE",
+    "C:\\Users\\Public\\svchost.exe,Start"
+   ]
+  },
+  {
+   "s": "rundll32.exe C:\\Users\\Public\\svchost.exe Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe",
+    "Start"
+   ]
+  },
+  {
+   "s": "exe \"two\"\" next",
+   "argv": [
+    "exe",
+    "two\"",
+    "next"
+   ]
+  },
+  {
+   "s": "exe \"a\"\"b\"",
+   "argv": [
+    "exe",
+    "a\"b"
+   ]
+  },
+  {
+   "s": "exe \"\"",
+   "argv": [
+    "exe",
+    ""
+   ]
+  },
+  {
+   "s": "exe \"\"\"\"",
+   "argv": [
+    "exe",
+    "\""
+   ]
+  },
+  {
+   "s": "exe \"\"\"\"\"\"",
+   "argv": [
+    "exe",
+    "\"\""
+   ]
+  },
+  {
+   "s": "exe \"\"\"a b\"\"\"",
+   "argv": [
+    "exe",
+    "\"a",
+    "b\""
+   ]
+  },
+  {
+   "s": "exe \"a\"\"\"",
+   "argv": [
+    "exe",
+    "a\""
+   ]
+  },
+  {
+   "s": "exe \"a\"\" b\"",
+   "argv": [
+    "exe",
+    "a\"",
+    "b"
+   ]
+  },
+  {
+   "s": "exe a\"\"b",
+   "argv": [
+    "exe",
+    "ab"
+   ]
+  },
+  {
+   "s": "exe \"a b",
+   "argv": [
+    "exe",
+    "a b"
+   ]
+  },
+  {
+   "s": "exe \"a\"\"",
+   "argv": [
+    "exe",
+    "a\""
+   ]
+  },
+  {
+   "s": "exe a\"b c\"d",
+   "argv": [
+    "exe",
+    "ab cd"
+   ]
+  },
+  {
+   "s": "exe a\\\\\"b c\"",
+   "argv": [
+    "exe",
+    "a\\b c"
+   ]
+  },
+  {
+   "s": "exe a\\\\\\\"b",
+   "argv": [
+    "exe",
+    "a\\\"b"
+   ]
+  },
+  {
+   "s": "exe a\\\"b",
+   "argv": [
+    "exe",
+    "a\"b"
+   ]
+  },
+  {
+   "s": "exe \"C:\\dir\\\" next",
+   "argv": [
+    "exe",
+    "C:\\dir\" next"
+   ]
+  },
+  {
+   "s": "exe \"C:\\dir\\\\\" next",
+   "argv": [
+    "exe",
+    "C:\\dir\\",
+    "next"
+   ]
+  },
+  {
+   "s": "exe C:\\a\\\\b\\",
+   "argv": [
+    "exe",
+    "C:\\a\\\\b\\"
+   ]
+  },
+  {
+   "s": "\"C:\\a b\\x.exe\"arg rest",
+   "argv": [
+    "C:\\a b\\x.exe",
+    "arg",
+    "rest"
+   ]
+  },
+  {
+   "s": "C:\\a\"b c\"d.exe x",
+   "argv": [
+    "C:\\a\"b",
+    "cd.exe x"
+   ]
+  },
+  {
+   "s": "\"C:\\p\"\"q.exe\" x",
+   "argv": [
+    "C:\\p",
+    "q.exe",
+    "x"
+   ]
+  },
+  {
+   "s": "\"C:\\a b\\x.exe",
+   "argv": [
+    "C:\\a b\\x.exe"
+   ]
+  },
+  {
+   "s": "C:\\x\\\"y z",
+   "argv": [
+    "C:\\x\\\"y",
+    "z"
+   ]
+  },
+  {
+   "s": "exe\t\"a\tb\"\tc",
+   "argv": [
+    "exe",
+    "a\tb",
+    "c"
+   ]
+  },
+  {
+   "s": "   exe a",
+   "argv": [
+    "",
+    "exe",
+    "a"
+   ]
+  },
+  {
+   "s": "rundll32.exe \"C:\\Users\\Public\\svchost.exe\"\"x.dll\",Start",
+   "argv": [
+    "rundll32.exe",
+    "C:\\Users\\Public\\svchost.exe\"x.dll,Start"
+   ]
+  },
+  {
+   "s": "cmd /c \"C:\\Users\\Public\\a.exe\"\" & calc.exe\"",
+   "argv": [
+    "cmd",
+    "/c",
+    "C:\\Users\\Public\\a.exe\"",
+    "&",
+    "calc.exe"
+   ]
+  }
+ ]
+}
