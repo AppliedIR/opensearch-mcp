@@ -677,7 +677,7 @@ def _executable_of(value: str) -> str | None:
 _ARG_PATH = re.compile(
     r'(?<!\S)(?:"([^"]+)"|((?:[A-Za-z]:|\\|%[^%\s]+%)[^"]*?(?:'
     + "|".join(map(re.escape, _EXE_EXTS))
-    + r"))(?=[\s,]|$))",
+    + r")))(?=[\s,]|$)",
     re.I,
 )
 _MORE_THAN_ONE = re.compile(r"[&|]|\s(?:[A-Za-z]:|\\|%[^%\s]+%)")
