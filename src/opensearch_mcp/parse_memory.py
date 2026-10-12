@@ -81,7 +81,7 @@ _TIMESTAMP_FIELD: dict[str, str | None] = {
     "windows.handles": None,
     "windows.filescan": None,
     "windows.malfind": None,
-    "windows.shimcachemem": "LastModified",
+    "windows.shimcachemem": "Last Modified",
     "windows.driverscan": None,
     "windows.mutantscan": None,
     "timeliner": None,
