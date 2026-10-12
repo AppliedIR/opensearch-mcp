@@ -239,3 +239,40 @@ def test_the_extractions_folder_itself_is_refused(case, rel):  # noqa: F811
         paths.check_staging(case, case / rel)
     assert (case / "extractions" / "kept").is_dir()
 
+
+@pytest.mark.parametrize("artifact", ["srum", "prefetch"])
+def test_a_refused_staging_is_the_fallback_s_note_not_a_missing_tool(
+    case,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+    artifact,
+):
+    from opensearch_mcp import parse_prefetch, parse_srum, wintools
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (case / "extractions").symlink_to(elsewhere, target_is_directory=True)
+    monkeypatch.setattr(wintools, "wintools_available", lambda: True)
+    _fake_wintools(case, monkeypatch)
+    src = tmp_path / "mnt" / "C"
+    if artifact == "srum":
+        (src / "SRU").mkdir(parents=True)
+        (src / "SRU" / "SRUDB.dat").write_bytes(b"esedb")
+        monkeypatch.setattr(parse_srum, "_parse_srum_plaso", lambda *a, **k: (0, 0))
+        with ops.recording(AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_srum", {}):
+            *_, note, outcome, _ = parse_srum.parse_srum(
+                src / "SRU" / "SRUDB.dat", MagicMock(), "case-x-srum-0", "HOST1"
+            )
+    else:
+        (src / "Prefetch").mkdir(parents=True)
+        (src / "Prefetch" / "CMD.EXE-1.pf").write_bytes(b"pf1")
+        monkeypatch.setattr(parse_prefetch, "_parse_prefetch_plaso", lambda *a, **k: (0, 0))
+        with ops.recording(
+            AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_prefetch", {}
+        ):
+            *_, note, outcome, _ = parse_prefetch.parse_prefetch(
+                src / "Prefetch", MagicMock(), "case-x-prefetch-0", "HOST1"
+            )
+    assert note.startswith(f"{artifact}: Refusing to stage into ") and "Provision" not in note
+    assert "Parsed with Plaso fallback" in note
+    assert list(elsewhere.iterdir()) == []
