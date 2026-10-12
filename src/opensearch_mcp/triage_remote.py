@@ -378,28 +378,30 @@ def _enrich_file_artifact(
                 args, note = _amcache_args(path, str(h["key"]), str(size))
                 try:
                     result = call_tool("check_file", args, timeout=15)
-                    consecutive_failures = 0
-                    succeeded = True
                 except Exception:
-                    consecutive_failures += 1
+                    result = None
+                if not (isinstance(result, dict) and result.get("verdict")):
+                    consecutive_failures += 1  # no verdict: a failed call
                     continue
-                if result.get("verdict"):
-                    result = _reference_mismatch(result)
-                    if note:
-                        result = dict(result, reasons=[*result.get("reasons", []), note])
-                    answers[str(h["key"])] = result
+                consecutive_failures, succeeded = 0, True
+                result = _reference_mismatch(result)
+                if note:
+                    result = dict(result, reasons=[*result.get("reasons", []), note])
+                answers[str(h["key"])] = result
             if answers:
                 verdicts[path] = answers
             continue
         try:
             result = call_tool("check_file", {"path": path}, timeout=15)
-            consecutive_failures = 0
-            succeeded = True
-            if result.get("verdict"):
+            answered = bool(result.get("verdict"))  # none: a failed call
+            if answered:
                 verdicts[path] = _flags_only(result) if flags_only else result
         except Exception:
+            answered = False
+        if not answered:
             consecutive_failures += 1
             continue
+        consecutive_failures, succeeded = 0, True
 
     if not verdicts:
         return _hashes_unread(
@@ -770,12 +772,12 @@ _SURER = {"high": 3, "medium": 2, "low": 1}
 def _ask_all(values: list[str], state: dict) -> dict | None:
     """check_file on each value, flags only: the worse answer (SUSPICIOUS,
     then UNKNOWN, then the rest; of equal verdicts, the higher confidence),
-    with the LOLBin flag if any answer had it. A raise or a reply that isn't
-    a dict is a failed call. One lookup behaves as it always has: a reply
-    with no verdict is answered with nothing to write. Several lookups are
-    answered only when every reply carries a verdict; otherwise the value
-    fails as one failed call, and nothing is written. `state` carries the
-    loop's consecutive call failures and whether any value was answered."""
+    with the LOLBin flag if any answer had it. A raise, a reply that isn't
+    a dict, or a reply with no verdict (windows-triage's own errors come
+    back that way) is a failed call. A value is answered only when every
+    reply carries a verdict; otherwise it fails as one failed call, and
+    nothing is written. `state` carries the loop's consecutive call failures
+    and whether any value was answered."""
     if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
         return None
     replies = []
@@ -789,12 +791,10 @@ def _ask_all(values: list[str], state: dict) -> dict | None:
             return None
         replies.append(reply)
     answers = [_flags_only(r) for r in replies if r.get("verdict")]
-    if len(answers) < len(replies) > 1:
+    if len(answers) < len(replies):
         state["failures"] += 1
         return None
     state["failures"], state["ok"] = 0, True
-    if not answers:
-        return None
     worst = max(
         answers,
         key=lambda a: (_WORSE.get(a.get("verdict"), 0), _SURER.get(a.get("confidence"), 0)),
