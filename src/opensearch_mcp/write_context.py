@@ -295,11 +295,12 @@ def prepare_index(client, index: str) -> None:
     except Exception:
         exists = None  # unanswered: the bulk request creates it, and says why if it can't
     if exists is False:
-        body = {}
+        body: dict = {"mappings": {"_meta": dict(IDS_MARK)}}
         if artifact_type_of(index) in HOST_SCALED_TYPES:
-            body = {"settings": {"index": {"number_of_shards": HOST_SCALED_SHARDS}}}
+            body["settings"] = {"index": {"number_of_shards": HOST_SCALED_SHARDS}}
         try:
             client.indices.create(index=index, body=body)
+            _MARKED[index] = True
         except Exception as e:
             if "resource_already_exists" not in str(e):
                 raise
@@ -396,6 +397,25 @@ _FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5
 FILL: dict[tuple[str, str, str], list[int]] = {}  # (c12, unit_raw, type) -> [kept, added]
 FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
 _FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
+# An index this version creates carries IDS_MARK in its mapping: every record
+# in it has its 0.6.5 id, so there's nothing stored before 0.6.5 to look up
+IDS_MARK = {"vhir_ids": "0.6.5"}
+_MARKED: dict[str, bool] = {}  # index -> carries IDS_MARK, read once per process
+
+
+def _marked(client, index: str) -> bool:
+    """Whether `index` carries IDS_MARK. A mapping that can't be read is
+    read again at the next write, and until then the lookup runs."""
+    if index not in _MARKED:
+        try:
+            mapped = client.indices.get_mapping(index=index)
+        except Exception:
+            return False
+        metas = [((m or {}).get("mappings") or {}).get("_meta") or {} for m in mapped.values()]
+        _MARKED[index] = bool(metas) and all(
+            m.get("vhir_ids") == IDS_MARK["vhir_ids"] for m in metas
+        )
+    return _MARKED[index]
 
 
 def _same_evidence(stored: dict, src: dict) -> bool:
@@ -448,6 +468,8 @@ def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
     Returns (the actions to send, the (case, unit, type)s looked up)."""
     ctx = current()
     looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
+    marked = {i for i in {a["_index"] for a in looked} if _marked(client, i)}
+    looked = [a for a in looked if a["_index"] not in marked]
     if not looked:
         return actions, set()
 

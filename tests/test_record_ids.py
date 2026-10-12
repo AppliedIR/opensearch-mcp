@@ -85,7 +85,8 @@ def new_process(monkeypatch):
     paths.NO_TIME_FIELD[:] = no_time
 
 
-FILL_STATE = ("FILL", "_FILL_CLAIMED", "FILL_UNCHECKED", "_FILL_SAID")
+# what a process remembers: the fill-in's, and the indices it prepared
+FILL_STATE = ("FILL", "_FILL_CLAIMED", "FILL_UNCHECKED", "_FILL_SAID", "_MARKED", "_prepared")
 
 
 def open_run(cases, name, locator, host, source):
@@ -454,6 +455,8 @@ def test_each_changed_record_carries_the_id_0_6_4_stored_it_under(
         carried.extend(a.get("_vhir_old_id") for a in actions)  # bulk.OLD_ID_KEY
 
     monkeypatch.setattr(wc, "stamp_or_refuse", stamp_or_refuse)
+    suffix = f"vol-{atype}" if atype in SINGLE else atype
+    cluster.created.add(f"case-000000000000-{suffix}-0")  # 0.6.4 made it: no marker
     index = one_record(cluster, cases, monkeypatch, atype)
     assert carried == [STORED_064[atype]]
     assert cluster.asked == [(index, STORED_064[atype])]  # the fill-in looks it up
@@ -655,14 +658,19 @@ def test_a_lookup_that_fails_writes_everything_and_says_so(cluster, cases, monke
 
 
 def test_an_index_not_found_answer_is_not_stored_not_unchecked(cluster, cases, monkeypatch):
-    """Regression guard: mget answers each id of a missing index with an
+    """Regression guard: when exists() can't be answered, no index is created
+    before the write (so none carries the marker) and the lookup runs against
+    an index that isn't there yet. mget answers each such id with an
     index_not_found_exception item, which means "not stored"."""
-    real = cluster.client.indices.exists
-    monkeypatch.setattr(cluster.client.indices, "exists", lambda index=None, **k: False)
+
+    def unanswered(index=None, **k):
+        raise RuntimeError("stand-in cluster: exists unanswered")
+
+    monkeypatch.setattr(cluster.client.indices, "exists", unanswered)
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         out = ingest_all(cluster, cases, monkeypatch)
-    monkeypatch.setattr(cluster.client.indices, "exists", real)
+    assert cluster.asked and not cluster.mappings  # looked up; nothing made with the marker
     assert {t: len(cluster.docs(i)) for t, i in out.items()} == {t: len(ONCE[t]) for t in TYPES}
     assert report() == dict.fromkeys(TYPES, "") and "couldn't check" not in err.getvalue()
 
@@ -838,3 +846,22 @@ def test_after_a_failed_lookup_a_later_run_adds_no_copy(cluster, cases, monkeypa
     assert len(cluster.docs(index)) == after_failure
     # the first batch's records are already stored under their 0.6.5 ids
     assert report()["accesslog"] == f"accesslog: {kept(1, 0)}"
+
+
+def test_an_index_this_version_created_isnt_looked_up(cluster, cases, monkeypatch):
+    """Its mapping carries the marker: every record in it has its 0.6.5 id."""
+    out = ingest_all(cluster, cases, monkeypatch)
+    new_run(*FILL_STATE)  # a new process reads the marker from the mapping
+    ingest_all(cluster, cases, monkeypatch, reverse=True)
+    # no 0.6.4 id asked for: only stored ids, by the bulk's own 409 check
+    assert cluster.asked and set(cluster.asked) <= set(cluster.store)
+    assert all(cluster.mappings[i]["_meta"] == {"vhir_ids": "0.6.5"} for i in out.values())
+    assert evidence(cluster, out) == ONCE and report() == dict.fromkeys(TYPES, "")
+
+
+def test_an_index_whose_mapping_cant_be_read_is_looked_up(cluster, cases, monkeypatch):
+    """Without the marker read, the lookup runs: slower, never wrong."""
+    stored_by_064(cluster, "evidence")
+    cluster.mapping_error = RuntimeError("stand-in cluster: mapping refused")
+    out = ingest_all(cluster, cases, monkeypatch, reverse=True)
+    assert evidence(cluster, out) == ONCE and report() == SAID

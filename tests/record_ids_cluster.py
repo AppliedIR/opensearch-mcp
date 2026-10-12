@@ -7,7 +7,9 @@
   item, as the cluster does. `mget_error` makes the request raise, and
   `mget_item_error` answers every id with that error item, `mget_short`
   leaves out the last answer.
-- indices.exists/create/stats.
+- indices.exists/create/stats, and get_mapping: the mapping an index was
+  created with (an index made by a write, or by `stored_by_064`, has none).
+  `mapping_error` makes get_mapping raise.
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ class Cluster:
         self.mget_error: Exception | None = None
         self.mget_item_error: dict | None = None
         self.mget_short = False  # one answer fewer than the ids asked
+        self.mappings: dict[str, dict] = {}  # index -> the mapping it was created with
+        self.mapping_error: Exception | None = None
         cluster = self
 
         class Indices:
@@ -37,7 +41,13 @@ class Cluster:
 
             def create(self, index=None, body=None, **kw):
                 cluster.created.add(index)
+                cluster.mappings[index] = dict((body or {}).get("mappings") or {})
                 return {"acknowledged": True}
+
+            def get_mapping(self, index=None, **kw):
+                if cluster.mapping_error is not None:
+                    raise cluster.mapping_error
+                return {index: {"mappings": cluster.mappings.get(index, {})}}
 
             def stats(self, index=None, **kw):
                 return {"indices": {}}
@@ -59,9 +69,8 @@ class Cluster:
                 for d in body["docs"]:
                     key = (d["_index"], d["_id"])
                     src = cluster.store.get(key)
-                    if cluster.mget_item_error is not None or not self.indices.exists(
-                        index=key[0]
-                    ):
+                    held = key[0] in cluster.created or any(i == key[0] for i, _ in cluster.store)
+                    if cluster.mget_item_error is not None or not held:
                         error = cluster.mget_item_error or NO_INDEX
                         out.append({"_index": key[0], "_id": key[1], "error": error})
                         continue
