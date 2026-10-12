@@ -14,7 +14,7 @@ outrank vhir's own templates by design, so the check before a create (which
 refuses an index whose vhir template another outranks) would refuse every test
 index. Copies at vhir's own priorities can't be used instead: OpenSearch
 refuses a second template with overlapping patterns at the same priority. The
-check itself is covered by its own rows (test_cli_templates_followons).
+check itself is covered by its own rows (test_case_index_templates).
 """
 
 from __future__ import annotations

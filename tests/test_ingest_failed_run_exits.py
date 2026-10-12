@@ -1,5 +1,5 @@
 """A json, delimited or accesslog run that ingested nothing fails, and a
-terminal status of `failed` exits 1 (cli-templates follow-ons, SPEC-006).
+terminal status of `failed` exits 1.
 
 - None of its files read (each failed to parse, or was refused because an
   index template isn't installed), or a walk whose every host read nothing:
