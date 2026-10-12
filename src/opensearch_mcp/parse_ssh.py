@@ -23,6 +23,29 @@ _AUTH_FAILED = re.compile(
 NO_ZONE = "the system timezone is unknown, so local times can't be read as UTC"
 
 
+def _read_lines(log_file: Path, notes: list[str] | None):
+    """The file's lines, read as they're parsed. A file that can't be opened
+    or read is named; one that fails part way keeps the lines read before,
+    and says how far it got. Only the read is guarded: an error parsing or
+    sending a line isn't caught here."""
+    from opensearch_mcp import ops
+
+    read = 0
+    try:
+        with open(log_file, encoding="utf-8-sig", errors="replace") as f:
+            for read, line in enumerate(f, 1):  # how far it got, if it fails
+                yield line
+    except OSError as e:
+        why = (
+            ops.Unreadable(str(e))
+            if not read
+            else ops.NoEntry(
+                f"couldn't be read past line {read} ({e}); the lines before it were read"
+            )
+        )
+        ops.not_indexed(notes, log_file, why)
+
+
 def parse_ssh_log(
     ssh_dir: Path,
     client: OpenSearch,
@@ -73,13 +96,7 @@ def parse_ssh_log(
 
         rel = relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
         lines = unread = 0
-        try:  # a file that can't be opened or read is named; the others are still parsed
-            with open(log_file, encoding="utf-8-sig", errors="replace") as f:
-                raw_lines = f.readlines()
-        except OSError as e:
-            ops.not_indexed(notes, log_file, ops.Unreadable(str(e)))
-            continue
-        for line in raw_lines:
+        for line in _read_lines(log_file, notes):  # one that can't be read is named
             line = line.strip()
             if not line:
                 continue

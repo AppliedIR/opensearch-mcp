@@ -269,10 +269,10 @@ THREE = {
 
 
 class _FailsOnRead:
-    """A log that opens, then fails on read (a disk error)."""
+    """A log that opens, then fails on read (a disk error), after `lines`."""
 
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, path, lines=()):
+        self.path, self.lines = path, list(lines)
 
     def __enter__(self):
         return self
@@ -283,11 +283,16 @@ class _FailsOnRead:
     def _fail(self, *a):
         raise OSError(errno.EIO, os.strerror(errno.EIO), str(self.path))
 
-    __iter__ = __next__ = read = readline = readlines = _fail
+    def __iter__(self):
+        yield from self.lines
+        self._fail()
+
+    __next__ = read = readline = readlines = _fail
 
 
-def make_unreadable(how, root, monkeypatch) -> str:
-    """Make the middle log, b.log, unreadable; the error it gives."""
+def make_unreadable(how, root, monkeypatch, lines=()) -> str:
+    """Make the middle log, b.log, unreadable (after `lines`); the error it
+    gives."""
     bad = root / LOGS / "b.log"
     if how == "mode 000":
         bad.chmod(0)
@@ -296,7 +301,9 @@ def make_unreadable(how, root, monkeypatch) -> str:
     monkeypatch.setattr(
         parse_ssh,
         "open",
-        lambda path, *a, **kw: _FailsOnRead(path) if Path(path) == bad else real(path, *a, **kw),
+        lambda path, *a, **kw: (
+            _FailsOnRead(path, lines) if Path(path) == bad else real(path, *a, **kw)
+        ),
         raising=False,
     )
     return f"[Errno 5] {os.strerror(errno.EIO)}: '{bad}'"
@@ -317,6 +324,21 @@ def test_an_unreadable_log_is_named_and_the_others_are_parsed(parse, tmp_path, m
     assert sorted(d["user.name"] for _, d in docs) == ["alice", "carol"]
     assert res == (2, 0, 0)  # named, never counted as a skip
     assert notes == [f"not indexed: {root / LOGS / 'b.log'}: couldn't be read ({err})"]
+
+
+def test_a_read_that_fails_part_way_keeps_the_lines_before_it(parse, tmp_path, monkeypatch):
+    """Read as it's parsed: a log whose read fails after two lines keeps
+    them, and is named with how far it got."""
+    root = tmp_path / "WKS01"
+    write(root, THREE)
+    err = make_unreadable("EIO on read", root, monkeypatch, [f"{GOOD_2}\n", "\n"])
+    res, docs, notes = parse({})
+    assert sorted(d["user.name"] for _, d in docs) == ["alice", "bob", "carol"]
+    assert res == (3, 0, 0)
+    bad = root / LOGS / "b.log"
+    assert notes == [
+        f"not indexed: {bad}: couldn't be read past line 2 ({err}); the lines before it were read"
+    ]
 
 
 @pytest.mark.parametrize("how", UNREADABLE)
