@@ -187,17 +187,20 @@ def install_component_templates(client) -> dict[str, Any]:
 STAMP_FIELDS = ("vhir.original.path", "vhir.original.sha256", "vhir.content_hash")
 
 
-def put_stamp_fields(client, audit=None) -> dict[str, Any]:
-    """Map the stamp's fields `keyword` on every open case index, one
-    put_mapping each (one index's conflict doesn't stop the others), recorded
-    as one step when `audit` is given."""
+def put_stamp_fields(client, audit=None, indices: str = "") -> dict[str, Any]:
+    """Map the stamp's fields `keyword` on the open indices of one case,
+    `indices` (`case-<c12>-*`, the run's; none when ""), one put_mapping each
+    (one index's conflict doesn't stop the others), recorded as one step when
+    `audit` is given."""
     results: dict[str, Any] = {"patched": [], "failed": []}
+    if not indices:
+        return results
     props = {f: HOST_KEY_FIELDS[f] for f in STAMP_FIELDS}
     try:
-        rows = client.cat.indices(index="case-*", h="index", format="json",
+        rows = client.cat.indices(index=indices, h="index", format="json",
                                   expand_wildcards="open")  # fmt: skip
     except Exception as e:
-        results["failed"].append({"index": "case-*", "error": str(e)})
+        results["failed"].append({"index": indices, "error": str(e)})
         rows = []
     names = [r.get("index") for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
     for index in sorted(n for n in names if n):
@@ -225,15 +228,16 @@ _INSTALLED_LOCK = threading.Lock()
 _INSTALLED: dict | None = None  # this process's ensure_winlog_pipeline result
 
 
-def ensure_installed_once(client, audit=None) -> dict:
+def ensure_installed_once(client, audit=None, stamp_indices: str = "") -> dict:
     """ensure_winlog_pipeline, once per process (whatever the cluster already
     holds: an older release's templates are replaced), from the process's
-    first write. What wasn't installed is printed once."""
+    first write, `stamp_indices` its case's. What wasn't installed is printed
+    once."""
     global _INSTALLED
     with _INSTALLED_LOCK:
         if _INSTALLED is None:
             try:
-                _INSTALLED = ensure_winlog_pipeline(client, audit)
+                _INSTALLED = ensure_winlog_pipeline(client, audit, stamp_indices)
             except Exception as e:
                 _INSTALLED = {"status": "error", "error": str(e)}
             other = _INSTALLED.get("other_templates") or {}
@@ -259,9 +263,24 @@ def template_for(index: str) -> str | None:
     return best[1] if best else None
 
 
+def governing_template(index: str) -> str | None:
+    """The shipped template OpenSearch would apply to `index`: the evtx
+    template (priority 100, above every other) for an evtx index, else
+    template_for's."""
+    if fnmatch.fnmatchcase(index, _TEMPLATE_PATTERN):
+        return _TEMPLATE_NAME
+    return template_for(index)
+
+
 def not_installed(result: dict, template: str) -> str:
-    """Why non-evtx `template` isn't on the cluster after the install
-    `result`, or "" when it is."""
+    """Why `template` isn't on the cluster after the install `result`, or ""
+    when it is. The evtx template is installed when the install's status is
+    ok or partial, and counts as such where an operator's template governs
+    its pattern (the install stopped for it: its indices are written)."""
+    if template == _TEMPLATE_NAME:
+        if result.get("status") in ("ok", "partial") or result.get("operator_template"):
+            return ""
+        return str(result.get("error") or "not installed")
     other = result.get("other_templates") or {}
     if template in other.get("skipped", []):
         return f"its file {dict(_TEMPLATES_REGISTRY).get(template)} is missing"
@@ -273,7 +292,7 @@ def not_installed(result: dict, template: str) -> str:
     return ""
 
 
-def install_all_templates(client, audit=None) -> dict[str, Any]:
+def install_all_templates(client, audit=None, stamp_indices: str = "") -> dict[str, Any]:
     """Idempotent install of all non-evtx case-* index templates.
 
     Installs component templates FIRST (they're referenced by composable
@@ -317,6 +336,15 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
                 continue
             body = with_host_key_fields(_load_json(path))
             loading = False
+            # what decides an index's template is the registry: a file that
+            # says otherwise would govern other indices, or none
+            priority, patterns = _TEMPLATE_PATTERNS[tpl_name]
+            pats = body.get("index_patterns")
+            same = isinstance(pats, list) and sorted(map(str, pats)) == sorted(patterns)
+            for field, ok in (("priority", body.get("priority") == priority),
+                              ("index_patterns", same)):  # fmt: skip
+                if not ok:
+                    raise ValueError(f"{filename}: its {field} doesn't match what vhir expects")
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
@@ -330,7 +358,8 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
     except Exception as e:  # never cost the install its per-template results
         logger.warning("install_all_templates: patching existing indices failed: %s", e)
         results["patched_indices"] = {"patched": [], "failed": [{"index": "*", "error": str(e)}]}
-    results["stamp_fields"] = put_stamp_fields(client, audit)  # indices made before them
+    # the case's indices made before the stamp fields were mapped
+    results["stamp_fields"] = put_stamp_fields(client, audit, stamp_indices)
     return results
 
 
@@ -399,7 +428,7 @@ def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]
     return results
 
 
-def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
+def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[str, Any]:
     """Install winlog_data_normalize_v1 pipeline + update evtx template.
 
     Order (IMPORTANT — Rev 6 correctness correction):
@@ -426,7 +455,7 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
     # conflict, simulate-validation failure) or the whole function
     # raises. This matches CR's 2026-04-21 recommendation.
     try:
-        other_templates_result = install_all_templates(client, audit)
+        other_templates_result = install_all_templates(client, audit, stamp_indices)
     except Exception as _ot_e:
         logger.warning("install_all_templates unexpected failure: %s", _ot_e)
         other_templates_result = {
@@ -454,6 +483,7 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
                     f"{_TEMPLATE_PATTERN}. Resolve before install."
                 ),
                 "other_templates": other_templates_result,
+                "operator_template": True,  # it governs evtx indices: they're still written
             }
         existing_dp = (
             (sim.get("template", {}) or {})
@@ -470,6 +500,7 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
                     f"required before installing {_PIPELINE_ID}."
                 ),
                 "other_templates": other_templates_result,
+                "operator_template": True,
             }
 
         # 2. Simulate-pipeline validation BEFORE PUT — inline body form.

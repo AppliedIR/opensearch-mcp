@@ -875,7 +875,8 @@ def test_each_existing_case_index_is_given_the_stamp_fields_as_one_step(case):
     client.indices.put_mapping.side_effect = lambda index, body: (
         (_ for _ in ()).throw(RuntimeError("conflict")) if "json" in index else {}
     )
-    result = mappings.put_stamp_fields(client, AuditWriter(mcp_name="opensearch-mcp"))
+    audit = AuditWriter(mcp_name="opensearch-mcp")
+    result = mappings.put_stamp_fields(client, audit, f"case-{C12}-*")
     keywords = {f: {"type": "keyword"} for f in mappings.STAMP_FIELDS}
     for call in client.indices.put_mapping.call_args_list:
         assert call.kwargs["body"] == {"properties": keywords}
@@ -890,7 +891,7 @@ def test_installing_the_templates_gives_existing_case_indices_the_stamp_fields()
 
     client = MagicMock()
     client.cat.indices.return_value = [{"index": f"case-{C12}-evtx-0"}]
-    result = mappings.install_all_templates(client)
+    result = mappings.install_all_templates(client, stamp_indices=f"case-{C12}-*")
     assert result["stamp_fields"]["patched"] == [f"case-{C12}-evtx-0"]
     bodies = [c.kwargs["body"] for c in client.indices.put_mapping.call_args_list]
     assert {"properties": {f: {"type": "keyword"} for f in mappings.STAMP_FIELDS}} in bodies

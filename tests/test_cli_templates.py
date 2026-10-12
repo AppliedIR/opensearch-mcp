@@ -304,18 +304,8 @@ def test_an_unanswered_exists_still_refuses(sent, monkeypatch):
     assert client.named("_bulk") == []
 
 
-def test_an_evtx_index_is_never_refused(sent):
-    """Its template's failure is warned about; the index is still written."""
-    client = Client(refuse={"vhir-evtx-ecs"})
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        index = write(client, "evtx")
-    assert client.named("_bulk") == [index]
-    assert "WARNING: index templates not installed: vhir-evtx-ecs: " in err.getvalue()
-
-
 def test_an_install_that_raises_refuses_every_new_non_evtx_index(sent, monkeypatch):
-    def broken(client, audit=None):
+    def broken(client, audit=None, stamp_indices=""):
         raise RuntimeError("cluster went away")
 
     monkeypatch.setattr(mp, "ensure_winlog_pipeline", broken)

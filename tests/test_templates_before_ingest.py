@@ -28,7 +28,7 @@ def stubs(monkeypatch, tmp_path):
     monkeypatch.setattr(srv, "_client_verified", False)
     monkeypatch.setattr(srv, "get_client", lambda: client)
 
-    def install(_client, audit=None):
+    def install(_client, audit=None, stamp_indices=""):
         seen.append("install")
         return {"status": "ok"}
 

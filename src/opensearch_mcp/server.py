@@ -275,7 +275,7 @@ def _get_os():
             try:
                 from opensearch_mcp.mappings import ensure_winlog_pipeline
 
-                _install_result = ensure_winlog_pipeline(_client, audit)
+                _install_result = ensure_winlog_pipeline(_client, audit, _active_case_indices())
                 if _install_result.get("status") != "ok":
                     logger.warning(
                         "winlog pipeline install reported %s: %s",
@@ -294,6 +294,16 @@ def _get_os():
                 "Run 'opensearch-setup' to start OpenSearch."
             ) from e
     return _client
+
+
+def _active_case_indices() -> str:
+    """`case-<c12>-*` of the active case, the one the server's audit writes
+    to: the indices its template install gives the stamp fields ("" for none)."""
+    try:
+        c12 = _case_c12(_get_active_case() or "")
+    except Exception:
+        c12 = ""
+    return f"case-{c12}-*" if c12 else ""
 
 
 def _os_call(fn, *args, **kwargs):
@@ -1596,7 +1606,7 @@ def idx_install_pipelines() -> dict:
     from opensearch_mcp.mappings import ensure_winlog_pipeline
 
     client = _get_os()
-    result = ensure_winlog_pipeline(client, audit)
+    result = ensure_winlog_pipeline(client, audit, _active_case_indices())
 
     # Surface the non-evtx template install outcome in the summary so
     # operators running this manually see both halves of the work.
