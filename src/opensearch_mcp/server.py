@@ -865,6 +865,29 @@ _IP_WILDCARD_HINT = (
 )
 
 
+def _stale_dates_hint(client, scope: str, query: str, time_field: str = "") -> str:
+    """A hint for each index of `scope` that maps an EZ date field the query
+    (or `time_field`) names without the template's format: a date range on it
+    matches none of that index's records. "" for any other query."""
+    from opensearch_mcp.mappings import csv_date_fields, stale_date_indices
+
+    named = {f for f in csv_date_fields() if f == time_field
+             or re.search(rf"(?<![\w.]){re.escape(f)}\s*:", query or "")}  # fmt: skip
+    if not named:
+        return ""
+    return " ".join(
+        f"{index} was made before 0.6.5; its EZ date fields aren't read as dates, so date "
+        "ranges on them miss its records: delete the index and re-ingest, then re-run "
+        "idx_enrich_triage/intel"
+        for index in stale_date_indices(client, scope, named)
+    )
+
+
+def _add_hint(resp: dict, hint: str) -> None:
+    if hint:
+        resp["hint"] = hint + (f" {resp['hint']}" if resp.get("hint") else "")
+
+
 _INGEST_AGG_CAP = 1000
 
 
@@ -1121,6 +1144,7 @@ def idx_search(
         # Hits from indices that keep the address as text don't mean the
         # IP-typed ones matched: there the wildcard silently matches nothing.
         resp["hint"] = _IP_WILDCARD_HINT
+    _add_hint(resp, _stale_dates_hint(client, index, query))
     if compact:
         resp["note"] = (
             "Results are compact — bloat fields excluded, long values truncated. "
@@ -1195,6 +1219,7 @@ def idx_count(
         return err
     count = result["hits"]["total"]["value"]
     resp = {"count": count}
+    _add_hint(resp, _stale_dates_hint(client, index, query))
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
     return _logged_query(
         resp,
@@ -1386,6 +1411,7 @@ def idx_timeline(
         "interval": interval,
         "buckets": buckets,
     }
+    _add_hint(resp, _stale_dates_hint(client, index, query, time_field))
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
         resp,

@@ -1604,7 +1604,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 parts = [f"{idx:,} entries"]
                 if sk:
                     parts.append(f"{sk} skipped")
-                print(", ".join(parts))
+                print(", ".join(parts) + describe(kw))
             elif event == "artifact_failed":
                 print(f"FAILED: {kw['error']}")
 
@@ -1993,6 +1993,8 @@ def cmd_csv(args: argparse.Namespace) -> None:
             time_field=cfg.time_field,
             host_dict=case_host_dict,
             row_host=tool_name != "jumplists",
+            # the evtx index is searched and charted by @timestamp
+            timestamp_from=cfg.time_field if cfg.index_suffix == "evtx" else "",
         )
 
     _file_outcome(audit, aid, entry, f"{count} indexed, {sk} skipped, {bf} bulk failed", csv_path)

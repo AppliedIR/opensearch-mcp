@@ -5,8 +5,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 
 from opensearchpy import OpenSearch
@@ -14,6 +16,29 @@ from opensearchpy import OpenSearch
 from opensearch_mcp.bulk import flush_bulk
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
+
+_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def _ez_time(value: str) -> datetime | None:
+    """An EZ tool's time (`2023-01-21 13:00:59.3935272`, with or without the
+    fraction, or ISO) as UTC, or None when it isn't one. The tools write UTC
+    with no zone, and Python 3.10 reads at most 6 fraction digits."""
+    try:
+        ts = datetime.fromisoformat(_FRACTION.sub(r"\1", value.strip().replace("Z", "+00:00")))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+@cache
+def _date_fields() -> frozenset[str]:
+    """The csv template's date fields: a blank one is left out of the record,
+    so it isn't counted as a value the mapping couldn't parse."""
+    from opensearch_mcp.mappings import csv_date_fields
+
+    return csv_date_fields()
+
 
 # Stands in for NUL while Python 3.10's csv reads a line. A lone surrogate
 # never comes out of decoding a file with errors="replace".
@@ -159,6 +184,7 @@ def ingest_csv(
     row_source=None,
     seen: dict | None = None,
     collided: dict | None = None,
+    timestamp_from: str = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -167,6 +193,9 @@ def ingest_csv(
 
     Returns (count_indexed, count_skipped, count_bulk_failed).
     count_skipped = rows dropped by time range filter.
+
+    timestamp_from: a column whose EZ time sets each record's @timestamp
+    (UTC), for a tool whose index is searched and charted by @timestamp.
 
     `seen` ((machine key, record id) -> the first file that sent it, one per
     index for a run) and `collided` ((file whose row isn't stored, the earlier
@@ -204,10 +233,7 @@ def ingest_csv(
             if time_field and (time_from or time_to):
                 ts_str = row.get(time_field, "")
                 if ts_str:
-                    try:
-                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                    except ValueError:
-                        ts = None
+                    ts = _ez_time(ts_str)
                     if ts:
                         if time_from and ts < time_from:
                             skipped += 1
@@ -251,6 +277,12 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            for k in [k for k, v in row.items() if k in _date_fields() and v == ""]:
+                del row[k]  # a blank date: no value, not an unparsed one
+
+            # the time a timeline reads, from the tool's own time column
+            if timestamp_from and (ts := _ez_time(str(row.get(timestamp_from) or ""))):
+                row["@timestamp"] = ts.isoformat()
 
             # Provenance fields (added after ID computation)
             if source_file:
