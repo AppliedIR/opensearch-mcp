@@ -378,11 +378,147 @@ def second_copy_types(hostname: str = "", c12: str = "") -> list[str]:
 
 
 def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
-    """The notice for `hostname`'s `artifact_type`, or for any it got."""
+    """The notice for `hostname`'s `artifact_type`, or for any it got, and
+    the fill-in report beside it."""
     types = second_copy_types(hostname, c12)
     if artifact_type:
-        return SECOND_COPY_NOTE if artifact_type in types else ""
-    return f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
+        legacy = SECOND_COPY_NOTE if artifact_type in types else ""
+    else:
+        legacy = f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
+    return "; ".join(n for n in (legacy, fill_note(hostname, artifact_type, c12)) if n)
+
+
+# A re-ingest of evidence stored before 0.6.5 (the fill-in): a record whose
+# 0.6.4 id is stored, without the id-scheme marker, from the same evidence,
+# is that stored record and isn't written again. Each stored record stands
+# for one record: the first to match claims it for this process.
+_FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
+FILL: dict[tuple[str, str, str], list[int]] = {}  # (c12, unit_raw, type) -> [kept, added]
+FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
+_FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
+
+
+def _same_evidence(stored: dict, src: dict) -> bool:
+    """Whether the stored record came from the same evidence: what its 0.6.4
+    id leaves out (an access-log line's user, version and referrer), the
+    source file, or a vol3 object's offset, which both must have."""
+    method = str(src.get("vhir.parse_method") or "")
+    if method.startswith("vol3-"):
+        return stored.get("Offset") is not None and stored.get("Offset") == src.get("Offset")
+    fields = ["vhir.source_file"]
+    if method == "accesslog":
+        fields += ["user.name", "http.version", "http.request.referrer"]
+    return all(stored.get(f) == src.get(f) for f in fields)
+
+
+def _unchecked(key: tuple[str, str, str], index: str, error) -> None:
+    import sys
+
+    if key not in FILL_UNCHECKED:  # one line per (case, unit, type)
+        FILL_UNCHECKED[key] = f"couldn't check for records stored before 0.6.5 in {index}: {error}"
+        print(f"WARNING: {FILL_UNCHECKED[key]}", file=sys.stderr)
+
+
+def _mget(client, actions: list[dict], ids: list[str]) -> list:
+    """Each id's answer, in order; a failed or short answer raises."""
+    body = {"docs": [{"_index": a["_index"], "_id": i} for a, i in zip(actions, ids)]}
+    docs = client.mget(body=body, realtime=True)["docs"]
+    if len(docs) != len(actions):
+        raise RuntimeError(f"{len(docs)} answers for {len(actions)} ids")
+    return docs
+
+
+def _stored(answer, key: tuple[str, str, str], index: str) -> dict | None:
+    """The record an mget answer holds: its _source, {} when none is stored
+    (not found, or no such index), None when the id wasn't answered (said,
+    never read as "not stored")."""
+    error = answer.get("error") if isinstance(answer, dict) else f"no answer: {answer!r}"
+    if error and not (
+        isinstance(error, dict) and error.get("type") == "index_not_found_exception"
+    ):
+        _unchecked(key, index, error)
+        return None
+    return {} if error or not answer.get("found") else answer.get("_source") or {}
+
+
+def fill_in(client, actions: list[dict]) -> tuple[list[dict], set]:
+    """Before the write: one lookup of the batch's 0.6.4 ids, and the actions
+    to send, without those already stored. A lookup that fails, or a record
+    it didn't answer, is written under its 0.6.5 id and said; nothing raises.
+    Returns (the actions to send, the (case, unit, type)s looked up)."""
+    ctx = current()
+    looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
+    if not looked:
+        return actions, set()
+
+    def key(a: dict) -> tuple[str, str, str]:
+        return ctx.c12, ctx.unit_raw, artifact_type_of(a["_index"])
+
+    matched = []
+    try:
+        for a, d in zip(looked, _mget(client, looked, [a[OLD_ID_KEY] for a in looked])):
+            stored = _stored(d, key(a), a["_index"])
+            if not stored or "vhir.id_scheme" in stored:
+                continue
+            FILL.setdefault(key(a), [0, 0])  # said, "kept 0" when nothing matches
+            claim = _FILL_CLAIMED.get((a["_index"], a[OLD_ID_KEY]), a["_id"])
+            if claim == a["_id"] and _same_evidence(stored, a["_source"]):
+                matched.append(a)
+        # one already stored under its 0.6.5 id (a lookup failed when it was
+        # written) is that copy: it doesn't take the stored record too
+        now = _mget(client, matched, [a["_id"] for a in matched]) if matched else []
+    except Exception as e:
+        for a in looked:
+            _unchecked(key(a), a["_index"], e)
+        return actions, {key(a) for a in looked}
+    kept = set()
+    for a, d in zip(matched, now):
+        claim = (a["_index"], a[OLD_ID_KEY])
+        if _stored(d, key(a), a["_index"]) != {} or _FILL_CLAIMED.get(claim, a["_id"]) != a["_id"]:
+            continue  # stored under its 0.6.5 id, unanswered, or its twin took the record
+        if claim not in _FILL_CLAIMED:  # the same record read again counts once
+            _FILL_CLAIMED[claim] = a["_id"]
+            FILL[key(a)][0] += 1
+        kept.add(id(a))
+    return [a for a in actions if id(a) not in kept], {key(a) for a in looked}
+
+
+def fill_added(keys: set, stored: int) -> None:
+    """After the write: what a batch of one looked-up (case, unit, type)
+    stored, once a record stored before 0.6.5 was found there."""
+    if len(keys) == 1 and stored and next(iter(keys)) in FILL:
+        FILL[next(iter(keys))][1] += stored
+
+
+def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
+    """The fill-in report for `hostname`'s `artifact_type` (any type when "")."""
+    c12 = c12 or (current().c12 if current() is not None else "")
+
+    def mine(c, h, t):
+        return (
+            (not c12 or c == c12)
+            and (not hostname or h == hostname)
+            and (not artifact_type or t == artifact_type)
+        )
+
+    notes = [
+        f"{k[2]}: kept {kept} record{'' if kept == 1 else 's'} already stored; "
+        f"added {added} not stored before"
+        for k, (kept, added) in sorted(FILL.items())
+        if mine(*k)
+    ]
+    notes += [why for k, why in sorted(FILL_UNCHECKED.items()) if mine(*k)]
+    return "; ".join(notes)
+
+
+def print_fill_report() -> None:
+    """At a command's Done line: each (case, unit, type)'s fill-in report not
+    yet printed in this process (the CLI route writes no status)."""
+    import sys
+
+    for k in sorted({*FILL, *FILL_UNCHECKED} - _FILL_SAID):
+        _FILL_SAID.add(k)
+        print(f"NOTE: {fill_note(k[1], k[2], k[0])}", file=sys.stderr)
 
 
 def removed_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:

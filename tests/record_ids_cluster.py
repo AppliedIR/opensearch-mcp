@@ -2,13 +2,20 @@
 
 - helpers.bulk(client, actions, ...): `create` on an existing (index, id) is a
   409 error item, `index` overwrites; returns (successes, errors).
-- client.mget, indices.exists/create/stats.
+- client.mget: each id found (with its `_version`) or not; an index that
+  doesn't exist answers each of its ids with an index_not_found_exception
+  item, as the cluster does. `mget_error` makes the request raise, and
+  `mget_item_error` answers every id with that error item, `mget_short`
+  leaves out the last answer.
+- indices.exists/create/stats.
 """
 
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
+
+NO_INDEX = {"type": "index_not_found_exception", "reason": "no such index"}
 
 
 class Cluster:
@@ -17,6 +24,11 @@ class Cluster:
         self.created: set[str] = set()
         self.reject = False  # every write refused (a mapping conflict, a block)
         self.timeout_once = False  # the next write is stored, then answered by a timeout
+        self.versions: dict[tuple[str, str], int] = {}  # each stored doc's _version
+        self.asked: list[tuple[str, str]] = []  # every (index, id) an mget asked for
+        self.mget_error: Exception | None = None
+        self.mget_item_error: dict | None = None
+        self.mget_short = False  # one answer fewer than the ids asked
         cluster = self
 
         class Indices:
@@ -40,13 +52,23 @@ class Cluster:
             indices = Indices()
 
             def mget(self, body=None, **kw):
+                cluster.asked += [(d["_index"], d["_id"]) for d in body["docs"]]
+                if cluster.mget_error is not None:
+                    raise cluster.mget_error
                 out = []
                 for d in body["docs"]:
                     key = (d["_index"], d["_id"])
                     src = cluster.store.get(key)
+                    if cluster.mget_item_error is not None or not self.indices.exists(
+                        index=key[0]
+                    ):
+                        error = cluster.mget_item_error or NO_INDEX
+                        out.append({"_index": key[0], "_id": key[1], "error": error})
+                        continue
                     out.append({"_index": key[0], "_id": key[1], "found": src is not None,
-                                **({"_source": src} if src is not None else {})})  # fmt: skip
-                return {"docs": out}
+                                **({"_source": src, "_version": cluster.versions[key]}
+                                   if src is not None else {})})  # fmt: skip
+                return {"docs": out[:-1] if cluster.mget_short else out}
 
         self.client = Client
 
@@ -57,7 +79,9 @@ class Cluster:
         if self.timeout_once:  # stored, but the answer never came back
             self.timeout_once = False
             for a in actions:
-                self.store.setdefault((a["_index"], a["_id"]), dict(a["_source"]))
+                if (a["_index"], a["_id"]) not in self.store:
+                    self.store[(a["_index"], a["_id"])] = dict(a["_source"])
+                    self.versions[(a["_index"], a["_id"])] = 1
             from opensearchpy.exceptions import ConnectionTimeout
 
             raise ConnectionTimeout("TIMEOUT", "read timed out", None)
@@ -75,6 +99,7 @@ class Cluster:
                                           "error": conflict}})  # fmt: skip
                 continue
             self.store[key] = dict(a["_source"])
+            self.versions[key] = self.versions.get(key, 0) + 1
             self.created.add(a["_index"])
             ok += 1
         if raise_on_error and errors:

@@ -1670,6 +1670,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
         minutes = result.elapsed_seconds / 60
         print(f"\nDone in {minutes:.1f} minutes. ", end="")
         print(_run_summary(result))
+        from opensearch_mcp.write_context import print_fill_report
+
+        print_fill_report()
         if total_bulk_failed:
             # Primary action: presume loss until proven otherwise
             # (safer default — matches operator mental model that
@@ -2780,6 +2783,9 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         raise
 
     print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    from opensearch_mcp.write_context import print_fill_report
+
+    print_fill_report()
     if _alog_failed_files:
         print(f"*** {len(_alog_failed_files)} files failed to parse; continuing walk: ***")
         for path, err in _alog_failed_files[:10]:
@@ -3243,6 +3249,9 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     total = sum(r.get("indexed", 0) for r in results.values())
     failed = [p for p, r in results.items() if r.get("status") == "failed"]
     print(f"\nDone. {total:,} entries indexed from {len(results)} plugins.")
+    from opensearch_mcp.write_context import print_fill_report
+
+    print_fill_report()
     if failed:
         print(f"{len(failed)} plugin(s) failed: {', '.join(failed)}")
 
