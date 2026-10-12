@@ -104,25 +104,50 @@ def template_type_tokens() -> frozenset[str]:
     return frozenset(tokens)
 
 
+def csv_date_fields() -> frozenset[str]:
+    """The fields the csv template maps as dates."""
+    props = _load_json(_MAPPINGS_DIR / "csv_template.json")["template"]["mappings"]["properties"]
+    return frozenset(f for f, p in props.items() if p.get("type") == "date")
+
+
+def _stale(got: dict) -> list[str]:
+    """The csv template's formatted date fields that a mapping's properties
+    `got` map as dates without the template's format."""
+    props = _load_json(_MAPPINGS_DIR / "csv_template.json")["template"]["mappings"]["properties"]
+    want = {
+        f: p["format"] for f, p in props.items() if p.get("type") == "date" and p.get("format")
+    }
+    return sorted(
+        f for f, fmt in want.items()
+        if (got.get(f) or {}).get("type") == "date" and got[f].get("format") != fmt
+    )  # fmt: skip
+
+
 def stale_date_fields(client, index: str, why: list | None = None) -> list[str] | None:
     """The csv template's date fields (the EZ tools' date columns) that `index`
     maps as dates without the template's format: an index made before 0.6.5,
     whose EZ dates go unparsed until it is rebuilt from the template. None when
     the mapping can't be read, and why in `why` when given."""
-    props = _load_json(_MAPPINGS_DIR / "csv_template.json")["template"]["mappings"]["properties"]
-    want = {
-        f: p["format"] for f, p in props.items() if p.get("type") == "date" and p.get("format")
-    }
     try:
         got = client.indices.get_mapping(index=index)[index]["mappings"].get("properties", {})
     except Exception as e:
         if why is not None:
             why.append(str(e) or type(e).__name__)
         return None
-    return sorted(
-        f for f, fmt in want.items()
-        if (got.get(f) or {}).get("type") == "date" and got[f].get("format") != fmt
-    )  # fmt: skip
+    return _stale(got)
+
+
+def stale_date_indices(client, scope: str, fields) -> dict[str, list[str]]:
+    """The indices of `scope` (a name or pattern) that map any of `fields` as
+    stale_date_fields says, each with those fields; {} when none, or when the
+    mappings can't be read (a query's hint never fails the query)."""
+    try:
+        mappings = client.indices.get_mapping(index=scope)
+        got = {i: m["mappings"].get("properties", {}) for i, m in mappings.items()}
+    except Exception:
+        return {}
+    stale = {i: [f for f in _stale(props) if f in fields] for i, props in sorted(got.items())}
+    return {i: fs for i, fs in stale.items() if fs}
 
 
 def install_component_templates(client) -> dict[str, Any]:

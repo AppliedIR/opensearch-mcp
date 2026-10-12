@@ -15,6 +15,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp import __version__, ops
 from opensearch_mcp import write_context as wc
 from opensearch_mcp.discover import DiscoveredHost, scan_triage_directory
+from opensearch_mcp.ingest_counts import stored_counts
 from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.ops import NO_ENTRY
@@ -1052,9 +1053,16 @@ def _ingest_hosts(
                     if hives
                     else None,
                 )
+                # what the index kept of this step, values it couldn't parse named
+                counts = stored_counts(client, index_name, aid) if cnt else {}
                 if tool_status:
                     tool_status["status"] = "failed" if "error" in tool_status else "complete"
                     tool_status["indexed"] = tool_status.get("indexed", 0) + cnt
+                    for k in ("stored", "ignored_docs") if counts else ():
+                        tool_status[k] = tool_status.get(k, 0) + counts[k]
+                    for f, n in counts.get("ignored", {}).items():
+                        ignored = tool_status.setdefault("ignored", {})
+                        ignored[f] = ignored.get(f, 0) + n
                     tool_status["skipped"] = sk
                     tool_status["bulk_failed"] = tool_status.get("bulk_failed", 0) + bf
                     if unread:
@@ -1070,6 +1078,7 @@ def _ingest_hosts(
                     artifact=tool_name,
                     indexed=cnt,
                     skipped=sk,
+                    **counts,
                 )
             except Exception as e:
                 ar.error = str(e)
