@@ -158,7 +158,7 @@ def test_the_snapshot_folder_is_given_to_uid_1000_when_its_owner_differs(
     if exists:
         d.mkdir()
     text = SCRIPT.read_text()
-    block = text[text.index("# --- 2b.") : text.index("# --- 3. Start OpenSearch ---")]
+    block = text[text.index("# --- 2b.") : text.index('if [ ! -f "$OVERRIDE_FILE" ]')]
     assert f'SNAPSHOTS_DIR="{FOLDER}"' in block
     prog = tmp_path / "chown.sh"
     prog.write_text(
@@ -181,11 +181,33 @@ def test_the_snapshot_folder_is_given_to_uid_1000_when_its_owner_differs(
     assert calls == [w.format(d=d) for w in want]
 
 
-def test_no_override_file_is_made_or_named():
-    """docker-compose.yml carries the bind and path.repo; an override file is
-    a second place setup's own `-f` run never reads."""
-    assert not (ROOT / "docker" / "docker-compose.override.yml").exists()
-    assert "override" not in SCRIPT.read_text()
+def test_the_tracked_override_is_left_alone_and_never_asked_to_be_edited():
+    """A box whose user edited the tracked override (as the old WARNING told
+    them to) must still `git pull --ff-only`: the file stays, and setup never
+    asks for it to be edited, since its own `-f` run doesn't read it."""
+    override = ROOT / "docker" / "docker-compose.override.yml"
+    assert override.is_file()
+    text = SCRIPT.read_text()
+    assert "Add manually" not in text and "WARNING: Override file" not in text
+    assert "setup starts docker-compose.yml alone" in text
+
+
+def test_the_printed_rerun_survives_a_space_in_the_path(tmp_path):
+    """The script's own error says how to run it again: one shell word."""
+    tail = SCRIPT.read_text()[SCRIPT.read_text().index("# Snapshots are the one part") :]
+    scripts = tmp_path / "jo smith" / "scripts"
+    docker = tmp_path / "jo smith" / "docker"
+    scripts.mkdir(parents=True)
+    docker.mkdir()
+    prog = tmp_path / "tail.sh"
+    prog.write_text(
+        f"SCRIPT_DIR={shlex.quote(str(scripts))}\nDOCKER_DIR={shlex.quote(str(docker))}\n"
+        "SNAPSHOT_PROBLEMS='no bind'\n" + tail
+    )
+    r = subprocess.run(["bash", str(prog)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 3, r.stdout + r.stderr
+    (line,) = [ln for ln in r.stdout.splitlines() if ln.startswith("  bash ")]
+    assert shlex.split(line) == ["bash", str(scripts / "setup-opensearch.sh")]
 
 
 def _docker_paragraph() -> str:

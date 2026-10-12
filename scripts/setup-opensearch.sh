@@ -62,8 +62,8 @@ EOF
 fi
 
 # --- 2b. Configure snapshot support for backup/restore ---
-# The bind and path.repo are in docker-compose.yml; this makes the host folder
 SNAPSHOTS_DIR="/var/lib/vhir/snapshots"
+OVERRIDE_FILE="$DOCKER_DIR/docker-compose.override.yml"
 
 if [ ! -d "$SNAPSHOTS_DIR" ]; then
     echo "Creating snapshot directory ($SNAPSHOTS_DIR)..."
@@ -73,6 +73,29 @@ fi
 if [ "$(stat -c '%u:%g' "$SNAPSHOTS_DIR")" != "1000:1000" ]; then
     sudo chown 1000:1000 "$SNAPSHOTS_DIR"
     echo "  Snapshot directory: owner set to 1000:1000"
+fi
+
+if [ ! -f "$OVERRIDE_FILE" ]; then
+    echo "Creating docker-compose.override.yml for snapshot volume..."
+    cat > "$OVERRIDE_FILE" <<OVERRIDE
+# Snapshot volume mount for vhir backup/restore
+# Added by setup-opensearch.sh — do not modify the main docker-compose.yml
+services:
+  opensearch:
+    volumes:
+      - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots
+OVERRIDE
+    echo "  Override file: OK"
+else
+    echo "docker-compose.override.yml exists — checking snapshot volume..."
+    if grep -q "/var/lib/vhir/snapshots" "$OVERRIDE_FILE"; then
+        echo "  Snapshot volume: already configured"
+    else
+        # docker-compose.yml carries the bind and path.repo, and is the only
+        # file setup starts, so this file's content changes nothing
+        echo "  Note: $OVERRIDE_FILE doesn't name the snapshots folder."
+        echo "  Nothing to change: setup starts docker-compose.yml alone, which binds it."
+    fi
 fi
 
 # --- 3. Start OpenSearch ---
@@ -428,6 +451,6 @@ if [ -n "$SNAPSHOT_PROBLEMS" ]; then
     echo "$SNAPSHOT_PROBLEMS" | sed 's/^/  - /'
     echo "Re-run this script; it recreates the vhir-opensearch container from"
     echo "$(cd "$DOCKER_DIR" && pwd)/docker-compose.yml and keeps its indexed data:"
-    echo "  bash $SCRIPT_DIR/setup-opensearch.sh"
+    printf '  bash %q\n' "$SCRIPT_DIR/setup-opensearch.sh"
     exit 3
 fi
