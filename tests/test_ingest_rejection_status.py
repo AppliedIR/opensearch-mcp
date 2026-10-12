@@ -309,7 +309,9 @@ class TestRejectionsReachTheStatus:
         monkeypatch.setattr(bulk.helpers, "bulk", timing_out)
         monkeypatch.setattr(bulk, "_MAX_RETRIES", 1)
         monkeypatch.setattr(bulk.time, "sleep", lambda _s: None)
-        ingest.json(_write_jsonl(tmp_path / "outage.jsonl", [{"x": 1}, {"x": 2}]))
+        with pytest.raises(SystemExit) as e:  # a `failed` run exits 1
+            ingest.json(_write_jsonl(tmp_path / "outage.jsonl", [{"x": 1}, {"x": 2}]))
+        assert e.value.code == 1
         s = _status()
         assert (s["status"], s["bulk_failed"]) == ("failed", 2)
         assert s["halt_reason"] == "transport_failed"
