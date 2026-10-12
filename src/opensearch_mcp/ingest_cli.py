@@ -32,7 +32,7 @@ from opensearch_mcp.paths import (
     no_time_field_note,
     vhir_dir,
 )
-from opensearch_mcp.tools import TOOLS
+from opensearch_mcp.tools import PER_PROFILE, TOOLS, scan_id_source
 
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
 
@@ -2010,8 +2010,18 @@ def cmd_csv(args: argparse.Namespace) -> None:
 
     case_host_dict = _load_case_host_dict(case_id)
 
+    # a per-profile tool's row gets the scan route's id, from the file it read;
+    # a row that can't is counted: by scan as well, it would be stored twice
+    no_scan_id = [0]
+
+    def id_source(row: dict) -> str:
+        found = scan_id_source(tool_name, str(row.get("SourceFile") or ""))
+        no_scan_id[0] += not found
+        return found
+
     with wc.op(aid):
         count, sk, bf = ingest_csv(
+            id_source=id_source if tool_name in PER_PROFILE else "",
             csv_path=csv_path,
             client=client,
             index_name=index_name,
@@ -2025,12 +2035,20 @@ def cmd_csv(args: argparse.Namespace) -> None:
             row_host=tool_name != "jumplists",
         )
 
-    _file_outcome(audit, aid, entry, f"{count} indexed, {sk} skipped, {bf} bulk failed", csv_path)
+    outcome = f"{count} indexed, {sk} skipped, {bf} bulk failed"
+    twice = (
+        f"{no_scan_id[0]} rows of {tool_name} couldn't be given a per-profile id: if the same "
+        "profile is also ingested by scan they're stored twice, and identical rows from "
+        "different profiles are stored as one"
+    )
+    _file_outcome(audit, aid, entry, f"{outcome}; {twice}" if no_scan_id[0] else outcome, csv_path)
     print(
         f"Indexed {count:,} entries"
         + (f" ({sk} skipped)" if sk else "")
         + (f", {bf} bulk failed" if bf else "")
     )
+    if no_scan_id[0]:
+        print(twice)
 
 
 # ---------------------------------------------------------------------------

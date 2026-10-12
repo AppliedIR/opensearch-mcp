@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -159,7 +160,7 @@ def ingest_csv(
     row_source=None,
     seen: dict | None = None,
     collided: dict | None = None,
-    id_source: str = "",
+    id_source: str | Callable[[dict], str] = "",
 ) -> tuple[int, int, int]:
     """Read CSV, bulk index each row as a document.
 
@@ -252,10 +253,13 @@ def ingest_csv(
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
             _id = old_rid = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
-            if id_source:  # the profile path the run read is in the id
+            # the profile path the run read is in the id (a row's own, when given
+            # per row), case-folded: Windows paths are case-insensitive
+            src = (id_source(row) if callable(id_source) else id_source).lower()
+            if src:
                 _id = _doc_id(
                     index_name,
-                    {**row, "\x00id_source": id_source},
+                    {**row, "\x00id_source": src},
                     natural_key,
                     volatile_keys=_VOLATILE_KEYS,
                 )
@@ -272,7 +276,7 @@ def ingest_csv(
                 row["vhir.parse_method"] = parse_method
 
             action = {"_index": index_name, "_id": _id, "_source": row}
-            if id_source:  # the id 0.6.4 gave it
+            if src:  # the id 0.6.4 gave it
                 action[OLD_RID_KEY] = old_rid
             actions.append(action)
 

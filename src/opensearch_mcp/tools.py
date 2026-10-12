@@ -322,6 +322,36 @@ def _recased_ntuser(profile: Path, view: Path) -> tuple[Path, Path] | None:
         return None  # SBECmd's own run already reported what it couldn't read
 
 
+# Tools run once per profile folder: the folder they ran on is in each id
+PER_PROFILE = ("shellbags", "jumplists", "lnk", "timeline")
+_SKIPPED_PROFILES = {"public", "default", "default user", "all users"}  # as discovery skips
+
+
+def scan_id_source(tool: str, source_file: str) -> str:
+    """The profile folder the scan route runs `tool` on, as its id source, for
+    a row whose tool read `source_file`: `Users/<name>` and the tool's own
+    folder (discovery's), "/"-separated; "" when the path holds no such folder
+    the scan route would read. A path with more than one `Users` folder (an
+    image mounted under a profile, a profile copied into another) can't say
+    which is the scan's, so it gets "" too."""
+    import re
+
+    from opensearch_mcp.discover import USER_ARTIFACTS
+
+    parts = [p for p in re.split(r"[\\/]+", source_file or "") if p]
+    users = [i for i in range(len(parts) - 1) if parts[i].lower() == "users"]
+    if len(users) != 1 or parts[users[0] + 1].lower() in _SKIPPED_PROFILES:
+        return ""
+    i = users[0]
+    rest = parts[i + 2 :]
+    rels = USER_ARTIFACTS.get(tool, [])
+    for rel in rels if isinstance(rels, list) else [rels]:
+        want = [w.lower() for w in rel.split("/") if w]
+        if len(rest) > len(want) and [r.lower() for r in rest[: len(want)]] == want:
+            return "/".join(parts[i : i + 2 + len(want)])
+    return ""
+
+
 def run_and_ingest(
     tool_name: str,
     artifact_path: Path,
@@ -448,9 +478,7 @@ def run_and_ingest(
             count, sk, bf = ingest_csv(
                 hive=(source_file or str(artifact_path)) if tool_name == "registry_user" else "",
                 # per-profile tools put the profile path they read in the id
-                id_source=(source_file or str(artifact_path))
-                if tool_name in ("shellbags", "jumplists", "lnk", "timeline")
-                else "",
+                id_source=(source_file or str(artifact_path)) if tool_name in PER_PROFILE else "",
                 csv_path=csv_file,
                 client=client,
                 index_name=index_name,
