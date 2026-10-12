@@ -48,15 +48,22 @@ class Cluster(Client):
     """Answers _simulate_index as OpenSearch does: `overlapping` holds the
     templates that match too but don't apply. `outranked` names vhir
     templates another template outranks; `probe` answers the evtx install's
-    own collision probe (`case-PROBE-evtx-PROBE`)."""
+    own collision probe (`case-PROBE-evtx-PROBE`), and with `above` an
+    operator's template outranks every vhir one there: vhir-evtx-ecs is then in
+    `overlapping` once it's on the cluster (as measured on 3.5.0, which never
+    names a priority)."""
 
-    def __init__(self, *a, outranked=(), probe=None, simulate_fails=False, **kw):
+    def __init__(self, *a, outranked=(), probe=None, simulate_fails=False, above=False, **kw):
         super().__init__(*a, **kw)
         self.outranked, self.probe, self.simulate_fails = set(outranked), probe, simulate_fails
+        self.above = above
 
     def _indices_simulate_index_template(self, name):
         if "PROBE" in name:
-            return self.probe or {}
+            reply = dict(self.probe or {})
+            if self.above and EVTX in self.templates:
+                reply["overlapping"] = [{"name": EVTX, "index_patterns": ["case-*-evtx-*"]}]
+            return reply
         if self.simulate_fails:
             raise ConnectionError("no answer")
         patterns = {t: list(ps) for t, (_, ps) in mp._TEMPLATE_PATTERNS.items()}
@@ -68,10 +75,13 @@ class Cluster(Client):
         return [{"index": i} for i in sorted(self.existing) if fnmatch.fnmatchcase(i, kw["index"])]
 
 
+# an operator's template on the evtx pattern, answered as OpenSearch 3.5.0 does
 OPERATOR = {
-    "priority": {"template": {"priority": 500}},
-    "default_pipeline": {"template": {"settings": {"index": {"default_pipeline": "theirs"}}}},
-}
+    "priority": dict(above=True, probe={"template": {"settings": {"index": {
+        "number_of_replicas": "0"}}, "aliases": {}}, "overlapping": []}),
+    "default_pipeline": dict(probe={"template": {"settings": {"index": {
+        "default_pipeline": "theirs"}}}}),
+}  # fmt: skip
 
 
 # --------------------------------------------------------------------------
@@ -94,7 +104,7 @@ def test_an_evtx_index_an_operator_template_governs_is_written(operator):
     """The evtx install stopped because an operator's template governs the
     pattern: the index is created under it, even when vhir's own is on the
     cluster from an earlier install (outranked)."""
-    client = Cluster(probe=OPERATOR[operator], outranked={EVTX})
+    client = Cluster(**OPERATOR[operator], outranked={EVTX})
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         index = write(client, "evtx")
@@ -103,7 +113,7 @@ def test_an_evtx_index_an_operator_template_governs_is_written(operator):
 
 
 def test_an_operator_return_is_marked_and_an_evtx_failure_is_not():
-    client = Cluster(probe=OPERATOR["priority"])
+    client = Cluster(**OPERATOR["priority"])
     assert mp.ensure_winlog_pipeline(client)["operator_template"] is True
     assert "operator_template" not in mp.ensure_winlog_pipeline(Cluster(refuse={EVTX}))
 
@@ -422,3 +432,58 @@ def test_idx_install_pipelines_answers_with_a_broken_evtx_template(monkeypatch):
     monkeypatch.setattr(server, "_get_active_case", lambda: None)
     result = server.idx_install_pipelines()
     assert result["status"] == "error" and "Expecting value" in result["error"]
+
+
+# --------------------------------------------------------------------------
+# codex M2: an operator's template outranking ours is read from `overlapping`
+# after our PUT (_simulate_index names no priority: measured on 3.5.0)
+
+
+@pytest.mark.usefixtures("sent")
+@pytest.mark.parametrize("ours_before", [False, True], ids=["fresh cluster", "ours installed"])
+def test_an_operator_template_above_ours_is_an_operator_return(ours_before):
+    """Was: read from a priority the reply never has, so missed; the evtx index
+    was then refused as outranked (SPEC-001's exemption lost)."""
+    client = Cluster(**OPERATOR["priority"], templates={EVTX} if ours_before else set())
+    result = mp.ensure_winlog_pipeline(client)
+    assert (result["status"], result.get("operator_template")) == ("error", True), result
+    assert result["error"].startswith(f"Another index template outranks ours ({EVTX}, ")
+    mp._INSTALLED = None
+    wc._prepared.clear()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        index = write(Cluster(**OPERATOR["priority"], outranked={EVTX}), "evtx")
+    assert index.endswith("-evtx-0")
+
+
+@pytest.mark.usefixtures("sent")
+def test_when_ours_outranks_the_operators_the_install_is_ok():
+    """Control: the operator's template is in `overlapping`, not ours."""
+    probe = {"template": {"settings": {"index": {}}, "aliases": {}},
+             "overlapping": [{"name": "op-low", "index_patterns": ["case-*"]}]}  # fmt: skip
+    client = Cluster(probe=probe)
+    result = mp.ensure_winlog_pipeline(client)
+    assert result["status"] == "ok" and "operator_template" not in result, result
+    assert EVTX in client.named("indices.put_index_template")
+
+
+# --------------------------------------------------------------------------
+# codex M1: the evtx template file is checked against what vhir expects
+
+
+@pytest.mark.usefixtures("sent")
+@pytest.mark.parametrize(
+    "changes", [{"index_patterns": ["unrelated-*"]}, {"priority": 5}], ids=["patterns", "priority"]
+)
+def test_an_evtx_template_file_that_differs_fails_its_install(request, monkeypatch, changes):
+    """Was: installed, and the evtx index created under no template of ours."""
+    folder = request.getfixturevalue("files")
+    path = folder / "evtx_ecs_template.json"
+    _edit(folder, path.name, **changes)
+    monkeypatch.setattr(mp, "_EVTX_TEMPLATE_FILE", path)
+    client = Cluster()
+    said, _ = _refused_write(client, "evtx")
+    field = next(iter(changes))
+    assert f"evtx_ecs_template.json: its {field} doesn't match what vhir expects" in said
+    assert EVTX not in client.named("indices.put_index_template")
+    assert client.named("indices.create") == []
