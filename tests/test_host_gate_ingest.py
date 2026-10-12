@@ -539,7 +539,11 @@ def test_a_waiting_runs_status_outlives_the_cleanup_by_age(gate):
     (f,) = [f for f in (gate.tmp / "status").glob("*.json")]
     old = time.time() - 25 * 3600
     os.utime(f, (old, old))  # a day without a write
-    time.sleep(0.3)  # a few polls
+    # the waiting run rewrites its status on its next poll; wait for that
+    # (bounded), not for a fixed time a loaded machine can overrun
+    deadline = time.monotonic() + 10
+    while f.stat().st_mtime < old + 3600 and time.monotonic() < deadline:
+        time.sleep(0.05)
     ingest_status.cleanup_old()
     assert f.exists() and json.loads(f.read_text())["status"] == host_gate.AWAITING
     host_gate.cancel(gate.case_dir, RUN, "ex1")
