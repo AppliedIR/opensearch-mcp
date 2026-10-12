@@ -11,7 +11,10 @@
 
 from __future__ import annotations
 
+import errno
+import os
 import uuid
+from pathlib import Path
 
 import pytest
 from ssh_scan_cluster import FakeOS
@@ -182,7 +185,7 @@ def scan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
 
-    def run(files: dict, tz=NY):
+    def run(files: dict, tz=NY, prepare=None):
         case_id = f"ssh-{uuid.uuid4().hex[:8]}"
         case_dir = wc.case_dir_for(case_id)
         (case_dir / "CASE.yaml").write_text(
@@ -194,6 +197,8 @@ def scan(tmp_path, monkeypatch):
         write(root, files)
         (root / "Windows" / "System32" / "config").mkdir(parents=True)
         (root / "Windows" / "System32" / "config" / "SYSTEM").touch()
+        if prepare:  # a change to the volume before the scan
+            prepare(root)
         host = make_host("WKS01", root)
         host.system_timezone = tz
         client = FakeOS()
@@ -249,3 +254,110 @@ def test_a_line_that_cant_be_read_is_counted_unread_and_the_rest_are_kept(parse,
     assert sorted(d["user.name"] for _, d in docs) == ["alice", "bob"]
     assert res == (2, 1, 0)
     assert notes == [f"{LOG}: 1 of 3 line(s) not in a known sshd log format, not indexed"]
+
+
+# --------------------------------------------------------------------------
+# A log that can't be read is named, and the scan's other logs are indexed
+
+LOGS = "ProgramData/ssh/logs"
+CAROL = "4300 2021-03-23 17:00:00.000 Accepted password for carol from 10.0.0.7 port 50300 ssh2"
+THREE = {
+    f"{LOGS}/a.log": f"{GOOD_1}\n",
+    f"{LOGS}/b.log": f"{GOOD_2}\n",
+    f"{LOGS}/c.log": f"{CAROL}\n",
+}
+
+
+class _FailsOnRead:
+    """A log that opens, then fails on read (a disk error), after `lines`."""
+
+    def __init__(self, path, lines=()):
+        self.path, self.lines = path, list(lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def _fail(self, *a):
+        raise OSError(errno.EIO, os.strerror(errno.EIO), str(self.path))
+
+    def __iter__(self):
+        yield from self.lines
+        self._fail()
+
+    __next__ = read = readline = readlines = _fail
+
+
+def make_unreadable(how, root, monkeypatch, lines=()) -> str:
+    """Make the middle log, b.log, unreadable (after `lines`); the error it
+    gives."""
+    bad = root / LOGS / "b.log"
+    if how == "mode 000":
+        bad.chmod(0)
+        return f"[Errno 13] Permission denied: '{bad}'"
+    real = open
+    monkeypatch.setattr(
+        parse_ssh,
+        "open",
+        lambda path, *a, **kw: (
+            _FailsOnRead(path, lines) if Path(path) == bad else real(path, *a, **kw)
+        ),
+        raising=False,
+    )
+    return f"[Errno 5] {os.strerror(errno.EIO)}: '{bad}'"
+
+
+UNREADABLE = [
+    pytest.param("mode 000", marks=pytest.mark.skipif(os.geteuid() == 0, reason="root reads it")),
+    "EIO on read",
+]
+
+
+@pytest.mark.parametrize("how", UNREADABLE)
+def test_an_unreadable_log_is_named_and_the_others_are_parsed(parse, tmp_path, monkeypatch, how):
+    root = tmp_path / "WKS01"
+    write(root, THREE)
+    err = make_unreadable(how, root, monkeypatch)
+    res, docs, notes = parse({})
+    assert sorted(d["user.name"] for _, d in docs) == ["alice", "carol"]
+    assert res == (2, 0, 0)  # named, never counted as a skip
+    assert notes == [f"not indexed: {root / LOGS / 'b.log'}: couldn't be read ({err})"]
+
+
+def test_a_read_that_fails_part_way_keeps_the_lines_before_it(parse, tmp_path, monkeypatch):
+    """Read as it's parsed: a log whose read fails after two lines keeps
+    them, and is named with how far it got."""
+    root = tmp_path / "WKS01"
+    write(root, THREE)
+    err = make_unreadable("EIO on read", root, monkeypatch, [f"{GOOD_2}\n", "\n"])
+    res, docs, notes = parse({})
+    assert sorted(d["user.name"] for _, d in docs) == ["alice", "bob", "carol"]
+    assert res == (3, 0, 0)
+    bad = root / LOGS / "b.log"
+    assert notes == [
+        f"not indexed: {bad}: couldn't be read past line 2 ({err}); the lines before it were read"
+    ]
+
+
+@pytest.mark.parametrize("how", UNREADABLE)
+def test_the_scan_status_names_an_unreadable_log(scan, monkeypatch, how):
+    errs = []
+    warnings, docs, root = scan(THREE, prepare=lambda root: errs.append(
+        make_unreadable(how, root, monkeypatch)))  # fmt: skip
+    assert sorted(d["user.name"] for d in docs if "ssh.event_type" in d) == ["alice", "carol"]
+    bad = root / LOGS / "b.log"
+    assert warnings == [
+        f"WKS01: 1 file(s) not indexed; not indexed: {bad}: couldn't be read ({errs[0]})"
+    ]
+
+
+def test_a_scan_of_readable_logs_is_unchanged(scan):
+    warnings, docs, _ = scan(THREE)
+    assert sorted(d["user.name"] for d in docs if "ssh.event_type" in d) == [
+        "alice",
+        "bob",
+        "carol",
+    ]
+    assert warnings == []
