@@ -25,7 +25,7 @@ import yaml
 from sift_common import host_identity
 from sift_common.content_hash import content_hash
 
-from opensearch_mcp.bulk import ShardCapacityExhausted
+from opensearch_mcp.bulk import OLD_ID_KEY, OLD_RID_KEY, ShardCapacityExhausted, _vss_id
 
 _tls = threading.local()
 
@@ -295,11 +295,12 @@ def prepare_index(client, index: str) -> None:
     except Exception:
         exists = None  # unanswered: the bulk request creates it, and says why if it can't
     if exists is False:
-        body = {}
+        body: dict = {"mappings": {"_meta": dict(IDS_MARK)}}
         if artifact_type_of(index) in HOST_SCALED_TYPES:
-            body = {"settings": {"index": {"number_of_shards": HOST_SCALED_SHARDS}}}
+            body["settings"] = {"index": {"number_of_shards": HOST_SCALED_SHARDS}}
         try:
             client.indices.create(index=index, body=body)
+            _MARKED[index] = True
         except Exception as e:
             if "resource_already_exists" not in str(e):
                 raise
@@ -364,168 +365,6 @@ def note_second_copy(client, ctx: WriteContext, index: str) -> str:
     return note
 
 
-# Records stored before 0.6.5 whose ids 0.6.5 computes differently
-OLD_IDS: dict[tuple[str, str, str], str] = {}  # (c12, unit_raw, type) -> index
-_OLD_IDS_CHECKED: set = set()
-# what found older records, until a 0.6.5-id record of it is in the index too
-_OLD_IDS_PENDING: dict[tuple, tuple[str, str, str]] = {}
-# (c12, unit_raw, type) -> why the index couldn't be checked
-OLD_IDS_UNCHECKED: dict[tuple[str, str, str], str] = {}
-OLD_IDS_NOTE = (
-    "{index}: records of this machine from the evidence this run read were stored before "
-    "0.6.5 under ids that 0.6.5 computes differently, so the index now holds them under "
-    "both the old and the new ids. To keep one copy, an examiner deletes {index} outside "
-    "Valhuntir (as setup-opensearch.sh deletes its test index) and then ingests every "
-    "machine's {atype} evidence in this case again, because that index holds all of it"
-)
-
-
-def _old_ids_probe(action: dict) -> tuple | None:
-    """(index, machine, unit, parse method, source) of a record written with
-    the 0.6.5 ids, else None. A memory image's source path can change per run
-    (an archive's temporary copy): its unit names it."""
-    src = action.get("_source") or {}
-    if src.get("vhir.id_scheme") != 2:
-        return None
-    method = str(src.get("vhir.parse_method") or "")
-    source = "" if method.startswith("vol3-") else src.get("vhir.source_file")
-    return (str(action.get("_index", "")), src.get("vhir.host_key"), src.get("vhir.unit"),
-            method, source)  # fmt: skip
-
-
-def _exact(props: dict, field: str, value) -> str:
-    """The field a `term` on `value` matches exactly in an index mapped as
-    `props`: `field` when it's keyword (or unmapped: no record holds it), its
-    keyword sub-field when it's text (an index 0.6.4's CLI made without a
-    template). Anything else raises, never a silent zero."""
-    node = props.get(field)
-    if not isinstance(node, dict):
-        node, here = None, props
-        for part in field.split("."):
-            node = (here or {}).get(part)
-            if not isinstance(node, dict):
-                return field
-            here = node.get("properties")
-    form = field
-    if node.get("type") == "text":
-        sub = (node.get("fields") or {}).get("keyword") or {}
-        if sub.get("type") == "keyword":
-            form, node = f"{field}.keyword", sub
-    if node.get("type") != "keyword":
-        raise RuntimeError(f"{field} isn't exact-match")
-    limit = node.get("ignore_above")
-    # the keyword mapper counts UTF-16 units (Java's String.length), not code points
-    if limit is not None and len(str(value).encode("utf-16-le")) // 2 > int(limit):
-        raise RuntimeError(
-            f"{field} isn't exact-match (values over {limit} characters aren't indexed)"
-        )
-    return form
-
-
-def _count_of(client, probe: tuple, marked: bool) -> int:
-    """How many records of `probe`'s machine, unit, method and source the
-    index holds with the 0.6.5 ids (`marked`) or with the older ones, each
-    field filtered in the form the index maps it. A missing index holds none;
-    any other failure raises."""
-    index, host_key, unit, method, source = probe
-    terms = {"vhir.host_key": host_key, "vhir.unit": unit, "vhir.parse_method": method}
-    if source:
-        terms["vhir.source_file"] = source
-    scheme = {"exists": {"field": "vhir.id_scheme"}}
-    try:
-        mapped = client.indices.get_mapping(index=index)
-        forms = {
-            tuple(_exact((m.get("mappings") or {}).get("properties") or {}, f, v)
-                  for f, v in terms.items())
-            for m in mapped.values()
-        } or {tuple(terms)}  # fmt: skip
-        if len(forms) > 1:  # an alias over indices mapped differently
-            raise RuntimeError(f"{index} maps the record-id fields differently across indices")
-        flt = [{"term": {f: v}} for f, v in zip(forms.pop(), terms.values())]
-        query = {"filter": flt + [scheme]} if marked else {"filter": flt, "must_not": [scheme]}
-        resp = client.count(index=index, body={"query": {"bool": query}})
-    except Exception as e:
-        if getattr(e, "status_code", None) == 404:  # no index yet
-            return 0
-        raise
-    # a count some shards didn't answer is no answer, never a zero
-    shards = resp.get("_shards") or {}
-    failed, total = int(shards.get("failed") or 0), int(shards.get("total") or 0)
-    if failed or int(shards.get("successful", total) or 0) < total:
-        raise RuntimeError(f"{failed or total - int(shards.get('successful') or 0)} of "
-                           f"{total} shards failed")  # fmt: skip
-    return int(resp["count"])
-
-
-def _unchecked(key: tuple[str, str, str], index: str, error: Exception) -> None:
-    import sys
-
-    if key not in OLD_IDS_UNCHECKED:  # one line per (case, unit, type)
-        OLD_IDS_UNCHECKED[key] = f"couldn't check for pre-0.6.5 copies in {index}: {error}"
-        print(f"WARNING: {OLD_IDS_UNCHECKED[key]}", file=sys.stderr)
-
-
-def check_old_ids(client, ctx: WriteContext, actions: list[dict]) -> None:
-    """Before the write: for each (index, machine, unit, parse method, source)
-    this batch writes with the 0.6.5 ids, look once for records of it stored
-    with the older ids. Found, it is said once the index also holds a 0.6.5-id
-    record of it (note_old_ids)."""
-    # each tuple once per batch, whatever the outcome: a failed count is
-    # tried again on the next write, never on the next record
-    probes = dict.fromkeys(p for p in map(_old_ids_probe, actions) if p is not None)
-    for probe in probes:
-        if probe in _OLD_IDS_CHECKED:
-            continue
-        key = (ctx.c12, ctx.unit_raw, artifact_type_of(probe[0]))
-        try:
-            if _count_of(client, probe, marked=False):
-                _OLD_IDS_PENDING[probe] = key
-        except Exception as e:  # said, and checked again before the next write
-            _unchecked(key, probe[0], e)
-            continue
-        _OLD_IDS_CHECKED.add(probe)
-
-
-def note_old_ids(client, actions: list[dict]) -> None:
-    """After the write, from the index itself: once it holds both a 0.6.5-id
-    record and an older one of the same machine, unit, method and source, say
-    so, once per (case, unit, type). Whatever the bulk answered (a refusal, a
-    409, a retry after a timeout) doesn't decide it."""
-    import sys
-
-    for probe in {p for p in map(_old_ids_probe, actions) if p in _OLD_IDS_PENDING}:
-        key = _OLD_IDS_PENDING[probe]
-        try:
-            client.indices.refresh(index=probe[0])
-            if not _count_of(client, probe, marked=True):
-                continue  # nothing new stored yet: checked again after the next write
-        except Exception as e:  # said, and checked again after the next write
-            _unchecked(key, probe[0], e)
-            continue
-        del _OLD_IDS_PENDING[probe]
-        if key not in OLD_IDS:  # one line per (case, unit, type)
-            OLD_IDS[key] = probe[0]
-            print("WARNING: " + old_ids_note(key[1], key[2], key[0]), file=sys.stderr)
-
-
-def old_ids_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
-    """The pre-0.6.5 ids note for `hostname`'s `artifact_type` (any type when "")."""
-    c12 = c12 or (current().c12 if current() is not None else "")
-
-    def mine(c, h, t):
-        return (
-            (not c12 or c == c12)
-            and (not hostname or h == hostname)
-            and (not artifact_type or t == artifact_type)
-        )
-
-    notes = [
-        OLD_IDS_NOTE.format(index=i, atype=k[2]) for k, i in sorted(OLD_IDS.items()) if mine(*k)
-    ]
-    notes += [why for k, why in sorted(OLD_IDS_UNCHECKED.items()) if mine(*k)]
-    return "; ".join(notes)
-
-
 def second_copy_types(hostname: str = "", c12: str = "") -> list[str]:
     """Artifact types that got the notice in this process: for `hostname`, in
     case `c12` (the open context's when not given)."""
@@ -540,14 +379,170 @@ def second_copy_types(hostname: str = "", c12: str = "") -> list[str]:
 
 
 def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
-    """The notice for `hostname`'s `artifact_type`, or for any it got."""
+    """The notice for `hostname`'s `artifact_type`, or for any it got, and
+    the fill-in report beside it."""
     types = second_copy_types(hostname, c12)
     if artifact_type:
         legacy = SECOND_COPY_NOTE if artifact_type in types else ""
     else:
         legacy = f"{SECOND_COPY_NOTE} ({', '.join(types)})" if types else ""
-    # the pre-0.6.5 ids note rides on the same calls
-    return "; ".join(n for n in (legacy, old_ids_note(hostname, artifact_type, c12)) if n)
+    return "; ".join(n for n in (legacy, fill_note(hostname, artifact_type, c12)) if n)
+
+
+# A re-ingest of evidence stored before 0.6.5 (the fill-in): a record whose
+# 0.6.4 id is stored, without the id-scheme marker, from the same evidence,
+# is that stored record and isn't written again. Each stored record stands
+# for one record: the first to match claims it for this process.
+_FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
+FILL: dict[tuple[str, str, str], int] = {}  # (c12, unit_raw, type) -> records kept
+FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
+_FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
+# An index this version creates carries IDS_MARK in its mapping: every record
+# in it has its 0.6.5 id, so there's nothing stored before 0.6.5 to look up
+IDS_MARK = {"vhir_ids": "0.6.5"}
+_MARKED: dict[str, bool] = {}  # index -> carries IDS_MARK, read once per process
+
+
+def _marked(client, index: str) -> bool:
+    """Whether `index` carries IDS_MARK. A mapping that can't be read is
+    read again at the next write, and until then the lookup runs."""
+    if index not in _MARKED:
+        try:
+            mapped = client.indices.get_mapping(index=index)
+        except Exception:
+            return False
+        metas = [((m or {}).get("mappings") or {}).get("_meta") or {} for m in mapped.values()]
+        _MARKED[index] = bool(metas) and all(
+            m.get("vhir_ids") == IDS_MARK["vhir_ids"] for m in metas
+        )
+    return _MARKED[index]
+
+
+def _vss_class(src: dict) -> str:
+    """The shadow copy a record came from, "" for the live volume: a --vss run
+    tags live records "live", a default run leaves them untagged."""
+    tag = _vss_id(src)
+    return "" if tag == "live" else tag
+
+
+def _same_evidence(stored: dict, src: dict) -> bool:
+    """Whether the stored record came from the same evidence: the same
+    shadow copy (or both from the live volume), and what its 0.6.4 id leaves out (an access-log
+    line's user, version and referrer), the source file, or a vol3 object's
+    offset, which both must have."""
+    if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
+        return False
+    method = str(src.get("vhir.parse_method") or "")
+    if method.startswith("vol3-"):
+        return stored.get("Offset") is not None and stored.get("Offset") == src.get("Offset")
+    fields = ["vhir.source_file"]
+    if method == "accesslog":
+        fields += ["user.name", "http.version", "http.request.referrer"]
+    return all(stored.get(f) == src.get(f) for f in fields)
+
+
+def _unchecked(key: tuple[str, str, str], index: str, error) -> None:
+    import sys
+
+    if key not in FILL_UNCHECKED:  # one line per (case, unit, type)
+        FILL_UNCHECKED[key] = f"couldn't check for records stored before 0.6.5 in {index}: {error}"
+        print(f"WARNING: {FILL_UNCHECKED[key]}", file=sys.stderr)
+
+
+def _mget(client, actions: list[dict], ids: list[str]) -> list:
+    """Each id's answer, in order; a failed or short answer raises."""
+    body = {"docs": [{"_index": a["_index"], "_id": i} for a, i in zip(actions, ids)]}
+    docs = client.mget(body=body, realtime=True)["docs"]
+    if len(docs) != len(actions):
+        raise RuntimeError(f"{len(docs)} answers for {len(actions)} ids")
+    return docs
+
+
+def _stored(answer, key: tuple[str, str, str], index: str) -> dict | None:
+    """The record an mget answer holds: its _source, {} when none is stored
+    (not found, or no such index), None when the id wasn't answered (said,
+    never read as "not stored")."""
+    error = answer.get("error") if isinstance(answer, dict) else f"no answer: {answer!r}"
+    if error and not (
+        isinstance(error, dict) and error.get("type") == "index_not_found_exception"
+    ):
+        _unchecked(key, index, error)
+        return None
+    return {} if error or not answer.get("found") else answer.get("_source") or {}
+
+
+def fill_in(client, actions: list[dict]) -> list[dict]:
+    """Before the write: one lookup of the batch's 0.6.4 ids, and the actions
+    to send, without those already stored. A lookup that fails, or a record
+    it didn't answer, is written under its 0.6.5 id and said; nothing raises.
+    Returns the actions to send."""
+    ctx = current()
+    looked = [a for a in actions if ctx is not None and a.get(OLD_ID_KEY)]
+    marked = {i for i in {a["_index"] for a in looked} if _marked(client, i)}
+    looked = [a for a in looked if a["_index"] not in marked]
+    if not looked:
+        return actions
+
+    def key(a: dict) -> tuple[str, str, str]:
+        return ctx.c12, ctx.unit_raw, artifact_type_of(a["_index"])
+
+    matched = []
+    try:
+        for a, d in zip(looked, _mget(client, looked, [a[OLD_ID_KEY] for a in looked])):
+            stored = _stored(d, key(a), a["_index"])
+            if not stored or "vhir.id_scheme" in stored:
+                continue
+            FILL.setdefault(key(a), 0)  # said, "kept 0" when nothing matches
+            claim = _FILL_CLAIMED.get((a["_index"], a[OLD_ID_KEY]), a["_id"])
+            if claim == a["_id"] and _same_evidence(stored, a["_source"]):
+                matched.append(a)
+        # one already stored under its 0.6.5 id (a lookup failed when it was
+        # written) is that copy: it doesn't take the stored record too
+        now = _mget(client, matched, [a["_id"] for a in matched]) if matched else []
+    except Exception as e:
+        for a in looked:
+            _unchecked(key(a), a["_index"], e)
+        return actions
+    kept = set()
+    for a, d in zip(matched, now):
+        claim = (a["_index"], a[OLD_ID_KEY])
+        if _stored(d, key(a), a["_index"]) != {} or _FILL_CLAIMED.get(claim, a["_id"]) != a["_id"]:
+            continue  # stored under its 0.6.5 id, unanswered, or its twin took the record
+        if claim not in _FILL_CLAIMED:  # the same record read again counts once
+            _FILL_CLAIMED[claim] = a["_id"]
+            FILL[key(a)] += 1
+        kept.add(id(a))
+    return [a for a in actions if id(a) not in kept]
+
+
+def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
+    """The fill-in report for `hostname`'s `artifact_type` (any type when "")."""
+    c12 = c12 or (current().c12 if current() is not None else "")
+
+    def mine(c, h, t):
+        return (
+            (not c12 or c == c12)
+            and (not hostname or h == hostname)
+            and (not artifact_type or t == artifact_type)
+        )
+
+    notes = [
+        f"{k[2]}: kept {kept} record{'' if kept == 1 else 's'} already stored"
+        for k, kept in sorted(FILL.items())
+        if mine(*k)
+    ]
+    notes += [why for k, why in sorted(FILL_UNCHECKED.items()) if mine(*k)]
+    return "; ".join(notes)
+
+
+def print_fill_report() -> None:
+    """At a command's Done line: each (case, unit, type)'s fill-in report not
+    yet printed in this process (the CLI route writes no status)."""
+    import sys
+
+    for k in sorted({*FILL, *FILL_UNCHECKED} - _FILL_SAID):
+        _FILL_SAID.add(k)
+        print(f"NOTE: {fill_note(k[1], k[2], k[0])}", file=sys.stderr)
 
 
 def removed_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str:
@@ -592,7 +587,6 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
                 if index.startswith(f"case-{ctx.c12}-"):
                     prepare_index(client, index)
                     note_second_copy(client, ctx, index)
-            check_old_ids(client, ctx, actions)  # said after the write
         return
     for action in actions:
         if _V2_INDEX.match(str(action.get("_index", ""))):
@@ -641,6 +635,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
+            if action.get(OLD_RID_KEY):  # the id 0.6.4 stored it under
+                action[OLD_ID_KEY] = doc_id(key, str(action[OLD_RID_KEY]))
         # last, over the record as it is sent: its stored _source hashes alike
         src["vhir.content_hash"] = content_hash(src)
         if action.get("_op_type", "index") == "index":

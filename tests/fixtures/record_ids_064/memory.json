@@ -1,0 +1,30 @@
+[
+ [
+  "case-000000000000-vol-netscan-0",
+  "86a0492e7fbc018b65c4",
+  1,
+  {
+   "@timestamp": "2026-10-01T10:00:00+00:00",
+   "Created": "2026-10-01T10:00:00+00:00",
+   "ForeignAddr": "203.0.113.7",
+   "ForeignPort": 443,
+   "LocalAddr": "10.0.0.5",
+   "LocalPort": 49710,
+   "Offset": 246295608115216,
+   "Owner": null,
+   "PID": 4,
+   "Proto": "TCPv4",
+   "State": "CLOSED",
+   "host.id": "HOST-M",
+   "host.name": "HOST-M",
+   "pipeline_version": "opensearch-mcp-0.6.4",
+   "vhir.content_hash": "970d23e4c8ca8c862f9439826319b79f7fd34e802909c7d9e158be75dc845322",
+   "vhir.host_key": "0123456789abcdef",
+   "vhir.ingest_audit_id": "opensearchingest360433-examiner-20261012-01m4pz8sqjw7300wxz6v2nvsz0",
+   "vhir.parse_method": "vol3-windows.netscan",
+   "vhir.rid": "2196b521fe39719d0448",
+   "vhir.source_file": "/tmp/case-root/cases/fillm/evidence/mem.raw",
+   "vhir.unit": "f6984a3f95b3d75c"
+  }
+ ]
+]

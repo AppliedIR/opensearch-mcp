@@ -11,7 +11,7 @@ from pathlib import Path
 
 from opensearchpy import OpenSearch
 
-from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 
 csv.field_size_limit(10 * 1024 * 1024)  # 10 MB — L2T CSV can have >131 KB fields
 
@@ -251,7 +251,7 @@ def ingest_csv(
             # Provenance differs across re-ingests (different source_file),
             # but evidence content is the same — ID must be stable.
             # Also strip volatile fields that change per-run (temp dir paths).
-            _id = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
+            _id = old_rid = _doc_id(index_name, row, natural_key, volatile_keys=_VOLATILE_KEYS)
             if id_source:  # the profile path the run read is in the id
                 _id = _doc_id(
                     index_name,
@@ -272,7 +272,10 @@ def ingest_csv(
             if parse_method:
                 row["vhir.parse_method"] = parse_method
 
-            actions.append({"_index": index_name, "_id": _id, "_source": row})
+            action = {"_index": index_name, "_id": _id, "_source": row}
+            if id_source:  # the id 0.6.4 gave it
+                action[OLD_RID_KEY] = old_rid
+            actions.append(action)
 
             if len(actions) >= 1000:
                 flushed, failed = flush_bulk(client, actions)
