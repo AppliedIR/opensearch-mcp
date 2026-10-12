@@ -356,6 +356,9 @@ def _os_call(fn, *args, **kwargs):
         info = getattr(e, "info", None) or {}
         err = info.get("error", {})
         reason = err.get("reason", str(e)) if isinstance(err, dict) else str(e)
+        root = (err.get("root_cause") or [{}])[0] if isinstance(err, dict) else {}
+        if isinstance(root, dict) and root.get("reason"):  # what failed, and where
+            reason += f": {root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
         raise ValueError(f"Query error: {reason}") from e
 
 
@@ -932,7 +935,7 @@ def _gap_parts(result: dict, case: str = "") -> tuple[list[str], dict]:
     timed_out = bool(result.get("timed_out"))
     names, why = [], []
     for f in shards.get("failures") or []:  # grouped: one per index and reason
-        index = str(f.get("index", "?"))
+        index = str(f.get("index") or "?")  # a node's failure has none
         if index in names:
             continue
         reason = str((f.get("reason") or {}).get("reason", ""))
@@ -1008,12 +1011,16 @@ def _ingest_params(result: dict) -> dict:
     return out
 
 
-def _logged_query(resp: dict, **entry) -> dict:
+_NOT_RECORDED = "not recorded: no active case, or the audit write failed"
+
+
+def _logged_query(resp: dict, queried: str = "", **entry) -> dict:
     """Write a query's audit entry, and save its response, as returned to the
     AI, beside it: `extractions/<audit id>/response.json`, its SHA-256 on the
     entry, so a quote of the response can be checked against what the AI was
-    given. Returns the response with its audit id; without an entry, the
-    response as it was and nothing saved."""
+    given. A query naming another case (`queried`, the tool's case_id) says
+    which case it read. Returns the response with its audit id; without an
+    entry, the response saying it wasn't recorded, and nothing saved."""
     import hashlib
 
     audit_dir = audit._get_audit_dir()
@@ -1036,12 +1043,14 @@ def _logged_query(resp: dict, **entry) -> dict:
     if audit_dir is not None:
         writer = AuditWriter(mcp_name=audit.mcp_name, audit_dir=str(audit_dir))
         entry.setdefault("case_id", Path(audit_dir).parent.name)  # that case's, too
+        if queried and queried != Path(audit_dir).parent.name:
+            entry["params"] = {**(entry.get("params") or {}), "queried_case": queried}
     logged = writer.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
     if logged is None:
         if saved:  # an entry that wasn't written leaves no file of its own
             Path(saved["path"]).unlink(missing_ok=True)
             Path(saved["path"]).parent.rmdir()
-        return resp
+        return {**resp, "audit": _NOT_RECORDED}
     return out
 
 
@@ -1222,7 +1231,7 @@ def idx_search(
     if total_capped:
         resp["total_capped"] = True
         resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
-    if not docs and not gap:  # partial: partial_warning, never "No results"
+    if not total and not gap:  # partial, or past the last page: never "No results"
         resp["hint"] = (
             "No results. If searching for filenames, include the extension "
             "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
@@ -1248,6 +1257,7 @@ def idx_search(
     return _logged_query(
         resp,
         tool="idx_search",
+        queried=case_id,
         params={
             "query": query,
             "index": requested,
@@ -1310,6 +1320,7 @@ def idx_count(
     return _logged_query(
         resp,
         tool="idx_count",
+        queried=case_id,
         params={"query": query, "index": requested, "scope": index, **_ingest_params(result)},
         result_summary=f"count={count}",
     )
@@ -1375,6 +1386,7 @@ def idx_aggregate(
     return _logged_query(
         resp,
         tool="idx_aggregate",
+        queried=case_id,
         params={
             "field": field,
             "query": query,
@@ -1503,6 +1515,7 @@ def idx_timeline(
     return _logged_query(
         resp,
         tool="idx_timeline",
+        queried=case_id,
         params={
             "query": query,
             "index": requested,
@@ -1561,6 +1574,7 @@ def idx_field_values(
     return _logged_query(
         resp,
         tool="idx_field_values",
+        queried=case_id,
         params={
             "field": field,
             "query": query,
