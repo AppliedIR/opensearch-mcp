@@ -3,101 +3,12 @@
 - helpers.bulk(client, actions, ...): `create` on an existing (index, id) is a
   409 error item, `index` overwrites; returns (successes, errors).
 - client.mget, indices.exists/create/stats.
-- client.count(index=, body={"query": ...}): bool (filter/must/must_not),
-  term, terms, exists and match_all. Any other clause raises, so a change
-  can't pass on a query this doesn't understand. A missing index raises
-  NotFoundError, as the cluster does.
-- indices.get_mapping: `mappings[index]`, else the template's keyword fields.
-  A `term` on a keyword field matches exactly (not over its ignore_above,
-  counted in UTF-16 units as the keyword mapper does),
-  on a text field one of its lowercased word tokens, and on `<text>.keyword`
-  the text field's value exactly (not over the sub-field's ignore_above).
 """
 
 from __future__ import annotations
 
-import re
 import uuid
 from pathlib import Path
-
-from opensearchpy.exceptions import NotFoundError
-
-
-def _get(src, field):
-    if field in src:
-        return src[field]
-    node = src
-    for part in field.split("."):
-        if not isinstance(node, dict) or part not in node:
-            return None
-        node = node[part]
-    return node
-
-
-def _vals(v):
-    return v if isinstance(v, list) else [v]
-
-
-# what an index made from the templates maps the record-id fields as
-FIELDS = ("host_key", "unit", "parse_method", "source_file")
-TEMPLATE = {"vhir": {"properties": {f: {"type": "keyword"} for f in FIELDS}}}
-
-
-def _node(props, field):
-    node, here = None, props
-    for part in field.split("."):
-        node = (here or {}).get(part)
-        if not isinstance(node, dict):
-            return None
-        here = node.get("properties")
-    return node
-
-
-def _units(v) -> int:
-    return len(str(v).encode("utf-16-le")) // 2
-
-
-def _term(src, field, val, props):
-    node, values = _node(props, field), _vals(_get(src, field))
-    if node is None and field.endswith(".keyword"):  # a text field's keyword sub-field
-        base = _node(props, field[: -len(".keyword")]) or {}
-        node = (base.get("fields") or {}).get("keyword")
-        if node is None:
-            return False
-        values = _vals(_get(src, field[: -len(".keyword")]))
-    if node is not None and node.get("type") == "text":
-        return any(val in re.findall(r"\w+", str(v).lower()) for v in values)
-    limit = (node or {}).get("ignore_above")
-    return any(v == val and (limit is None or _units(v) <= limit) for v in values)
-
-
-def _match(src, q, props=TEMPLATE):
-    if not q:
-        return True
-    ((kind, arg),) = q.items()
-    if kind == "match_all":
-        return True
-    if kind == "bool":
-        unknown = set(arg) - {"filter", "must", "must_not"}
-        if unknown:
-            raise ValueError(f"fake count: unsupported bool keys {unknown}")
-        pos = _vals(arg.get("filter", [])) + _vals(arg.get("must", []))
-        neg = _vals(arg.get("must_not", []))
-        return all(_match(src, c, props) for c in pos) and not any(
-            _match(src, c, props) for c in neg
-        )
-    if kind == "term":
-        ((field, val),) = arg.items()
-        if isinstance(val, dict):
-            val = val["value"]
-        return _term(src, field, val, props)
-    if kind == "terms":
-        ((field, vals),) = arg.items()
-        return any(v in vals for v in _vals(_get(src, field)))
-    if kind == "exists":
-        v = _get(src, arg["field"])
-        return v is not None and v != []
-    raise ValueError(f"fake count: unsupported clause {kind}")
 
 
 class Cluster:
@@ -106,9 +17,6 @@ class Cluster:
         self.created: set[str] = set()
         self.reject = False  # every write refused (a mapping conflict, a block)
         self.timeout_once = False  # the next write is stored, then answered by a timeout
-        self.count_error: Exception | None = None  # what every count raises
-        self.partial_counts = 0  # the next N counts: 0, with one of two shards failed
-        self.mappings: dict[str, dict] = {}  # index -> properties, else TEMPLATE
         cluster = self
 
         class Indices:
@@ -128,11 +36,6 @@ class Cluster:
             def refresh(self, index=None, **kw):
                 return {}
 
-            def get_mapping(self, index=None, **kw):
-                if not self.exists(index=index):
-                    raise NotFoundError(404, "index_not_found_exception", {"index": index})
-                return {index: {"mappings": {"properties": cluster.mappings.get(index, TEMPLATE)}}}
-
         class Client:
             indices = Indices()
 
@@ -144,21 +47,6 @@ class Cluster:
                     out.append({"_index": key[0], "_id": key[1], "found": src is not None,
                                 **({"_source": src} if src is not None else {})})  # fmt: skip
                 return {"docs": out}
-
-            def count(self, index=None, body=None, **kw):
-                if cluster.count_error is not None:
-                    raise cluster.count_error
-                if cluster.partial_counts:
-                    cluster.partial_counts -= 1
-                    return {"count": 0, "_shards": {"total": 2, "successful": 1, "failed": 1}}
-                if not self.indices.exists(index=index):
-                    raise NotFoundError(404, "index_not_found_exception", {"index": index})
-                q = (body or {}).get("query", {"match_all": {}})
-                props = cluster.mappings.get(index, TEMPLATE)
-                n = sum(
-                    1 for (i, _), s in cluster.store.items() if i == index and _match(s, q, props)
-                )
-                return {"count": n}
 
         self.client = Client
 
