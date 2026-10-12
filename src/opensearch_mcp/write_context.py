@@ -427,9 +427,10 @@ def _vss_class(src: dict) -> str:
 
 def _same_evidence(stored: dict, src: dict) -> bool:
     """Whether the stored record came from the same evidence: the same
-    shadow copy (or both from the live volume), and what its 0.6.4 id leaves out (an access-log
-    line's user, version and referrer), the source file, or a vol3 object's
-    offset, which both must have."""
+    shadow copy (or both from the live volume), the source file, and what its
+    0.6.4 id leaves out (an access-log line's user, version and referrer, a
+    json or delimited row's @timestamp), or a vol3 object's offset, which both
+    must have."""
     if _vss_class(stored) != _vss_class(src):  # a shadow copy's record isn't the live one
         return False
     method = str(src.get("vhir.parse_method") or "")
@@ -438,6 +439,8 @@ def _same_evidence(stored: dict, src: dict) -> bool:
     fields = ["vhir.source_file"]
     if method == "accesslog":
         fields += ["user.name", "http.version", "http.request.referrer"]
+    elif method == "json-ingest" or method.startswith("delimited-"):
+        fields.append("@timestamp")
     return all(stored.get(f) == src.get(f) for f in fields)
 
 
@@ -615,6 +618,9 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         resent = rid is not None and _stamped_here(action, src)
         if resent:
             rid = src["vhir.rid"]  # a batch sent again: its parser id, not the stored one
+        # a record whose id 0.6.5 changed carries the id 0.6.4 gave it: the
+        # stamp marks it, never the evidence (a batch sent again keeps its mark)
+        changed = bool(action.get(OLD_RID_KEY)) or (resent and src.get("vhir.id_scheme") == 2)
         removed = _drop_owned(src, resent)  # evidence never sets a record's machine
         if removed:
             key = (ctx.c12, ctx.unit_raw, artifact_type_of(action["_index"]))
@@ -632,6 +638,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
         src["host.id"] = canonical
         src["vhir.host_key"] = key
         src["vhir.unit"] = ctx.unit
+        if changed:
+            src["vhir.id_scheme"] = 2
         if rid is not None:
             src["vhir.rid"] = str(rid)
             action["_id"] = doc_id(key, str(rid))
@@ -650,7 +658,7 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
 # What the stamp owns, dotted and nested: evidence that carries them is restamped.
 _OWNED = (
     "host.id", "vhir.host_key", "vhir.unit", "vhir.rid", "vhir.prev_ids",
-    "vhir.original.path", "vhir.original.sha256", "vhir.content_hash",
+    "vhir.original.path", "vhir.original.sha256", "vhir.content_hash", "vhir.id_scheme",
 )  # fmt: skip
 
 
@@ -664,7 +672,7 @@ def _stamped_here(action: dict, src: dict) -> bool:
 
 # Field names the stamp owns, at any depth of the subtree they belong to.
 _RESERVED = {
-    "vhir": {"host_key", "unit", "rid", "prev_ids", "original", "content_hash"},
+    "vhir": {"host_key", "unit", "rid", "prev_ids", "original", "content_hash", "id_scheme"},
     "host": {"id"},
 }
 

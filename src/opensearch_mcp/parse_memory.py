@@ -297,8 +297,6 @@ def _index_vol3_records(
                 record["host.id"] = hostname
         record["vhir.source_file"] = source_file
         record["vhir.parse_method"] = f"vol3-{plugin}"
-        if plugin in _ID_SCHEME_2:
-            record["vhir.id_scheme"] = 2  # marker
         if ingest_audit_id:
             record["vhir.ingest_audit_id"] = ingest_audit_id
         if pipeline_version:
