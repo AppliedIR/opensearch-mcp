@@ -243,6 +243,9 @@ def ensure_installed_once(client, audit=None, stamp_indices: str = "") -> dict:
             other = _INSTALLED.get("other_templates") or {}
             failed = (other.get("components") or {}).get("failed", []) + other.get("failed", [])
             bad = [f"{f.get('template')}: {f.get('error')}" for f in failed]
+            files = dict(_TEMPLATES_REGISTRY + _COMPONENT_TEMPLATES_REGISTRY)
+            skipped = (other.get("components") or {}).get("skipped", []) + other.get("skipped", [])
+            bad += [f"{t}: its file {files.get(t)} is missing" for t in skipped]
             if _INSTALLED.get("status") not in ("ok", "partial"):
                 bad.append(f"{_TEMPLATE_NAME}: {_INSTALLED.get('error')}")
             if bad:
@@ -631,7 +634,9 @@ def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[
         }
 
     except Exception as e:
-        logger.exception("ensure_winlog_pipeline failed")
+        # its callers report the error (the CLI's one WARNING line, the
+        # server's log, idx_install_pipelines' reply); the traceback is debug
+        logger.debug("ensure_winlog_pipeline failed: %s", e, exc_info=True)
         return {
             "status": "error",
             "error": str(e),

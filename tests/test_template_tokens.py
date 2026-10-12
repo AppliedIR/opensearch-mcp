@@ -135,7 +135,13 @@ def test_the_json_command_with_a_broken_template_file(
     monkeypatch.setattr(sys, "argv", ["opensearch-ingest", "json", str(f), "--hostname", "h1"])
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        ingest_cli.main()  # a refused file doesn't raise yet: revisit if it gets an exit code
+        if said is None:
+            ingest_cli.main()
+        else:  # its only file refused: no file read, so the run fails and exits 1
+            with pytest.raises(SystemExit) as e:
+                ingest_cli.main()
+            assert e.value.code == 1
+            assert err.getvalue().count("Error: no_file_read: none of 1 file(s) was read") == 1
     out = capsys.readouterr().out
     index = wc.index_name(index_type)
     assert f"{f.name} -> {index}..." in out

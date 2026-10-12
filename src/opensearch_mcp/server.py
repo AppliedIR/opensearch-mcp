@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -258,7 +259,7 @@ def _get_os():
     If the cached client hits a connection error (OpenSearch went down),
     the next _get_os() call will create a fresh client and re-verify.
     """
-    global _client, _client_verified
+    global _client, _client_verified, _install_settled, _install_at
     if _client is None:
         try:
             _client = get_client()
@@ -268,32 +269,51 @@ def _get_os():
         try:
             _client.cluster.health()
             _client_verified = True
-            # Auto-install winlog pipeline + evtx template + 14 non-evtx
-            # templates on first verified connection. Idempotent —
-            # validate-before-PUT means a broken pipeline body never
-            # replaces the running one.
-            try:
-                from opensearch_mcp.mappings import ensure_winlog_pipeline
-
-                _install_result = ensure_winlog_pipeline(_client, audit, _active_case_indices())
-                if _install_result.get("status") != "ok":
-                    logger.warning(
-                        "winlog pipeline install reported %s: %s",
-                        _install_result.get("status"),
-                        _install_result.get("error") or _install_result.get("other_templates"),
-                    )
-            except Exception as _install_e:
-                logger.warning(
-                    "winlog pipeline auto-install failed (non-fatal): %s",
-                    _install_e,
-                )
+            _install_settled, _install_at = False, None  # each verified connection installs
         except Exception as e:
             _client = None
             raise RuntimeError(
                 f"OpenSearch not running or not reachable: {e}\n"
                 "Run 'opensearch-setup' to start OpenSearch."
             ) from e
+    _install_templates(_client)
     return _client
+
+
+_install_settled = False  # the template install succeeded, or an operator template governs evtx
+_install_at: float | None = None  # time.monotonic() of its last attempt
+_INSTALL_RETRY_SECONDS = 60
+
+
+def _install_templates(client) -> None:
+    """Install the winlog pipeline, the evtx template and the other index
+    templates on each verified connection, and again on a later call, at
+    most once a minute, until an install is ok. An operator's template on the
+    evtx pattern isn't retried (a retry can't change it), and only the first
+    attempt gives the active case's indices the stamp fields (one audit
+    entry, not one a minute). Idempotent: validate-before-PUT means a broken
+    pipeline body never replaces the running one."""
+    global _install_settled, _install_at
+    now = time.monotonic()
+    if _install_settled or (
+        _install_at is not None and now - _install_at < _INSTALL_RETRY_SECONDS
+    ):
+        return
+    first, _install_at = _install_at is None, now
+    try:
+        from opensearch_mcp.mappings import ensure_winlog_pipeline
+
+        result = ensure_winlog_pipeline(client, audit, _active_case_indices() if first else "")
+        _install_settled = result.get("status") == "ok" or bool(result.get("operator_template"))
+        if result.get("status") != "ok":
+            logger.warning(
+                "winlog pipeline install reported %s%s: %s",
+                result.get("status"),
+                "" if _install_settled else " (tried again in a minute)",
+                result.get("error") or result.get("other_templates"),
+            )
+    except Exception as _install_e:
+        logger.warning("winlog pipeline auto-install failed (non-fatal): %s", _install_e)
 
 
 def _active_case_indices() -> str:

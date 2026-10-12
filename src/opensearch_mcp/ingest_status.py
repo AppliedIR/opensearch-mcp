@@ -214,6 +214,8 @@ HALT_HAYABUSA_NO_RULES = "hayabusa_no_rules"
 ALL_RECORDS_REJECTED = "all_records_rejected"
 # Not a halt either: the transport gave up, so nothing was delivered to reject.
 TRANSPORT_FAILED = "transport_failed"
+# Files were given and not one of them was read (each failed, or was refused).
+NOTHING_READ = "no_file_read"
 
 
 def read_active_ingests() -> list[dict]:
