@@ -36,11 +36,22 @@ def _copies_govern(client, index: str, template: str) -> bool:
 def install(client, tag: str, c12: str = "") -> dict[str, list[str]]:
     """Install the tree's templates for `case-{tag}-*` indices, or with
     `c12`, for one case's `case-{c12}-<type>-*` indices (names built from a
-    case identity). Returns what was created, for `remove`."""
+    case identity). Returns what was created, for `remove`. The check is
+    turned off only once every PUT has succeeded; a PUT that fails removes
+    what this call made and leaves the check as it was."""
     global _installed
+    created: dict[str, list[str]] = {"components": [], "pipelines": [], "templates": []}
+    try:
+        _put(client, tag, c12, created)
+    except BaseException:
+        _delete(client, created)
+        raise
     _installed += 1
     wc._outranked = _copies_govern
-    created: dict[str, list[str]] = {"components": [], "pipelines": [], "templates": []}
+    return created
+
+
+def _put(client, tag: str, c12: str, created: dict[str, list[str]]) -> None:
     renamed = {}
     for name, filename in mappings._COMPONENT_TEMPLATES_REGISTRY:
         renamed[name] = f"{tag}-{name}"
@@ -78,7 +89,6 @@ def install(client, tag: str, c12: str = "") -> dict[str, list[str]]:
                 scope[key] = pipeline
         client.indices.put_index_template(name=f"{tag}-{name}", body=body)
         created["templates"].append(f"{tag}-{name}")
-    return created
 
 
 def remove(client, created: dict[str, list[str]]) -> None:
@@ -86,6 +96,10 @@ def remove(client, created: dict[str, list[str]]) -> None:
     _installed = max(_installed - 1, 0)
     if not _installed:
         wc._outranked = _REAL_OUTRANKED
+    _delete(client, created)
+
+
+def _delete(client, created: dict[str, list[str]]) -> None:
     for name in created["templates"]:
         client.indices.delete_index_template(name=name, ignore=[404])
     for name in created["components"]:
