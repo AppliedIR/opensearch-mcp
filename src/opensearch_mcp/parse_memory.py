@@ -24,9 +24,28 @@ from opensearch_mcp.memory_tiers import TIER_1, TIER_2, TIER_3, TIERS  # noqa: F
 _NATURAL_KEYS: dict[str, list[str]] = {
     "windows.pslist": ["PID", "CreateTime"],
     "windows.pstree": ["PID", "CreateTime"],
-    "windows.netscan": ["LocalAddr", "LocalPort", "ForeignAddr", "ForeignPort", "PID"],
-    "windows.netstat": ["LocalAddr", "LocalPort", "ForeignAddr", "ForeignPort", "PID"],
-    "windows.svcscan": ["Name", "PID"],
+    # the object's offset, state and creation time are in the key
+    "windows.netscan": [
+        "LocalAddr",
+        "LocalPort",
+        "ForeignAddr",
+        "ForeignPort",
+        "PID",
+        "Offset",
+        "State",
+        "Created",
+    ],
+    "windows.netstat": [
+        "LocalAddr",
+        "LocalPort",
+        "ForeignAddr",
+        "ForeignPort",
+        "PID",
+        "Offset",
+        "State",
+        "Created",
+    ],
+    "windows.svcscan": ["Name", "PID", "Offset"],
     "windows.cmdline": ["PID"],
     "windows.dlllist": ["PID", "Base", "Name"],
     "windows.handles": ["PID", "Offset(V)"],
@@ -170,6 +189,10 @@ def _flatten_records(records: list[dict], _depth: int = 0) -> list[dict]:
     return flat
 
 
+# the plugins whose ids 0.6.5 changed: their records carry vhir.id_scheme 2
+_ID_SCHEME_2 = frozenset({"windows.netscan", "windows.netstat", "windows.svcscan"})
+
+
 def _vol3_doc_id(index_name: str, plugin: str, record: dict, source_file: str) -> str:
     """Deterministic ID — natural key or content hash, with the image's
     evidence unit (its basename outside an ingest run), so two images with
@@ -182,6 +205,12 @@ def _vol3_doc_id(index_name: str, plugin: str, record: dict, source_file: str) -
     nk_fields = _NATURAL_KEYS.get(plugin)
     if nk_fields:
         parts = [str(record.get(f, "")) for f in nk_fields]
+        if plugin in _ID_SCHEME_2:  # the object's offset keys it
+            if record.get("Offset") is not None:
+                parts = ["" if record.get(f) is None else str(record.get(f)) for f in nk_fields]
+                key = f"{index_name}:{source_name}:{plugin}:{':'.join(parts)}"
+                return hashlib.sha256(key.encode()).hexdigest()[:20]
+            parts = [""]  # no offset: the content hash
         if all(parts):
             key = f"{index_name}:{source_name}:{plugin}:{':'.join(parts)}"
             return hashlib.sha256(key.encode()).hexdigest()[:20]
@@ -256,6 +285,8 @@ def _index_vol3_records(
                 record["host.id"] = hostname
         record["vhir.source_file"] = source_file
         record["vhir.parse_method"] = f"vol3-{plugin}"
+        if plugin in _ID_SCHEME_2:
+            record["vhir.id_scheme"] = 2  # marker
         if ingest_audit_id:
             record["vhir.ingest_audit_id"] = ingest_audit_id
         if pipeline_version:

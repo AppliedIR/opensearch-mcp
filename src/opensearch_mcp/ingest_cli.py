@@ -3150,6 +3150,11 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
                     a.update({k: kw[k] for k in ("stored", "ignored_docs", "ignored") if k in kw})
                     if kw.get("implausible_time"):
                         a["implausible_time"] = kw["implausible_time"]
+                    from opensearch_mcp.parse_memory import _plugin_to_index_suffix
+
+                    old = wc.second_copy_note(hostname, _plugin_to_index_suffix(plugin))
+                    if old:
+                        a["note"] = "; ".join(n for n in (a.get("note"), old) if n)
                     break
             if cnt:
                 print(f"{cnt:,} entries" + describe(kw))

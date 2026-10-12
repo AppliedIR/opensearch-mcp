@@ -447,6 +447,10 @@ def run_and_ingest(
                     table_name = stem
             count, sk, bf = ingest_csv(
                 hive=(source_file or str(artifact_path)) if tool_name == "registry_user" else "",
+                # per-profile tools put the profile path they read in the id
+                id_source=(source_file or str(artifact_path))
+                if tool_name in ("shellbags", "jumplists", "lnk", "timeline")
+                else "",
                 csv_path=csv_file,
                 client=client,
                 index_name=index_name,

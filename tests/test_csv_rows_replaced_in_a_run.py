@@ -1,5 +1,10 @@
 """Rows one file of a scan replaces in another are named, not lost silently.
 
+Since 0.6.5 the per-profile tools (shellbags, jumplists, lnk, timeline) put
+the profile in a row's id, so identical profiles no longer collide: the rows
+below that compare profiles say nothing was lost. The note stays for the
+tools whose ids still leave the file out.
+
 A content-hash tool's row id leaves out the file it came from, so two
 profiles whose shellbags are identical write the same ids, and the later
 profile's rows replace the earlier one's: every row reads as the later
@@ -112,47 +117,42 @@ def _host(root, profiles, vss_id="", hostname="WS01"):
     return host
 
 
-def test_identical_profiles_name_the_profile_that_lost_its_rows(tmp_path, status_dir, capsys):
-    """Two profiles hold the same 37 shellbags; a third holds its own."""
+def test_identical_profiles_each_keep_their_rows_and_nothing_is_said_lost(
+    tmp_path, status_dir, capsys
+):
+    """Two profiles hold the same 37 shellbags; a third holds its own. Since
+    0.6.5 a shellbag row's id has the profile it came from, so none is lost."""
     profiles = ["alice", "bob-admin", "carol"]
     root = _volume(tmp_path, profiles)
     lines, warnings = _scan(
         [_host(root, profiles)],
         lambda p: range(100, 120) if p == "carol" else range(37),
     )
-    message = (
-        "37 shellbag rows from Users/bob-admin are identical to rows Users/alice sent "
-        "earlier in this run and are stored once, under the first ingest that wrote "
-        "them; a search for Users/bob-admin won't find them"
-    )
-    assert [w for w in warnings if "stored once" in w] == [f"WS01: {message}"]
-    assert lines[str(root / "Users/bob-admin")] == f"37 indexed; {message}"
+    assert [w for w in warnings if "stored once" in w] == []
+    assert lines[str(root / "Users/bob-admin")] == "37 indexed"
     assert lines[str(root / "Users/alice")] == "37 indexed"
     assert lines[str(root / "Users/carol")] == "20 indexed"
-    assert "stored once" not in capsys.readouterr().out  # no console line
+    assert "stored once" not in capsys.readouterr().out
 
 
-def test_three_identical_profiles_count_each_loss_against_its_own_file(tmp_path, status_dir):
+def test_three_identical_profiles_lose_nothing(tmp_path, status_dir):
     profiles = ["a", "b", "c"]
     root = _volume(tmp_path, profiles)
     _, warnings = _scan([_host(root, profiles)], lambda p: range(5))
-    once = ("sent earlier in this run and are stored once, under the first ingest "
-            "that wrote them")  # fmt: skip
-    assert [w for w in warnings if "stored once" in w] == [
-        f"WS01: 5 shellbag rows from Users/b are identical to rows Users/a {once}; "
-        "a search for Users/b won't find them; "
-        f"5 shellbag rows from Users/c are identical to rows Users/a {once}; "
-        "a search for Users/c won't find them"
-    ]
+    assert [w for w in warnings if "stored once" in w] == []
 
 
-def test_rows_three_files_hold_are_stored_under_the_first(tmp_path, status_dir):
+def test_rows_three_files_hold_are_stored_under_each(tmp_path, status_dir):
     profiles = ["a", "b", "c"]
     root = _volume(tmp_path, profiles)
     stored: dict = {}
     _scan([_host(root, profiles)], lambda p: range(5), stored=stored)
-    assert len(stored) == 5  # one document per row
-    assert {Path(src).parent.name + "/" + Path(src).name for src in stored.values()} == {"Users/a"}
+    assert len(stored) == 15  # one document per row per profile
+    assert {Path(src).parent.name + "/" + Path(src).name for src in stored.values()} == {
+        "Users/a",
+        "Users/b",
+        "Users/c",
+    }
 
 
 def test_anchor_a_shadow_copy_of_the_same_profile_is_silent(tmp_path, status_dir):

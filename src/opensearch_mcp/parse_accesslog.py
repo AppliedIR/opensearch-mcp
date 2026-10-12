@@ -47,7 +47,7 @@ def ingest_accesslog(
     actions: list[dict] = []
 
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
+        for line_no, line in enumerate(f, 1):  # every physical line counts
             line = line.strip()
             if not line:
                 continue
@@ -90,8 +90,13 @@ def ingest_accesslog(
                     pass
 
             # Dedup: content-based key
+            # the line number (as w3c's data_seq) and every parsed field
             id_input = (
                 f"{index_name}:{source_file or path.name}"
+                f":{line_no}"
+                f":{doc.get('user.name', '')}"
+                f":{doc.get('http.version', '')}"
+                f":{doc.get('http.request.referrer', '')}"
                 f":{doc.get('@timestamp', '')}"
                 f":{doc.get('source.ip', '')}"
                 f":{doc.get('http.request.method', '')}"
@@ -110,6 +115,7 @@ def ingest_accesslog(
                 else:
                     doc["host.id"] = hostname
             doc["vhir.parse_method"] = "accesslog"
+            doc["vhir.id_scheme"] = 2  # marker
             if source_file:
                 doc["vhir.source_file"] = source_file
             if ingest_audit_id:
