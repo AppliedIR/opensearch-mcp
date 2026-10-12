@@ -105,8 +105,14 @@ def _add_investigation_hints(resp: dict, artifacts: dict, case: str) -> None:
         )
     if has_usn:
         hints.append(
-            "USN Journal indexed. Use time_from/time_to. "
-            "Deleted Prefetch: UpdateReasons:*Delete* AND ParentPath:*Prefetch*. "
+            "USN Journal indexed. "
+            + (  # only the EZ usn index has no event time; delim-/json- copies map one
+                "It has no event time, so time_from/time_to skip it: filter on its own "
+                "field, UpdateTimestamp:[<from> TO <to>], with index=. "
+                if "usn" in art_keys
+                else "Use time_from/time_to. "
+            )
+            + "Deleted Prefetch: UpdateReasons:*Delete* AND ParentPath:*Prefetch*. "
             "Code deployment: Name:(*.exe OR *.dll OR *.ps1) AND UpdateReasons:*FileCreate*. "
             "SDelete: Name:AAAAAAA* AND UpdateReasons:*Rename* "
             "(verify with surrounding entries). "
@@ -1041,6 +1047,56 @@ def _hit_params(hits: list) -> dict:
     return out
 
 
+def _untimed_note(client, index: str, why: str) -> str:
+    """The indices `index` names whose mapping has no @timestamp (the EZ-tool
+    CSV indices idx_ingest makes; other routes' templates map it), which a
+    window, the default timeline and the case time range leave out: a note
+    naming them, or "". Read from the mapping, so an index whose records all
+    fall outside a window isn't named. A failed read says so."""
+    from opensearch_mcp.tools import TOOLS
+    from opensearch_mcp.write_context import artifact_type_of
+
+    try:
+        got = client.indices.get_field_mapping(
+            index=index, fields="@timestamp", allow_no_indices=True, ignore_unavailable=True
+        )
+    except Exception as e:
+        return f"{_UNCHECKED} ({type(e).__name__}); EZ-tool CSV indices {why}"
+    names = sorted(n for n, m in (got or {}).items() if not (m or {}).get("mappings"))
+    if not names:
+        return ""
+    fields = {c.index_suffix: c.time_field for c in TOOLS.values() if c.time_field}
+
+    def one(n: str) -> str:
+        f = fields.get(artifact_type_of(n))
+        return f"{n} (time field {f})" if f else n
+
+    more = f", and {len(names) - 5} more indices" if len(names) > 5 else ""
+    return (
+        f"{len(names)} index(es) have no event time and {why}: "
+        + ", ".join(one(n) for n in names[:5])
+        + f"{more}; query them by their own field with index="
+    )
+
+
+def _agg_time(agg: dict) -> str | None:
+    """A min/max date aggregation's time, as OpenSearch writes it. Over indices
+    some of which lack the field, 3.5.0 gives only `value` (epoch ms): that time
+    is written the same way."""
+    if agg.get("value_as_string"):
+        return agg["value_as_string"]
+    if not isinstance(agg.get("value"), (int, float)):
+        return None
+    from datetime import datetime, timezone
+
+    t = datetime.fromtimestamp(agg["value"] / 1000, tz=timezone.utc)
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+_WINDOW = "are left out of time_from/time_to"
+_UNCHECKED = "couldn't check which indices lack an event time"  # the failed-read note's start
+
+
 @server.tool()
 def idx_search(
     query: str,
@@ -1141,7 +1197,16 @@ def idx_search(
     if total_capped:
         resp["total_capped"] = True
         resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
-    if not docs:
+    if (time_from or time_to) and (note := _untimed_note(client, index, _WINDOW)):
+        resp["time_note"] = note
+    # "have none" only when the window found nothing and the note names the indices:
+    # never on a failed read, nor on a page past the end of what the window found
+    if not total and not resp.get("time_note", _UNCHECKED).startswith(_UNCHECKED):
+        resp["hint"] = (
+            "No results with an event time in the window. The indices in time_note "
+            "have none, so the window left them out."
+        )
+    elif not docs:
         resp["hint"] = (
             "No results. If searching for filenames, include the extension "
             "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
@@ -1416,6 +1481,10 @@ def idx_timeline(
         "interval": interval,
         "buckets": buckets,
     }
+    if time_field == "@timestamp":  # the histogram itself reads @timestamp, window or not
+        why = _WINDOW if (time_from or time_to) else "aren't in this timeline"
+        if note := _untimed_note(client, index, why):
+            resp["time_note"] = note
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
         resp,
@@ -2009,14 +2078,16 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 },
             },
         )
-        min_val = ts_result["aggregations"]["min_ts"].get("value_as_string")
-        max_val = ts_result["aggregations"]["max_ts"].get("value_as_string")
+        min_val = _agg_time(ts_result["aggregations"]["min_ts"])
+        max_val = _agg_time(ts_result["aggregations"]["max_ts"])
         if min_val:
             time_range["earliest"] = min_val
         if max_val:
             time_range["latest"] = max_val
     except Exception as e:
         resp.setdefault("warnings", []).append(f"Time range query failed: {e}")
+    if note := _untimed_note(client, pattern, "aren't in time_range"):
+        resp.setdefault("warnings", []).append(f"Time range: {note}")
 
     resp.update(
         {
