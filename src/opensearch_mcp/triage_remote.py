@@ -672,25 +672,110 @@ def _executable_of(value: str) -> str | None:
     return s if _a_path(s) else None
 
 
+def _program(command: str) -> tuple[str, int]:
+    """The program a command line starts, and where the rest of the line
+    begins: to its closing quote, or to the first space or tab, with no
+    escapes. A line that starts with a space has an empty program."""
+    if command[:1] == '"':
+        end = command.find('"', 1)
+        end = len(command) if end < 0 else end
+        return command[1:end], end + 1
+    end = 0
+    while end < len(command) and command[end] not in " \t":
+        end += 1
+    return command[:end], end
+
+
+def _argv(command: str) -> list[str]:
+    """A command line's arguments as Windows splits them (CommandLineToArgvW,
+    as measured on Windows 11): the program (`_program`), then each argument
+    to a space or tab outside quotes. 2n backslashes before a quote are n,
+    and the quote opens or closes a quoted part; 2n+1 are n and a literal
+    quote; other backslashes are literal; and "" inside a quoted part is one
+    quote that ends the part."""
+    if not command:
+        return []
+    program, i = _program(command)
+    s, n, out = command, len(command), [program]
+    while True:
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            return out
+        arg, quoted = [], False
+        while i < n and (quoted or s[i] not in " \t"):
+            if s[i] == "\\":
+                k = i
+                while k < n and s[k] == "\\":
+                    k += 1
+                if k < n and s[k] == '"':  # backslashes before a quote: halved
+                    arg.append("\\" * ((k - i) // 2))
+                    if (k - i) % 2:
+                        arg.append('"')
+                        k += 1
+                else:
+                    arg.append("\\" * (k - i))
+                i = k
+            elif s[i] == '"':
+                if quoted and s[i + 1 : i + 2] == '"':  # one quote, and the part ends
+                    arg.append('"')
+                    quoted, i = False, i + 2
+                else:
+                    quoted, i = not quoted, i + 1
+            else:
+                arg.append(s[i])
+                i += 1
+        out.append("".join(arg))
+
+
+def _rundll32_runs(tail: str) -> str | None:
+    """The DLL rundll32 loads, read from its command tail as rundll32 reads it
+    (Wine's parse_arguments): a quoted name to its closing quote, commas and
+    all; an unquoted one to the first space, comma or tab."""
+    tail = tail.lstrip(" \t")
+    if tail.startswith('"'):
+        end = tail.find('"', 1)
+        return tail[1:end] if end > 0 else None  # an unclosed quote names nothing
+    return re.split(r"[ ,\t]", tail, maxsplit=1)[0] or None
+
+
+# The file a program runs, by the program's name: one rule each, given the
+# line after the program as the program itself reads it. A program with no
+# rule here runs no file of its own (its line is still checked)
+_RUNS = {"rundll32": _rundll32_runs, "rundll32.exe": _rundll32_runs}
+
+
+def _target_of(value: str) -> str | None:
+    """The file a command line runs, by its program's rule, when that is a
+    path with an executable extension."""
+    line = (value or "").strip()
+    program, end = _program(line)
+    rule = _RUNS.get(program.replace("/", "\\").rsplit("\\", 1)[-1].lower())
+    target = rule(line[end:]) if rule else None
+    return target if target and target.lower().endswith(_EXE_EXTS) and _a_path(target) else None
+
+
 def _sends(value: str, raw: bool = True) -> list[str]:
-    """What check_file is given for a command line: its executable, and the
-    value itself when `raw` (as it was sent before, so no answer is lost)."""
-    exe = _executable_of(value)
-    return list(dict.fromkeys(([exe] if exe else []) + ([value] if raw else [])))
+    """What check_file is given for a command line: its executable, the file
+    it runs by its program's rule, and the value itself when `raw` (as it was
+    sent before, so no answer is lost)."""
+    picks = [_executable_of(value), _target_of(value), value if raw else None]
+    return list(dict.fromkeys(p for p in picks if p))
 
 
 _WORSE = {"SUSPICIOUS": 2, "UNKNOWN": 1}
+_SURER = {"high": 3, "medium": 2, "low": 1}
 
 
 def _ask_all(values: list[str], state: dict) -> dict | None:
     """check_file on each value, flags only: the worse answer (SUSPICIOUS,
-    then UNKNOWN, then the rest), with the LOLBin flag if any answer had it.
-    A raise or a reply that isn't a dict is a failed call. One lookup
-    behaves as it always has: a reply with no verdict is answered with
-    nothing to write. Two lookups are answered only when both replies carry
-    a verdict; otherwise the value fails as one failed call, and nothing is
-    written. `state` carries the loop's consecutive
-    call failures and whether any value was answered."""
+    then UNKNOWN, then the rest; of equal verdicts, the higher confidence),
+    with the LOLBin flag if any answer had it. A raise or a reply that isn't
+    a dict is a failed call. One lookup behaves as it always has: a reply
+    with no verdict is answered with nothing to write. Several lookups are
+    answered only when every reply carries a verdict; otherwise the value
+    fails as one failed call, and nothing is written. `state` carries the
+    loop's consecutive call failures and whether any value was answered."""
     if not values or state["failures"] >= _MAX_CONSECUTIVE_FAILURES:
         return None
     replies = []
@@ -710,7 +795,10 @@ def _ask_all(values: list[str], state: dict) -> dict | None:
     state["failures"], state["ok"] = 0, True
     if not answers:
         return None
-    worst = max(answers, key=lambda a: _WORSE.get(a.get("verdict"), 0))
+    worst = max(
+        answers,
+        key=lambda a: (_WORSE.get(a.get("verdict"), 0), _SURER.get(a.get("confidence"), 0)),
+    )
     return dict(worst, is_lolbin=True) if any(a.get("is_lolbin") for a in answers) else worst
 
 
@@ -1047,7 +1135,10 @@ def _too_long(result: dict, n: int) -> dict:
     """A result that also says how many Run-key values were too long to read."""
     if not n:
         return result
-    why = f"{n} Run-key values are over 256 characters and were not checked"
+    why = (
+        f"{n} Run-key values are over 256 characters and were not checked; "
+        "find them with exists ValueData and not exists ValueData.keyword under the Run keys"
+    )
     reason = f"{result['reason']}; {why}" if result.get("reason") else why
     return {**result, "status": "failed", "reason": reason, "too_long": n}
 
@@ -1104,7 +1195,8 @@ def _enrich_registry_check_file(
             continue
         if dll_filter and not value.lower().endswith(".dll"):
             continue
-        # a StubPath is a command line: its executable too; a NetSh value is the DLL
+        # a StubPath is a command line: its executable and what it runs too; a NetSh
+        # value is the DLL
         verdict = _ask_all([value] if dll_filter else _sends(value), state)
         if not verdict:
             continue
@@ -1113,11 +1205,17 @@ def _enrich_registry_check_file(
             script_lines = [
                 "ctx._source['triage.verdict'] = params.verdict",
                 "ctx._source['triage.checked'] = true",
+                "ctx._source['triage.confidence'] = params.confidence",
             ]
-            params: dict = {"verdict": verdict["verdict"]}
+            params: dict = {
+                "verdict": verdict["verdict"],
+                "confidence": verdict.get("confidence", "low"),
+            }
             if reasons:
                 script_lines.append("ctx._source['triage.reason'] = params.reason")
                 params["reason"] = "; ".join(reasons)
+            if verdict.get("is_lolbin"):
+                script_lines.append("ctx._source['triage.lolbin'] = true")
             resp = _ubq(
                 client,
                 index=index,
