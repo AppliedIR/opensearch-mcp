@@ -202,21 +202,22 @@ def scan(tmp_path, monkeypatch):
                case_id=case_id, include={"ssh"}, status_pid=1, status_run_id="run-ssh",
                case_dir=case_dir)  # fmt: skip
         (st,) = srv.idx_ingest_status(case_id=case_id)["ingests"]
-        return st, [s for _, _, s in client.all("case-")], root
+        # the ssh logs' warnings only: on a box with the EZ tools, the volume's
+        # empty SYSTEM hive gives shimcache a warning of its own
+        ssh = [w for w in st.get("warnings") or [] if "ProgramData/ssh/" in w]
+        return ssh, [s for _, _, s in client.all("case-")], root
 
     return run
 
 
 def test_the_scan_status_names_each_files_unread_lines(scan, capfd):
-    st, docs, _ = scan({LOG: MIXED, "ProgramData/ssh/logs/z-other.log": OTHER})
-    assert len(docs) == 3
-    assert st.get("warnings") == [f"WKS01: {UNREAD_1}; {UNREAD_2}"]
+    warnings, docs, _ = scan({LOG: MIXED, "ProgramData/ssh/logs/z-other.log": OTHER})
+    assert len([d for d in docs if "ssh.event_type" in d]) == 3
+    assert warnings == [f"WKS01: {UNREAD_1}; {UNREAD_2}"]
     assert f"  WKS01: ssh: {UNREAD_1}; {UNREAD_2}" in capfd.readouterr().err.splitlines()
 
 
 def test_with_no_time_zone_each_ssh_log_is_named_not_indexed(scan):
-    st, docs, root = scan({LOG: WIN32}, tz=None)
-    assert docs == []
-    assert st.get("warnings") == [
-        f"WKS01: 1 file(s) not indexed; not indexed: {root / LOG}: {NO_ZONE}"
-    ]
+    warnings, docs, root = scan({LOG: WIN32}, tz=None)
+    assert [d for d in docs if "ssh.event_type" in d] == []
+    assert warnings == [f"WKS01: 1 file(s) not indexed; not indexed: {root / LOG}: {NO_ZONE}"]
