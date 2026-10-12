@@ -66,3 +66,49 @@ def test_a_red_index_whose_last_ingest_failed_keeps_its_warning(case, monkeypatc
     ]
     assert f"Document counts: partial; failing indices: {registry}; " in " ".join(resp["warnings"])
     assert resp["total_docs"] == 1694 + 252626
+
+
+# --- a per-host count only some shards gave is unknown, not a count -------------
+
+import test_summary_reads_the_cases_own_audit as own  # noqa: E402
+from test_summary_reads_the_cases_own_audit import root  # noqa: E402, F401 (a fixture)
+
+NONE_ANSWERED = {"total": 1, "successful": 0, "skipped": 0, "failed": 1}
+ALL_ANSWERED = {"total": 1, "successful": 1, "skipped": 0, "failed": 0}
+
+
+@pytest.mark.parametrize(
+    "index_count,shards,count,shown",
+    [
+        (None, NONE_ANSWERED, 0, "document count unknown"),  # the red index codex measured
+        ("1000", NONE_ANSWERED, 0, "document count unknown"),
+        ("1000", {**ALL_ANSWERED, "total": 2, "failed": 1}, 400, "document count unknown"),
+        (None, ALL_ANSWERED, 0, "0 docs from host1"),  # every shard answered: a real 0
+        ("1000", ALL_ANSWERED, 1000, "1,000 docs from host1"),  # control
+    ],
+    ids=["red-none-answered", "green-none-answered", "half-answered", "whole-0", "whole"],
+)
+def test_a_per_host_count_some_shards_didnt_give_is_unknown(
+    root,  # noqa: F811
+    monkeypatch,
+    index_count,
+    shards,
+    count,
+    shown,
+):
+    class Client(own._Client):
+        class cat:
+            @staticmethod
+            def indices(index, format="json", **kw):
+                return [{"index": index.removesuffix("*") + "registry-0",
+                         "docs.count": index_count}]  # fmt: skip
+
+        def count(self, index, body):
+            if "host.name" in str(body):
+                return {"count": count, "_shards": dict(shards)}
+            return {"count": 0}
+
+    monkeypatch.setattr(faw.server, "_get_os", lambda: Client())
+    own.activate(root, "a")
+    (warning,) = own.incomplete("a")
+    assert warning == own._warning("a").replace("1,000 docs from host1", shown)

@@ -1816,8 +1816,12 @@ def _failed_artifact_warnings(
     for (index, _h), (_ts, rs, tool, host, _run) in sorted(last.items()):
         if rs.startswith("FAILED") and index in docs_by_index:
             # a shared index holds every host's records: count this host's
-            n = host_docs(index, host) if host_docs and index.endswith("-0") else None
-            if n is not None:
+            n, whole = (None, True)
+            if host_docs and index.endswith("-0"):
+                n, whole = host_docs(index, host)
+            if not whole:  # some shards didn't answer: unknown, never their count
+                docs = "document count unknown"
+            elif n is not None:
                 docs = f"{n:,} docs from {host}"
             elif docs_by_index[index] is not None:
                 docs = f"{docs_by_index[index]:,} docs"
@@ -2196,12 +2200,14 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     docs_by_index = {i["index"]: _cat_doc_count(i) for i in indices}
     try:
 
-        def host_docs(index, host):
+        def host_docs(index, host):  # (its count or None, whether every shard answered)
             try:
                 body = {"query": {"term": {"host.name": host}}}
-                return client.count(index=index, body=body)["count"]
+                reply = client.count(index=index, body=body)
             except Exception:
-                return None
+                return None, True
+            shards = reply.get("_shards") or {}
+            return reply["count"], shards.get("successful", 0) >= shards.get("total", 0)
 
         partial = _failed_artifact_warnings(cid, docs_by_index, host_docs)
     except OSError as e:
