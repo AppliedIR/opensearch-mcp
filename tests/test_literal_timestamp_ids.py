@@ -179,8 +179,8 @@ def test_evidence_cannot_carry_the_marker(cluster, cases, monkeypatch):
 
 FIXTURES = Path(__file__).parent / "fixtures" / "record_ids_064"
 AGAIN = (
-    "records with their own @timestamp were written again; their copies stored before "
-    "0.6.5 may also remain"
+    "records with their own @timestamp aren't matched against copies stored before 0.6.5; "
+    "those copies may remain"
 )
 W = "2026-10-01T05:00:00Z"
 LITERAL = {"json": FILES["a-json"][:2], "csv": FILES["b-csv"][:2]}
@@ -267,6 +267,15 @@ def test_a_row_is_never_kept_onto_a_record_stored_under_its_0_6_4_id(
     old = OLD["shared_when.json"]
     assert got == {k: sorted([*NEW_SHARED[k], old[k]]) for k in SHARED_WHEN}
     assert all(n.endswith(f": {AGAIN}") for n in notes.values())
+
+
+def test_the_note_doesnt_say_a_row_was_written(cluster, cases, monkeypatch):
+    """Every row refused before sending (deeper than its index allows): the
+    note says only that nothing was matched; none of them was written."""
+    monkeypatch.setattr(bulk, "_index_depth_limit", lambda client, index: 1)
+    got, notes = re_ingest(cluster, cases, monkeypatch, "literal.json", LITERAL)
+    assert got == {k: [old] for k, old in OLD["literal.json"].items()}  # 0.6.4's alone
+    assert all(n.endswith(f": {AGAIN}") and "written" not in n for n in notes.values())
 
 
 def test_a_re_ingest_without_its_own_time_is_unchanged(cluster, cases, monkeypatch):

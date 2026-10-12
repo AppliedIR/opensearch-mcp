@@ -396,7 +396,7 @@ def second_copy_note(hostname: str = "", artifact_type: str = "", c12: str = "")
 _FILL_CLAIMED: dict[tuple[str, str], str] = {}  # (index, 0.6.4 id) -> the 0.6.5 id
 FILL: dict[tuple[str, str, str], int] = {}  # (c12, unit_raw, type) -> records kept
 FILL_UNCHECKED: dict[tuple[str, str, str], str] = {}  # -> why its index couldn't be checked
-FILL_AGAIN: set[tuple[str, str, str]] = set()  # wrote records with their own @timestamp
+FILL_AGAIN: set[tuple[str, str, str]] = set()  # sent records with their own @timestamp
 _FILL_SAID: set[tuple[str, str, str]] = set()  # printed at a command's Done line
 # An index this version creates carries IDS_MARK in its mapping: every record
 # in it has its 0.6.5 id, so there's nothing stored before 0.6.5 to look up
@@ -544,8 +544,8 @@ def fill_note(hostname: str = "", artifact_type: str = "", c12: str = "") -> str
         if mine(*k)
     ]
     notes += [
-        f"{k[2]}: records with their own @timestamp were written again; their copies "
-        "stored before 0.6.5 may also remain"
+        f"{k[2]}: records with their own @timestamp aren't matched against copies stored "
+        "before 0.6.5; those copies may remain"
         for k in sorted(FILL_AGAIN)
         if mine(*k)
     ]
