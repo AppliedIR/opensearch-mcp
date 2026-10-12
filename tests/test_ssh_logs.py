@@ -223,16 +223,29 @@ def test_with_no_time_zone_each_ssh_log_is_named_not_indexed(scan):
     assert warnings == [f"WKS01: 1 file(s) not indexed; not indexed: {root / LOG}: {NO_ZONE}"]
 
 
-def test_a_line_with_an_impossibly_long_pid_is_counted_unread_and_the_rest_are_kept(parse):
-    """Past Python's int limit (4,300 digits) a pid can't be read: the line
-    isn't a Win32 line, so it is counted like any other unread line."""
-    text = (
-        "4120 2021-03-23 16:50:12.345 Accepted password for alice from 10.0.0.5 port 50123 ssh2\n"
-        + "9" * 4301
-        + " 2021-03-23 16:50:13.000 Accepted password for mallory from 10.0.0.9 port 1 ssh2\n"
-        "4188 2021-03-23 16:51:02.001 Failed password for bob from 203.0.113.9 port 50200 ssh2\n"
-    )
-    res, docs, notes = parse({LOG: text})
+BIG = "9" * 4301  # past Python's int-string limit (4,300 digits)
+GOOD_1 = "4120 2021-03-23 16:50:12.345 Accepted password for alice from 10.0.0.5 port 50123 ssh2"
+GOOD_2 = "4188 2021-03-23 16:51:02.001 Failed password for bob from 203.0.113.9 port 50200 ssh2"
+
+
+MALLORY = "Accepted password for mallory from 10.0.0.9 port {port} ssh2"
+
+
+@pytest.mark.parametrize(
+    "tz,bad",
+    [
+        (NY, f"{BIG} 2021-03-23 16:50:13.000 " + MALLORY.format(port=1)),
+        (NY, "4120 2021-03-23 16:50:13.000 " + MALLORY.format(port=BIG)),
+        (NY, f"2021-03-23 16:50:13 sshd: Failed password for mallory from 10.0.0.9 port {BIG}"),
+        ("Asia/Tokyo", "4120 0001-01-01 00:00:00.000 " + MALLORY.format(port=1)),
+        (NY, "4120 9999-12-31 23:00:00.000 " + MALLORY.format(port=1)),
+    ],
+    ids=["pid", "port-win32", "port-sshd-format", "year-0001-tokyo", "year-9999-new-york"],
+)
+def test_a_line_that_cant_be_read_is_counted_unread_and_the_rest_are_kept(parse, tz, bad):
+    """However a line fails (a pid or port no int can hold, a time UTC can't
+    hold), it is counted unread and the file's other lines are indexed."""
+    res, docs, notes = parse({LOG: f"{GOOD_1}\n{bad}\n{GOOD_2}\n"}, tz=tz)
     assert sorted(d["user.name"] for _, d in docs) == ["alice", "bob"]
     assert res == (2, 1, 0)
     assert notes == [f"{LOG}: 1 of 3 line(s) not in a known sshd log format, not indexed"]

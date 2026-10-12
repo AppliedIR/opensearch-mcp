@@ -91,80 +91,88 @@ def parse_ssh_log(
                     else:
                         doc["host.id"] = hostname
 
-                pid = None
-                ts_match = _SSH_LINE.match(line)
-                if ts_match:
-                    raw_ts, message = ts_match.group(1).strip(), ts_match.group(2)
-                else:
-                    win32 = _WIN32_LINE.match(line)
-                    if not win32:
+                # any line that can't be read (a field no int or time can hold) is
+                # counted unread; it never stops the rest of the file
+                try:
+                    pid = None
+                    ts_match = _SSH_LINE.match(line)
+                    if ts_match:
+                        raw_ts, message = ts_match.group(1).strip(), ts_match.group(2)
+                    else:
+                        win32 = _WIN32_LINE.match(line)
+                        if not win32:
+                            unread += 1
+                            continue
+                        pid, raw_ts, message = win32.group(1), win32.group(2), win32.group(3)
+                    # Convert local timestamp to UTC
+                    try:
+                        fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in raw_ts else "%Y-%m-%d %H:%M:%S"
+                        naive = datetime.strptime(raw_ts, fmt)
+                        aware = naive.replace(tzinfo=tz_info)
+                        doc["@timestamp"] = (
+                            aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
+                        )
+                    except ValueError:
                         unread += 1
                         continue
-                    pid, raw_ts, message = win32.group(1), win32.group(2), win32.group(3)
-                # Convert local timestamp to UTC
-                try:
-                    fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in raw_ts else "%Y-%m-%d %H:%M:%S"
-                    naive = datetime.strptime(raw_ts, fmt)
-                    aware = naive.replace(tzinfo=tz_info)
-                    doc["@timestamp"] = (
-                        aware.astimezone(tzutc()).isoformat().replace("+00:00", "Z")
+                    if pid is not None:
+                        doc["process.pid"] = int(pid)
+
+                    # Time range filter
+                    if time_from or time_to:
+                        try:
+                            ts = datetime.fromisoformat(doc["@timestamp"].replace("Z", "+00:00"))
+                            if time_from and ts < time_from:
+                                skipped += 1
+                                continue
+                            if time_to and ts > time_to:
+                                skipped += 1
+                                continue
+                        except (ValueError, TypeError):
+                            pass
+
+                    accepted = _AUTH_ACCEPTED.search(message)
+                    failed = _AUTH_FAILED.search(message)
+
+                    if accepted:
+                        doc["ssh.event_type"] = "auth_accepted"
+                        doc["ssh.auth_method"] = accepted.group(1)
+                        doc["user.name"] = accepted.group(2)
+                        doc["source.ip"] = accepted.group(3)
+                        doc["source.port"] = int(accepted.group(4))
+                    elif failed:
+                        doc["ssh.event_type"] = "auth_failed"
+                        doc["ssh.auth_method"] = failed.group(1)
+                        doc["user.name"] = failed.group(2)
+                        doc["source.ip"] = failed.group(3)
+                        doc["source.port"] = int(failed.group(4))
+                    else:
+                        doc["ssh.event_type"] = "other"
+
+                    doc["ssh.raw_line"] = message
+                    if ingest_audit_id:
+                        doc["vhir.ingest_audit_id"] = ingest_audit_id
+                    if pipeline_version:
+                        doc["pipeline_version"] = pipeline_version
+                    doc["vhir.parse_method"] = "ssh-parser"
+                    if vss_id:
+                        doc["vhir.vss_id"] = vss_id
+
+                    from opensearch_mcp.paths import relative_evidence_path
+
+                    rel = (
+                        relative_evidence_path(log_file, volume_root)
+                        if volume_root
+                        else str(log_file)
                     )
-                except ValueError:
+                    # a Win32 line's pid is in its id: two sessions can log one text at once
+                    hashed = message if pid is None else f"{pid} {message}"
+                    msg_hash = hashlib.sha256(hashed.encode()).hexdigest()[:16]
+                    id_input = f"{index_name}:{rel}:{doc['@timestamp']}:{msg_hash}"
+                    doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
+                except Exception:  # noqa: BLE001 - counted, and named in the note
                     unread += 1
                     continue
-                if pid is not None:
-                    doc["process.pid"] = int(pid)
-
-                # Time range filter
-                if time_from or time_to:
-                    try:
-                        ts = datetime.fromisoformat(doc["@timestamp"].replace("Z", "+00:00"))
-                        if time_from and ts < time_from:
-                            skipped += 1
-                            continue
-                        if time_to and ts > time_to:
-                            skipped += 1
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-
-                accepted = _AUTH_ACCEPTED.search(message)
-                failed = _AUTH_FAILED.search(message)
-
-                if accepted:
-                    doc["ssh.event_type"] = "auth_accepted"
-                    doc["ssh.auth_method"] = accepted.group(1)
-                    doc["user.name"] = accepted.group(2)
-                    doc["source.ip"] = accepted.group(3)
-                    doc["source.port"] = int(accepted.group(4))
-                elif failed:
-                    doc["ssh.event_type"] = "auth_failed"
-                    doc["ssh.auth_method"] = failed.group(1)
-                    doc["user.name"] = failed.group(2)
-                    doc["source.ip"] = failed.group(3)
-                    doc["source.port"] = int(failed.group(4))
-                else:
-                    doc["ssh.event_type"] = "other"
-
-                doc["ssh.raw_line"] = message
-                if ingest_audit_id:
-                    doc["vhir.ingest_audit_id"] = ingest_audit_id
-                if pipeline_version:
-                    doc["pipeline_version"] = pipeline_version
-                doc["vhir.parse_method"] = "ssh-parser"
-                if vss_id:
-                    doc["vhir.vss_id"] = vss_id
-
-                from opensearch_mcp.paths import relative_evidence_path
-
-                rel = (
-                    relative_evidence_path(log_file, volume_root) if volume_root else str(log_file)
-                )
-                # a Win32 line's pid is in its id: two sessions can log one text at once
-                hashed = message if pid is None else f"{pid} {message}"
-                msg_hash = hashlib.sha256(hashed.encode()).hexdigest()[:16]
-                id_input = f"{index_name}:{rel}:{doc['@timestamp']}:{msg_hash}"
-                doc_hash = hashlib.sha256(id_input.encode()).hexdigest()[:20]
                 actions.append({"_index": index_name, "_id": doc_hash, "_source": doc, **step})
 
                 if len(actions) >= 1000:
