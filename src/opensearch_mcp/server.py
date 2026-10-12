@@ -110,7 +110,9 @@ def _add_investigation_hints(resp: dict, artifacts: dict, case: str) -> None:
             "Code deployment: Name:(*.exe OR *.dll OR *.ps1) AND UpdateReasons:*FileCreate*. "
             "SDelete: Name:AAAAAAA* AND UpdateReasons:*Rename* "
             "(verify with surrounding entries). "
-            "Cross-host: same filename across case-*-usn-*"
+            "Cross-host: idx_aggregate(field='host.id', "
+            "query='(Name:<file>) AND _exists_:UpdateReasons'); omit index, and pass "
+            "case_id unless this case is active"
         )
     if has_evtx:
         hints.append(
@@ -180,7 +182,9 @@ _FIELD_HINT_EVTX_EVTXECMD = (
     "EventId:4688 AND ExecutableInfo:*process*, "
     "EventId:7045 AND PayloadData1:*servicename*, "
     "EventId:4624 AND PayloadData2:*LogonType 3* (lateral movement).\n"
-    "Prefer native evtx (case-*-evtx-*) when available — proper ECS fields."
+    "Prefer native evtx when available — proper ECS fields. For native evtx records "
+    "only, query (<your query>) AND _exists_:winlog.channel; omit index, and pass "
+    "case_id unless this case is active."
 )
 
 _field_hint_delivered = False
@@ -232,8 +236,10 @@ def _add_field_hint(resp: dict, index_pattern: str, client) -> None:
         return
     if _field_hint_delivered:
         resp["field_hint"] = (
-            "Mixed evtx/EvtxECmd indices — use case-*-evtx-* for ECS fields "
-            "or case-*-delim-evtxecmd* for CSV fields."
+            "Mixed evtx/EvtxECmd indices — query (<your query>) AND _exists_:winlog.channel "
+            "for ECS fields, or (<your query>) AND _exists_:EventId for CSV fields; omit "
+            "index, and pass "
+            "case_id unless this case is active."
         )
     else:
         resp["field_hint"] = _FIELD_HINT_EVTX_EVTXECMD
@@ -887,6 +893,71 @@ def _no_index_matched(result: dict, index: str) -> dict | None:
     return None
 
 
+_PARTIAL_LOW = (
+    "Totals, counts and buckets are a lower bound: they cover only the shards that "
+    "answered, and 0 is not 'no match'."
+)
+_TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
+
+
+def _repair(reason: str, case: str) -> str:
+    """What repairs a shard failure: a field that is text where a keyword was
+    meant. A vhir.* field is text only in an index made without its template;
+    any other is aggregated through its .keyword sub-field."""
+    m = _TEXT_FIELD.search(reason)
+    if not m:
+        return ""
+    field = m.group(1)
+    if field.startswith("vhir."):
+        case = case or _get_active_case() or "<case>"
+        return (
+            f"; {field} is text there: the index was made without its template, "
+            f"repair it with opensearch-ingest repair-index --case {case}"
+        )
+    return (
+        f"; {field} is text there: aggregate {field}.keyword "
+        "(values over 256 characters are left out)"
+    )
+
+
+def _shard_gap(result: dict, case: str = "") -> dict:
+    """{} when every shard answered in time (a skipped shard answered: it
+    can't match). Otherwise `partial: true`, the shard counts, the indices
+    that failed, and a warning naming each with its reason and what repairs
+    it: an answer from only some shards is a lower bound."""
+    shards = result.get("_shards") or {}
+    total, failed = int(shards.get("total") or 0), int(shards.get("failed") or 0)
+    # a red index's shards are neither successful nor failed, with no failures entry
+    lost = max(0, total - int(shards.get("successful", total) or 0) - failed)
+    timed_out = bool(result.get("timed_out"))
+    if not (failed or lost or timed_out):
+        return {}
+    names, why = [], []
+    for f in shards.get("failures") or []:  # grouped: one per index and reason
+        index = str(f.get("index", "?"))
+        if index in names:
+            continue
+        reason = str((f.get("reason") or {}).get("reason", ""))
+        names.append(index)
+        why.append(f"{index}: {reason.split('. ')[0][:200]}{_repair(reason, case)}")
+    parts = []
+    if failed:
+        named = f" in {'; '.join(why[:5])}" if why else ""
+        more = f"; and {len(why) - 5} more indices" if len(why) > 5 else ""
+        parts.append(f"{failed} of {total} shard(s) failed{named}{more}")
+    if lost:
+        parts.append(f"{lost} of {total} shard(s) unavailable")
+    if timed_out:
+        parts.append("the search timed out")
+    return {
+        "partial": True,
+        "shards": {"total": total, "failed": failed, **({"unavailable": lost} if lost else {})},
+        "failed_indices": names,
+        "timed_out": timed_out,
+        "partial_warning": f"Incomplete answer: {'; '.join(parts)}. {_PARTIAL_LOW}",
+    }
+
+
 # A wildcard on an IPv4 address: 10.1.2.*, 172.16.5.1?
 _IP_WILDCARD = re.compile(r"\b\d{1,3}\.[\d.]*[*?]")
 _IP_WILDCARD_HINT = (
@@ -1138,10 +1209,12 @@ def idx_search(
         docs = _strip_hits(result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999)
 
     resp: dict = {"total": total, "returned": len(docs), "results": docs, "compact": compact}
+    gap = _shard_gap(result, case_id)
+    resp.update(gap)
     if total_capped:
         resp["total_capped"] = True
         resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
-    if not docs:
+    if not docs and not gap:  # partial: partial_warning, never "No results"
         resp["hint"] = (
             "No results. If searching for filenames, include the extension "
             "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
@@ -1224,7 +1297,7 @@ def idx_count(
             err["audit_id"] = aid
         return err
     count = result["hits"]["total"]["value"]
-    resp = {"count": count}
+    resp = {"count": count, **_shard_gap(result, case_id)}
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
     return _logged_query(
         resp,
@@ -1288,6 +1361,7 @@ def idx_aggregate(
         "total_docs": result["hits"]["total"]["value"],
         "buckets": buckets,
         "truncated": len(buckets) >= limit,
+        **_shard_gap(result, case_id),
     }
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
     return _logged_query(
@@ -1415,6 +1489,7 @@ def idx_timeline(
         "total_docs": result["hits"]["total"]["value"],
         "interval": interval,
         "buckets": buckets,
+        **_shard_gap(result, case_id),
     }
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
@@ -1473,7 +1548,8 @@ def idx_field_values(
         for b in result["aggregations"]["values"]["buckets"]
     ]
 
-    resp = {"field": field, "values": values, "truncated": len(values) >= limit}
+    resp = {"field": field, "values": values, "truncated": len(values) >= limit,
+            **_shard_gap(result, case_id)}  # fmt: skip
     return _logged_query(
         resp,
         tool="idx_field_values",
@@ -1746,12 +1822,16 @@ def _outcome_is(outcome: str) -> dict:
     }
 
 
-def _intel_counts(client, pattern: str) -> dict:
+def _intel_counts(client, pattern: str, gaps: list | None = None) -> dict:
     """Documents checked, with any IOC matched, with any IOC unanswered, and
-    carrying an older release's single stamp."""
+    carrying an older release's single stamp. Each count's reply goes to
+    `gaps`, for its shards."""
 
     def count(query: dict) -> int:
-        return client.count(index=pattern, body={"query": query})["count"]
+        result = client.count(index=pattern, body={"query": query})
+        if gaps is not None:
+            gaps.append(result)
+        return result["count"]
 
     return {
         "checked": count({"exists": {"field": "threat_intel.checked"}}),
@@ -1861,6 +1941,18 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     host_names: dict = {}
     index_hosts: dict = {}
     ingested: dict = {}  # which ingests the summarised records came from
+
+    def shard_gap(what: str, result: dict) -> None:  # a part only some shards answered
+        gap = _shard_gap(result, cid)
+        if not gap or any(w.startswith(f"{what}: ") for w in resp.get("warnings", [])):
+            return
+        text = gap["partial_warning"]
+        if what == "Time range":  # a partial min/max is narrower, not lower
+            text = text.replace(_PARTIAL_LOW, "The earliest and latest cover only the shards "
+                                "that answered and may be narrower.")  # fmt: skip
+        resp["partial"] = True
+        resp.setdefault("warnings", []).append(f"{what}: {text}")
+
     try:
         host_agg = client.search(
             index=pattern,
@@ -1880,6 +1972,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
             },
         )
         ingested = host_agg
+        shard_gap("Host detection", host_agg)
         for bucket in host_agg["aggregations"]["hosts"]["buckets"]:
             hosts.add(bucket["key"])
             host_names[bucket["key"]] = sorted(b["key"] for b in bucket["names"]["buckets"])
@@ -1967,15 +2060,19 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
     # Enrichment status
     enrichment: dict = {}
     try:
-        triage_count = client.count(
+        triage = client.count(
             index=pattern,
             body={"query": {"exists": {"field": "triage.checked"}}},
-        )["count"]
+        )
+        shard_gap("Triage stats", triage)
+        triage_count = triage["count"]
         if triage_count:
-            suspicious = client.count(
+            triage = client.count(
                 index=pattern,
                 body={"query": {"term": {"triage.verdict": "SUSPICIOUS"}}},
-            )["count"]
+            )
+            shard_gap("Triage stats", triage)
+            suspicious = triage["count"]
             enrichment["triage"] = {
                 "checked": triage_count,
                 "suspicious": suspicious,
@@ -1984,7 +2081,10 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
         resp.setdefault("warnings", []).append(f"Triage stats query failed: {e}")
 
     try:
-        intel = _intel_counts(client, pattern)
+        intel_replies: list = []
+        intel = _intel_counts(client, pattern, intel_replies)
+        for reply in intel_replies:
+            shard_gap("Intel stats", reply)
         if any(intel.values()):
             enrichment["threat_intel"] = intel
         if intel["legacy"]:
@@ -2009,6 +2109,7 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 },
             },
         )
+        shard_gap("Time range", ts_result)
         min_val = ts_result["aggregations"]["min_ts"].get("value_as_string")
         max_val = ts_result["aggregations"]["max_ts"].get("value_as_string")
         if min_val:
