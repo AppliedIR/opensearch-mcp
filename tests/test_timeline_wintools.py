@@ -177,3 +177,27 @@ def test_a_hostname_that_climbs_stages_nothing_outside_extractions(
     assert any(p.name == "ActivitiesCache.db" for p in written)
     (host_dir,) = (extractions / "timeline").iterdir()
     assert "/" not in host_dir.name and host_dir.name not in (".", "..")
+
+
+def test_a_database_without_companions_is_staged_without_an_earlier_runs(
+    case,  # noqa: F811
+    monkeypatch,
+    tmp_path,
+):
+    """A snapshot's database often has no -wal; the live one's, staged first in
+    the same folder, must not be applied to it."""
+    from opensearch_mcp import ops, parse_csv, parse_timeline, wintools
+
+    monkeypatch.setattr(wintools, "wintools_available", lambda: True)
+    monkeypatch.setattr(wintools, "run_tool_and_get_csv", lambda **kw: [tmp_path / "out.csv"])
+    monkeypatch.setattr(parse_csv, "ingest_csv", lambda **kw: (1, 0, 0))
+    live = _rd01(tmp_path / "live") / RD01[2] / "ActivitiesCache.db"
+    snap = tmp_path / "vss1" / RD01[2] / "ActivitiesCache.db"
+    snap.parent.mkdir(parents=True)
+    snap.write_bytes(b"snapshot")
+    with ops.recording(AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_timeline", {}):
+        parse_timeline.parse_timeline(live, MagicMock(), "idx", "RD01")
+        parse_timeline.parse_timeline(snap, MagicMock(), "idx", "RD01")
+    staged = case / "extractions" / "timeline" / "RD01" / "tdungan" / "L.tdungan"
+    assert sorted(f.name for f in staged.iterdir()) == ["ActivitiesCache.db"]
+    assert (staged / "ActivitiesCache.db").read_bytes() == b"snapshot"

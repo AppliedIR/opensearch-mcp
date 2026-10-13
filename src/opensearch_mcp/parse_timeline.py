@@ -70,6 +70,10 @@ def parse_timeline(
     workdir = _staging(Path(case_dir_str), hostname, db_path)
     check_staging(Path(case_dir_str), workdir)  # inside extractions/, or refused
     workdir.mkdir(parents=True, exist_ok=True)
+    # an earlier run's -wal/-shm (a VSS host shares the live one's name) would
+    # be applied to a database copied without its own
+    for s in ("-wal", "-shm"):
+        (workdir / (db_path.name + s)).unlink(missing_ok=True)
     copied = []
     for f in [db_path, *(db_path.with_name(db_path.name + s) for s in ("-wal", "-shm"))]:
         if f.is_file():
