@@ -686,12 +686,12 @@ def _container_scan(image: Path, container_type: str, case_id: str) -> dict:
     return out
 
 
-def _memory_scan(image: Path, hostname: str) -> list[dict]:
+def _memory_scan(image: Path, hostname: str, case_id: str = "") -> list[dict]:
     """The names scan of a memory image (or an archive of them: names
-    arrive after extraction)."""
+    arrive after extraction), in `case_id` (else the active case)."""
     from opensearch_mcp import names_scan
 
-    case_dir = _scan_case_dir()
+    case_dir = _scan_case_dir(case_id)
     if image.suffix.lower() in (".7z", ".zip"):
         return [{"locator": str(image), "note": "names arrive after extraction"}]
     unit = names_scan.memory_unit(image, image, "", hostname or "", case_dir)
@@ -2193,6 +2193,7 @@ def idx_ingest(
                     "container": container_type,
                 },
                 result_summary=f"container preview: {container_type}",
+                **_audit_case(active),
             )
             if aid:
                 resp["audit_id"] = aid
@@ -2261,6 +2262,7 @@ def idx_ingest(
             tool="idx_ingest",
             params={"path": path, "dry_run": True},
             result_summary=f"discovery: {len(hosts)} hosts",
+            **_audit_case(active),
         )
         resp = {"status": "preview", "hosts": summary, "case_id": case_id}
         resp["scan"] = _folder_scan(hosts, case_id)
@@ -2296,6 +2298,7 @@ def idx_ingest(
             tool="idx_ingest",
             params={"path": path, "dry_run": False},
             result_summary=f"aborted: {reason[:120]}",
+            **_audit_case(active),
         )
         # Write terminal status so idx_ingest_status surfaces the
         # refusal (otherwise it returns "no active ingests" after a
@@ -2421,6 +2424,7 @@ def idx_ingest(
             resp, f"started ingest (pid {proc.pid}) for {len(hosts)} hosts"
         ),
         input_files=[path],
+        **_audit_case(active),
     )
     if aid:
         resp["audit_id"] = aid
@@ -2714,9 +2718,7 @@ def idx_ingest_json(
                                              skipped))  # fmt: skip
         return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
-    return _launch_background(
-        "json", path, hostname, index_suffix, time_field, active_case=active[0] or ""
-    )
+    return _launch_background("json", path, hostname, index_suffix, time_field, active=active)
 
 
 @server.tool()
@@ -2778,7 +2780,7 @@ def idx_ingest_delimited(
             time_field,
             delimiter=delimiter,
             auto_hosts=",".join(sorted(detected)),
-            active_case=active[0] or "",
+            active=active,
         )
 
     # Recursive mode: subdirs are hosts
@@ -2820,7 +2822,7 @@ def idx_ingest_delimited(
             time_field,
             delimiter=delimiter,
             recursive=True,
-            active_case=active[0] or "",
+            active=active,
         )
 
     # Non-recursive: hostname required
@@ -2863,7 +2865,7 @@ def idx_ingest_delimited(
         index_suffix,
         time_field,
         delimiter=delimiter,
-        active_case=active[0] or "",
+        active=active,
     )
 
 
@@ -2902,9 +2904,7 @@ def idx_ingest_accesslog(
         )
         return {"status": "preview", "files": files, "count": len(files), **_named(skipped)}
 
-    return _launch_background(
-        "accesslog", path, hostname, index_suffix, active_case=active[0] or ""
-    )
+    return _launch_background("accesslog", path, hostname, index_suffix, active=active)
 
 
 @server.tool()
@@ -3177,10 +3177,10 @@ def _launch_background(
     delimiter="",
     recursive=False,
     auto_hosts="",
-    active_case=None,
+    active=None,
 ):
     """Launch a generic ingest as background subprocess with concurrency control.
-    `active_case`: the calling tool's one read of the active case."""
+    `active`: the calling tool's one `_active_case()` read."""
     import os as _os
     import sys as _sys
     import uuid as _uuid
@@ -3191,6 +3191,9 @@ def _launch_background(
     from opensearch_mcp.ingest_status import write_status
 
     _reset_cb()
+    if active is None:
+        active = _active_case()
+    active_case = active[0]
 
     # Pre-flight shard capacity check — single insertion point covers
     # json / delimited / accesslog subcommands routed through here.
@@ -3215,8 +3218,6 @@ def _launch_background(
             write_status,
         )
 
-        if active_case is None:
-            active_case = _get_active_case()
         if active_case:
             write_status(
                 case_id=active_case,
@@ -3230,8 +3231,6 @@ def _launch_background(
             )
         return {"status": "failed", "error": "shard_capacity", "message": reason}
 
-    if active_case is None:
-        active_case = _get_active_case()
     if not active_case:
         return {"error": "No active case. Run 'vhir case activate' first."}
 
@@ -3319,6 +3318,7 @@ def _launch_background(
         params={"path": path, "hostname": hostname},
         result_summary=_launch_summary(resp, f"Background ingest started (pid={proc.pid})"),
         input_files=[path],
+        **_audit_case(active),
     )
     if aid:
         resp["audit_id"] = aid
@@ -3486,13 +3486,14 @@ def idx_ingest_memory(
             "tier": tier,
             "plugins": plugin_list,
             "plugin_count": len(plugin_list),
-            "scan": _memory_scan(Path(path), hostname),
+            "scan": _memory_scan(Path(path), hostname, active[0] or ""),
         }
-        _with_host_list_hint(resp)
+        _with_host_list_hint(resp, active[0] or "")
         aid = audit.log(
             tool="idx_ingest_memory",
             params={"path": path, "dry_run": True, "tier": tier},
             result_summary=f"preview: {len(plugin_list)} plugins",
+            **_audit_case(active),
         )
         if aid:
             resp["audit_id"] = aid
@@ -3518,6 +3519,7 @@ def idx_ingest_memory(
             tool="idx_ingest_memory",
             params={"path": path, "dry_run": False, "tier": tier},
             result_summary=f"aborted: {reason[:120]}",
+            **_audit_case(active),
         )
         from datetime import datetime as _dt
         from datetime import timezone as _tz
@@ -3648,6 +3650,7 @@ def idx_ingest_memory(
         params={"path": path, "tier": tier, "pid": proc.pid, "run_id": run_id},
         result_summary=_launch_summary(resp, f"started tier {tier} ({len(plugin_list)} plugins)"),
         input_files=[path],
+        **_audit_case(active),
     )
     if aid:
         resp["audit_id"] = aid
@@ -3673,6 +3676,13 @@ def _active_case() -> tuple[str | None, Path | None]:
     if os.path.isabs(raw):
         return name, Path(raw)
     return name, Path(os.environ.get("VHIR_CASES_DIR", str(Path.home() / "cases"))) / name
+
+
+def _audit_case(active) -> dict:
+    """audit.log's case for a call's one `_active_case()` read: its entry goes
+    into that case, with its id, even if the examiner switches meanwhile."""
+    case_id, case_dir = active
+    return {"case_id": case_id, "case_dir": str(case_dir)} if case_id else {}
 
 
 # Hayabusa's CSV abbreviates Level: crit, high, med, low, info, and emer on a

@@ -127,3 +127,66 @@ def test_a_relative_pointer_resolves_by_its_name_in_the_cases_folder(env, pointe
         str(env.cases["INC-RP2"] / "evidence/sec.json"),
         None,
     )
+
+
+# --- the audit entry and the scan stay in the call's case -------------------------
+
+
+def _audit_entries(case) -> list[dict]:
+    return [json.loads(line) for f in sorted((case / "audit").glob("*.jsonl"))
+            for line in f.read_text().splitlines() if line.strip()]  # fmt: skip
+
+
+@pytest.fixture
+def audited(env, monkeypatch, tmp_path):  # noqa: F811
+    """The server's real audit writer, finding its case as it does on a box:
+    no VHIR_AUDIT_DIR or VHIR_CASE_DIR, the pointer under HOME/.vhir."""
+    monkeypatch.delenv("VHIR_AUDIT_DIR", raising=False)
+    monkeypatch.delenv("VHIR_CASE_DIR", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".vhir").symlink_to(paths.vhir_dir())
+    monkeypatch.setenv("HOME", str(home))
+    return env
+
+
+def test_a_switch_while_the_launch_waits_keeps_its_audit_entry_in_its_case(audited, monkeypatch):
+    """The examiner activates INC-RP2 while the launch waits for the gate
+    answer: the entry is INC-RP1's, in INC-RP1."""
+    cases = audited
+    monkeypatch.setattr(srv, "_GATE_ANSWER_SECONDS", 0.01)
+
+    def spawn(cmd, *a, **k):
+        cases.launched.append(list(cmd))
+        cases.activate("INC-RP2")
+        return mock.MagicMock(pid=4242)
+
+    monkeypatch.setattr(srv, "_spawn_ingest", spawn)
+    srv.idx_ingest_json(path="evidence/sec.json", hostname="h1", dry_run=False)
+    rp1, rp2 = (_audit_entries(cases.cases[c]) for c in ("INC-RP1", "INC-RP2"))
+    launch = [e for e in rp1 if e["tool"] == "idx_ingest_json"]
+    assert [e["case_id"] for e in launch] == ["INC-RP1"], (rp1, rp2)
+    assert not [e for e in rp2 if e["tool"] == "idx_ingest_json"], rp2
+
+
+def test_a_switch_before_the_memory_preview_keeps_its_scan_and_audit_in_its_case(
+    audited, monkeypatch
+):
+    """The examiner activates INC-RP2 just after the path is resolved: the
+    names scan and the preview's audit entry are INC-RP1's."""
+    cases = audited
+    validate = srv._validate_path
+
+    def switch_then_validate(path):
+        cases.activate("INC-RP2")
+        return validate(path)
+
+    monkeypatch.setattr(srv, "_validate_path", switch_then_validate)
+    r = srv.idx_ingest_memory(path="evidence/mem.raw", hostname="h1", dry_run=True)
+    assert r.get("status") == "preview", r
+    rp1, rp2 = cases.cases["INC-RP1"], cases.cases["INC-RP2"]
+    assert (rp1 / "host-observations.jsonl").is_file()
+    assert not (rp2 / "host-observations.jsonl").exists()
+    previews = [e for e in _audit_entries(rp1) if e["tool"] == "idx_ingest_memory"]
+    assert [e["case_id"] for e in previews] == ["INC-RP1"], previews
+    assert not [e for e in _audit_entries(rp2) if e["tool"] == "idx_ingest_memory"]
