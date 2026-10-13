@@ -20,7 +20,7 @@ from opensearch_mcp.ingest_status import write_status
 from opensearch_mcp.manifest import sha256_file
 from opensearch_mcp.ops import NO_ENTRY
 from opensearch_mcp.parse_evtx import evtx_truncation, parse_and_index
-from opensearch_mcp.paths import vhir_dir
+from opensearch_mcp.paths import fs_name, vhir_dir
 from opensearch_mcp.results import ArtifactResult, HostResult, IngestResult
 from opensearch_mcp.tools import TOOLS, get_active_tools, run_and_ingest
 
@@ -1176,7 +1176,7 @@ def _ingest_plaso_volume(
     params = {"hostname": host.hostname, "tool": "plaso", "index_name": index_name,
               "run_id": run_id}  # fmt: skip
     for parsers, source in runs:
-        workdir = Path(tempfile.mkdtemp(prefix=f"plaso-{host.hostname}-", dir=base))
+        workdir = Path(tempfile.mkdtemp(prefix=f"plaso-{fs_name(host.hostname)}-", dir=base))
         aid = ""
         try:
             jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone, **run_kw)

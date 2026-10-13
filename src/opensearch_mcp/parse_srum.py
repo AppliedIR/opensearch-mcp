@@ -35,6 +35,7 @@ def parse_srum(
     SRUDB.dat from KAPE triage is frequently dirty/locked — SrumECmd
     handles this (built-in repair), Plaso's esedb parser does not.
     """
+    from opensearch_mcp.paths import StagingRefused
     from opensearch_mcp.wintools import mark_wintools_down, wintools_available
 
     _fallback_note = (
@@ -61,6 +62,8 @@ def parse_srum(
             return cnt, bf, "", PARSER_COMPLETED, cnt + bf + kept[0]
         except Exception as e:
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
+            if isinstance(e, StagingRefused):  # the cause, not a missing SrumECmd
+                _fallback_note = f"srum: {e} Parsed with Plaso fallback (reduced fidelity)."
             if "connection" in str(e).lower() or "timeout" in str(e).lower():
                 mark_wintools_down()
 
@@ -118,9 +121,11 @@ def _parse_srum_wintools(
     case_dir = Path(case_dir_str)
 
     from opensearch_mcp import ops
+    from opensearch_mcp.paths import check_staging, fs_name
 
     # Stage SRUM to case extractions (on the SMB share) for ESE recovery
-    srum_workdir = case_dir / "extractions" / "srum" / hostname
+    srum_workdir = case_dir / "extractions" / "srum" / fs_name(hostname)
+    check_staging(case_dir, srum_workdir)
     srum_workdir.mkdir(parents=True, exist_ok=True)
     copied = [(srum_path, srum_workdir / "SRUDB.dat")]
     shutil.copy2(srum_path, srum_workdir / "SRUDB.dat")

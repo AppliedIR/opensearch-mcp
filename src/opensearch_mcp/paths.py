@@ -308,6 +308,40 @@ def no_time_field_note() -> str:
     return "; ".join(notes)
 
 
+def fs_name(name: str) -> str:
+    """A host name from evidence as one file or folder name: `[A-Za-z0-9._-]`
+    kept, anything else `_`, `.` and `..` as `_` and `__`, at most 64 kept.
+    When that changed anything, `~` and a hash of the original follow: the
+    mapping never keeps `~`, so two names never share one."""
+    import hashlib
+    import re
+
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64]
+    safe = "_" * len(safe) if safe in (".", "..") else safe
+    if safe == name:
+        return safe
+    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{safe}~{digest[:12]}"
+
+
+class StagingRefused(ValueError):
+    """A staging folder that isn't a folder of its own inside the case's
+    extractions/."""
+
+
+def check_staging(case_dir: Path, staging: Path) -> None:
+    """Refuse a staging folder that isn't strictly inside the case's
+    extractions/ once resolved: extractions/ itself is refused too, as a run
+    removes its staging folder first. extractions/ isn't resolved, so a link
+    there is refused."""
+    root = case_dir.resolve() / "extractions"
+    real = staging.resolve()
+    if root not in real.parents:
+        raise StagingRefused(
+            f"Refusing to stage into {staging}: it resolves to {real}, not a folder inside {root}."
+        )
+
+
 def sanitize_index_component(value: str) -> str:
     """Sanitize a hostname or case_id for use in OpenSearch index names."""
     import re
