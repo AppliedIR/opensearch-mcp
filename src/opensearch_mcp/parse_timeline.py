@@ -24,13 +24,19 @@ NO_WINTOOLS = (
 
 def _staging(case_dir: Path, hostname: str, db: Path) -> Path:
     """extractions/timeline/<host>/<account>/<its folder>/: one per database
-    (an account can have several, e.g. L.<name> and a device id)."""
+    (an account can have several, e.g. L.<name> and a device id). Each part
+    comes from the evidence, so each is one safe folder name (fs_name)."""
+    from opensearch_mcp.paths import fs_name
+
     parts = db.parts
     lower = [p.lower() for p in parts]
     # the profile folder after the LAST "users" (a mount point can hold one too)
     at = max((i for i, p in enumerate(lower[:-1]) if p == "users"), default=None)
     account = parts[at + 1] if at is not None else "unknown"
-    return case_dir / "extractions" / "timeline" / hostname / account / db.parent.name
+    return (
+        case_dir / "extractions" / "timeline"
+        / fs_name(hostname) / fs_name(account) / fs_name(db.parent.name)
+    )  # fmt: skip
 
 
 def parse_timeline(
@@ -59,7 +65,10 @@ def parse_timeline(
     case_dir_str = resolve_case_dir()
     if not case_dir_str:
         raise RuntimeError("No active case directory")
+    from opensearch_mcp.paths import check_staging
+
     workdir = _staging(Path(case_dir_str), hostname, db_path)
+    check_staging(Path(case_dir_str), workdir)  # inside extractions/, or refused
     workdir.mkdir(parents=True, exist_ok=True)
     copied = []
     for f in [db_path, *(db_path.with_name(db_path.name + s) for s in ("-wal", "-shm"))]:

@@ -145,3 +145,35 @@ def test_the_account_is_the_folder_after_the_last_users():
     assert _staging(Path("/cases/c1"), "RD01", db) == Path(
         "/cases/c1/extractions/timeline/RD01/tdungan/L.x"
     )
+
+
+@pytest.mark.parametrize(
+    "hostname", ["a/../../../outside/victim", "../../../../../tmp/x", "..", "C:\\..\\x"],
+    ids=["climbs in the case", "climbs out of it", "dot-dot", "a Windows path"],
+)  # fmt: skip
+def test_a_hostname_that_climbs_stages_nothing_outside_extractions(
+    case,  # noqa: F811
+    monkeypatch,
+    tmp_path,
+    hostname,
+):
+    """The host name is evidence: it names one folder under extractions/,
+    whatever it holds, and nothing is written outside extractions/."""
+    db = _rd01(tmp_path / "C") / RD01[0] / "ActivitiesCache.db"
+    _fake_wintools(case, monkeypatch, "20261013_ActivitiesCache_Activity.csv")
+    from opensearch_mcp import ops, parse_csv, parse_timeline
+
+    monkeypatch.setattr("opensearch_mcp.wintools.wintools_available", lambda: True)
+    monkeypatch.setattr(parse_csv, "ingest_csv", lambda **kw: (1, 0, 0))
+    before = {p for p in tmp_path.rglob("*")}
+    with ops.recording(AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_timeline", {}):
+        parse_timeline.parse_timeline(db, MagicMock(), "idx", hostname)
+    written = {p for p in tmp_path.rglob("*")} - before
+    extractions = case / "extractions"
+    # the run's own audit line aside, everything it wrote is under extractions/
+    inside = (extractions, case / "audit")
+    stray = [p for p in written if p not in inside and not any(d in p.parents for d in inside)]
+    assert not stray, sorted(stray)
+    assert any(p.name == "ActivitiesCache.db" for p in written)
+    (host_dir,) = (extractions / "timeline").iterdir()
+    assert "/" not in host_dir.name and host_dir.name not in (".", "..")
