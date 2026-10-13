@@ -66,7 +66,8 @@ class TestResponseFieldMapping:
         params = client.update_by_query.call_args.kwargs["body"]["script"]["params"]
         assert params["confidence"] == "high"
 
-    def test_no_lolbin_when_false(self):
+    def test_lolbin_removed_when_false(self):
+        """Not a LOLBin: never set, and an earlier run's flag is removed."""
         from opensearch_mcp.triage_remote import _batch_stamp_verdicts
 
         verdicts = {
@@ -80,7 +81,8 @@ class TestResponseFieldMapping:
         client.update_by_query.return_value = {"updated": 1}
         _batch_stamp_verdicts(client, "case-test-*", "Path.keyword", verdicts)
         script_source = client.update_by_query.call_args.kwargs["body"]["script"]["source"]
-        assert "triage.lolbin" not in script_source
+        assert "ctx._source['triage.lolbin'] = true" not in script_source
+        assert "ctx._source.remove('triage.lolbin')" in script_source
 
 
 # ---------------------------------------------------------------------------
