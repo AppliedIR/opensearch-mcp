@@ -359,6 +359,16 @@ def _os_call(fn, *args, **kwargs):
         root = (err.get("root_cause") or [{}])[0] if isinstance(err, dict) else {}
         if isinstance(root, dict) and root.get("reason"):  # what failed, and where
             reason += f": {root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
+        named = []  # each failed index whose own reason has a repair, with it
+        shards = err.get("failed_shards") if isinstance(err, dict) else None
+        for f in shards if isinstance(shards, list) else ():
+            index, cause = (f.get("index"), f.get("reason")) if isinstance(f, dict) else (0, 0)
+            if isinstance(index, str) and isinstance(cause, dict) and index not in dict(named):
+                if fix := _repair(str(cause.get("reason", "")), "", index):
+                    named.append((index, fix))
+        if named:
+            more = f"; and {len(named) - 5} more indices" if len(named) > 5 else ""
+            reason += f" ({'; '.join(i + fix for i, fix in named[:5])}{more})"
         raise ValueError(f"Query error: {reason}") from e
 
 

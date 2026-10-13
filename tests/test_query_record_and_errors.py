@@ -161,3 +161,104 @@ def test_all_shards_failed_names_the_cause_and_the_index(monkeypatch, tool):
     with pytest.raises(ValueError) as e:
         ask(monkeypatch, tool, cluster=AllShardsFailed(OK), index=BRAVO)
     assert str(e.value) == f"Query error: all shards failed: {CAUSE} ({BRAVO})"
+
+
+# --- every shard failed on a field that is text: the failed index and its repair ---
+
+OLD = "case-5804970a586d-json-events-0"  # an index made before its template (0.6.4)
+TEXT_REASON = (
+    "Text fields are not optimised for operations that require per-document field data "
+    "like aggregations and sorting, so these operations are disabled by default. Please "
+    "use a keyword field instead. Alternatively, set fielddata=true on [{f}] in order to "
+    "load field data by uninverting the inverted index. Note that this can use "
+    "significant memory."
+)
+
+
+def text_failed(*entries):
+    """OpenSearch 3.5.0's 400 when every shard fails on a text field, measured on
+    a 0.6.4 index (idx_count's ingest aggregation): root_cause names no index;
+    each failed_shards entry has its index and its own reason. `entries`:
+    (index, field) pairs, or raw failed_shards entries."""
+    shards = [e if not isinstance(e, tuple) else {
+        "shard": 0, "index": e[0], "node": "ukUDTAaDTPqq2rlmO-Wb1g",
+        "reason": {"type": "illegal_argument_exception", "reason": TEXT_REASON.format(f=e[1])},
+    } for e in entries]  # fmt: skip
+    first = TEXT_REASON.format(f=entries[0][1] if isinstance(entries[0], tuple) else "x")
+    cause = {"type": "illegal_argument_exception", "reason": first}
+    return {"error": {"root_cause": [cause], "type": "search_phase_execution_exception",
+                      "reason": "all shards failed", "phase": "query", "grouped": True,
+                      "failed_shards": shards, "caused_by": {**cause, "caused_by": cause}},
+            "status": 400}  # fmt: skip
+
+
+class Refused(Cluster):
+    def __init__(self, info):
+        super().__init__(OK)
+        self.info = info
+
+    def search(self, index=None, body=None, **kw):
+        raise RequestError(400, "search_phase_execution_exception", self.info)
+
+    count = search
+
+
+def refused(monkeypatch, tool, info):
+    with pytest.raises(ValueError) as e:
+        ask(monkeypatch, tool, cluster=Refused(info), index=OLD)
+    return str(e.value)
+
+
+AS_BEFORE = f"Query error: all shards failed: {TEXT_REASON.format(f='vhir.ingest_audit_id')}"
+
+
+@pytest.mark.parametrize("tool", sorted(TOOLS))
+def test_every_shard_failing_on_a_vhir_field_names_the_index_and_its_repair(monkeypatch, tool):
+    got = refused(monkeypatch, tool, text_failed((OLD, "vhir.ingest_audit_id")))
+    assert got == (
+        f"{AS_BEFORE} ({OLD}; vhir.ingest_audit_id is text there: the index was made "
+        "without its template, delete the index and re-ingest it)"
+    )
+
+
+def test_every_shard_failing_on_another_field_names_its_keyword_hint(monkeypatch):
+    got = refused(monkeypatch, "idx_aggregate", text_failed((OLD, "Path")))
+    assert got.endswith(
+        f" ({OLD}; Path is text there: aggregate on a keyword form of Path "
+        f"with index={OLD}, if that index has one)"
+    )
+
+
+def test_each_failed_index_is_named_with_its_own_repair_once(monkeypatch):
+    other = "case-5804970a586d-delim-events-0"
+    entries = [(OLD, "vhir.ingest_audit_id"), (other, "Path"), (OLD, "vhir.ingest_audit_id")]
+    got = refused(monkeypatch, "idx_count", text_failed(*entries))
+    assert got.endswith(
+        f" ({OLD}; vhir.ingest_audit_id is text there: the index was made without its "
+        f"template, delete the index and re-ingest it; {other}; Path is text there: "
+        f"aggregate on a keyword form of Path with index={other}, if that index has one)"
+    )
+
+
+def test_more_than_five_failed_indices_are_counted_past_the_fifth(monkeypatch):
+    names = [f"case-5804970a586d-json-{n}-0" for n in range(7)]
+    got = refused(monkeypatch, "idx_count",
+                  text_failed(*[(n, "vhir.ingest_audit_id") for n in names]))  # fmt: skip
+    assert all(n in got for n in names[:5]) and names[5] not in got
+    assert got.endswith("re-ingest it; and 2 more indices)")
+
+
+@pytest.mark.parametrize("bad", [
+    "not a list", ["not an entry"], [{"index": 7, "reason": {"reason": "fielddata=true on [x]"}}],
+    [{"index": OLD, "reason": "fielddata=true on [x]"}], [{"index": OLD}], [{"reason": {}}],
+])  # fmt: skip
+def test_a_malformed_failed_shards_entry_leaves_the_error_as_it_was(monkeypatch, bad):
+    info = text_failed((OLD, "vhir.ingest_audit_id"))
+    info["error"]["failed_shards"] = bad
+    assert refused(monkeypatch, "idx_count", info) == AS_BEFORE
+
+
+def test_a_failure_with_no_repair_leaves_the_error_as_it_was(monkeypatch):
+    """Every shard failed, for a reason no field repair answers."""
+    got = refused(monkeypatch, "idx_count", ALL_FAILED)
+    assert got == f"Query error: all shards failed: {CAUSE} ({BRAVO})"
