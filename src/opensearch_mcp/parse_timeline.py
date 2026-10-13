@@ -27,7 +27,9 @@ def _staging(case_dir: Path, hostname: str, db: Path) -> Path:
     (an account can have several, e.g. L.<name> and a device id)."""
     parts = db.parts
     lower = [p.lower() for p in parts]
-    account = parts[lower.index("users") + 1] if "users" in lower[:-1] else "unknown"
+    # the profile folder after the LAST "users" (a mount point can hold one too)
+    at = max((i for i, p in enumerate(lower[:-1]) if p == "users"), default=None)
+    account = parts[at + 1] if at is not None else "unknown"
     return case_dir / "extractions" / "timeline" / hostname / account / db.parent.name
 
 

@@ -134,3 +134,14 @@ def test_the_timeline_stays_opt_in():
 
     assert "timeline" not in {t.cli_name for t in get_active_tools()}
     assert "timeline" in {t.cli_name for t in get_active_tools(include={"timeline"})}
+
+
+def test_the_account_is_the_folder_after_the_last_users():
+    from opensearch_mcp.parse_timeline import _staging
+
+    db = Path(
+        "/mnt/users/img/C/Users/tdungan/AppData/Local/ConnectedDevicesPlatform/L.x/ActivitiesCache.db"
+    )
+    assert _staging(Path("/cases/c1"), "RD01", db) == Path(
+        "/cases/c1/extractions/timeline/RD01/tdungan/L.x"
+    )
