@@ -198,6 +198,23 @@ class TestEnsureWinlogPipeline:
         assert (result["status"], result["operator_template"]) == ("error", True)
         assert "outranks ours" in result["error"]
 
+    def test_an_outranked_install_leaves_existing_evtx_indices_alone(self, monkeypatch):
+        """An install that says another template outranks ours, "resolve
+        before install", raises no existing index's event-data limits: its
+        error names no such change."""
+        from opensearch_mcp import mappings
+
+        patched = []
+        monkeypatch.setattr(mappings, "patch_evtx_indices", lambda *a, **k: patched.append(a))
+        client = self._mock_client_ok()
+        client.indices.simulate_index_template.return_value = {
+            "template": {"settings": {"index": {}}},
+            "overlapping": [{"name": _TEMPLATE_NAME, "index_patterns": ["case-*-evtx-*"]}],
+        }
+        result = ensure_winlog_pipeline(client)
+        assert (result["status"], result["operator_template"]) == ("error", True)
+        assert patched == []
+
     def test_refuses_on_existing_default_pipeline(self):
         client = self._mock_client_ok()
         client.indices.simulate_index_template.return_value = {
