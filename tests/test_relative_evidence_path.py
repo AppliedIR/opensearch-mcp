@@ -133,7 +133,10 @@ def test_a_relative_dry_run_previews_what_the_absolute_one_does(env, tool):
     """Run before any decoy exists: the heads fail these with Errno 2."""
     absolute = _tool(tool, str(env.cases["INC-RP1"] / FILES[tool]), dry_run=True)
     assert "error" not in absolute, absolute
-    assert _tool(tool, FILES[tool], dry_run=True) == absolute
+    relative = _tool(tool, FILES[tool], dry_run=True)
+    absolute.pop("audit_id", None)  # each preview's own entry in the case's audit
+    relative.pop("audit_id", None)
+    assert relative == absolute
 
 
 def test_after_a_case_switch_the_path_joins_the_new_case(env):
