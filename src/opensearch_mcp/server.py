@@ -913,10 +913,9 @@ def _repair(reason: str, case: str, index: str) -> str:
         return ""
     field = m.group(1)
     if field.startswith("vhir."):
-        case = case or _get_active_case() or "<case>"
         return (
             f"; {field} is text there: the index was made without its template, "
-            f"repair it with opensearch-ingest repair-index --case {case}"
+            "delete the index and re-ingest it"
         )
     return (
         f"; {field} is text there: aggregate on a keyword form of {field} "

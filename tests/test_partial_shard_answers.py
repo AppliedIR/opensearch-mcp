@@ -199,8 +199,8 @@ def test_an_index_made_without_its_template_names_its_repair(run, tool):
     reply = run(Cluster(CLI_TEXT, total=1, buckets=[("WKS1", 1)]), tool, case="acme",
                 **{k: v for k, v in tools("*", f"{CLI},{DELIM}")[tool].items()})  # fmt: skip
     assert reply["failed_indices"] == [CLI]
-    assert ("made without its template, repair it with opensearch-ingest repair-index "
-            "--case acme") in reply["partial_warning"]  # fmt: skip
+    assert ("made without its template, delete the index and re-ingest it"
+            in reply["partial_warning"])  # fmt: skip
     if tool == "idx_count":
         assert reply["count"] == 1
     else:
