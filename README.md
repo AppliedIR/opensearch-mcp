@@ -294,7 +294,7 @@ Optional:
 - Gateway + windows-triage-mcp (for triage enrichment)
 - Gateway + the threat-intel backend (for threat intel enrichment)
 
-**Docker container data:** OpenSearch stores all indexed evidence in a Docker named volume (`opensearch-data`). Removing or recreating the container with `docker rm -f` destroys all indices. Use `vhir backup --all` before any Docker maintenance. The named volume persists across `docker compose down && up -d` (normal restart) but NOT across `docker volume rm` or `docker system prune --volumes`.
+**Docker container data:** OpenSearch stores all indexed evidence in a Docker named volume (`opensearch-data`, in compose project `docker`). The volume survives removing or recreating the container (`docker rm -f`, `docker compose down && up -d`, `setup-opensearch.sh`). It is lost to `docker volume rm` and `docker system prune --volumes`; a compose run under another project name (`-p`) starts a new, empty volume beside it. Before Docker maintenance, back up each case's indices: `vhir backup <destination> --case <case-id> --include-opensearch`, once per case (`vhir backup --all` covers only the one case it backs up).
 
 ## Development
 

@@ -68,9 +68,11 @@ OVERRIDE_FILE="$DOCKER_DIR/docker-compose.override.yml"
 if [ ! -d "$SNAPSHOTS_DIR" ]; then
     echo "Creating snapshot directory ($SNAPSHOTS_DIR)..."
     sudo mkdir -p "$SNAPSHOTS_DIR"
-    # UID 1000 = opensearch user inside the Docker container
+fi
+# UID 1000 = opensearch user inside the Docker container (also fixes a folder docker made as root)
+if [ "$(stat -c '%u:%g' "$SNAPSHOTS_DIR")" != "1000:1000" ]; then
     sudo chown 1000:1000 "$SNAPSHOTS_DIR"
-    echo "  Snapshot directory: OK"
+    echo "  Snapshot directory: owner set to 1000:1000"
 fi
 
 if [ ! -f "$OVERRIDE_FILE" ]; then
@@ -89,19 +91,17 @@ else
     if grep -q "/var/lib/vhir/snapshots" "$OVERRIDE_FILE"; then
         echo "  Snapshot volume: already configured"
     else
-        echo "  WARNING: Override file exists but snapshot volume not configured."
-        echo "  Add manually to $OVERRIDE_FILE:"
-        echo "    services:"
-        echo "      opensearch:"
-        echo "        volumes:"
-        echo "          - /var/lib/vhir/snapshots:/usr/share/opensearch/snapshots"
+        # docker-compose.yml carries the bind and path.repo, and is the only
+        # file setup starts, so this file's content changes nothing
+        echo "  Note: $OVERRIDE_FILE doesn't name the snapshots folder."
+        echo "  Nothing to change: setup starts docker-compose.yml alone, which binds it."
     fi
 fi
 
 # --- 3. Start OpenSearch ---
 export VHIR_OS_PASSWORD="$OS_PASSWORD"
 echo "Starting OpenSearch..."
-docker compose -f "$DOCKER_DIR/docker-compose.yml" up -d
+docker compose -p docker -f "$DOCKER_DIR/docker-compose.yml" up -d
 
 # --- 4. Wait for OpenSearch to be ready ---
 echo -n "Waiting for OpenSearch"
@@ -125,12 +125,24 @@ if [ "$STATUS" != "green" ] && [ "$STATUS" != "yellow" ]; then
 fi
 echo "Cluster status: $STATUS"
 
-# --- Configure snapshot repository path ---
-echo "Configuring snapshot repository path..."
-curl -sk -u "admin:$OS_PASSWORD" -X PUT "$OS_URL/_cluster/settings" \
-    -H "Content-Type: application/json" \
-    -d '{"persistent":{"path.repo":["/usr/share/opensearch/snapshots"]}}' >/dev/null 2>&1
-echo "  path.repo: /usr/share/opensearch/snapshots"
+# --- Check snapshot support: the bind, and path.repo as a node setting (both in docker-compose.yml) ---
+# Anything that can't be read or run counts as a problem.
+echo "Checking snapshot support..."
+SNAPSHOT_PROBLEMS=""
+SNAP_MOUNT=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/usr/share/opensearch/snapshots"}}{{.Type}} {{.Source}} {{.RW}}{{end}}{{end}}' vhir-opensearch 2>&1) || SNAP_MOUNT="docker inspect failed: $SNAP_MOUNT"
+if [ "$SNAP_MOUNT" != "bind $SNAPSHOTS_DIR true" ]; then
+    SNAPSHOT_PROBLEMS="the container has no read-write bind of $SNAPSHOTS_DIR at /usr/share/opensearch/snapshots (docker inspect: '$SNAP_MOUNT')"
+fi
+SNAP_NODES=$(curl -sk --max-time 30 -u "admin:$OS_PASSWORD" "$OS_URL/_nodes/settings?filter_path=nodes.*.settings.path.repo" 2>&1) || SNAP_NODES="curl failed: $SNAP_NODES"
+if ! echo "$SNAP_NODES" | python3 -c "import sys, json; n = json.load(sys.stdin)['nodes']; r = [v['settings']['path']['repo'] for v in n.values()]; sys.exit(0 if n and all('/usr/share/opensearch/snapshots' in ([x] if isinstance(x, str) else x) for x in r) else 1)" 2>/dev/null; then
+    SNAPSHOT_PROBLEMS="${SNAPSHOT_PROBLEMS:+$SNAPSHOT_PROBLEMS
+}couldn't confirm that OpenSearch's path.repo includes /usr/share/opensearch/snapshots (_nodes/settings: '${SNAP_NODES:0:160}')"
+fi
+if [ -z "$SNAPSHOT_PROBLEMS" ]; then
+    echo "  Snapshots: OK ($SNAPSHOTS_DIR, path.repo /usr/share/opensearch/snapshots)"
+else
+    echo "  Snapshots: NOT SET UP (details at the end)"
+fi
 
 # --- Raise shard limit for multi-case deployments ---
 echo "Configuring cluster settings..."
@@ -429,3 +441,16 @@ echo ""
 echo "Next steps:"
 echo "  opensearch-ingest /path/to/evtx/ --hostname SERVER01 --case incident-001"
 echo "========================================="
+
+# Snapshots are the one part a backup needs: say so last, and exit 3 (not 1),
+# so setup-sift.sh and vhir update can tell it from a failed OpenSearch
+if [ -n "$SNAPSHOT_PROBLEMS" ]; then
+    echo ""
+    echo "ERROR: OpenSearch snapshots are not set up, so 'vhir backup --include-opensearch'"
+    echo "can't save this box's indices:"
+    echo "$SNAPSHOT_PROBLEMS" | sed 's/^/  - /'
+    echo "Re-run this script; it recreates the vhir-opensearch container from"
+    echo "$(cd "$DOCKER_DIR" && pwd)/docker-compose.yml and keeps its indexed data:"
+    printf '  bash %q\n' "$SCRIPT_DIR/setup-opensearch.sh"
+    exit 3
+fi
