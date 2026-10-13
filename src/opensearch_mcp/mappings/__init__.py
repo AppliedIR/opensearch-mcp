@@ -8,9 +8,11 @@ paths and tests).
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,55 @@ _TEMPLATES_REGISTRY: list[tuple[str, str]] = [
     ("vhir-accesslog", "accesslog_template.json"),
     ("vhir-hayabusa", "hayabusa_template.json"),
 ]
+# What each template governs, as its file says (a test keeps them equal), so
+# the template an index gets is decided without reading every file: one whose
+# file is missing or doesn't parse refuses its own indices and no others.
+_TEMPLATE_PATTERNS: dict[str, tuple[int, tuple[str, ...]]] = {
+    "vhir-csv": (
+        10,
+        (
+            "case-*-amcache-*",
+            "case-*-shimcache-*",
+            "case-*-mft-*",
+            "case-*-usn-*",
+            "case-*-registry-*",
+            "case-*-shellbags-*",
+            "case-*-jumplists-*",
+            "case-*-lnk-*",
+            "case-*-recyclebin-*",
+            "case-*-timeline-*",
+            "case-*-srum-*",
+        ),
+    ),
+    "vhir-prefetch": (20, ("case-*-prefetch-*",)),
+    "vhir-plaso": (29, ("case-*-plaso-*",)),
+    "vhir-srum": (21, ("case-*-srum-*",)),
+    "vhir-transcripts": (22, ("case-*-transcripts-*",)),
+    "vhir-w3c": (
+        23,
+        (
+            "case-*-iis-*",
+            "case-*-httperr-*",
+            "case-*-firewall-*",
+        ),
+    ),
+    "vhir-defender": (24, ("case-*-defender-*",)),
+    "vhir-tasks": (25, ("case-*-tasks-*",)),
+    "vhir-wer": (26, ("case-*-wer-*",)),
+    "vhir-ssh": (27, ("case-*-ssh-*",)),
+    "vhir-vol3": (15, ("case-*-vol-*",)),
+    "vhir-json": (12, ("case-*-json-*",)),
+    "vhir-delimited": (
+        11,
+        (
+            "case-*-delim-*",
+            "case-*-zeek-*",
+            "case-*-bodyfile-*",
+        ),
+    ),
+    "vhir-accesslog": (28, ("case-*-accesslog-*",)),
+    "vhir-hayabusa": (18, ("case-*-hayabusa-*",)),
+}
 
 
 def _load_json(path: Path) -> dict:
@@ -94,13 +145,14 @@ def with_host_key_fields(body: dict) -> dict:
 
 
 def template_type_tokens() -> frozenset[str]:
-    """The artifact type of every shipped template pattern (`case-*-<type>-*`)."""
+    """The artifact type of every shipped template pattern (`case-*-<type>-*`),
+    from the pattern table (a test keeps it equal to the files), so a template
+    file that is missing, unreadable or doesn't parse can't change an index name."""
     tokens = set()
-    for path in [_EVTX_TEMPLATE_FILE] + [_MAPPINGS_DIR / f for _, f in _TEMPLATES_REGISTRY]:
-        for pattern in _load_json(path).get("index_patterns", []):
-            parts = pattern.split("-")
-            if len(parts) == 4 and parts[0] == "case" and parts[1] == "*" and parts[3] == "*":
-                tokens.add(parts[2])
+    for pattern in [_TEMPLATE_PATTERN] + [p for _, ps in _TEMPLATE_PATTERNS.values() for p in ps]:
+        parts = pattern.split("-")
+        if len(parts) == 4 and parts[0] == "case" and parts[1] == "*" and parts[3] == "*":
+            tokens.add(parts[2])
     return frozenset(tokens)
 
 
@@ -181,17 +233,20 @@ def install_component_templates(client) -> dict[str, Any]:
 STAMP_FIELDS = ("vhir.original.path", "vhir.original.sha256", "vhir.content_hash")
 
 
-def put_stamp_fields(client, audit=None) -> dict[str, Any]:
-    """Map the stamp's fields `keyword` on every open case index, one
-    put_mapping each (one index's conflict doesn't stop the others), recorded
-    as one step when `audit` is given."""
+def put_stamp_fields(client, audit=None, indices: str = "") -> dict[str, Any]:
+    """Map the stamp's fields `keyword` on the open indices of one case,
+    `indices` (`case-<c12>-*`, the run's; none when ""), one put_mapping each
+    (one index's conflict doesn't stop the others), recorded as one step when
+    `audit` is given."""
     results: dict[str, Any] = {"patched": [], "failed": []}
+    if not indices:
+        return results
     props = {f: HOST_KEY_FIELDS[f] for f in STAMP_FIELDS}
     try:
-        rows = client.cat.indices(index="case-*", h="index", format="json",
+        rows = client.cat.indices(index=indices, h="index", format="json",
                                   expand_wildcards="open")  # fmt: skip
     except Exception as e:
-        results["failed"].append({"index": "case-*", "error": str(e)})
+        results["failed"].append({"index": indices, "error": str(e)})
         rows = []
     names = [r.get("index") for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
     for index in sorted(n for n in names if n):
@@ -215,7 +270,78 @@ def put_stamp_fields(client, audit=None) -> dict[str, Any]:
     return results
 
 
-def install_all_templates(client, audit=None) -> dict[str, Any]:
+_INSTALLED_LOCK = threading.Lock()
+_INSTALLED: dict | None = None  # this process's ensure_winlog_pipeline result
+
+
+def ensure_installed_once(client, audit=None, stamp_indices: str = "") -> dict:
+    """ensure_winlog_pipeline, once per process (whatever the cluster already
+    holds: an older release's templates are replaced), from the process's
+    first write, `stamp_indices` its case's. What wasn't installed is printed
+    once."""
+    global _INSTALLED
+    with _INSTALLED_LOCK:
+        if _INSTALLED is None:
+            try:
+                _INSTALLED = ensure_winlog_pipeline(client, audit, stamp_indices)
+            except Exception as e:
+                _INSTALLED = {"status": "error", "error": str(e)}
+            other = _INSTALLED.get("other_templates") or {}
+            failed = (other.get("components") or {}).get("failed", []) + other.get("failed", [])
+            bad = [f"{f.get('template')}: {f.get('error')}" for f in failed]
+            files = dict(_TEMPLATES_REGISTRY + _COMPONENT_TEMPLATES_REGISTRY)
+            skipped = (other.get("components") or {}).get("skipped", []) + other.get("skipped", [])
+            bad += [f"{t}: its file {files.get(t)} is missing" for t in skipped]
+            if _INSTALLED.get("status") not in ("ok", "partial"):
+                bad.append(f"{_TEMPLATE_NAME}: {_INSTALLED.get('error')}")
+            if bad:
+                print("WARNING: index templates not installed: " + "; ".join(bad),
+                      file=sys.stderr)  # fmt: skip
+        return _INSTALLED
+
+
+def template_for(index: str) -> str | None:
+    """The shipped non-evtx template OpenSearch would apply to `index`: of
+    those whose patterns match, the one of highest priority. None for evtx
+    (ensure_winlog_pipeline's) and for an index none matches."""
+    best: tuple[int, str] | None = None
+    for name, (priority, patterns) in _TEMPLATE_PATTERNS.items():
+        if any(fnmatch.fnmatchcase(index, p) for p in patterns):
+            if best is None or priority > best[0]:
+                best = (priority, name)
+    return best[1] if best else None
+
+
+def governing_template(index: str) -> str | None:
+    """The shipped template OpenSearch would apply to `index`: the evtx
+    template (priority 100, above every other) for an evtx index, else
+    template_for's."""
+    if fnmatch.fnmatchcase(index, _TEMPLATE_PATTERN):
+        return _TEMPLATE_NAME
+    return template_for(index)
+
+
+def not_installed(result: dict, template: str) -> str:
+    """Why `template` isn't on the cluster after the install `result`, or ""
+    when it is. The evtx template is installed when the install's status is
+    ok or partial, and counts as such where an operator's template governs
+    its pattern (the install stopped for it: its indices are written)."""
+    if template == _TEMPLATE_NAME:
+        if result.get("status") in ("ok", "partial") or result.get("operator_template"):
+            return ""
+        return str(result.get("error") or "not installed")
+    other = result.get("other_templates") or {}
+    if template in other.get("skipped", []):
+        return f"its file {dict(_TEMPLATES_REGISTRY).get(template)} is missing"
+    for f in other.get("failed", []):
+        if f.get("template") in (template, "*"):
+            return str(f.get("error") or "failed")
+    if template not in other.get("installed", []):
+        return str(result.get("error") or "not installed")
+    return ""
+
+
+def install_all_templates(client, audit=None, stamp_indices: str = "") -> dict[str, Any]:
     """Idempotent install of all non-evtx case-* index templates.
 
     Installs component templates FIRST (they're referenced by composable
@@ -224,8 +350,9 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
     returned; a single failure does NOT abort the remaining installs —
     a typo in one template file should not strand the others.
 
-    Called from the same sites as ensure_winlog_pipeline (server
-    first-connection, ingest pre-flight, idx_install_pipelines tool).
+    Called from ensure_winlog_pipeline, so from the same sites: the server's
+    first connection, idx_install_pipelines, and every ingest process's first
+    write (ensure_installed_once, from write_context.prepare_index).
     Without this, edits to csv/prefetch/srum/transcripts/w3c/defender/
     tasks/wer/ssh/vol3/json/delimited/accesslog/hayabusa templates on
     disk never reach the cluster after initial setup-opensearch.sh run.
@@ -248,26 +375,44 @@ def install_all_templates(client, audit=None) -> dict[str, Any]:
     }
     loaded: list[Any] = []
     for tpl_name, filename in _TEMPLATES_REGISTRY:
-        path = _MAPPINGS_DIR / filename
-        if not path.exists():
-            results["skipped"].append(tpl_name)
-            continue
+        # one template's whole load and install: whatever goes wrong is that
+        # template's failure, and the others are still installed
+        loading = True
         try:
+            path = _MAPPINGS_DIR / filename
+            if not path.exists():
+                results["skipped"].append(tpl_name)
+                continue
             body = with_host_key_fields(_load_json(path))
+            loading = False
+            _check_registry(body, filename, *_TEMPLATE_PATTERNS[tpl_name])
             loaded.append(body)
             client.indices.put_index_template(name=tpl_name, body=body)
             results["installed"].append(tpl_name)
         except Exception as e:
-            logger.warning("install_all_templates: %s failed: %s", tpl_name, e)
-            results["failed"].append({"template": tpl_name, "error": str(e)})
+            why = f"{filename} couldn't be loaded: {e}" if loading else str(e)
+            logger.warning("install_all_templates: %s failed: %s", tpl_name, why)
+            results["failed"].append({"template": tpl_name, "error": why})
     try:
         patterns = _composing_index_patterns(loaded)
         results["patched_indices"] = patch_flattened_indices(client, patterns)
     except Exception as e:  # never cost the install its per-template results
         logger.warning("install_all_templates: patching existing indices failed: %s", e)
         results["patched_indices"] = {"patched": [], "failed": [{"index": "*", "error": str(e)}]}
-    results["stamp_fields"] = put_stamp_fields(client, audit)  # indices made before them
+    # the case's indices made before the stamp fields were mapped
+    results["stamp_fields"] = put_stamp_fields(client, audit, stamp_indices)
     return results
+
+
+def _check_registry(body: dict, filename: str, priority: int, patterns) -> None:
+    """Raise when a template file's priority or patterns aren't the ones vhir
+    decides an index's template by: it would govern other indices, or none."""
+    pats = body.get("index_patterns")
+    same = isinstance(pats, list) and sorted(map(str, pats)) == sorted(patterns)
+    for field, ok in (("priority", body.get("priority") == priority),
+                      ("index_patterns", same)):  # fmt: skip
+        if not ok:
+            raise ValueError(f"{filename}: its {field} doesn't match what vhir expects")
 
 
 def _composing_index_patterns(bodies: list[Any]) -> list[str]:
@@ -548,7 +693,7 @@ def evtx_limit_note(client, index: str) -> str:
     )
 
 
-def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
+def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[str, Any]:
     """Install winlog_data_normalize_v1 pipeline + update evtx template.
 
     Order (IMPORTANT — Rev 6 correctness correction):
@@ -575,7 +720,7 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
     # conflict, simulate-validation failure) or the whole function
     # raises. This matches CR's 2026-04-21 recommendation.
     try:
-        other_templates_result = install_all_templates(client, audit)
+        other_templates_result = install_all_templates(client, audit, stamp_indices)
     except Exception as _ot_e:
         logger.warning("install_all_templates unexpected failure: %s", _ot_e)
         other_templates_result = {
@@ -585,25 +730,14 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
         }
 
     try:
-        # 1. Collision check — does anyone outrank us on the pattern?
+        # 1. Collision check — another template's default_pipeline on the
+        # pattern. (A template outranking ours is found after our PUT, step 4:
+        # _simulate_index names no priority, measured on 3.5.0.)
+        probe = _TEMPLATE_PATTERN.replace("*", "PROBE")
         try:
-            sim = client.indices.simulate_index_template(
-                name=f"{_TEMPLATE_PATTERN.replace('*', 'PROBE')}"
-            )
+            sim = client.indices.simulate_index_template(name=probe)
         except Exception:
             sim = {}
-        existing_priority = (sim.get("template", {}) or {}).get("priority", 0) or 0
-        if existing_priority > _TEMPLATE_PRIORITY:
-            return {
-                "status": "error",
-                "error": (
-                    f"Existing index template with priority "
-                    f"{existing_priority} preempts ours "
-                    f"({_TEMPLATE_PRIORITY}) for pattern "
-                    f"{_TEMPLATE_PATTERN}. Resolve before install."
-                ),
-                "other_templates": other_templates_result,
-            }
         existing_dp = (
             (sim.get("template", {}) or {})
             .get("settings", {})
@@ -619,6 +753,7 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
                     f"required before installing {_PIPELINE_ID}."
                 ),
                 "other_templates": other_templates_result,
+                "operator_template": True,
             }
 
         # 2. Simulate-pipeline validation BEFORE PUT — inline body form.
@@ -705,7 +840,30 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
         except Exception as _legacy_e:
             logger.debug("legacy evtx template delete non-fatal: %s", _legacy_e)
         template_body = with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE))
+        _check_registry(template_body, _EVTX_TEMPLATE_FILE.name, _TEMPLATE_PRIORITY,
+                        (_TEMPLATE_PATTERN,))  # fmt: skip
         client.indices.put_index_template(name=_TEMPLATE_NAME, body=template_body)
+        # Ours is in `overlapping` when another template outranks it (as
+        # write_context._outranked reads it): an operator's, so its indices
+        # are written under it
+        try:
+            after = client.indices.simulate_index_template(name=probe)
+        except Exception:
+            after = {}
+        overlapping = after.get("overlapping") if isinstance(after, dict) else None
+        if isinstance(overlapping, list) and any(
+            isinstance(t, dict) and t.get("name") == _TEMPLATE_NAME for t in overlapping
+        ):
+            return {
+                "status": "error",
+                "error": (
+                    f"Another index template outranks ours ({_TEMPLATE_NAME}, "
+                    f"priority {_TEMPLATE_PRIORITY}) for pattern "
+                    f"{_TEMPLATE_PATTERN}. Resolve before install."
+                ),
+                "other_templates": other_templates_result,
+                "operator_template": True,  # it governs evtx indices: they're still written
+            }
         # Existing evtx indices get the template's event-data limits too
         evtx_indices = patch_evtx_indices(client, audit)
 
@@ -754,7 +912,9 @@ def ensure_winlog_pipeline(client, audit=None) -> dict[str, Any]:
         }
 
     except Exception as e:
-        logger.exception("ensure_winlog_pipeline failed")
+        # its callers report the error (the CLI's one WARNING line, the
+        # server's log, idx_install_pipelines' reply); the traceback is debug
+        logger.debug("ensure_winlog_pipeline failed: %s", e, exc_info=True)
         return {
             "status": "error",
             "error": str(e),

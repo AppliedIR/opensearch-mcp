@@ -88,8 +88,11 @@ def test_json_files_that_fail_to_parse_are_named(bg, tmp_path):
 
 
 def test_a_single_json_file_that_fails_is_named(bg, tmp_path):
+    """No file read: the run fails and exits 1 (it was `complete`, exit 0)."""
     f = _files(tmp_path / "ev", {"only.jsonl": NOT_JSON}) / "only.jsonl"
-    bg.cmd_ingest_json(argparse.Namespace(path=str(f), case="c1", hostname="h1"))
+    with pytest.raises(SystemExit) as e:
+        bg.cmd_ingest_json(argparse.Namespace(path=str(f), case="c1", hostname="h1"))
+    assert e.value.code == 1
     (w,) = _not_read(_status())
     assert "1 file(s)" in w and str(f) in w, w
 

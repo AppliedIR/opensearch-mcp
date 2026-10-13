@@ -209,7 +209,9 @@ class TestRejectionsReachTheStatus:
 
     def test_json_all_78_rejected_names_the_reason(self, ingest, tmp_path):
         records = [{_DEEP: "v", "n": i} for i in range(78)]
-        ingest.json(_write_jsonl(tmp_path / "all.jsonl", records))
+        with pytest.raises(SystemExit) as e:  # a `failed` run exits 1
+            ingest.json(_write_jsonl(tmp_path / "all.jsonl", records))
+        assert e.value.code == 1
         s = _status()
         assert (s["status"], s["bulk_failed"]) == ("failed", 78)
         assert s["halt_reason"] == "all_records_rejected"
@@ -237,7 +239,9 @@ class TestRejectionsReachTheStatus:
 
     def test_delimited_all_78_rejected_names_the_reason(self, ingest, tmp_path):
         rows = [[f"a{i}", f"b{i}"] for i in range(78)]
-        ingest.delimited(_write_csv(tmp_path / "proc.csv", ["proc", "proc.name"], rows))
+        with pytest.raises(SystemExit) as e:  # a `failed` run exits 1
+            ingest.delimited(_write_csv(tmp_path / "proc.csv", ["proc", "proc.name"], rows))
+        assert e.value.code == 1
         s = _status()
         assert (s["status"], s["bulk_failed"]) == ("failed", 78)
         assert s["halt_reason"] == "all_records_rejected"
@@ -305,7 +309,9 @@ class TestRejectionsReachTheStatus:
         monkeypatch.setattr(bulk.helpers, "bulk", timing_out)
         monkeypatch.setattr(bulk, "_MAX_RETRIES", 1)
         monkeypatch.setattr(bulk.time, "sleep", lambda _s: None)
-        ingest.json(_write_jsonl(tmp_path / "outage.jsonl", [{"x": 1}, {"x": 2}]))
+        with pytest.raises(SystemExit) as e:  # a `failed` run exits 1
+            ingest.json(_write_jsonl(tmp_path / "outage.jsonl", [{"x": 1}, {"x": 2}]))
+        assert e.value.code == 1
         s = _status()
         assert (s["status"], s["bulk_failed"]) == ("failed", 2)
         assert s["halt_reason"] == "transport_failed"

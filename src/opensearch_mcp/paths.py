@@ -372,7 +372,8 @@ def stem_type(prefix: str, stem: str) -> str:
     `bodyfile-`): `<prefix>-<stem>`, where the stem has `_` for `-` (so no
     other template's `case-*-<type>-*` pattern can match), is cut to 92
     bytes plus `_<hash>` past 100, and gets a trailing `_` when it equals a
-    template's type."""
+    template's type. A non-ASCII stem, whose characters the name can't keep
+    (`日志` and `記録` both sanitize to `__`), gets `_<hash>` too."""
     import hashlib
 
     from opensearch_mcp.mappings import template_type_tokens
@@ -380,6 +381,8 @@ def stem_type(prefix: str, stem: str) -> str:
     s = sanitize_index_component(stem).replace("-", "_")
     if s.startswith(prefix + "_"):
         s = s[len(prefix) + 1 :]
+    if not stem.isascii():
+        s += "_" + hashlib.sha256(stem.encode()).hexdigest()[:7]
     if len(s.encode()) > _STEM_MAX:
         s = s[:92] + "_" + hashlib.sha256(stem.encode()).hexdigest()[:7]
     if s in template_type_tokens():

@@ -285,15 +285,55 @@ def shard_headroom(client, index: str, adding: int = 0) -> str:
     return ""
 
 
+class TemplateNotInstalled(RuntimeError):
+    """A new index's own template isn't on the cluster, or another outranks
+    it: the index isn't created."""
+
+
+def _outranked(client, index: str, template: str) -> bool:
+    """Whether another index template outranks `template` for `index`.
+    OpenSearch's _simulate_index lists in `overlapping` the templates that
+    match too but don't apply; unanswered counts as not outranked."""
+    try:
+        sim = client.indices.simulate_index_template(name=index)
+    except Exception:
+        return False
+    overlapping = sim.get("overlapping") if isinstance(sim, dict) else None
+    return isinstance(overlapping, list) and any(
+        isinstance(t, dict) and t.get("name") == template for t in overlapping
+    )
+
+
 def prepare_index(client, index: str) -> None:
-    """Before this process's first write to a case index: create it (four
-    primaries for host-scaled types) and refuse when a shard has no headroom."""
+    """Before this process's first write to a case index: install the index
+    templates (once per process), create it (four primaries for host-scaled
+    types) and refuse when a shard has no headroom. A new index whose
+    template wasn't installed, or that another template would govern, is
+    refused, never mapped by guess."""
     if index in _prepared or not _V2_INDEX.match(index):
         return
+    from opensearch_mcp import mappings, ops
+
+    run = ops.current_run()
+    case_indices = "-".join(index.split("-", 2)[:2]) + "-*"  # case-<c12>-*: this case's
+    installed = mappings.ensure_installed_once(client, run[0] if run else None, case_indices)
     try:
         exists = client.indices.exists(index=index)
     except Exception:
         exists = None  # unanswered: the bulk request creates it, and says why if it can't
+    template = mappings.governing_template(index) if exists is not True else None
+    why = mappings.not_installed(installed, template) if template else ""
+    if why:
+        raise TemplateNotInstalled(
+            f"index template {template} is not installed ({why[:200]}): {index} was not "
+            "created, so its fields aren't mapped by guess"
+        )
+    operator = template == mappings._TEMPLATE_NAME and installed.get("operator_template")
+    if exists is False and template and not operator and _outranked(client, index, template):
+        raise TemplateNotInstalled(
+            f"index template {template} is outranked: another index template of higher "
+            f"priority governs {index}, so it was not created"
+        )
     if exists is False:
         body: dict = {"mappings": {"_meta": dict(IDS_MARK)}}
         if artifact_type_of(index) in HOST_SCALED_TYPES:

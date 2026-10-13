@@ -97,6 +97,24 @@ def _case_for_every_ingest(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _templates_installed(request, monkeypatch):
+    """A process's first write installs the index templates once. Rows about
+    something else (often with a stand-in client) start as if that install had
+    succeeded; `@pytest.mark.template_install` runs the real one, from a new
+    process's empty cache."""
+    from opensearch_mcp import mappings
+
+    if request.node.get_closest_marker("template_install"):
+        monkeypatch.setattr(mappings, "_INSTALLED", None, raising=False)
+        yield
+        return
+    names = [n for n, _ in mappings._TEMPLATES_REGISTRY]
+    done = {"status": "ok", "other_templates": {"installed": names, "failed": []}}
+    monkeypatch.setattr(mappings, "_INSTALLED", done, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _inputs_traced(request, monkeypatch):
     """Ingest refuses an input that doesn't trace FULL to registered evidence.
     Rows about something else run the real gate and, where it would refuse

@@ -527,25 +527,33 @@ class TestAnUnreadableTemplateFile:
         assert [f["template"] for f in result["failed"]] == ["vhir-json"]
         assert sorted(self._read(client)) == sorted(_ALL_COMPOSING)
 
-    @pytest.mark.parametrize(
-        "filename,field",
-        [("csv_template.json", "composed_of"), ("json_template.json", "index_patterns")],
-        ids=["composed_of-null", "index_patterns-null"],
-    )
-    def test_a_valid_but_malformed_template_costs_only_the_patch(
-        self, scratch_mappings, filename, field
-    ):
+    def test_a_valid_but_malformed_template_costs_only_the_patch(self, scratch_mappings):
         """Valid JSON with a null where a list belongs installs as before
         (14, like the tree before the patch existed); whatever the patch step
         raises is recorded under `patched_indices`, never raised."""
-        path = scratch_mappings / filename
-        path.write_text(json.dumps({**json.loads(path.read_text()), field: None}))
+        path = scratch_mappings / "csv_template.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "composed_of": None}))
         _, result = self._install()
 
         assert len(result["installed"]) == 15
         assert result["failed"] == []
         assert result["patched_indices"]["patched"] == []
         assert "NoneType" in result["patched_indices"]["failed"][0]["error"]
+
+    def test_null_index_patterns_fail_that_template_only(self, scratch_mappings):
+        """Was (as index_patterns-null above): installed, and the patch step
+        failed on the null. The file no longer matches the registry, so its
+        install fails and the patch runs for the
+        other composing patterns."""
+        path = scratch_mappings / "json_template.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "index_patterns": None}))
+        client, result = self._install()
+
+        assert len(result["installed"]) == 14
+        assert [f["template"] for f in result["failed"]] == ["vhir-json"]
+        assert "index_patterns" in result["failed"][0]["error"]
+        assert result["patched_indices"]["patched"] == ["old"]
+        assert sorted(self._read(client)) == sorted(_ALL_COMPOSING[1:])
 
     def test_the_component_itself(self, scratch_mappings):
         (scratch_mappings / "json_type_stability.json").write_text("{ not json")
