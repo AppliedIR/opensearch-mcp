@@ -12,6 +12,22 @@ _wintools_down_since: float = 0
 _WINTOOLS_RETRY_INTERVAL = 300  # 5 minutes
 
 
+def _wintools_configured() -> bool:
+    """gateway.yaml names an enabled wintools-mcp backend, as the gateway
+    itself decides one is configured. Read on each call: a wintools join adds
+    the backend while this process runs."""
+    from opensearch_mcp.paths import vhir_dir
+
+    try:
+        import yaml
+
+        config = yaml.safe_load((vhir_dir() / "gateway.yaml").read_text()) or {}
+        entry = (config.get("backends") or {}).get("wintools-mcp")
+    except Exception:  # no usable file: no backend
+        return False
+    return isinstance(entry, dict) and bool(entry.get("enabled", True))
+
+
 def wintools_available() -> bool:
     """Check if wintools-mcp is configured. Retries after 5 minutes."""
     global _wintools_down
@@ -20,7 +36,7 @@ def wintools_available() -> bool:
             _wintools_down = False  # retry
         else:
             return False
-    return gateway_available()
+    return gateway_available() and _wintools_configured()
 
 
 def mark_wintools_down() -> None:
