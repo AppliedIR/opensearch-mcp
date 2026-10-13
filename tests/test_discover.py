@@ -226,6 +226,7 @@ class TestDiscoverArtifactsUserProfiles:
         discover_artifacts(host)
         tl_artifacts = [(n, p) for n, p in host.artifacts if n == "timeline"]
         assert len(tl_artifacts) == 1
+        assert tl_artifacts[0][1].name == "ActivitiesCache.db"
 
 
 # ---------------------------------------------------------------------------
@@ -336,8 +337,10 @@ class TestDiscoverArtifactsAdditional:
         discover_artifacts(host)
         tl_artifacts = [(n, p) for n, p in host.artifacts if n == "timeline"]
         assert len(tl_artifacts) == 1
-        # Path should be the ConnectedDevicesPlatform directory
-        assert "ConnectedDevicesPlatform" in str(tl_artifacts[0][1])
+        # the database FILE, which WxTCmd's -f takes (a folder reads nothing)
+        path = tl_artifacts[0][1]
+        assert path.is_file() and path.name == "ActivitiesCache.db"
+        assert path.parent.parent.name == "ConnectedDevicesPlatform"
 
     def test_usn_journal_detected(self, tmp_path):
         """$Extend/$J file detected as usn artifact."""

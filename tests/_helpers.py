@@ -74,8 +74,9 @@ def make_windows_tree(
 
         # Timeline
         if timeline:
-            cdp = profile / "AppData" / "Local" / "ConnectedDevicesPlatform"
+            cdp = profile / "AppData" / "Local" / "ConnectedDevicesPlatform" / f"L.{uname}"
             cdp.mkdir(parents=True)
+            (cdp / "ActivitiesCache.db").write_bytes(b"SQLite format 3\x00")
 
     # Prefetch
     if prefetch:

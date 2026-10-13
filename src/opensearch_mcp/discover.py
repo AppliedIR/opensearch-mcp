@@ -206,7 +206,19 @@ def discover_artifacts(host: DiscoveredHost) -> None:
 
                 # Per-user artifacts
                 for artifact_name, rel_paths in USER_ARTIFACTS.items():
-                    if isinstance(rel_paths, list):
+                    if artifact_name == "timeline":  # each database, in any subfolder
+                        cdp = resolve_case_insensitive(profile, rel_paths)
+                        for sub in (
+                            sorted(cdp.iterdir()) if cdp is not None and cdp.is_dir() else []
+                        ):
+                            db = (
+                                resolve_case_insensitive(sub, "ActivitiesCache.db")
+                                if sub.is_dir()
+                                else None
+                            )
+                            if db is not None and db.is_file():
+                                host.artifacts.append(("timeline", db))
+                    elif isinstance(rel_paths, list):
                         for rp in rel_paths:
                             full = resolve_case_insensitive(profile, rp)
                             if full is not None and full.is_dir():

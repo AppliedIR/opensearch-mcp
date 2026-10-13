@@ -859,9 +859,10 @@ def _ingest_hosts(
             if tool_name is None:
                 continue
 
-            # Route Plaso artifacts separately
-            if tool_name in _PLASO_ARTIFACTS:
-                if tool_name not in active_plaso:
+            # Route Plaso artifacts separately; the timeline (WxTCmd on
+            # wintools, per database) the same way, but by its tier (opt-in)
+            if tool_name in _PLASO_ARTIFACTS or tool_name == "timeline":
+                if tool_name not in (active_names if tool_name == "timeline" else active_plaso):
                     continue
                 if tool_name == "plaso":
                     _ingest_plaso_volume(
@@ -1274,9 +1275,11 @@ def _ingest_plaso_artifact(
     host_dict=None,
     case_dir=None,
 ) -> None:
-    """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback)."""
+    """Ingest a prefetch or SRUM artifact (wintools-first, Plaso fallback), or
+    a Timeline database (wintools only)."""
     from opensearch_mcp.parse_prefetch import parse_prefetch
     from opensearch_mcp.parse_srum import parse_srum
+    from opensearch_mcp.parse_timeline import parse_timeline
 
     index_name = wc.index_name(tool_name)
     existing = _safe_count(client, index_name, wc.current().unit)
@@ -1314,6 +1317,17 @@ def _ingest_plaso_artifact(
                     source_file=_plaso_src,
                     host_dict=host_dict,
                     volume_root=host.volume_root,
+                )
+            elif tool_name == "timeline":
+                cnt, bf, _note, outcome, rows = parse_timeline(
+                    db_path=artifact_path,
+                    client=client,
+                    index_name=index_name,
+                    hostname=host.hostname,
+                    pipeline_version=_PIPELINE_VERSION,
+                    vss_id=host.vss_id,
+                    source_file=_plaso_src,
+                    host_dict=host_dict,
                 )
             else:
                 cnt, bf, _note, outcome, rows = parse_srum(
