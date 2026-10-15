@@ -3184,14 +3184,17 @@ def _admission_refusal() -> dict | None:
     """The refusal of a new ingest while the most runs are already running or
     starting (listed, with their cases). A run waiting for host confirmation
     takes no place: it writes nothing, and once its hosts are confirmed it
-    starts only when a place is free."""
+    starts only when a place is free. Places are counted by process, as the
+    slots are: an archive's images run in the archive's process and share
+    its place."""
     from opensearch_mcp.ingest_status import AWAITING, active_runs
 
     runs = [r for r in active_runs() if r.get("status") != AWAITING]
-    if len(runs) < _MAX_CONCURRENT_INGESTS:
+    holding = {r.get("pid") for r in runs}
+    if len(holding) < _MAX_CONCURRENT_INGESTS:
         return None
     msg = (
-        f"Too many concurrent ingests ({len(runs)} running, max {_MAX_CONCURRENT_INGESTS})."
+        f"Too many concurrent ingests ({len(holding)} running, max {_MAX_CONCURRENT_INGESTS})."
         " Wait for current ingests to complete."
     )
     return {
