@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import os
+import subprocess
 import threading
 import time
 import uuid
@@ -499,12 +501,37 @@ def test_names_a_forwarded_log_gives_past_the_scan_are_their_own_machines(gate):
 # -- admission, walks, and a waiting run's status
 
 
-def _running(n):
-    """`n` other runs running, in other cases."""
-    import os
+@pytest.fixture
+def others():
+    """Starts processes standing in for other ingests: `others(run_id)` gives
+    the pid of a live process whose environment names that run, as a worker's
+    does. They are ended after the row."""
+    procs: list[subprocess.Popen] = []
 
+    def spawn(run_id):
+        env = {**os.environ, "VHIR_INGEST_RUN_ID": run_id}
+        procs.append(subprocess.Popen(["sleep", "300"], env=env))
+        return procs[-1].pid
+
+    yield spawn
+    for p in procs:
+        p.kill()
+        p.wait()
+
+
+def _running(others, n):
+    """`n` other ingests running, each in its own process and case; the
+    (case, pid, run) of each."""
+    runs = []
     for i in range(n):
-        ingest_status.write_status(f"case-{i}", os.getpid(), f"run-r{i}", "running", [], {}, "t0")
+        run = (f"case-{i}", others(f"run-r{i}"), f"run-r{i}")
+        ingest_status.write_status(*run, "running", [], {}, "t0")
+        runs.append(run)
+    return runs
+
+
+def _end(run):
+    ingest_status.write_status(*run, "complete", [], {}, "t0")
 
 
 def _until(check, timeout=15.0):
@@ -523,24 +550,20 @@ def _slot_wait(gate):
     return data if data.get("message") == SLOT_WAIT else None
 
 
-def test_runs_waiting_for_their_hosts_take_no_place_at_admission(gate):
-    import os
-
+def test_runs_waiting_for_their_hosts_take_no_place_at_admission(gate, others):
     for n in range(srv._MAX_CONCURRENT_INGESTS):
         ingest_status.write_status(f"case-{n}", os.getpid(), f"run-w{n}", host_gate.AWAITING,
                                    [], {"unresolved": 1}, "t0")  # fmt: skip
     assert srv._admission_refusal() is None  # a fourth run is admitted, and queues
-    _running(srv._MAX_CONCURRENT_INGESTS)
+    _running(others, srv._MAX_CONCURRENT_INGESTS)
     refused = srv._admission_refusal()
     assert refused["error"].startswith("Too many concurrent ingests (3 running, max 3).")
     assert sorted(r["run_id"] for r in refused["running"]) == ["run-r0", "run-r1", "run-r2"]
 
 
-def test_a_confirmed_run_waits_for_a_place_while_three_run(gate, monkeypatch):
-    import os
-
+def test_a_confirmed_run_waits_for_a_place_while_three_run(gate, monkeypatch, others):
     monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
-    _running(3)
+    first, *_ = _running(others, 3)
     command, args = _delimited(gate)
     t, out = gate.start(command, args)
     gate.waiting()
@@ -550,47 +573,48 @@ def test_a_confirmed_run_waits_for_a_place_while_three_run(gate, monkeypatch):
     assert data["message"] == SLOT_WAIT
     time.sleep(0.3)
     assert t.is_alive() and gate.writes == []  # it writes nothing meanwhile
-    ingest_status.write_status("case-0", os.getpid(), "run-r0", "complete", [], {}, "t0")
+    _end(first)
     t.join(15)
     assert out == {"ok": True} and gate.writes
 
 
-def test_runs_confirmed_together_start_only_up_to_the_cap(gate, monkeypatch):
-    import os
-
-    monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
-    _running(2)
+def test_runs_confirmed_together_start_only_up_to_the_cap(gate, others):
+    first, _ = _running(others, 2)
     started: list[str] = []
+    runs = {rid: (gate.case_id, others(rid), rid) for rid in ("run-a", "run-b")}
+    for run in runs.values():
+        ingest_status.write_status(*run, host_gate.AWAITING, [], {"unresolved": 1}, "t0")
 
-    def run(rid):
-        with wc.restoring():
-            cli._gate(gate.case_id, [], rid)  # its hosts are already confirmed
+    def take(rid):  # each run is its own process, confirmed at the same moment
+        waiting = functools.partial(
+            ingest_status.write_status, *runs[rid], host_gate.AWAITING, [], {}, "t0",
+            message=SLOT_WAIT,
+        )  # fmt: skip
+        while not ingest_status.take_slot(*runs[rid], waiting):
+            time.sleep(0.05)
         started.append(rid)
 
-    for rid in ("run-a", "run-b"):
-        ingest_status.write_status(gate.case_id, os.getpid(), rid, host_gate.AWAITING,
-                                   [], {"unresolved": 1}, "t0")  # fmt: skip
-    threads = [threading.Thread(target=run, args=(r,), daemon=True) for r in ("run-a", "run-b")]
+    threads = [threading.Thread(target=take, args=(r,), daemon=True) for r in runs]
     for t in threads:
         t.start()
     _until(lambda: started)
     time.sleep(0.3)
     assert len(started) == 1  # three running: the other waits
-    (other,) = {"run-a", "run-b"} - set(started)
+    (other,) = set(runs) - set(started)
     statuses = {r["run_id"]: r for r in ingest_status.active_runs()}
     assert statuses[started[0]]["status"] == "running"
     assert statuses[other]["message"] == SLOT_WAIT
-    ingest_status.write_status("case-0", os.getpid(), "run-r0", "complete", [], {}, "t0")
+    _end(first)
     for t in threads:
         t.join(15)
     assert sorted(started) == ["run-a", "run-b"]
 
 
-def test_a_cancel_while_it_waits_for_a_place_ends_it_and_holds_no_lock(gate, monkeypatch):
+def test_a_cancel_while_it_waits_for_a_place_ends_it_and_holds_no_lock(gate, monkeypatch, others):
     import fcntl
 
     monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
-    _running(3)
+    _running(others, 3)
     command, args = _delimited(gate)
     t, out = gate.start(command, args)
     gate.waiting()
@@ -606,6 +630,74 @@ def test_a_cancel_while_it_waits_for_a_place_ends_it_and_holds_no_lock(gate, mon
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nothing holds it
     with hi.case_lock(gate.case_dir, shared=False):
         pass  # nor the case lock
+
+
+def test_a_cancel_and_a_free_place_in_the_same_sleep_ends_the_run(gate, monkeypatch, others):
+    """The examiner cancels while it sleeps, and a place frees before it looks
+    again: the cancel wins, and nothing is written."""
+    first, *_ = _running(others, 3)
+    real_sleep = time.sleep
+
+    def sleep(seconds):  # both happen while the waiting run sleeps
+        if not hi.load(gate.case_dir).cancelled:
+            host_gate.cancel(gate.case_dir, RUN, "ex1")
+            _end(first)
+        real_sleep(0.01)
+
+    monkeypatch.setattr(cli, "time", mock.Mock(wraps=time, sleep=sleep))
+    command, args = _delimited(gate)
+    t, out = gate.start(command, args)
+    gate.waiting()
+    host_gate.start_now(gate.case_dir, RUN, "ex1")
+    t.join(15)
+    assert out == {"exit": 1} and gate.writes == []
+    data = gate.status()
+    assert data["status"] == host_gate.CANCELLED
+    assert data["error"] == f"run {RUN} was cancelled in the Hosts tab"
+
+
+def test_an_archive_image_with_two_other_ingests_starts_at_once(gate, monkeypatch, others):
+    """An archive's images run inside the process of the archive's own run,
+    whose record stays live: that run isn't another ingest."""
+    monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
+    _running(others, 2)
+    for run in ("run-arc", "run-arc-1"):  # the archive's run, and its first image's
+        ingest_status.write_status(gate.case_id, os.getpid(), run, "starting", [], {}, "t0")
+    done: list[bool] = []
+    t = threading.Thread(target=lambda: done.append(
+        cli._take_slot(gate.case_dir, gate.case_id, "run-arc-1", "t0") is None),
+        daemon=True)  # fmt: skip
+    t.start()
+    t.join(5)
+    alive = t.is_alive()
+    if alive:  # let a waiting image end, so no thread outlives the row
+        for run in [r for r in ingest_status.active_runs() if r["run_id"].startswith("run-r")]:
+            _end((run["case_id"], run["pid"], run["run_id"]))
+        t.join(15)
+    assert not alive and done == [True]
+    image = {r["run_id"]: r for r in ingest_status.active_runs()}["run-arc-1"]
+    assert image["status"] == "starting" and image.get("hosts_confirmed")  # it goes on
+
+
+def test_three_archives_each_with_images_all_run_their_images(gate, others):
+    """Three archive runs, each in its own process with two images: every
+    image starts, each one after the one before it in its archive."""
+    archives = {a: (gate.case_id, others(a), a) for a in ("run-a", "run-b", "run-c")}
+    for archive in archives.values():
+        ingest_status.write_status(*archive, "starting", [], {}, "t0")
+    for n in (1, 2):
+        for case_id, pid, a in archives.values():
+            image = (case_id, pid, f"{a}-{n}")
+            waited = []
+            assert ingest_status.take_slot(*image, lambda: waited.append(1)), image
+            assert waited == []
+            _end(image)
+
+
+def test_the_status_doc_names_the_wait_for_a_place():
+    doc = " ".join(srv.idx_ingest_status.__doc__.split())
+    assert f'"{SLOT_WAIT}"' in doc
+    assert ingest_status.SLOT_WAIT == SLOT_WAIT
 
 
 def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate, monkeypatch):

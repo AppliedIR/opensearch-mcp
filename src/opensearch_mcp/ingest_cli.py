@@ -240,15 +240,19 @@ def _take_slot(case_dir, case_id: str, run: str, started: str) -> None:
         write_status(case_id, os.getpid(), run, AWAITING, [], {}, started, message=SLOT_WAIT)
 
     said = False
-    while not take_slot(case_id, os.getpid(), run, waiting):
-        if not said:
-            print(f"Waiting: {SLOT_WAIT}", file=sys.stderr)
-            said = True
+    while True:
+        took = take_slot(case_id, os.getpid(), run, waiting)
+        # a cancel made while it slept counts even when a place has just freed
         if run in hi.load(case_dir).cancelled:
             why = f"run {run} was cancelled in the Hosts tab"
             write_status(case_id, os.getpid(), run, CANCELLED, [], {}, started, error=why)
             print(f"Cancelled: {why}", file=sys.stderr)
             sys.exit(1)
+        if took:
+            return
+        if not said:
+            print(f"Waiting: {SLOT_WAIT}", file=sys.stderr)
+            said = True
         time.sleep(_SLOT_POLL)
 
 

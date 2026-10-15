@@ -2589,6 +2589,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
     and writes nothing until the examiner confirms them (or chooses Start
     now) in the portal's Hosts tab; you can't confirm them. It then ingests
     by itself. idx_host_inventory shows what it waits for.
+    The same status with the message "Its hosts are confirmed. It starts when
+    one of the 3 running ingests ends." means only that: no one needs to
+    confirm anything, and the run starts by itself when a place frees.
 
     Args:
         case_id: Filter to this case (default: active case). "*" for all.

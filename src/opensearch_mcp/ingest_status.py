@@ -152,8 +152,10 @@ def take_slot(case_id: str, pid: int, run_id: str, waiting) -> bool:
     _STATUS_DIR.mkdir(parents=True, exist_ok=True)
     with open(_STATUS_DIR / "slots.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # the caller's own process isn't another ingest: an archive's images
+        # run inside the process of the archive's own run
         running = [r for r in active_runs()
-                   if r.get("status") != AWAITING and r.get("run_id") != run_id]  # fmt: skip
+                   if r.get("status") != AWAITING and r.get("pid") != pid]  # fmt: skip
         if len(running) >= MAX_RUNNING:
             waiting()
             return False
