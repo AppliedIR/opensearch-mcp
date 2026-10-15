@@ -2266,7 +2266,7 @@ def idx_ingest(
     import sys
     from pathlib import Path
 
-    from opensearch_mcp.containers import detect_container
+    from opensearch_mcp.containers import SUDO_REMEDY, detect_container
     from opensearch_mcp.ingest import discover
 
     active = _active_case()  # one read: the input's folder and the run's case
@@ -2305,10 +2305,7 @@ def idx_ingest(
                 ),
             }
             if not sudo_ok:
-                resp["warning"] = (
-                    "Container mounting requires sudo. If ingest fails, "
-                    "mount manually and point idx_ingest at the mount."
-                )
+                resp["warning"] = SUDO_REMEDY
             if hostname:
                 resp["hostname"] = hostname
             resp["scan"] = _container_scan(evidence_path, container_type, case_id)
@@ -2757,6 +2754,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
             elif _prefix == "all_plugins_failed":
                 # whole: the fix it names (the SIFT update) comes after the cause
                 s["message"] = f"Ingest failed ({_prefix}): {_err[len(_prefix) + 2 :]}"
+            elif _prefix == "process_died_unexpectedly":  # longer: its cause ends in the fix
+                s["message"] = f"Ingest failed: {_err[:600]}"
             else:
                 s["message"] = f"Ingest failed: {_err[:200]}"
             if _prefix == "process_died_unexpectedly" and s["log_file"]:

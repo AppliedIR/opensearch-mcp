@@ -194,15 +194,20 @@ class MountContext:
                 self._loop_devices.remove(dev)
 
 
+# what to do when sudo asks for a password: an examiner's own mount is gated
+# like any folder, so it passes only once registered from inside the case
+SUDO_REMEDY = (
+    "Mounting a disk image needs sudo without a password for the user the gateway "
+    "runs as. Or mount the image yourself (read-only), link the mount into the case's "
+    "evidence/ folder, register that link as evidence, and ingest the mounted folder."
+)
+
+
 def check_sudo() -> None:
     """Verify non-interactive sudo is available."""
     result = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if result.returncode != 0:
-        raise PermissionError(
-            "Disk image mounting requires sudo.\n"
-            "Run with: sudo vhir ingest <path>\n"
-            "Or configure passwordless sudo for mount/umount."
-        )
+        raise PermissionError(SUDO_REMEDY)
 
 
 def mount_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
