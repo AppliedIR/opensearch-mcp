@@ -152,15 +152,36 @@ def take_slot(case_id: str, pid: int, run_id: str, waiting) -> bool:
     _STATUS_DIR.mkdir(parents=True, exist_ok=True)
     with open(_STATUS_DIR / "slots.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        # the caller's own process isn't another ingest: an archive's images
-        # run inside the process of the archive's own run
-        running = [r for r in active_runs()
-                   if r.get("status") != AWAITING and r.get("pid") != pid]  # fmt: skip
-        if len(running) >= MAX_RUNNING:
-            waiting()
-            return False
+        runs = active_runs()
+        # One process holds at most one place: an image of an archive runs in
+        # the archive run's process and uses its place, so it never waits
+        if not _in_archive_run(pid, run_id, runs):
+            holding = {r.get("pid") for r in runs
+                       if r.get("status") != AWAITING and r.get("pid") != pid}  # fmt: skip
+            if len(holding) >= MAX_RUNNING:
+                waiting()
+                return False
         mark_hosts_confirmed(case_id, pid, run_id)
         return True
+
+
+def _in_archive_run(pid: int, run_id: str, runs: list[dict]) -> bool:
+    """Whether `run_id` is an image of the archive run process `pid` started
+    as: that run's id plus "-<n>", with a live record for that run under the
+    same pid. The start comes from /proc/<pid>/environ, so a pid reused by
+    another ingest doesn't qualify."""
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    prefix = b"VHIR_INGEST_RUN_ID="
+    started = [v[len(prefix) :].decode(errors="replace") for v in environ if v.startswith(prefix)]
+    if not started or not started[0]:
+        return False
+    parent = started[0]
+    if not re.fullmatch(re.escape(parent) + r"-[0-9]+", run_id):
+        return False
+    return any(r.get("pid") == pid and r.get("run_id") == parent for r in runs)
 
 
 def finish_status(

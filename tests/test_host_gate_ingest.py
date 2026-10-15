@@ -694,6 +694,75 @@ def test_three_archives_each_with_images_all_run_their_images(gate, others):
             _end(image)
 
 
+def _archive(others, a, case_id="case-a"):
+    """An archive run `a` in its own process, its record live; (case, pid, run)."""
+    run = (case_id, others(a), a)
+    ingest_status.write_status(*run, "running", [], {}, "t0")
+    return run
+
+
+def _self_made(case_id, pid, run, status):
+    """A record as the process writes it for a run id it made itself (an
+    archive's image): the sweep checks only that its pid lives."""
+    ingest_status.write_status(case_id, pid, run, status, [], {}, "t0")
+    path = ingest_status._status_path_safe(case_id, pid, run)
+    path.write_text(json.dumps({**json.loads(path.read_text()), "run_id_from_env": False}))
+
+
+def _image(archive, n):
+    """Image `n` of an archive, asking for a place in the archive's process."""
+    case_id, pid, a = archive
+    _self_made(case_id, pid, f"{a}-{n}", host_gate.AWAITING)
+    waited = []
+    took = ingest_status.take_slot(case_id, pid, f"{a}-{n}", lambda: waited.append(1))
+    return took and not waited
+
+
+def test_three_archives_each_running_an_image_all_run(gate, others):
+    """One archive already runs its first image; the other two images ask."""
+    a, b, c = (_archive(others, r) for r in ("run-a", "run-b", "run-c"))
+    assert _image(a, 1)
+    assert _image(b, 1) and _image(c, 1)
+    held = [r["run_id"] for r in ingest_status.active_runs() if r["status"] == "running"]
+    assert sorted(held) == ["run-a", "run-a-1", "run-b", "run-b-1", "run-c", "run-c-1"]
+
+
+def test_four_archive_processes_none_waits_forever(gate, others):
+    """Four archives live at once (only an admission race gets here): each
+    image uses its archive's place, so none waits on the others."""
+    archives = [_archive(others, f"run-{x}") for x in "abcd"]
+    assert [_image(a, 1) for a in archives] == [True] * 4
+
+
+def test_an_image_never_waits_on_its_own_archive(gate, others):
+    _running(others, 3)  # every place is taken by other processes
+    assert _image(_archive(others, "run-arc"), 1)
+
+
+def test_two_archives_each_running_an_image_leave_a_place(gate, others):
+    """Two processes hold places, with two records each: a third run starts."""
+    for a in (_archive(others, "run-a"), _archive(others, "run-b")):
+        assert _image(a, 1)
+    waited = []
+    run = ("case-x", others("run-x"), "run-x")
+    assert ingest_status.take_slot(*run, lambda: waited.append(1)) and waited == []
+
+
+def test_a_new_run_under_a_reused_pid_waits_for_a_place(gate, others):
+    """A dead archive's image record (pid-only liveness) stays live under a pid
+    a new ingest now has. That ingest isn't an image of it: with three other
+    processes running, it waits."""
+    _running(others, 3)
+    pid = others("run-x")
+    _self_made("case-old", pid, "run-old-1", "running")
+    assert "run-old-1" in {r["run_id"] for r in ingest_status.active_runs()}
+    waited = []
+    assert not ingest_status.take_slot("case-x", pid, "run-x", lambda: waited.append(1))
+    assert waited == [1]
+    # nor does a run named like an image of the dead archive
+    assert not ingest_status.take_slot("case-x", pid, "run-old-2", lambda: waited.append(1))
+
+
 def test_the_status_doc_names_the_wait_for_a_place():
     doc = " ".join(srv.idx_ingest_status.__doc__.split())
     assert f'"{SLOT_WAIT}"' in doc
