@@ -320,3 +320,157 @@ def test_a_refused_runs_status_is_failed_with_the_reason_and_the_fix(case, tmp_p
     assert code != 0 and status["status"] == "failed" and status["pid"] == os.getpid()
     assert status["error"].startswith(f"not ingested: {refusal['refused']['reason']}")
     assert refusal["refused"]["fix"] in status["error"]
+
+
+def _closed(f: Path, job: str) -> dict:
+    """The hash_complete row of the job that hashed `f` as it is now."""
+    st = f.stat()
+    row = {
+        "path": str(f),
+        "sha256": _sha(f),
+        "size": st.st_size,
+        "st_dev": st.st_dev,
+        "st_ino": st.st_ino,
+        "mtime_ns": st.st_mtime_ns,
+        "ctime_ns": st.st_ctime_ns,
+    }
+    return {"ts": "2026-10-15T00:30:00+00:00", "audit_id": f"file-identity-{job}",
+            "mcp": "file-identity", "tool": "hash_complete", "job_id": job,
+            "files": [row]}  # fmt: skip
+
+
+def _made_many(case: Path, tmp_path: Path, shape: str, n: int = 20) -> tuple[dict, Path]:
+    """One operation that read a registered image and wrote `n` files: each
+    recorded `pending:<job>` and closed by its job's hash_complete row
+    (hashed), or the first recorded with its real hash and the rest pending
+    on jobs still open (mixed)."""
+    image = tmp_path / "srv" / "host.E01"
+    image.parent.mkdir()
+    image.write_bytes(b"EVF\x09\x0d\x0a\xff\x00" + b"q" * 64)
+    reg = _register(case, image)
+    out = case / "extractions" / "rc-many" / "out"
+    out.mkdir(parents=True)
+    outputs, rows = [], []
+    for i in range(n):
+        f = out / f"f{i:02d}.csv"
+        f.write_text(f"x,y\n{i},{i}\n")
+        job = f"hash-{i:016x}"
+        pending = shape == "hashed" or (shape == "mixed" and i)
+        outputs.append(_output(f, f"pending:{job}" if pending else _sha(f)))
+        rows.append(_closed(f, job))
+    AuditWriter("sift-mcp", audit_dir=str(case / "audit")).log(
+        tool="run_command",
+        params={"command": f"extract {image} {out}"},
+        result_summary={"exit_code": 0},
+        extra={"inputs": [ops.place(image)],
+               "input_registered": [{"path": str(image.resolve()), "sha256": _sha(image)}],
+               "outputs": outputs},
+    )  # fmt: skip
+    if shape == "hashed":
+        (case / "audit" / "file-identity.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows)
+        )
+    return reg, out
+
+
+def _counted(monkeypatch, module, name: str) -> list:
+    calls: list = []
+    real = getattr(module, name)
+    monkeypatch.setattr(module, name, lambda *a, **k: calls.append(a) or real(*a, **k))
+    return calls
+
+
+def test_a_folder_of_hashed_outputs_reads_the_hash_log_once(case, tmp_path, monkeypatch):
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    reads = _counted(monkeypatch, fi, "_completed_rows")
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert len(reads) == 1  # not once per file
+
+
+def test_a_later_file_changed_after_the_hash_log_was_read_is_refused(case, tmp_path, monkeypatch):
+    """The hash log is read once for the folder, but each file's recorded hash is
+    taken only while the file is as the walk found it: one rewritten in place
+    after the read (same size, its mtime set back, only its ctime moved) is
+    hashed again and refused, as when each file read the log itself."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    later = out / "f05.csv"  # not f00, whose gate reads the log
+    st = later.stat()
+    real = fi.completed_hashes
+
+    def then_change(case_dir, paths):
+        found = real(case_dir, paths)
+        while later.stat().st_ctime_ns == st.st_ctime_ns:  # a coarse ctime may not tick
+            later.write_text("x,y\n9,9\n")
+            os.utime(later, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_change)
+    with pytest.raises(ops.Refused) as refused:
+        ops.gate(case, out)
+    assert refused.value.path == str(later)
+    now = later.stat()
+    assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def test_a_file_deleted_after_the_walk_is_skipped(case, tmp_path, monkeypatch):
+    """A file gone by the time its turn comes is skipped, as when each file was
+    looked at as the walk reached it: the gate takes the rest, not an error."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    later = out / "f05.csv"  # not f00, whose gate reads the log
+    real = fi.completed_hashes
+
+    def then_delete(case_dir, paths):
+        found = real(case_dir, paths)
+        later.unlink(missing_ok=True)
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_delete)
+    gated: list = []
+    real_gate_file = ops._gate_file
+    monkeypatch.setattr(
+        ops,
+        "_gate_file",
+        lambda pv, case, case_dir, f, *a: (
+            gated.append(f) or real_gate_file(pv, case, case_dir, f, *a)
+        ),
+    )
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert str(later) not in gated and len(gated) == 19
+
+
+def test_an_output_rewritten_after_its_job_closed_mid_gate_is_refused(case, tmp_path, monkeypatch):
+    """A pending output whose hash job closes after the gate starts, and which
+    is then rewritten in place (same size, its mtime set back, only its ctime
+    moved), is hashed again and refused: the gate sees the job closed, not
+    the output still pending on it."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "mixed", n=2)
+    later = out / "f01.csv"  # pending; f00 (inline) is gated first
+    log = case / "audit" / "file-identity.jsonl"
+    st = later.stat()
+    real = fi.completed_hashes
+
+    def then_close_and_rewrite(case_dir, paths):
+        found = real(case_dir, paths)
+        if not log.exists():
+            log.write_text(json.dumps(_closed(later, f"hash-{1:016x}")) + "\n")
+            while later.stat().st_ctime_ns == st.st_ctime_ns:  # a coarse ctime may not tick
+                later.write_text("x,y\n9,9\n")
+                os.utime(later, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_close_and_rewrite)
+    with pytest.raises(ops.Refused) as refused:
+        ops.gate(case, out)
+    assert refused.value.path == str(later)
+    now = later.stat()
+    assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)

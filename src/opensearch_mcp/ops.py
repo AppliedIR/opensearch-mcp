@@ -373,20 +373,32 @@ def extraction_step(audit, case_dir, archive, dest, command: list[str], params=N
     return aid
 
 
-def recorded_hash(case_dir, path) -> str:
+def recorded_hash(case_dir, path, *, done=None) -> str:
     """The hash of a large file read whole and never hashed here (an image, a
     memory dump), as recorded when an earlier operation wrote it: what its
     completed background job recorded while the file is unchanged; else
     `pending:<job>` of the newest operation that recorded it as an output whose
     job hasn't closed, while the file is still that output (its inode, size
     and mtime as recorded: a file replaced at the path never takes it); the
-    resolver takes it through that job. Else ""."""
+    resolver takes it through that job. Else "". A gate passes `done`
+    (`completed_hashes` of the files it walks), read once for all of them,
+    each with the file's stat key as its walk found it: a file changed since
+    takes what the log records for it now, as if no `done` were passed."""
     if case_dir is None:
         return ""
     from sift_common import file_identity as fi
     from sift_common import provenance as pv
 
-    if sha := fi.completed_hash(case_dir, path):
+    sha = None
+    if done is None:
+        sha = fi.completed_hash(case_dir, path)
+    elif (hit := done.get(str(path))) is not None:
+        try:
+            same = hit.get("key") == fi._stat_key(os.stat(path))
+        except OSError:
+            same = False
+        sha = hit.get("sha256") if same else fi.completed_hash(case_dir, path)
+    if sha:
         return sha
     real = os.path.realpath(path)
     try:
@@ -460,17 +472,35 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
         return [{"path": folder["path"], "sha256": folder.get("manifest_sha256", "")}], folder
     if not os.path.isdir(real):
         return _gate_file(pv, case, case_dir, real), {}
-    roots: dict = {}
+    from sift_common import file_identity as fi
+
+    files, keys = [], {}  # each file's stat key, taken before the hash log is read
     for top, dirs, names in os.walk(real):
         dirs.sort()
         for n in sorted(names):
             f = os.path.join(top, n)
             if os.path.isfile(f) and not os.path.islink(f):
-                roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f))
+                files.append(f)
+                try:
+                    keys[f] = fi._stat_key(os.stat(f))
+                except OSError:
+                    pass  # no key: its recorded hash is looked up when it's gated
+    done: list = []  # the hash log, read once for all the files, when first needed
+
+    def completed() -> dict:
+        if not done:
+            found = fi.completed_hashes(case_dir, files)
+            done.append({f: {**r, "key": keys.get(f)} for f, r in found.items()})
+        return done[0]
+
+    roots: dict = {}
+    for f in files:
+        if os.path.isfile(f) and not os.path.islink(f):  # one gone since the walk is skipped
+            roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed))
     return list(roots.values()), {}
 
 
-def _gate_file(pv, case, case_dir, real: str) -> list[dict]:
+def _gate_file(pv, case, case_dir, real: str, completed=None) -> list[dict]:
     p = place(real)
     at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
     t = pv.trace_file(case, real, None, **at)  # registered, or read through a mount
@@ -481,7 +511,8 @@ def _gate_file(pv, case, case_dir, real: str) -> list[dict]:
         (os.path.realpath(o), (e, line, h)) for o, h in pv._outputs(case, e)])  # fmt: skip
     if real not in outputs:  # no recorded origin can hold it: refused unhashed
         raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
-    sha = recorded_hash(case_dir, real) or sha256_file(Path(real))
+    done = completed() if completed is not None else None
+    sha = recorded_hash(case_dir, real, done=done) or sha256_file(Path(real))
     t = pv.trace_file(case, real, sha, **at)
     if t.grade != "FULL" and sha.startswith("pending:") and (
             (t.break_ or {}).get("kind") == "hash-pending"):  # fmt: skip
