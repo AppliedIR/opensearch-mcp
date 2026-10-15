@@ -130,3 +130,41 @@ def test_a_probe_that_fails_to_run_falls_back_to_csv_timeline(hb, monkeypatch):
     results, commands = hb("csv-timeline")
     assert results == {"HOST1": 2}
     assert commands == ["csv-timeline"]
+
+
+# Hayabusa 3.8.1, the release `cast install teamdfir/sift` installs. Its answers
+# as measured on the release binary (hayabusa-3.8.1-lin-x64-musl, zip sha256
+# 93c7fc58…bcee as the release API lists it): `dfir-timeline --help` exits 2
+# ("unrecognized subcommand", tip: csv-timeline); `csv-timeline --help` exits 0.
+# The ingest's own argv then ran rc 0 on three real evtx files (30,388 rows,
+# the 15 columns of 4.2.0's run; the captures are hb381-help.txt and
+# hb381-ingest-argv.txt in this change's review outputs). A regression
+# guard: the code didn't change.
+STUB_3_8_1 = b"""#!/bin/sh
+case "$1" in
+  csv-timeline|json-timeline) ;;
+  dfir-timeline)
+    printf "error: unrecognized subcommand 'dfir-timeline'\\n\\n" >&2
+    printf "  tip: a similar subcommand exists: 'csv-timeline'\\n" >&2
+    exit 2 ;;
+  *) echo "error: unexpected argument '$1' found" >&2; exit 2 ;;
+esac
+for a in "$@"; do
+  [ "$a" = "--help" ] && { echo "Hayabusa v3.8.1 - Spring Hayfever Release"; exit 0; }
+done
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+echo "$1" >> "$HB_RAN"
+printf '%s\\n' "$@" > "$HB_RAN.argv"
+cp "$HB_FIXTURE" "$out"
+"""
+
+
+def test_hayabusa_3_8_1_from_sift_runs_csv_timeline_with_the_ingests_options(hb, tmp_path):
+    results, commands = hb("unused", binary=STUB_3_8_1)
+    assert results == {"HOST1": 2}
+    assert commands == ["csv-timeline"]
+    argv = (tmp_path / "ran.txt.argv").read_text().splitlines()
+    options = [a for a in argv if a.startswith("-")]
+    assert options == ["-r", "-c", "-d", "-o", "-p", "--no-wizard"]
+    assert argv[argv.index("-p") + 1] == "verbose"

@@ -18,6 +18,7 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp.bulk import OLD_RID_KEY, flush_bulk
 from opensearch_mcp.ingest_counts import stored_counts
+from opensearch_mcp.ingest_status import ALL_PLUGINS_FAILED
 from opensearch_mcp.memory_tiers import TIER_1, TIER_2, TIER_3, TIERS  # noqa: F401
 
 # Natural keys per plugin (content-intrinsic, version-independent)
@@ -105,6 +106,53 @@ _MAX_JSON_BYTES = 200 * 1024 * 1024  # 200MB
 
 _VOL3_CMD: str | None = None
 
+# What Volatility 3 before 2.28 logs when it can't save the symbols it
+# downloads beside its own package (root-owned on SIFT): every Windows plugin
+# then fails. Measured on 2.27.0.
+_SYMBOL_WRITE_FAILED = "Cannot write necessary symbol file"
+_CAUSE_MAX = 300  # the status shows the whole error, so the cause line is capped
+SYMBOL_WRITE_FIX = (
+    "Volatility 3 can't save the symbols it downloads, so memory analysis fails. "
+    "Update SIFT with: `sudo cast install teamdfir/sift` (about 5 minutes on the "
+    "SANS OVA; if it reports failed states, run it again, since a download outage "
+    "can cause them), then re-run `./setup-sift.sh`."
+)
+
+
+class Vol3PluginError(RuntimeError):
+    """A vol3 run that failed; `cause` is the stderr line that says why."""
+
+    def __init__(self, message: str, cause: str = ""):
+        super().__init__(message)
+        self.cause = cause
+
+
+def _cause_line(stderr: str) -> str:
+    """The line of vol3's stderr that says why it failed: its first logged
+    warning or error, else its first line that isn't the banner."""
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    lines = [ln for ln in lines if not ln.startswith("Volatility 3 Framework")]
+    for ln in lines:
+        if ln.split(None, 1)[0] in ("WARNING", "ERROR", "CRITICAL"):
+            return ln
+    return lines[0] if lines else ""
+
+
+def all_failed_error(results: dict) -> str | None:
+    """The run's error when every plugin failed (nothing was indexed), else None.
+
+    It names the first cause, and the SIFT update when every plugin failed
+    because Volatility couldn't save its symbols.
+    """
+    if not results or any(r.get("status") != "failed" for r in results.values()):
+        return None
+    causes = [r.get("cause") or (r.get("error") or "").strip() for r in results.values()]
+    first = next((c.splitlines()[0] for c in causes if c), "no error text")[:_CAUSE_MAX]
+    text = f"{ALL_PLUGINS_FAILED}: every plugin failed ({len(results)}); the first cause: {first}"
+    if all(_SYMBOL_WRITE_FAILED in (r.get("cause") or "") for r in results.values()):
+        text += f". {SYMBOL_WRITE_FIX}"
+    return text
+
 
 def _find_vol3() -> str:
     """Find the vol3 command. Tries vol3, vol, python3 -m volatility3."""
@@ -154,7 +202,10 @@ def run_vol3_plugin(
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         stderr = result.stderr[:500] if result.stderr else ""
-        raise RuntimeError(f"vol3 {plugin} failed (exit {result.returncode}): {stderr}")
+        raise Vol3PluginError(
+            f"vol3 {plugin} failed (exit {result.returncode}): {stderr}",
+            cause=_cause_line(result.stderr or ""),
+        )
     if not result.stdout.strip():
         return []
 
@@ -414,13 +465,21 @@ def ingest_memory(
         ]
         test = subprocess.run(test_cmd, capture_output=True, text=True, timeout=60)
         if "Unsatisfied" in test.stderr:
-            print(
-                "ERROR: Volatility 3 symbols not available for this image.\n"
-                "  Download symbols: vol -f <image> windows.info\n"
-                "  Or set symbol path: export VOLATILITY_SYMBOLS=/path/to/symbols/",
-                file=sys.stderr,
-            )
-            return {"windows.info": {"status": "failed", "error": "Symbols not available"}}
+            cause = _cause_line(test.stderr)
+            if _SYMBOL_WRITE_FAILED in cause:
+                print(f"ERROR: {SYMBOL_WRITE_FIX}", file=sys.stderr)
+            else:
+                print(
+                    "ERROR: Volatility 3 symbols not available for this image.\n"
+                    "  Download symbols: vol -f <image> windows.info\n"
+                    "  Or set symbol path: export VOLATILITY_SYMBOLS=/path/to/symbols/",
+                    file=sys.stderr,
+                )
+            return {
+                "windows.info": {
+                    "status": "failed", "error": "Symbols not available", "cause": cause,
+                }
+            }  # fmt: skip
     except subprocess.TimeoutExpired:
         pass  # Slow but not a symbol issue — continue
 
@@ -440,6 +499,8 @@ def ingest_memory(
             records = run_vol3_plugin(image_path, plugin, timeout=timeout)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             results[plugin] = {"status": "failed", "error": str(e)}
+            if getattr(e, "cause", ""):
+                results[plugin]["cause"] = e.cause
             step(tool, params, f"FAILED: {e}")  # the plugin's one entry
             if on_progress:
                 on_progress("plugin_failed", plugin=plugin, error=str(e))

@@ -1837,9 +1837,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 skipped = hb_results.get("skipped") if isinstance(hb_results, dict) else None
                 if skipped or failed_hosts:
                     why = (
-                        f"detections skipped: {skipped}. Install hayabusa on the PATH "
-                        "(https://github.com/Yamato-Security/hayabusa/releases) "
-                        "and re-run the ingest."
+                        f"detections skipped: {skipped}. Install it with "
+                        "`sudo cast install teamdfir/sift` (Hayabusa 3.8.1 with the "
+                        "rest of SIFT) or `vhir setup hayabusa` (the current Hayabusa "
+                        "only), then re-run the ingest."
                         if skipped
                         else "; ".join(
                             f"{host}: {v.get('error', 'failed')}"
@@ -3086,7 +3087,13 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     """Parse a memory image with Volatility 3 and index results."""
     from opensearch_mcp import __version__
     from opensearch_mcp.bulk import ShardCapacityExhausted, reset_circuit_breaker
-    from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3, ingest_memory
+    from opensearch_mcp.parse_memory import (
+        TIER_1,
+        TIER_2,
+        TIER_3,
+        all_failed_error,
+        ingest_memory,
+    )
 
     reset_circuit_breaker()
 
@@ -3343,14 +3350,21 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     if failed:
         print(f"{len(failed)} plugin(s) failed: {', '.join(failed)}")
 
-    # Final status
-    _write_mem_status("complete")
+    # Final status: a run where every plugin failed indexed nothing, so it failed
+    error = all_failed_error(results)
+    if error:
+        print(error)
+        _write_mem_status("failed", error=error)
+    else:
+        _write_mem_status("complete")
 
     # Clean up extracted temp dir (multi-GB memory image)
     if _mem_extract_dir and _mem_extract_dir.exists():
         import shutil
 
         shutil.rmtree(_mem_extract_dir, ignore_errors=True)
+    if error:  # as every failed ingest does, so an archive's loop counts it
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------

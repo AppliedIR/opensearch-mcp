@@ -80,3 +80,10 @@ def test_the_active_cases_own_alerts_are_counted_and_pointed_to(monkeypatch, bra
     assert "124 Hayabusa alerts" in suggestion, suggestion
     assert f"index='case-{c12('case-a')}-hayabusa-*'" in suggestion, suggestion
     assert "496 Hayabusa" not in suggestion and srv._HAYABUSA_ABSENT not in suggestion
+
+
+def test_the_absent_note_names_both_ways_to_install_hayabusa(monkeypatch):
+    indices = {f"case-{c12('case-a')}-evtx-0": 5000}
+    suggestion = _cluster(monkeypatch, indices, BRANCHES[0], installed=False)
+    assert "`sudo cast install teamdfir/sift` (Hayabusa 3.8.1" in suggestion
+    assert "`vhir setup hayabusa` (the current Hayabusa only)" in suggestion
