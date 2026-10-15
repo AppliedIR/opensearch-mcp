@@ -373,7 +373,7 @@ def extraction_step(audit, case_dir, archive, dest, command: list[str], params=N
     return aid
 
 
-def recorded_hash(case_dir, path, *, done=None) -> str:
+def recorded_hash(case_dir, path, *, done=None, held=None) -> str:
     """The hash of a large file read whole and never hashed here (an image, a
     memory dump), as recorded when an earlier operation wrote it: what its
     completed background job recorded while the file is unchanged; else
@@ -383,7 +383,10 @@ def recorded_hash(case_dir, path, *, done=None) -> str:
     resolver takes it through that job. Else "". A gate passes `done`
     (`completed_hashes` of the files it walks), read once for all of them,
     each with the file's stat key as its walk found it: a file changed since
-    takes what the log records for it now, as if no `done` were passed."""
+    takes what the log records for it now, as if no `done` were passed. A gate
+    also passes `held`, the case this last loaded for it with the key of what
+    that load read (`_case_key`, taken before the read): it is used again only
+    while that key is unchanged, and loaded again otherwise."""
     if case_dir is None:
         return ""
     from sift_common import file_identity as fi
@@ -406,7 +409,13 @@ def recorded_hash(case_dir, path, *, done=None) -> str:
     except OSError:
         return ""
     now = (st.st_ino, st.st_size, st.st_mtime_ns)
-    case = pv.load_case(case_dir)
+    if held is None:
+        case = pv.load_case(case_dir)
+    else:
+        key = _case_key(case_dir)
+        if not held or held[0] != key:
+            held[:] = [key, pv.load_case(case_dir)]
+        case = held[1]
     # every job with a completion row is closed: only an open one is pending
     closed = {str(e.get("job_id")) for items in case.by_id.values() for e, _ in items
               if e.get("tool") in ("hash_complete", "hash_failed")}  # fmt: skip
@@ -418,6 +427,22 @@ def recorded_hash(case_dir, path, *, done=None) -> str:
              and os.path.realpath(str(pv._where(case, o))) == real
              and (o.get("st_ino"), o.get("size"), o.get("mtime_ns")) == now]  # fmt: skip
     return max(found)[1] if found else ""
+
+
+def _case_key(case_dir) -> tuple:
+    """What `pv.load_case` reads, as it is now: the case folder's real path,
+    then evidence.json and each audit/*.jsonl by name with its full stat key
+    (a link followed, as the load follows it)."""
+    from sift_common import file_identity as fi
+
+    d = Path(case_dir)
+    key: list = [os.path.realpath(d)]
+    for p in [d / "evidence.json", *sorted((d / "audit").glob("*.jsonl"))]:
+        try:
+            key.append((p.name, fi._stat_key(os.stat(p))))
+        except OSError:
+            key.append((p.name, None))
+    return tuple(key)
 
 
 def large_input(case_dir, path) -> dict:
@@ -494,13 +519,16 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
         return done[0]
 
     roots: dict = {}
+    held: list = []  # the case the pending-hash lookup last loaded, with its key
     for f in files:
         if os.path.isfile(f) and not os.path.islink(f):  # one gone since the walk is skipped
-            roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed))
+            roots.update(
+                (r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed, held)
+            )
     return list(roots.values()), {}
 
 
-def _gate_file(pv, case, case_dir, real: str, completed=None) -> list[dict]:
+def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list[dict]:
     p = place(real)
     at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
     t = pv.trace_file(case, real, None, **at)  # registered, or read through a mount
@@ -512,7 +540,7 @@ def _gate_file(pv, case, case_dir, real: str, completed=None) -> list[dict]:
     if real not in outputs:  # no recorded origin can hold it: refused unhashed
         raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
     done = completed() if completed is not None else None
-    sha = recorded_hash(case_dir, real, done=done) or sha256_file(Path(real))
+    sha = recorded_hash(case_dir, real, done=done, held=held) or sha256_file(Path(real))
     t = pv.trace_file(case, real, sha, **at)
     if t.grade != "FULL" and sha.startswith("pending:") and (
             (t.break_ or {}).get("kind") == "hash-pending"):  # fmt: skip
