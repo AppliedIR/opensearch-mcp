@@ -3492,13 +3492,14 @@ def _launch_enrich_background(
 
     # Concurrency gate — same cap as ingest. Enrichment is one-per-case
     # and typically long; running multiple simultaneously would starve
-    # the rate limiter.
+    # the rate limiter. Places are counted by process, as at admission.
     active = read_active_ingests()
     running = [i for i in active if i.get("status") in ("running", "starting")]
-    if len(running) >= _MAX_CONCURRENT_INGESTS:
+    holding = {r.get("pid") for r in running}
+    if len(holding) >= _MAX_CONCURRENT_INGESTS:
         return {
             "error": (
-                f"Too many concurrent ingest/enrich runs ({len(running)} "
+                f"Too many concurrent ingest/enrich runs ({len(holding)} "
                 f"running, max {_MAX_CONCURRENT_INGESTS}). Wait for "
                 "current runs to complete. Use idx_ingest_status() to check."
             ),
