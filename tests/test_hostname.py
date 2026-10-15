@@ -285,3 +285,36 @@ class TestPeekHostnameFromEvidence:
         (tmp_path / "a.jsonl").write_text(json.dumps({"random": "value"}) + "\n")
         (tmp_path / "b.jsonl").write_text(json.dumps({"Hostname": "rd01"}) + "\n")
         assert peek_hostname_from_evidence(tmp_path) == "rd01"
+
+
+# A header line repeated inside a file (schtasks /fo csv, kept by Kansa's SchedTasks)
+
+
+def test_a_repeated_header_line_names_no_host():
+    row = {
+        "HostName": "HostName",
+        "TaskName": "TaskName",
+        "Status": "Status",
+        "PSComputerName": "pc1.example.com",
+    }
+    assert extract_host_from_record(row) is None
+
+
+def test_a_host_named_like_its_column_keeps_its_name_in_a_data_row():
+    row = {"Computer": "COMPUTER", "TaskName": r"\Backup", "Status": "Ready"}
+    assert extract_host_from_record(row) == "COMPUTER"
+
+
+def test_a_data_row_with_another_cell_named_like_its_column_keeps_its_host():
+    row = {
+        "Computer": "COMPUTER",
+        "User": "user",
+        "EventID": 4624,
+        "PSComputerName": "computer.example.com",
+    }
+    assert extract_host_from_record(row) == "COMPUTER"
+
+
+def test_a_header_line_with_an_empty_cell_names_no_host():
+    row = {"HostName": "HostName", "TaskName": "TaskName", "Comment": "", "PSComputerName": "pc1"}
+    assert extract_host_from_record(row) is None

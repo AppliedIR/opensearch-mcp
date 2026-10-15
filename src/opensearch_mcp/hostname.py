@@ -90,14 +90,44 @@ def extract_host_from_record(doc: dict) -> str | None:
     `computername` and `HOSTNAME` are read; `Host` and dotted fields are
     exact. First non-empty string hit wins. Returns the raw value unchanged —
     normalization is HostDictionary's job. None if no priority field resolves.
+
+    A header line repeated inside the file names no host: `schtasks /fo csv`
+    writes one per task folder, and Kansa's SchedTasks output keeps them as
+    rows whose cells hold their own column names. A host cell holding its
+    column's name is read as such a line only when every other non-empty cell
+    holds its own column's name too, apart from the fields Kansa adds, and at
+    least one does. A machine really named like its column keeps its host.
     """
     for key, rest in _host_keys(tuple(doc)):
         val = doc[key]
         if rest:
             val = _dotted_get(val, rest) if isinstance(val, dict) else None
         if isinstance(val, str) and val.strip():
+            if not rest and _names_itself(key, val) and _header_line(doc, key):
+                return None
             return val.strip()
     return None
+
+
+def _names_itself(key: object, val: object) -> bool:
+    return isinstance(key, str) and isinstance(val, str) and val.strip().lower() == key.lower()
+
+
+# Fields Kansa adds to each row it collects; they keep real values in a header line.
+_KANSA_ADDED = frozenset({"PSComputerName", "PSShowComputerName", "RunspaceId"})
+
+
+def _header_line(doc: dict, host_key: str) -> bool:
+    """Every non-empty cell of the row, apart from the fields Kansa adds, holds
+    its own column's name, and at least one besides the host cell does."""
+    other = False
+    for k, v in doc.items():
+        if k in _KANSA_ADDED or v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        if not _names_itself(k, v):
+            return False
+        other = other or k != host_key
+    return other
 
 
 def detect_hostname_from_volume(volume_root: Path) -> str | None:

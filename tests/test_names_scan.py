@@ -478,3 +478,15 @@ def test_a_file_the_examiner_registered_gives_artifact_names(tmp_path):
     (d / "evidence.json").write_text(json.dumps(registry))
     unit = names_scan.files_unit(f, "", [f], d)
     assert {(n.raw, n.origin) for n in unit.names} == {("DC03", "artifact")}
+
+
+def test_a_header_line_repeated_inside_a_kansa_file_is_not_a_name(tmp_path):
+    f = tmp_path / "PC1-SchedTasks.csv"
+    lines = [
+        '"HostName","TaskName","Status","PSComputerName"',
+        r'"PC1","\Backup","Ready","pc1.example.com"',
+        '"HostName","TaskName","Status","pc1.example.com"',
+        r'"PC1","\Microsoft\Defrag","Ready","pc1.example.com"',
+    ]
+    f.write_bytes("\r\n".join(lines).encode("utf-16"))  # Export-Csv's UTF-16LE with a BOM
+    assert names_scan.row_names(f) == ["PC1"]
