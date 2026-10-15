@@ -33,6 +33,7 @@ from opensearch_mcp import write_context as wc
 pytestmark = pytest.mark.host_gate
 
 RUN = "run-gate"
+SLOT_WAIT = "Its hosts are confirmed. It starts when one of the 3 running ingests ends."
 
 
 @pytest.fixture
@@ -498,16 +499,113 @@ def test_names_a_forwarded_log_gives_past_the_scan_are_their_own_machines(gate):
 # -- admission, walks, and a waiting run's status
 
 
-def test_runs_waiting_for_their_hosts_count_at_admission_and_are_listed(gate, monkeypatch):
+def _running(n):
+    """`n` other runs running, in other cases."""
+    import os
+
+    for i in range(n):
+        ingest_status.write_status(f"case-{i}", os.getpid(), f"run-r{i}", "running", [], {}, "t0")
+
+
+def _until(check, timeout=15.0):
+    """`check()`'s first true value, polled (bounded)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = check()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("it never happened")
+
+
+def _slot_wait(gate):
+    data = gate.status()
+    return data if data.get("message") == SLOT_WAIT else None
+
+
+def test_runs_waiting_for_their_hosts_take_no_place_at_admission(gate):
     import os
 
     for n in range(srv._MAX_CONCURRENT_INGESTS):
         ingest_status.write_status(f"case-{n}", os.getpid(), f"run-w{n}", host_gate.AWAITING,
                                    [], {"unresolved": 1}, "t0")  # fmt: skip
+    assert srv._admission_refusal() is None  # a fourth run is admitted, and queues
+    _running(srv._MAX_CONCURRENT_INGESTS)
     refused = srv._admission_refusal()
-    assert "3 of them wait for host confirmation" in refused["error"]
-    assert sorted(r["case_id"] for r in refused["running"]) == ["case-0", "case-1", "case-2"]
-    assert {r["status"] for r in refused["running"]} == {host_gate.AWAITING}
+    assert refused["error"].startswith("Too many concurrent ingests (3 running, max 3).")
+    assert sorted(r["run_id"] for r in refused["running"]) == ["run-r0", "run-r1", "run-r2"]
+
+
+def test_a_confirmed_run_waits_for_a_place_while_three_run(gate, monkeypatch):
+    import os
+
+    monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
+    _running(3)
+    command, args = _delimited(gate)
+    t, out = gate.start(command, args)
+    gate.waiting()
+    host_gate.start_now(gate.case_dir, RUN, "ex1")
+    data = _until(lambda: _slot_wait(gate))
+    assert data["status"] == host_gate.AWAITING
+    assert data["message"] == SLOT_WAIT
+    time.sleep(0.3)
+    assert t.is_alive() and gate.writes == []  # it writes nothing meanwhile
+    ingest_status.write_status("case-0", os.getpid(), "run-r0", "complete", [], {}, "t0")
+    t.join(15)
+    assert out == {"ok": True} and gate.writes
+
+
+def test_runs_confirmed_together_start_only_up_to_the_cap(gate, monkeypatch):
+    import os
+
+    monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
+    _running(2)
+    started: list[str] = []
+
+    def run(rid):
+        with wc.restoring():
+            cli._gate(gate.case_id, [], rid)  # its hosts are already confirmed
+        started.append(rid)
+
+    for rid in ("run-a", "run-b"):
+        ingest_status.write_status(gate.case_id, os.getpid(), rid, host_gate.AWAITING,
+                                   [], {"unresolved": 1}, "t0")  # fmt: skip
+    threads = [threading.Thread(target=run, args=(r,), daemon=True) for r in ("run-a", "run-b")]
+    for t in threads:
+        t.start()
+    _until(lambda: started)
+    time.sleep(0.3)
+    assert len(started) == 1  # three running: the other waits
+    (other,) = {"run-a", "run-b"} - set(started)
+    statuses = {r["run_id"]: r for r in ingest_status.active_runs()}
+    assert statuses[started[0]]["status"] == "running"
+    assert statuses[other]["message"] == SLOT_WAIT
+    ingest_status.write_status("case-0", os.getpid(), "run-r0", "complete", [], {}, "t0")
+    for t in threads:
+        t.join(15)
+    assert sorted(started) == ["run-a", "run-b"]
+
+
+def test_a_cancel_while_it_waits_for_a_place_ends_it_and_holds_no_lock(gate, monkeypatch):
+    import fcntl
+
+    monkeypatch.setattr(cli, "_SLOT_POLL", 0.05, raising=False)
+    _running(3)
+    command, args = _delimited(gate)
+    t, out = gate.start(command, args)
+    gate.waiting()
+    host_gate.start_now(gate.case_dir, RUN, "ex1")
+    _until(lambda: _slot_wait(gate))
+    host_gate.cancel(gate.case_dir, RUN, "ex1")
+    t.join(15)
+    assert out == {"exit": 1} and gate.writes == []
+    data = gate.status()
+    assert data["status"] == host_gate.CANCELLED
+    assert data["error"] == f"run {RUN} was cancelled in the Hosts tab"
+    with open(gate.tmp / "status" / "slots.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # nothing holds it
+    with hi.case_lock(gate.case_dir, shared=False):
+        pass  # nor the case lock
 
 
 def test_a_walk_over_three_hosts_waits_once_for_all_of_them(gate, monkeypatch):

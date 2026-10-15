@@ -17,6 +17,11 @@ _LIVE = ("running", "starting", AWAITING)  # a worker owns these: the sweep chec
 
 _STATUS_DIR = vhir_dir() / "ingest-status"
 
+MAX_RUNNING = 3  # ingests running at once; a run waiting for its hosts takes no place
+SLOT_WAIT = (
+    f"Its hosts are confirmed. It starts when one of the {MAX_RUNNING} running ingests ends."
+)
+
 
 def write_status(
     case_id: str,
@@ -135,6 +140,25 @@ def mark_hosts_confirmed(case_id: str, pid: int, run_id: str) -> None:
         except OSError:
             pass
         raise
+
+
+def take_slot(case_id: str, pid: int, run_id: str, waiting) -> bool:
+    """Start a run whose hosts passed the gate if fewer than MAX_RUNNING other
+    runs are running, marking it confirmed; else call `waiting()`, which
+    writes its waiting status. Both happen under one lock, so runs confirmed
+    together never start past the cap. The lock goes with the process."""
+    import fcntl
+
+    _STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_STATUS_DIR / "slots.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        running = [r for r in active_runs()
+                   if r.get("status") != AWAITING and r.get("run_id") != run_id]  # fmt: skip
+        if len(running) >= MAX_RUNNING:
+            waiting()
+            return False
+        mark_hosts_confirmed(case_id, pid, run_id)
+        return True
 
 
 def finish_status(
