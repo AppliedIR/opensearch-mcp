@@ -3830,7 +3830,7 @@ def idx_list_detections(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """List detection findings from Security Analytics (Sigma) or suggest Hayabusa alternatives.
+    """Hayabusa detection alerts: the count, and an idx_search call for high and critical ones.
 
     Args:
         severity: Filter by severity (critical, high, medium, low).
