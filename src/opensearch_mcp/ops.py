@@ -416,15 +416,15 @@ def recorded_hash(case_dir, path, *, done=None, held=None) -> str:
         if not held or held[0] != key:
             held[:] = [key, pv.load_case(case_dir)]
         case = held[1]
-    # every job with a completion row is closed: only an open one is pending
-    closed = {str(e.get("job_id")) for items in case.by_id.values() for e, _ in items
-              if e.get("tool") in ("hash_complete", "hash_failed")}  # fmt: skip
-    found = [(pv._when(case, e), o["sha256"])
-             for items in case.by_id.values() for e, _ in items
-             for o in e.get("outputs") or [] if isinstance(o, dict)
-             and str(o.get("sha256") or "").startswith("pending:")
-             and o["sha256"][len("pending:"):] not in closed
-             and os.path.realpath(str(pv._where(case, o))) == real
+    # every job with a completion row is closed: only an open one is pending.
+    # Both are indexed once per case, not walked again for each file a gate checks.
+    closed = pv._index(case, "hash_jobs_closed", lambda e, line: [(str(e.get("job_id")), True)]
+                       if e.get("tool") in ("hash_complete", "hash_failed") else [])  # fmt: skip
+    pending = pv._index(case, "pending_outputs", lambda e, line: [
+        (os.path.realpath(str(pv._where(case, o))), (e, o)) for o in e.get("outputs") or []
+        if isinstance(o, dict) and str(o.get("sha256") or "").startswith("pending:")])  # fmt: skip
+    found = [(pv._when(case, e), o["sha256"]) for e, o in pending.get(real, [])
+             if o["sha256"][len("pending:"):] not in closed
              and (o.get("st_ino"), o.get("size"), o.get("mtime_ns")) == now]  # fmt: skip
     return max(found)[1] if found else ""
 
