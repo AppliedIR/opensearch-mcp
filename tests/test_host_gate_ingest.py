@@ -511,7 +511,16 @@ def others():
     def spawn(run_id):
         env = {**os.environ, "VHIR_INGEST_RUN_ID": run_id}
         procs.append(subprocess.Popen(["sleep", "300"], env=env))
-        return procs[-1].pid
+        pid = procs[-1].pid
+        # Popen returns before the child's exec fills /proc/<pid>/environ
+        want = f"VHIR_INGEST_RUN_ID={run_id}".encode()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                if want in f.read().split(b"\0"):
+                    return pid
+            time.sleep(0.01)
+        raise AssertionError(f"process {pid} never showed {want!r}")
 
     yield spawn
     for p in procs:
