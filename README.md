@@ -68,7 +68,7 @@ The LLM gets these tools via the MCP protocol:
 | `idx_ingest_status` | Monitor running ingest operations |
 | `idx_enrich_triage` | Baseline enrichment via windows-triage-mcp |
 | `idx_enrich_intel` | Threat intel enrichment via lookup_ioc (threat intel) |
-| `idx_list_detections` | Detection alerts (Hayabusa/Sigma) |
+| `idx_list_detections` | Hayabusa detection alerts (count and query) |
 | `idx_host_inventory` | A case's machines (`host.id`), the names and evidence units behind each, and ingests awaiting host confirmation |
 
 ### Enrich

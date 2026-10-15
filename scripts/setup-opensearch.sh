@@ -239,7 +239,7 @@ echo "  Applied GeoIP pipeline to IP-bearing indices"
 # --- 8. Security Analytics detector (Phase 4) ---
 echo "Configuring Security Analytics..."
 
-# Fetch all Windows pre-packaged Sigma rule IDs, create detector
+# Fetch the pre-packaged Sigma rule IDs (detectors are disabled on 3.5; see Step 3)
 python3 -c "
 import json, sys, time, urllib.request, ssl
 
