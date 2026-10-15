@@ -17,6 +17,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -517,6 +518,50 @@ def test_a_folder_of_inline_outputs_loads_the_case_once_for_its_lookups(
     roots, folder = ops.gate(case, out)
     assert roots == [reg] and folder == {}
     assert len(loads) <= 2  # the gate's own, then one for the 20 lookups
+
+
+def test_a_big_folder_of_inline_outputs_looks_up_pending_hashes_by_index(
+    case, tmp_path, monkeypatch
+):
+    """Each file's pending-hash lookup reads an index of the case built once,
+    not every entry of the case again: two walks of the whole case per file
+    kept a 12,500-file triage folder at "starting" for about 4 minutes before
+    anything of it was read."""
+    from sift_common import provenance as pv
+
+    n = 3000
+    reg, out = _made_many(case, tmp_path, "inline", n=n)
+    others = tmp_path / "others"
+    others.mkdir()
+    rows = []
+    for i in range(n):  # hash rows for files elsewhere: the log the lookups skip
+        f = others / f"o{i}.txt"
+        f.write_text(f"{i}\n")
+        rows.append(_closed(f, f"hash-o{i:015x}"))
+    (case / "audit" / "file-identity.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows)
+    )
+    walks: list = []
+
+    class Walked(dict):  # counts the walks of every entry in the case
+        def values(self):
+            walks.append(1)
+            return super().values()
+
+    real = pv.load_case
+
+    def load_case(*a, **k):
+        loaded = real(*a, **k)
+        loaded.by_id = Walked(loaded.by_id)
+        return loaded
+
+    monkeypatch.setattr(pv, "load_case", load_case)
+    t0 = time.perf_counter()
+    roots, folder = ops.gate(case, out)
+    took = time.perf_counter() - t0
+    assert roots == [reg] and folder == {}
+    assert len(walks) <= 20, len(walks)  # by index: not two walks per file
+    assert took < 60, took  # a loose ceiling for slow runners: about 4 s here
 
 
 def test_an_audit_log_rewritten_after_the_kept_load_is_read_again(case, tmp_path, monkeypatch):
