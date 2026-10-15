@@ -216,6 +216,8 @@ ALL_RECORDS_REJECTED = "all_records_rejected"
 TRANSPORT_FAILED = "transport_failed"
 # Files were given and not one of them was read (each failed, or was refused).
 NOTHING_READ = "no_file_read"
+# A memory image where every Volatility plugin failed, so nothing was indexed.
+ALL_PLUGINS_FAILED = "all_plugins_failed"
 
 
 def read_active_ingests() -> list[dict]:

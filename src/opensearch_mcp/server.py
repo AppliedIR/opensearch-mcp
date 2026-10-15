@@ -2750,6 +2750,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 )
             elif _prefix == "hayabusa_no_rules":
                 s["message"] = f"Ingest failed ({_prefix}): {_err[:200]}"
+            elif _prefix == "all_plugins_failed":
+                # whole: the fix it names (the SIFT update) comes after the cause
+                s["message"] = f"Ingest failed ({_prefix}): {_err[len(_prefix) + 2 :]}"
             else:
                 s["message"] = f"Ingest failed: {_err[:200]}"
             if _prefix == "process_died_unexpectedly" and s["log_file"]:

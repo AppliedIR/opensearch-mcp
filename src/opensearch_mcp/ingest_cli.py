@@ -3086,7 +3086,13 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     """Parse a memory image with Volatility 3 and index results."""
     from opensearch_mcp import __version__
     from opensearch_mcp.bulk import ShardCapacityExhausted, reset_circuit_breaker
-    from opensearch_mcp.parse_memory import TIER_1, TIER_2, TIER_3, ingest_memory
+    from opensearch_mcp.parse_memory import (
+        TIER_1,
+        TIER_2,
+        TIER_3,
+        all_failed_error,
+        ingest_memory,
+    )
 
     reset_circuit_breaker()
 
@@ -3343,8 +3349,13 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
     if failed:
         print(f"{len(failed)} plugin(s) failed: {', '.join(failed)}")
 
-    # Final status
-    _write_mem_status("complete")
+    # Final status: a run where every plugin failed indexed nothing, so it failed
+    error = all_failed_error(results)
+    if error:
+        print(error)
+        _write_mem_status("failed", error=error)
+    else:
+        _write_mem_status("complete")
 
     # Clean up extracted temp dir (multi-GB memory image)
     if _mem_extract_dir and _mem_extract_dir.exists():

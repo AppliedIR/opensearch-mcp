@@ -57,8 +57,10 @@ def test_no_rules_or_no_config_beside_it(resolve, tmp_path, rules, config):
     assert resolve() is None
 
 
-def test_a_fixed_candidate_still_wins(resolve, tmp_path):
-    _install(tmp_path)
+def test_the_binarys_own_rules_beat_a_fixed_candidate(resolve, tmp_path):
+    # the rules beside the binary that will run, never a fixed path's older
+    # rules ahead of a newer binary on PATH
+    rules = _install(tmp_path)
     fixed = tmp_path / "share" / "hayabusa-rules"
     (fixed / "config").mkdir(parents=True)
-    assert resolve(candidates=(str(fixed),)) == fixed
+    assert resolve(candidates=(str(fixed),)) == rules.resolve()

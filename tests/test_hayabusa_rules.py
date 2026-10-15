@@ -76,3 +76,41 @@ class TestResolveHayabusaRulesDir:
             # Depending on path resolution, may or may not find it —
             # the key behavior is "doesn't crash on missing /opt"
             assert result is None or result == rules
+
+
+class TestTheRulesOfTheBinaryThatRuns:
+    """cast installs Hayabusa 3.8.1 with its rules in one folder and links it
+    into ~/.local/bin. Rules elsewhere (an older /opt/hayabusa) came first and
+    ran with the newer binary. Layout as measured on a cast-updated SIFT:
+    /opt/mulder-assets/hayabusa/{hayabusa-3.8.1-lin-x64-musl, rules/config}."""
+
+    def _cast_install(self, tmp_path: Path) -> tuple[Path, Path]:
+        install = tmp_path / "mulder-assets" / "hayabusa"
+        rules = _make_rules_dir(install / "rules")
+        binary = install / "hayabusa-3.8.1-lin-x64-musl"
+        binary.write_text("")
+        binary.chmod(0o755)
+        link = tmp_path / "home" / ".local" / "bin" / "hayabusa"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(binary)
+        return link, rules
+
+    def test_a_binary_with_no_rules_beside_it_uses_the_install_paths(self, tmp_path, monkeypatch):
+        # a wrapper script in /usr/local/bin that runs /opt/hayabusa/hayabusa
+        monkeypatch.delenv("HAYABUSA_RULES_DIR", raising=False)
+        wrapper = tmp_path / "usr-local-bin" / "hayabusa"
+        wrapper.parent.mkdir()
+        wrapper.write_text("#!/bin/sh\n")
+        std = _make_rules_dir(tmp_path / "opt" / "hayabusa" / "rules")
+        with (
+            patch("opensearch_mcp.ingest._HAYABUSA_RULES_CANDIDATES", (str(std),)),
+            patch("opensearch_mcp.ingest.shutil.which", return_value=str(wrapper)),
+        ):
+            assert _resolve_hayabusa_rules_dir() == std
+
+    def test_the_env_var_still_wins(self, tmp_path, monkeypatch):
+        link, _ = self._cast_install(tmp_path)
+        env_dir = _make_rules_dir(tmp_path / "custom-rules")
+        monkeypatch.setenv("HAYABUSA_RULES_DIR", str(env_dir))
+        with patch("opensearch_mcp.ingest.shutil.which", return_value=str(link)):
+            assert _resolve_hayabusa_rules_dir() == env_dir

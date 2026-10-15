@@ -343,11 +343,13 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
 
     Precedence:
       1. $HAYABUSA_RULES_DIR env var
-      2. Standard install paths (see _HAYABUSA_RULES_CANDIDATES)
-      3. /opt/hayabusa*/rules (nested layout)
-      4. /opt/hayabusa* (direct layout — rules dir at the top level)
-      5. rules/ beside the hayabusa binary on PATH, links resolved (SIFT
-         links ~/.local/bin/hayabusa into its own install directory)
+      2. rules/ beside the hayabusa binary that runs (the first on PATH),
+         links resolved: SIFT links ~/.local/bin/hayabusa into its own
+         install directory, rules included. A binary's own rules come
+         first, so an older install's rules elsewhere never run with it.
+      3. Standard install paths (see _HAYABUSA_RULES_CANDIDATES)
+      4. /opt/hayabusa*/rules (nested layout)
+      5. /opt/hayabusa* (direct layout — rules dir at the top level)
 
     Returns None if nothing found. Only returns paths where the
     directory AND a 'config' subdirectory both exist — hayabusa
@@ -356,6 +358,11 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
     env_dir = os.environ.get("HAYABUSA_RULES_DIR", "").strip()
     if env_dir:
         p = Path(env_dir)
+        if p.is_dir() and (p / "config").is_dir():
+            return p
+    binary = shutil.which("hayabusa")
+    if binary:
+        p = Path(binary).resolve().parent / "rules"
         if p.is_dir() and (p / "config").is_dir():
             return p
     for candidate in _HAYABUSA_RULES_CANDIDATES:
@@ -373,11 +380,6 @@ def _resolve_hayabusa_rules_dir() -> Path | None:
         for sibling in sorted(opt.glob("hayabusa*")):
             if sibling.is_dir() and (sibling / "config").is_dir():
                 return sibling
-    binary = shutil.which("hayabusa")
-    if binary:
-        p = Path(binary).resolve().parent / "rules"
-        if p.is_dir() and (p / "config").is_dir():
-            return p
     return None
 
 
