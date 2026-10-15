@@ -3830,7 +3830,7 @@ def idx_list_detections(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """Hayabusa detection alerts: the case's alert count and the idx_search call that lists them.
+    """Hayabusa detection alerts: the count, and an idx_search call for high and critical ones.
 
     Args:
         severity: Filter by severity (critical, high, medium, low).
