@@ -22,6 +22,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
+from opensearch_mcp.ingest_status import MAX_RUNNING as _MAX_RUNNING
 from opensearch_mcp.paths import members
 
 logger = logging.getLogger(__name__)
@@ -636,7 +637,7 @@ def _answer_after_gate(resp: dict, case_id: str, pid: int, run_id: str) -> dict:
                 unresolved=(data.get("totals") or {}).get("unresolved", len(hosts)),
                 unresolved_hosts=hosts,
                 message=(
-                    f"Nothing is written yet: {data.get('message', '')}. "
+                    f"Nothing is written yet: {data.get('message', '').rstrip('.')}. "
                     "Then call idx_ingest_status() to follow the run."
                 ),
             )
@@ -2588,6 +2589,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
     and writes nothing until the examiner confirms them (or chooses Start
     now) in the portal's Hosts tab; you can't confirm them. It then ingests
     by itself. idx_host_inventory shows what it waits for.
+    The same status with the message "Its hosts are confirmed. It starts when
+    one of the 3 running ingests ends." means only that: no one needs to
+    confirm anything, and the run starts by itself when a place frees.
 
     Args:
         case_id: Filter to this case (default: active case). "*" for all.
@@ -3173,27 +3177,23 @@ def idx_enrich_triage(
     return resp
 
 
-_MAX_CONCURRENT_INGESTS = 3
+_MAX_CONCURRENT_INGESTS = _MAX_RUNNING
 
 
 def _admission_refusal() -> dict | None:
-    """The refusal of a new ingest while the most runs are already admitted:
-    running, starting, or waiting for host confirmation (listed, with their
-    cases, so the examiner can confirm or cancel them)."""
+    """The refusal of a new ingest while the most runs are already running or
+    starting (listed, with their cases). A run waiting for host confirmation
+    takes no place: it writes nothing, and once its hosts are confirmed it
+    starts only when a place is free."""
     from opensearch_mcp.ingest_status import AWAITING, active_runs
 
-    runs = active_runs()
+    runs = [r for r in active_runs() if r.get("status") != AWAITING]
     if len(runs) < _MAX_CONCURRENT_INGESTS:
         return None
-    waiting = [r for r in runs if r.get("status") == AWAITING]
-    msg = f"Too many concurrent ingests ({len(runs)} admitted, max {_MAX_CONCURRENT_INGESTS})."
-    if waiting:
-        msg += (
-            f" {len(waiting)} of them wait for host confirmation: confirm their hosts "
-            "in the Hosts tab, or cancel them there."
-        )
-    else:
-        msg += " Wait for current ingests to complete."
+    msg = (
+        f"Too many concurrent ingests ({len(runs)} running, max {_MAX_CONCURRENT_INGESTS})."
+        " Wait for current ingests to complete."
+    )
     return {
         "error": msg + " Use idx_ingest_status() to check progress.",
         "running": [

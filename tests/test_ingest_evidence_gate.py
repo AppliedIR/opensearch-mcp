@@ -29,6 +29,7 @@ pytestmark = pytest.mark.evidence_gate
 
 UUID = "0123456789abcdef0123456789abcdef"
 RUN = "the run, recorded before any of its steps"
+REMEDY = "re-make it with run_command from registered evidence, or register it as evidence"
 
 
 def _sha(p: Path) -> str:
@@ -263,6 +264,31 @@ def test_a_file_a_declared_action_made_is_refused(case, tmp_path, monkeypatch):
     assert code != 0 and parsed == []
     (refusal,) = _refusals(case)
     assert "declared" in refusal["refused"]["reason"]
+    assert refusal["refused"]["fix"] == REMEDY
+
+
+def test_each_remedy_the_refusal_names_passes_the_gate(case, tmp_path, monkeypatch):
+    """Never log_external_action, which grades DECLARED: a file registered as
+    evidence, or made again with run_command from registered evidence, is
+    ingested."""
+    loose = case / "loose" / "events.jsonl"
+    loose.parent.mkdir()
+    loose.write_text('{"a": 1}\n')
+    assert _json(monkeypatch, loose)[0] != 0
+    (refusal,) = _refusals(case)
+    assert refusal["refused"]["fix"] == REMEDY
+    assert "log_external_action" not in refusal["refused"]["fix"]
+    _register(case, loose)
+    assert _json(monkeypatch, loose) == (0, ["events.jsonl"])
+    original = tmp_path / "srv" / "events.jsonl"
+    original.parent.mkdir()
+    original.write_text('{"b": 2}\n')
+    _register(case, original)
+    made = case / "extractions" / "made" / "events.jsonl"
+    made.parent.mkdir()
+    made.write_bytes(original.read_bytes())
+    _made(case, "run_command", original, made, _sha(made))
+    assert _json(monkeypatch, made) == (0, ["events.jsonl"])
 
 
 def test_a_registered_folder_is_taken_with_its_members_as_they_are(case, monkeypatch):

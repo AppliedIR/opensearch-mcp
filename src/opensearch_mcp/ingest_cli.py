@@ -35,6 +35,7 @@ from opensearch_mcp.paths import (
 from opensearch_mcp.tools import PER_PROFILE, TOOLS, scan_id_source
 
 _ACTIVE_CASE_FILE = vhir_dir() / "active_case"
+_SLOT_POLL = 2.0  # seconds between looks for a free place, while a confirmed run waits
 
 
 def _case_dir_for(case_id: str) -> Path | None:
@@ -205,6 +206,8 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
             write_status(case_id, os.getpid(), run, CANCELLED, [], {}, started, error=str(e))
         print(f"Cancelled: {e}", file=sys.stderr)
         sys.exit(1)
+    if run:
+        _take_slot(case_dir, case_id, run, started)
     try:
         wc.hold(hi.case_lock(case_dir, shared=True))
         op = hi.unfinished_op(case_dir)
@@ -218,6 +221,39 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
         from opensearch_mcp.ingest_status import mark_hosts_confirmed
 
         mark_hosts_confirmed(case_id, os.getpid(), run)
+
+
+def _take_slot(case_dir, case_id: str, run: str, started: str) -> None:
+    """Start the run once fewer than the most runs are running. Until then it
+    waits, says so in its status, and a cancel in the Hosts tab ends it."""
+    from sift_common import host_identity as hi
+
+    from opensearch_mcp.ingest_status import (
+        AWAITING,
+        CANCELLED,
+        SLOT_WAIT,
+        take_slot,
+        write_status,
+    )
+
+    def waiting():
+        write_status(case_id, os.getpid(), run, AWAITING, [], {}, started, message=SLOT_WAIT)
+
+    said = False
+    while True:
+        took = take_slot(case_id, os.getpid(), run, waiting)
+        # a cancel made while it slept counts even when a place has just freed
+        if run in hi.load(case_dir).cancelled:
+            why = f"run {run} was cancelled in the Hosts tab"
+            write_status(case_id, os.getpid(), run, CANCELLED, [], {}, started, error=why)
+            print(f"Cancelled: {why}", file=sys.stderr)
+            sys.exit(1)
+        if took:
+            return
+        if not said:
+            print(f"Waiting: {SLOT_WAIT}", file=sys.stderr)
+            said = True
+        time.sleep(_SLOT_POLL)
 
 
 def _confirmed_name(case_dir, ctx) -> str:

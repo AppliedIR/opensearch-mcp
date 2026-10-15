@@ -17,6 +17,11 @@ _LIVE = ("running", "starting", AWAITING)  # a worker owns these: the sweep chec
 
 _STATUS_DIR = vhir_dir() / "ingest-status"
 
+MAX_RUNNING = 3  # ingests running at once; a run waiting for its hosts takes no place
+SLOT_WAIT = (
+    f"Its hosts are confirmed. It starts when one of the {MAX_RUNNING} running ingests ends."
+)
+
 
 def write_status(
     case_id: str,
@@ -135,6 +140,48 @@ def mark_hosts_confirmed(case_id: str, pid: int, run_id: str) -> None:
         except OSError:
             pass
         raise
+
+
+def take_slot(case_id: str, pid: int, run_id: str, waiting) -> bool:
+    """Start a run whose hosts passed the gate if fewer than MAX_RUNNING other
+    runs are running, marking it confirmed; else call `waiting()`, which
+    writes its waiting status. Both happen under one lock, so runs confirmed
+    together never start past the cap. The lock goes with the process."""
+    import fcntl
+
+    _STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_STATUS_DIR / "slots.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        runs = active_runs()
+        # One process holds at most one place: an image of an archive runs in
+        # the archive run's process and uses its place, so it never waits
+        if not _in_archive_run(pid, run_id, runs):
+            holding = {r.get("pid") for r in runs
+                       if r.get("status") != AWAITING and r.get("pid") != pid}  # fmt: skip
+            if len(holding) >= MAX_RUNNING:
+                waiting()
+                return False
+        mark_hosts_confirmed(case_id, pid, run_id)
+        return True
+
+
+def _in_archive_run(pid: int, run_id: str, runs: list[dict]) -> bool:
+    """Whether `run_id` is an image of the archive run process `pid` started
+    as: that run's id plus "-<n>", with a live record for that run under the
+    same pid. The start comes from /proc/<pid>/environ, so a pid reused by
+    another ingest doesn't qualify."""
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    prefix = b"VHIR_INGEST_RUN_ID="
+    started = [v[len(prefix) :].decode(errors="replace") for v in environ if v.startswith(prefix)]
+    if not started or not started[0]:
+        return False
+    parent = started[0]
+    if not re.fullmatch(re.escape(parent) + r"-[0-9]+", run_id):
+        return False
+    return any(r.get("pid") == pid and r.get("run_id") == parent for r in runs)
 
 
 def finish_status(
