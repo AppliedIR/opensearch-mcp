@@ -346,14 +346,18 @@ def reset_extracted() -> None:
     _tls.extracted = {}
 
 
-def extraction_step(audit, case_dir, archive, dest, command: list[str], params=None) -> str:
+def extraction_step(
+    audit, case_dir, archive, dest, command: list[str], params=None, input_entry=None
+) -> str:
     """Record an archive's extraction, after it and before any member is used:
     the archive (by the registry when registered, never hashed again), the
     command (it never carries the password: 7z reads that on stdin) and an
     output manifest of every regular file extracted, hashed. A later step that
-    reads one of them takes its hash from the manifest. Raises NoEntry when
-    the entry couldn't be written."""
-    entry, reg = file_input(case_dir, archive)
+    reads one of them takes its hash from the manifest. `input_entry`, when
+    given, is the archive's ``(input, registered entry)`` as recorded
+    elsewhere (a disk image by `image_input`, never hashed here). Raises
+    NoEntry when the entry couldn't be written."""
+    entry, reg = input_entry if input_entry is not None else file_input(case_dir, archive)
     outs = [output(p) for p in sorted(Path(dest).rglob("*")) if p.is_file() and not p.is_symlink()]
     aid = write(
         audit,

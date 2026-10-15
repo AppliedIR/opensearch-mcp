@@ -29,6 +29,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The disk image tests run qemu-img, mmls and tsk_recover (in bwrap) for real
+      - name: Install disk image tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-utils sleuthkit bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - name: Install sift-common (from sift-mcp monorepo)
         run: pip install "sift-common @ git+https://github.com/AppliedIR/sift-mcp.git#subdirectory=packages/sift-common"
 

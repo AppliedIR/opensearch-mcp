@@ -1325,7 +1325,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         sys.exit(1)
                     print(f"  Mounted {len(volumes)} volume(s)")
 
-                    if vss_flag and volumes:
+                    # shadow copies are read from a mount, never from extracted folders
+                    if vss_flag and volumes and not mount_ctx.extracted:
                         # An E01's volumes are read from its raw stream, as mount_image does
                         ewf = img.suffix.lower() in (".e01", ".ex01")
                         vss_volumes = mount_vss(
@@ -1386,8 +1387,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if hostname:
                     name_origin = "artifact"
 
-            # VSS handling
-            if vss_flag:
+            # VSS handling (from a mount, never from extracted folders)
+            if vss_flag and not mount_ctx.extracted:
                 # Get the raw path for VSS scanning
                 # For EWF: the ewf1 file under the FUSE mount
                 # For raw/nbd: the original file or nbd device

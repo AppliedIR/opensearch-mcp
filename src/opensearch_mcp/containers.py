@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -116,6 +117,7 @@ class MountContext:
         self.audit = None  # the run's writer, which recorded the mounts
         self.recorded: dict[str, object] = {}  # recorded mount point realpath -> mnt_id
         self.streams: dict[str, Path] = {}  # an E01's raw stream (ewfmount's ewf1) -> the E01
+        self.extracted = False  # the volumes are folders extracted without NBD, not mounts
 
     def record(self, image, points: list[dict], tool: str = "mount_image") -> None:
         """Record a mount (the run's writer), and remember its points, whose
@@ -221,7 +223,20 @@ def mount_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
         volumes = _mount_ewf(path, dest, ctx)
     elif suffix in (".dd", ".raw", ".img", ".iso"):
         volumes = _mount_raw(path, dest, ctx)
-    elif suffix in (".vmdk", ".vhd", ".vhdx"):
+    elif suffix == ".vhdx":
+        try:
+            volumes = _mount_nbd(path, dest, ctx)
+            why = "no volume mounted"
+        except (PermissionError, RuntimeError, subprocess.CalledProcessError, OSError) as e:
+            volumes, why = [], str(e).splitlines()[0] if str(e) else type(e).__name__
+        if not volumes:  # no sudo or no free NBD device: read it without either
+            ctx.cleanup()  # a device attached with nothing mounted is detached first
+            print(f"  {path.name}: {why}; {NO_NBD_NOTE}", file=sys.stderr, flush=True)
+            volumes = _extract_disk_image(path, dest, ctx)
+            ctx.extracted = True
+            ctx.not_mounted.append(f"{path.name}: {NO_NBD_NOTE}")
+            return volumes  # recorded as an extraction: nothing was mounted
+    elif suffix in (".vmdk", ".vhd"):
         volumes = _mount_nbd(path, dest, ctx)
     else:
         raise ValueError(f"Unknown disk image format: {path.name}")
@@ -456,6 +471,124 @@ def _mount_nbd(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
             mount_point.rmdir()
 
     return mounted
+
+
+NO_NBD_NOTE = (
+    "mounted without NBD: extracted with qemu-img + TSK (no sudo); shadow copies not read"
+)
+
+
+def _tool(cmd: list[str], package: str, **kw) -> subprocess.CompletedProcess:
+    """Run a tool the extraction needs; its package named when it is missing."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    except FileNotFoundError:
+        raise RuntimeError(f"{cmd[0]} not found: install {package}") from None
+
+
+def _partition_starts(raw: Path) -> tuple[list[tuple[int, int]], list[str]]:
+    """``[(start sector, sector size)]`` of each allocated partition mmls lists,
+    and the command; one volume at 0 when there is no partition table."""
+    cmd = ["mmls", "-a", str(raw)]
+    result = _tool(cmd, "sleuthkit")
+    sector_size = 512
+    starts = []
+    for line in result.stdout.splitlines():
+        m = re.match(r"Units are in (\d+)-byte sectors", line)
+        if m:
+            sector_size = int(m.group(1))
+        m = re.match(r"\d+:\s+\S+\s+(\d+)\s+\d+\s+\d+\s", line)
+        if m:
+            starts.append((int(m.group(1)), sector_size))
+    return (starts if result.returncode == 0 else []) or [(0, 512)], cmd
+
+
+def _set_ntfs_end_marker(raw: Path, offset: int) -> bool:
+    """Write 55 AA at bytes 510-511 of the volume's boot sector in the derived
+    raw when its OEM is NTFS and the marker isn't there: TSK refuses NTFS
+    without it, and some collections write it as 00 00. True when written."""
+    with open(raw, "r+b") as f:
+        f.seek(offset)
+        boot = f.read(512)
+        if len(boot) < 512 or boot[3:11] != b"NTFS    " or boot[510:512] == b"\x55\xaa":
+            return False
+        f.seek(offset + 510)
+        f.write(b"\x55\xaa")
+    return True
+
+
+def _extract_disk_image(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
+    """A .vhdx read without sudo or NBD: converted to a derived raw by
+    qemu-img (the format fixed, never probed), then each partition's allocated
+    files written out by tsk_recover into its own folder, ``_x/vol<N>``.
+
+    tsk_recover writes names as the image holds them, so it runs in bwrap
+    where only that folder is writable: a crafted name can't write outside
+    it. The write it refuses prints an Error line while the exit code stays
+    0, so any Error line, or a non-zero exit after something was written,
+    refuses the image. A partition TSK can't read at all is a failure, as a
+    partition that doesn't mount is. The raw is deleted whatever happens.
+
+    Recorded under the open run before any file is used, as one extraction
+    of the image (by its input entry, as a mount records it) with every file
+    hashed. No run open, or the entry not written, refuses the image."""
+    from opensearch_mcp import ops
+
+    run = ops.current_run()
+    if run is None:
+        raise RuntimeError(f"{path.name}: no ingest run is open to record its extraction")
+    raw_dir, out = dest / "_raw", dest / "_x"
+    raw = raw_dir / "disk.raw"
+    raw_dir.mkdir()  # never an existing folder: it is removed after
+    try:
+        convert = ["qemu-img", "convert", "-f", IMAGE_FORMATS[".vhdx"], "-O", "raw", str(path)]
+        convert.append(str(raw))
+        result = _tool(convert, "qemu-utils")
+        if result.returncode != 0:
+            raise RuntimeError(f"{path.name}: qemu-img could not read it: {result.stderr.strip()}")
+        starts, mmls = _partition_starts(raw)
+        commands, volumes, folders = [convert, mmls], [], []
+        out.mkdir()
+        for n, (start, sector_size) in enumerate(starts, 1):
+            offset = start * sector_size
+            marker = _set_ntfs_end_marker(raw, offset)
+            vol = out / f"vol{n}"
+            vol.mkdir()
+            cmd = ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--bind", str(vol), str(vol),
+                   "--unshare-all", "--die-with-parent", "--new-session",
+                   "tsk_recover", "-a", "-o", str(start), "-b", str(sector_size), str(raw),
+                   str(vol)]  # fmt: skip
+            commands.append(cmd)
+            result = _tool(cmd, "bubblewrap", stdin=subprocess.DEVNULL)
+            lines = result.stderr.splitlines()
+            refused = [ln for ln in lines if ln.startswith(("Error", "bwrap:"))]
+            if refused or (result.returncode != 0 and any(vol.iterdir())):
+                shown = ", ".join(repr(ln) for ln in (refused or lines)[:3])
+                raise RuntimeError(
+                    f"{path.name}: refused: tsk_recover at offset {offset} (exit "
+                    f"{result.returncode}): {shown or 'no message'}"
+                )
+            if result.returncode != 0:  # nothing written: TSK can't read this partition
+                vol.rmdir()
+                why = lines[0] if lines else f"tsk_recover exit {result.returncode}"
+                failure = f"partition at offset {offset} could not be read: {why}"
+                ctx.failures.append(failure)
+                ctx.failed_offsets[offset] = failure
+                print(f"  WARNING: {failure}", file=sys.stderr)
+                continue
+            volumes.append({"offset": offset, "end_marker_set": marker})
+            folders.append(vol)
+            ctx.offsets[vol] = offset
+    finally:
+        shutil.rmtree(raw_dir, ignore_errors=True)
+    audit, case_dir = run
+    params = {"method": "qemu-img+tsk_recover", "volumes": volumes}
+    try:
+        ops.extraction_step(audit, case_dir, path, out, [shlex.join(c) for c in commands], params,
+                            input_entry=ops.image_input(case_dir, path))  # fmt: skip
+    except ops.NoEntry as e:
+        raise RuntimeError(f"{path.name}: its extraction was not recorded: {e}") from None
+    return folders
 
 
 def _nbd_offset(part_dev: str) -> int:
