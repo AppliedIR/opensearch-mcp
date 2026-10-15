@@ -343,7 +343,7 @@ def _made_many(case: Path, tmp_path: Path, shape: str, n: int = 20) -> tuple[dic
     """One operation that read a registered image and wrote `n` files: each
     recorded `pending:<job>` and closed by its job's hash_complete row
     (hashed), or the first recorded with its real hash and the rest pending
-    on jobs still open (mixed)."""
+    on jobs still open (mixed), or each with its real hash (inline)."""
     image = tmp_path / "srv" / "host.E01"
     image.parent.mkdir()
     image.write_bytes(b"EVF\x09\x0d\x0a\xff\x00" + b"q" * 64)
@@ -476,3 +476,57 @@ def test_an_output_rewritten_after_its_job_closed_mid_gate_is_refused(case, tmp_
     assert refused.value.fix == "wait for the job to finish, then trace again"
     now = later.stat()
     assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def test_a_folder_of_inline_outputs_loads_the_case_once_for_its_lookups(
+    case, tmp_path, monkeypatch
+):
+    """Outputs recorded with their real hashes each look for a pending hash in
+    the case: while nothing it was loaded from changes, that load serves the
+    whole folder, not one per file."""
+    from sift_common import provenance as pv
+
+    reg, out = _made_many(case, tmp_path, "inline")
+    loads = _counted(monkeypatch, pv, "load_case")
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert len(loads) <= 2  # the gate's own, then one for the 20 lookups
+
+
+def test_an_audit_log_rewritten_after_the_kept_load_is_read_again(case, tmp_path, monkeypatch):
+    """The case a lookup loaded is used again only while what it was loaded
+    from is as it was before the load: an audit log rewritten in place right
+    after it (same size, its mtime set back, only its ctime moved) to close a
+    pending output's job, with that output then rewritten the same way, is
+    read again, and the output is refused, as when each file loaded the case."""
+    from sift_common import provenance as pv
+
+    reg, out = _made_many(case, tmp_path, "mixed", n=2)
+    later = out / "f01.csv"  # pending on an open job; f00 (inline) is looked up first
+    other = tmp_path / "other.txt"
+    other.write_text("o\n")
+    log = case / "audit" / "file-identity.jsonl"
+    log.write_text(json.dumps(_closed(other, f"hash-{9:016x}")) + "\n")
+    st, lst = later.stat(), log.stat()
+    real, loads = pv.load_case, []
+
+    def then_close_and_rewrite(*a, **k):
+        c = real(*a, **k)
+        loads.append(a)
+        if len(loads) == 2:  # f00's lookup: the load kept for f01's
+            text = log.read_text().replace(f"hash-{9:016x}", f"hash-{1:016x}")  # same size
+            while log.stat().st_ctime_ns == lst.st_ctime_ns:  # a coarse ctime may not tick
+                with open(log, "r+") as fh:
+                    fh.write(text)
+                os.utime(log, ns=(lst.st_atime_ns, lst.st_mtime_ns))
+            while later.stat().st_ctime_ns == st.st_ctime_ns:
+                later.write_text("x,y\n9,9\n")
+                os.utime(later, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return c
+
+    monkeypatch.setattr(pv, "load_case", then_close_and_rewrite)
+    with pytest.raises(ops.Refused) as refused:
+        ops.gate(case, out)
+    assert refused.value.path == str(later)
+    now = log.stat()
+    assert (now.st_ino, now.st_size, now.st_mtime_ns) == (lst.st_ino, lst.st_size, lst.st_mtime_ns)
