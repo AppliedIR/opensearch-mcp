@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -106,11 +107,98 @@ def test_an_image_that_cannot_be_mounted(case, monkeypatch, tmp_path):
     status = _final()
     assert status["status"] == "failed", status
     assert status["log_tail"], status
-    # The whole log: a short tail can start after the mount line
-    log = Path(status["log_file"]).read_text().splitlines()
+    # The whole log: a short tail can start after the mount line. The worker
+    # writes "failed" before its traceback reaches the log: wait for that.
+    deadline = time.monotonic() + 30
+    while True:
+        log = Path(status["log_file"]).read_text().splitlines()
+        if any("'fdisk'" in line for line in log) or time.monotonic() > deadline:
+            break
+        time.sleep(0.1)
     assert "Mounting disk.raw..." in log, status
     mounting = log.index("Mounting disk.raw...")
     assert any("'fdisk'" in line for line in log[mounting:]), status  # the mount said why
+
+
+def _no_sudo(tmp_path, monkeypatch) -> None:
+    """A stand-in sudo that asks for a password: `sudo -n` fails."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    sudo = bindir / "sudo"
+    sudo.write_text("#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n")
+    sudo.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:/usr/bin:/bin")
+
+
+def test_a_worker_that_dies_before_its_starting_status_says_why(case, monkeypatch, tmp_path):
+    """The worker fails its sudo check about 0.3 s after the spawn, before the
+    launch writes the "starting" status it would have filled in. The sweep
+    takes the cause from the worker's log, not "detected by sweep", and the
+    cause names what the examiner can do."""
+    from opensearch_mcp.containers import SUDO_REMEDY
+
+    _no_sudo(tmp_path, monkeypatch)
+    spawn = srv._spawn_ingest
+
+    def dead_first(*a):  # the worker is dead before the launch writes its status
+        proc = spawn(*a)
+        proc.wait(timeout=60)
+        return proc
+
+    monkeypatch.setattr(srv, "_spawn_ingest", dead_first)
+    resp = srv.idx_ingest(path=str(case / "disk.raw"), hostname="h1", dry_run=False)
+    assert resp["status"] in ("started", "failed"), resp
+    status = _final()
+    assert status["status"] == "failed", status
+    assert f"PermissionError: {SUDO_REMEDY}" in status["message"], status
+    assert "detected by sweep" not in status["message"], status
+    [disk] = [json.loads(f.read_text()) for f in ingest_status._STATUS_DIR.glob("*.json")]
+    assert disk["error"] == f"process_died_unexpectedly: PermissionError: {SUDO_REMEDY}", disk
+
+
+def test_the_dry_run_names_the_register_step_without_sudo(case, monkeypatch, tmp_path):
+    """Without passwordless sudo, the preview says how to ingest the image by
+    a mount of one's own: link it into evidence/ and register it, since the
+    evidence gate refuses a mounted folder that isn't registered."""
+    _no_sudo(tmp_path, monkeypatch)
+    resp = srv.idx_ingest(path=str(case / "disk.raw"), hostname="h1", dry_run=True)
+    assert resp.get("status") == "preview", resp
+    warning = resp.get("warning", "")
+    assert "sudo without a password" in warning, resp
+    assert "link the mount into the case's evidence/ folder" in warning, resp
+    assert "register that link as evidence" in warning, resp
+    assert "point idx_ingest at the mount" not in warning, resp
+
+
+def test_the_sweep_reads_a_cause_only_from_an_ingest_log(tmp_path, monkeypatch):
+    """A status's log_file is read only in ingest-logs/, only its end, and only
+    an error line and up to 2 after it, to a blank line."""
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "ingest-status")
+    logs = tmp_path / "ingest-logs"
+    logs.mkdir()
+    elsewhere = tmp_path / "other.log"
+    elsewhere.write_text("PermissionError: from outside\n")
+    assert ingest_status._log_cause(str(elsewhere)) == ""
+    (logs / "ln.log").symlink_to(elsewhere)  # a link out of ingest-logs/ is outside it too
+    assert ingest_status._log_cause(str(logs / "ln.log")) == ""
+    log = logs / "r1.log"
+    log.write_text(
+        "Running scope as unit: vhir-ingest-1.scope\n"
+        + "Error: the first\n"
+        + "x" * 9000
+        + "\nTraceback (most recent call last):\n"
+        + "ValueError: one\ntwo\nthree\nfour\n"
+    )
+    assert ingest_status._log_cause(str(log)) == "ValueError: one\ntwo\nthree"
+    log.write_text("KeyError: k\n\nafter\n")
+    assert ingest_status._log_cause(str(log)) == "KeyError: k"
+    log.write_text("Running scope as unit: vhir-ingest-1.scope\nKilled\n")
+    assert ingest_status._log_cause(str(log)) == ""
+    log.write_text("OSError: " + "y" * 2000 + "\n")
+    assert len(ingest_status._log_cause(str(log))) == 500
+    assert ingest_status._log_cause("") == ingest_status._log_cause(None) == ""
+    os.mkfifo(logs / "fifo.log")  # never opened: a pipe would hold the sweep
+    assert ingest_status._log_cause(str(logs / "fifo.log")) == ""
 
 
 def test_a_worker_that_runs_still_goes_running_then_complete(case, monkeypatch, tmp_path):

@@ -304,7 +304,7 @@ def read_active_ingests() -> list[dict]:
                 data["status"] = "failed"
                 prev_error = data.get("error") or ""
                 data["error"] = "process_died_unexpectedly: " + (
-                    prev_error if prev_error else "detected by sweep"
+                    prev_error or _log_cause(data.get("log_file")) or "detected by sweep"
                 )
                 # Persist the sweep finding so external consumers
                 # reading the disk state directly see the update.
@@ -316,6 +316,34 @@ def read_active_ingests() -> list[dict]:
                     pass  # Best-effort — in-memory result is still correct
         results.append(data)
     return results
+
+
+# a line that names an exception or an error: "PermissionError: …", "Error: …"
+_CAUSE = re.compile(r"^(?:[A-Za-z_][\w.]*)?(?:Error|Exception): ")
+
+
+def _log_cause(log_file) -> str:
+    """The cause a worker that died before its status was written left in its
+    own log: the last error line and up to 2 lines after it, to a blank line,
+    at most 500 characters. Only a regular file in ingest-logs/ is read, and
+    only its last 8 KiB."""
+    logs = os.path.realpath(_STATUS_DIR.parent / "ingest-logs")
+    real = os.path.realpath(str(log_file or ""))
+    if not log_file or os.path.dirname(real) != logs or not os.path.isfile(real):
+        return ""
+    try:
+        with open(real, "rb") as f:
+            f.seek(max(0, os.path.getsize(real) - 8192))
+            lines = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return ""
+    at = [i for i, line in enumerate(lines) if _CAUSE.match(line)]
+    cause: list[str] = []
+    for line in lines[at[-1] : at[-1] + 3] if at else []:
+        if not line.strip():  # a blank line ends it
+            break
+        cause.append(line)
+    return "\n".join(cause)[:500]
 
 
 def active_runs() -> list[dict]:
