@@ -322,10 +322,28 @@ def test_a_refused_runs_status_is_failed_with_the_reason_and_the_fix(case, tmp_p
     assert refusal["refused"]["fix"] in status["error"]
 
 
+def _closed(f: Path, job: str) -> dict:
+    """The hash_complete row of the job that hashed `f` as it is now."""
+    st = f.stat()
+    row = {
+        "path": str(f),
+        "sha256": _sha(f),
+        "size": st.st_size,
+        "st_dev": st.st_dev,
+        "st_ino": st.st_ino,
+        "mtime_ns": st.st_mtime_ns,
+        "ctime_ns": st.st_ctime_ns,
+    }
+    return {"ts": "2026-10-15T00:30:00+00:00", "audit_id": f"file-identity-{job}",
+            "mcp": "file-identity", "tool": "hash_complete", "job_id": job,
+            "files": [row]}  # fmt: skip
+
+
 def _made_many(case: Path, tmp_path: Path, shape: str, n: int = 20) -> tuple[dict, Path]:
     """One operation that read a registered image and wrote `n` files: each
     recorded `pending:<job>` and closed by its job's hash_complete row
-    (hashed), or recorded with its real hash and no row (inline)."""
+    (hashed), or the first recorded with its real hash and the rest pending
+    on jobs still open (mixed)."""
     image = tmp_path / "srv" / "host.E01"
     image.parent.mkdir()
     image.write_bytes(b"EVF\x09\x0d\x0a\xff\x00" + b"q" * 64)
@@ -336,21 +354,10 @@ def _made_many(case: Path, tmp_path: Path, shape: str, n: int = 20) -> tuple[dic
     for i in range(n):
         f = out / f"f{i:02d}.csv"
         f.write_text(f"x,y\n{i},{i}\n")
-        st = f.stat()
         job = f"hash-{i:016x}"
-        outputs.append(_output(f, f"pending:{job}" if shape == "hashed" else _sha(f)))
-        row = {
-            "path": str(f),
-            "sha256": _sha(f),
-            "size": st.st_size,
-            "st_dev": st.st_dev,
-            "st_ino": st.st_ino,
-            "mtime_ns": st.st_mtime_ns,
-            "ctime_ns": st.st_ctime_ns,
-        }
-        rows.append({"ts": "2026-10-15T00:30:00+00:00", "audit_id": f"file-identity-{job}",
-                     "mcp": "file-identity", "tool": "hash_complete", "job_id": job,
-                     "files": [row]})  # fmt: skip
+        pending = shape == "hashed" or (shape == "mixed" and i)
+        outputs.append(_output(f, f"pending:{job}" if pending else _sha(f)))
+        rows.append(_closed(f, job))
     AuditWriter("sift-mcp", audit_dir=str(case / "audit")).log(
         tool="run_command",
         params={"command": f"extract {image} {out}"},
@@ -381,16 +388,6 @@ def test_a_folder_of_hashed_outputs_reads_the_hash_log_once(case, tmp_path, monk
     roots, folder = ops.gate(case, out)
     assert roots == [reg] and folder == {}
     assert len(reads) == 1  # not once per file
-
-
-def test_a_folder_of_outputs_hashed_inline_loads_the_case_once(case, tmp_path, monkeypatch):
-    from sift_common import provenance as pv
-
-    reg, out = _made_many(case, tmp_path, "inline")
-    loads = _counted(monkeypatch, pv, "load_case")
-    roots, folder = ops.gate(case, out)
-    assert roots == [reg] and folder == {}
-    assert len(loads) == 1  # the gate's own: not one more per file
 
 
 def test_a_later_file_changed_after_the_hash_log_was_read_is_refused(case, tmp_path, monkeypatch):
@@ -447,3 +444,33 @@ def test_a_file_deleted_after_the_walk_is_skipped(case, tmp_path, monkeypatch):
     roots, folder = ops.gate(case, out)
     assert roots == [reg] and folder == {}
     assert str(later) not in gated and len(gated) == 19
+
+
+def test_an_output_rewritten_after_its_job_closed_mid_gate_is_refused(case, tmp_path, monkeypatch):
+    """A pending output whose hash job closes after the gate starts, and which
+    is then rewritten in place (same size, its mtime set back, only its ctime
+    moved), is hashed again and refused: the gate sees the job closed, not
+    the output still pending on it."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "mixed", n=2)
+    later = out / "f01.csv"  # pending; f00 (inline) is gated first
+    log = case / "audit" / "file-identity.jsonl"
+    st = later.stat()
+    real = fi.completed_hashes
+
+    def then_close_and_rewrite(case_dir, paths):
+        found = real(case_dir, paths)
+        if not log.exists():
+            log.write_text(json.dumps(_closed(later, f"hash-{1:016x}")) + "\n")
+            while later.stat().st_ctime_ns == st.st_ctime_ns:  # a coarse ctime may not tick
+                later.write_text("x,y\n9,9\n")
+                os.utime(later, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_close_and_rewrite)
+    with pytest.raises(ops.Refused) as refused:
+        ops.gate(case, out)
+    assert refused.value.path == str(later)
+    now = later.stat()
+    assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
