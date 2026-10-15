@@ -757,6 +757,25 @@ def test_two_archives_each_running_an_image_leave_a_place(gate, others):
     assert ingest_status.take_slot(*run, lambda: waited.append(1)) and waited == []
 
 
+def test_two_archives_each_running_an_image_admit_a_third_run(gate, others):
+    """Two processes hold places, with two records each: admission counts
+    processes, as the slots do, so a third launch is admitted."""
+    for a in (_archive(others, "run-a"), _archive(others, "run-b")):
+        assert _image(a, 1)
+    assert srv._admission_refusal() is None
+
+
+def test_two_archives_and_a_single_run_refuse_a_fourth(gate, others):
+    """Three processes hold places (five records): a fourth launch is refused,
+    and the refusal counts processes."""
+    for a in (_archive(others, "run-a"), _archive(others, "run-b")):
+        assert _image(a, 1)
+    _running(others, 1)
+    refused = srv._admission_refusal()
+    assert refused["error"].startswith("Too many concurrent ingests (3 running, max 3).")
+    assert len(refused["running"]) == 5
+
+
 def test_a_new_run_under_a_reused_pid_waits_for_a_place(gate, others):
     """A dead archive's image record (pid-only liveness) stays live under a pid
     a new ingest now has. That ingest isn't an image of it: with three other

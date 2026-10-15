@@ -587,6 +587,48 @@ class TestEnrichIntelAsync:
         assert "error" in resp
         assert "Too many concurrent" in resp["error"]
 
+    def test_two_archives_each_running_an_image_admit_an_enrichment(
+        self, mock_client, monkeypatch, tmp_path
+    ):
+        """Two processes hold places, with two records each (an archive and
+        its image): the gate counts processes, so an enrichment starts."""
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+        roster = [
+            {"status": "running", "case_id": "C", "pid": pid, "run_id": f"r{pid}-{n}"}
+            for pid in (1001, 1002)
+            for n in (0, 1)
+        ]
+        fake_proc = MagicMock()
+        fake_proc.pid = 54321
+        with (
+            patch("opensearch_mcp.server._spawn_ingest", return_value=fake_proc),
+            patch("opensearch_mcp.ingest_status.write_status"),
+            patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=roster),
+            patch("opensearch_mcp.paths.vhir_dir", return_value=tmp_path),
+        ):
+            resp = idx_enrich_intel(dry_run=False)
+        assert resp.get("status") == "started", resp
+
+    def test_three_processes_refuse_an_enrichment_and_count_processes(
+        self, mock_client, monkeypatch
+    ):
+        from opensearch_mcp.server import idx_enrich_intel
+
+        monkeypatch.setattr(srv, "_get_active_case", lambda: "TEST-CASE")
+        roster = [
+            {"status": "running", "case_id": "C", "pid": pid, "run_id": f"r{pid}-{n}"}
+            for pid in (1001, 1002)
+            for n in (0, 1)
+        ] + [{"status": "starting", "case_id": "C", "pid": 1003, "run_id": "r1003"}]
+        with patch("opensearch_mcp.ingest_status.read_active_ingests", return_value=roster):
+            resp = idx_enrich_intel(dry_run=False)
+        assert resp["error"].startswith(
+            "Too many concurrent ingest/enrich runs (3 running, max 3)"
+        )
+        assert len(resp["running"]) == 5
+
 
 class TestPathRejectionNamesTheTarget:
     """A symlink under an allowed location to evidence elsewhere was refused
