@@ -391,3 +391,30 @@ def test_a_folder_of_outputs_hashed_inline_loads_the_case_once(case, tmp_path, m
     roots, folder = ops.gate(case, out)
     assert roots == [reg] and folder == {}
     assert len(loads) == 1  # the gate's own: not one more per file
+
+
+def test_a_later_file_changed_after_the_hash_log_was_read_is_refused(case, tmp_path, monkeypatch):
+    """The hash log is read once for the folder, but each file's recorded hash is
+    taken only while the file is as the walk found it: one rewritten in place
+    after the read (same size, its mtime set back, only its ctime moved) is
+    hashed again and refused, as when each file read the log itself."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    later = out / "f05.csv"  # not f00, whose gate reads the log
+    st = later.stat()
+    real = fi.completed_hashes
+
+    def then_change(case_dir, paths):
+        found = real(case_dir, paths)
+        while later.stat().st_ctime_ns == st.st_ctime_ns:  # a coarse ctime may not tick
+            later.write_text("x,y\n9,9\n")
+            os.utime(later, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_change)
+    with pytest.raises(ops.Refused) as refused:
+        ops.gate(case, out)
+    assert refused.value.path == str(later)
+    now = later.stat()
+    assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)

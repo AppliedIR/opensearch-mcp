@@ -381,16 +381,23 @@ def recorded_hash(case_dir, path, *, case=None, done=None) -> str:
     job hasn't closed, while the file is still that output (its inode, size
     and mtime as recorded: a file replaced at the path never takes it); the
     resolver takes it through that job. Else "". A gate passes the case and
-    `done` (`completed_hashes` of the files it walks) it read once for all."""
+    `done` (`completed_hashes` of the files it walks) it read once for all,
+    each with the file's stat key as its walk found it: a file changed since
+    takes what the log records for it now, as if no `done` were passed."""
     if case_dir is None:
         return ""
     from sift_common import file_identity as fi
     from sift_common import provenance as pv
 
-    if done is not None:
-        sha = done.get(str(path), {}).get("sha256")
-    else:
+    sha = None
+    if done is None:
         sha = fi.completed_hash(case_dir, path)
+    elif (hit := done.get(str(path))) is not None:
+        try:
+            same = hit.get("key") == fi._stat_key(os.stat(path))
+        except OSError:
+            same = False
+        sha = hit.get("sha256") if same else fi.completed_hash(case_dir, path)
     if sha:
         return sha
     real = os.path.realpath(path)
@@ -468,18 +475,23 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
         return _gate_file(pv, case, case_dir, real), {}
     from sift_common import file_identity as fi
 
-    files = []
+    files, keys = [], {}  # each file's stat key, taken before the hash log is
     for top, dirs, names in os.walk(real):
         dirs.sort()
         for n in sorted(names):
             f = os.path.join(top, n)
             if os.path.isfile(f) and not os.path.islink(f):
                 files.append(f)
+                try:
+                    keys[f] = fi._stat_key(os.stat(f))
+                except OSError:
+                    pass  # no key: its recorded hash is looked up when it's gated
     done: list = []  # the hash log, read once for all the files, when first needed
 
     def completed() -> dict:
         if not done:
-            done.append(fi.completed_hashes(case_dir, files))
+            found = fi.completed_hashes(case_dir, files)
+            done.append({f: {**r, "key": keys.get(f)} for f, r in found.items()})
         return done[0]
 
     roots: dict = {}
