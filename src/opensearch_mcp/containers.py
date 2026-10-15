@@ -397,8 +397,15 @@ def _parse_fdisk_output(output: str) -> list[dict]:
     return partitions
 
 
+# The format each disk image is opened as, from its name: never probed from
+# its content (a VMDK description named .vhdx would make qemu read the files
+# it names).
+IMAGE_FORMATS = {".vhdx": "vhdx", ".vhd": "vpc", ".vmdk": "vmdk"}
+
+
 def _mount_nbd(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
-    """Mount VMDK/VHD/VHDX via qemu-nbd."""
+    """Mount VMDK/VHD/VHDX via qemu-nbd, in the format its name says."""
+    fmt = IMAGE_FORMATS[path.suffix.lower()]
     check_sudo()
     subprocess.run(
         ["sudo", "modprobe", "nbd", "max_part=8"],
@@ -406,7 +413,7 @@ def _mount_nbd(path: Path, dest: Path, ctx: MountContext) -> list[Path]:
     )
     nbd_dev = _find_free_nbd()
     subprocess.run(
-        ["sudo", "qemu-nbd", "-r", "-c", nbd_dev, str(path)],
+        ["sudo", "qemu-nbd", "-r", "-f", fmt, "-c", nbd_dev, str(path)],
         check=True,
         capture_output=True,
     )
