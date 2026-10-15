@@ -449,8 +449,9 @@ def test_a_file_deleted_after_the_walk_is_skipped(case, tmp_path, monkeypatch):
 def test_an_output_rewritten_after_its_job_closed_mid_gate_is_refused(case, tmp_path, monkeypatch):
     """A pending output whose hash job closes after the gate starts, and which
     is then rewritten in place (same size, its mtime set back, only its ctime
-    moved), is hashed again and refused: the gate sees the job closed, not
-    the output still pending on it."""
+    moved), is refused as hash pending: the gate traces it through the case it
+    loaded when it started, while the job was still open, so the closed job's
+    hash is never taken for the rewritten output."""
     from sift_common import file_identity as fi
 
     reg, out = _made_many(case, tmp_path, "mixed", n=2)
@@ -472,5 +473,6 @@ def test_an_output_rewritten_after_its_job_closed_mid_gate_is_refused(case, tmp_
     with pytest.raises(ops.Refused) as refused:
         ops.gate(case, out)
     assert refused.value.path == str(later)
+    assert refused.value.fix == "wait for the job to finish, then trace again"
     now = later.stat()
     assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
