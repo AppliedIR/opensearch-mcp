@@ -373,20 +373,25 @@ def extraction_step(audit, case_dir, archive, dest, command: list[str], params=N
     return aid
 
 
-def recorded_hash(case_dir, path) -> str:
+def recorded_hash(case_dir, path, *, case=None, done=None) -> str:
     """The hash of a large file read whole and never hashed here (an image, a
     memory dump), as recorded when an earlier operation wrote it: what its
     completed background job recorded while the file is unchanged; else
     `pending:<job>` of the newest operation that recorded it as an output whose
     job hasn't closed, while the file is still that output (its inode, size
     and mtime as recorded: a file replaced at the path never takes it); the
-    resolver takes it through that job. Else ""."""
+    resolver takes it through that job. Else "". A gate passes the case and
+    `done` (`completed_hashes` of the files it walks) it read once for all."""
     if case_dir is None:
         return ""
     from sift_common import file_identity as fi
     from sift_common import provenance as pv
 
-    if sha := fi.completed_hash(case_dir, path):
+    if done is not None:
+        sha = done.get(str(path), {}).get("sha256")
+    else:
+        sha = fi.completed_hash(case_dir, path)
+    if sha:
         return sha
     real = os.path.realpath(path)
     try:
@@ -394,7 +399,8 @@ def recorded_hash(case_dir, path) -> str:
     except OSError:
         return ""
     now = (st.st_ino, st.st_size, st.st_mtime_ns)
-    case = pv.load_case(case_dir)
+    if case is None:
+        case = pv.load_case(case_dir)
     # every job with a completion row is closed: only an open one is pending
     closed = {str(e.get("job_id")) for items in case.by_id.values() for e, _ in items
               if e.get("tool") in ("hash_complete", "hash_failed")}  # fmt: skip
@@ -460,17 +466,29 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
         return [{"path": folder["path"], "sha256": folder.get("manifest_sha256", "")}], folder
     if not os.path.isdir(real):
         return _gate_file(pv, case, case_dir, real), {}
-    roots: dict = {}
+    from sift_common import file_identity as fi
+
+    files = []
     for top, dirs, names in os.walk(real):
         dirs.sort()
         for n in sorted(names):
             f = os.path.join(top, n)
             if os.path.isfile(f) and not os.path.islink(f):
-                roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f))
+                files.append(f)
+    done: list = []  # the hash log, read once for all the files, when first needed
+
+    def completed() -> dict:
+        if not done:
+            done.append(fi.completed_hashes(case_dir, files))
+        return done[0]
+
+    roots: dict = {}
+    for f in files:
+        roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed))
     return list(roots.values()), {}
 
 
-def _gate_file(pv, case, case_dir, real: str) -> list[dict]:
+def _gate_file(pv, case, case_dir, real: str, completed=None) -> list[dict]:
     p = place(real)
     at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
     t = pv.trace_file(case, real, None, **at)  # registered, or read through a mount
@@ -481,7 +499,8 @@ def _gate_file(pv, case, case_dir, real: str) -> list[dict]:
         (os.path.realpath(o), (e, line, h)) for o, h in pv._outputs(case, e)])  # fmt: skip
     if real not in outputs:  # no recorded origin can hold it: refused unhashed
         raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
-    sha = recorded_hash(case_dir, real) or sha256_file(Path(real))
+    done = completed() if completed is not None else None
+    sha = recorded_hash(case_dir, real, case=case, done=done) or sha256_file(Path(real))
     t = pv.trace_file(case, real, sha, **at)
     if t.grade != "FULL" and sha.startswith("pending:") and (
             (t.break_ or {}).get("kind") == "hash-pending"):  # fmt: skip

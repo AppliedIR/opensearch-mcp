@@ -320,3 +320,74 @@ def test_a_refused_runs_status_is_failed_with_the_reason_and_the_fix(case, tmp_p
     assert code != 0 and status["status"] == "failed" and status["pid"] == os.getpid()
     assert status["error"].startswith(f"not ingested: {refusal['refused']['reason']}")
     assert refusal["refused"]["fix"] in status["error"]
+
+
+def _made_many(case: Path, tmp_path: Path, shape: str, n: int = 20) -> tuple[dict, Path]:
+    """One operation that read a registered image and wrote `n` files: each
+    recorded `pending:<job>` and closed by its job's hash_complete row
+    (hashed), or recorded with its real hash and no row (inline)."""
+    image = tmp_path / "srv" / "host.E01"
+    image.parent.mkdir()
+    image.write_bytes(b"EVF\x09\x0d\x0a\xff\x00" + b"q" * 64)
+    reg = _register(case, image)
+    out = case / "extractions" / "rc-many" / "out"
+    out.mkdir(parents=True)
+    outputs, rows = [], []
+    for i in range(n):
+        f = out / f"f{i:02d}.csv"
+        f.write_text(f"x,y\n{i},{i}\n")
+        st = f.stat()
+        job = f"hash-{i:016x}"
+        outputs.append(_output(f, f"pending:{job}" if shape == "hashed" else _sha(f)))
+        row = {
+            "path": str(f),
+            "sha256": _sha(f),
+            "size": st.st_size,
+            "st_dev": st.st_dev,
+            "st_ino": st.st_ino,
+            "mtime_ns": st.st_mtime_ns,
+            "ctime_ns": st.st_ctime_ns,
+        }
+        rows.append({"ts": "2026-10-15T00:30:00+00:00", "audit_id": f"file-identity-{job}",
+                     "mcp": "file-identity", "tool": "hash_complete", "job_id": job,
+                     "files": [row]})  # fmt: skip
+    AuditWriter("sift-mcp", audit_dir=str(case / "audit")).log(
+        tool="run_command",
+        params={"command": f"extract {image} {out}"},
+        result_summary={"exit_code": 0},
+        extra={"inputs": [ops.place(image)],
+               "input_registered": [{"path": str(image.resolve()), "sha256": _sha(image)}],
+               "outputs": outputs},
+    )  # fmt: skip
+    if shape == "hashed":
+        (case / "audit" / "file-identity.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in rows)
+        )
+    return reg, out
+
+
+def _counted(monkeypatch, module, name: str) -> list:
+    calls: list = []
+    real = getattr(module, name)
+    monkeypatch.setattr(module, name, lambda *a, **k: calls.append(a) or real(*a, **k))
+    return calls
+
+
+def test_a_folder_of_hashed_outputs_reads_the_hash_log_once(case, tmp_path, monkeypatch):
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    reads = _counted(monkeypatch, fi, "_completed_rows")
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert len(reads) == 1  # not once per file
+
+
+def test_a_folder_of_outputs_hashed_inline_loads_the_case_once(case, tmp_path, monkeypatch):
+    from sift_common import provenance as pv
+
+    reg, out = _made_many(case, tmp_path, "inline")
+    loads = _counted(monkeypatch, pv, "load_case")
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert len(loads) == 1  # the gate's own: not one more per file
