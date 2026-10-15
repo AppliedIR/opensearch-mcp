@@ -528,6 +528,18 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
     return list(roots.values()), {}
 
 
+# what makes an input pass the gate: a declared origin (log_external_action)
+# grades DECLARED, which the gate refuses
+GATE_FIX = "re-make it with run_command from registered evidence, or register it as evidence"
+
+
+def _refused(real: str, t) -> Refused:
+    """The gate's refusal of `real`: the trace's own fix, unless it has none
+    or offers log_external_action, which can't make an input pass."""
+    fix = (t.break_ or {}).get("fix", "")
+    return Refused(real, t.reason, GATE_FIX if not fix or "log_external_action" in fix else fix)
+
+
 def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list[dict]:
     p = place(real)
     at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
@@ -538,7 +550,7 @@ def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list
     outputs = pv._index(case, "outputs", lambda e, line: [
         (os.path.realpath(o), (e, line, h)) for o, h in pv._outputs(case, e)])  # fmt: skip
     if real not in outputs:  # no recorded origin can hold it: refused unhashed
-        raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
+        raise _refused(real, t)
     done = completed() if completed is not None else None
     sha = recorded_hash(case_dir, real, done=done, held=held) or sha256_file(Path(real))
     t = pv.trace_file(case, real, sha, **at)
@@ -548,7 +560,7 @@ def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list
         t = pv.trace_op(case, made[-1]["audit_id"]) if made else t
     if t.grade == "FULL":
         return [{"path": r["path"], "sha256": r.get("sha256", "")} for r in t.roots]
-    raise Refused(real, t.reason, (t.break_ or {}).get("fix", ""))
+    raise _refused(real, t)
 
 
 def run_roots() -> list[dict]:
