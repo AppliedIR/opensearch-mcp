@@ -90,7 +90,7 @@ class Client:
     def _indices_exists(self, index):
         return index in self.existing
 
-    def _indices_create(self, index, body=None):
+    def _indices_create(self, index, body=None, **kw):
         self.existing.add(index)
         return {"acknowledged": True}
 

@@ -339,7 +339,7 @@ def prepare_index(client, index: str) -> None:
         if artifact_type_of(index) in HOST_SCALED_TYPES:
             body["settings"] = {"index": {"number_of_shards": HOST_SCALED_SHARDS}}
         try:
-            client.indices.create(index=index, body=body)
+            client.indices.create(index=index, body=body, request_timeout=60)
             _MARKED[index] = True
         except Exception as e:
             if "resource_already_exists" not in str(e):

@@ -23,6 +23,7 @@ import io
 import json
 
 import pytest
+from opensearchpy.exceptions import ConnectionTimeout
 
 from opensearch_mcp import mappings as mp
 from opensearch_mcp import ops, server
@@ -32,6 +33,7 @@ from opensearch_mcp.paths import build_index_name, stem_type
 from .test_cli_templates import (  # noqa: F401 (fixtures)
     Audit,
     Client,
+    _refused,
     _refused_write,
     files,
     sent,
@@ -147,6 +149,37 @@ def test_an_index_vhirs_template_governs_is_created(cluster):
     client = Cluster(outranked={"vhir-csv"}, simulate_fails=cluster == "unanswered")
     index = write(client, "json")
     assert client.named("indices.create") == [index] and client.named("_bulk") == [index]
+
+
+class Slow(Cluster):
+    """Creates an index only for a caller that waits long enough: OpenSearch
+    takes up to 30 s to allocate a new index's shards. `made` creates it
+    elsewhere first, so the create is refused as already there."""
+
+    def __init__(self, *a, made=False, **kw):
+        super().__init__(*a, **kw)
+        self.made = made
+
+    def _indices_create(self, index, body=None, **kw):
+        if self.made:
+            raise _refused("resource_already_exists_exception", f"index [{index}] exists")
+        if kw.get("request_timeout", 10) < 30:
+            raise ConnectionTimeout("TIMEOUT", "Read timed out. (read timeout=10)", None)
+        return super()._indices_create(index, body)
+
+
+@pytest.mark.usefixtures("sent")
+def test_an_index_whose_shards_are_slow_to_allocate_is_created():
+    client = Slow()
+    index = write(client, "json")
+    assert client.named("indices.create") == [index] and client.named("_bulk") == [index]
+
+
+@pytest.mark.usefixtures("sent")
+def test_an_index_created_elsewhere_first_is_written():
+    client = Slow(made=True)
+    index = write(client, "json")
+    assert client.named("_bulk") == [index]
 
 
 @pytest.mark.usefixtures("sent")
