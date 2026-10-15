@@ -4,13 +4,18 @@ On a SANS SIFT OVA, Volatility 3 2.27.0 can't save the symbols it downloads
 (its folder is root-owned), so every Windows plugin failed, and the ingest
 still ended "complete" with 0 documents. The cause was only in the log. It
 now ends "failed" with the first stderr line that names the cause, plus the
-SIFT update when the cause is the symbol write. Volatility is a stub script
-printing 2.27.0's stderr as measured on the OVA (windows.pslist, no -s).
+SIFT update when the cause is the symbol write. Volatility is a stub script.
+STDERR_2_27 is 2.27.0's output on the OVA (windows.pslist, no -s) with both
+streams in one capture; most rows print all of it to stderr. Real 2.27.0
+prints the "Unsatisfied requirement" lines to stdout (STDOUT_2_27 and
+STDERR_2_27_SPLIT below), and one row runs that split.
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
+import zipfile
 from unittest import mock
 
 import pytest
@@ -41,14 +46,35 @@ STDERR_2_27 = "\n".join(
         "",
     ]
 )
+# 2.27.0's real split with the ingest's flags (--renderer json -q): the
+# requirement report on stdout; the banner, the log lines and the summary on
+# stderr
+STDOUT_2_27 = "\n".join(
+    [
+        "",
+        "Unsatisfied requirement plugins.PsList.kernel.symbol_table_name: ",
+        "",
+        "A symbol table requirement was not fulfilled.  Please verify that:",
+        "\tThe associated translation layer requirement was fulfilled",
+        "\tYou have the correct symbol file for the requirement",
+        "\tThe symbol file is under the correct directory or zip file",
+        "\tThe symbol file is named appropriately or contains the correct banner",
+        "",
+    ]
+)
+STDERR_2_27_SPLIT = "\n".join(
+    line for line in STDERR_2_27.split("\n") if not line.startswith("Unsatisfied")
+)
 UNREADABLE = "Volatility 3 Framework 2.28.2\nUnable to validate the plugin requirements: []\n"
 
 # Answers the pre-flight (windows.info) when INFO_OK is set; every other run
-# prints $VOL_STDERR's text and exits 1, or nothing and 0 for $VOL_EMPTY.
+# prints $VOL_STDOUT's text (if any) to stdout and $VOL_STDERR's to stderr and
+# exits 1, or prints nothing and exits 0 for $VOL_EMPTY.
 STUB = """#!/bin/sh
 for a in "$@"; do last="$a"; done
 if [ "$last" = "windows.info" ] && [ -n "$INFO_OK" ]; then exit 0; fi
 if [ "$last" = "$VOL_EMPTY" ]; then exit 0; fi
+if [ -n "$VOL_STDOUT" ]; then cat "$VOL_STDOUT"; fi
 cat "$VOL_STDERR" >&2
 exit 1
 """
@@ -61,6 +87,7 @@ def ingest(tmp_path, monkeypatch):
     stub.chmod(0o755)
     stderr = tmp_path / "stderr.txt"
     monkeypatch.setenv("VOL_STDERR", str(stderr))
+    stdout = tmp_path / "stdout.txt"
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     monkeypatch.setattr(cli, "get_client", lambda: mock.MagicMock())
     for name in ("_preflight_shard_capacity", "_ensure_case_active"):
@@ -74,20 +101,27 @@ def ingest(tmp_path, monkeypatch):
     image = tmp_path / "m.raw"
     image.write_bytes(b"\0" * 64)
 
-    def run(text: str, plugins: str, run_id: str, info_ok=True, empty=""):
+    def run(text: str, plugins: str, run_id: str, info_ok=True, empty="", out="", path=None):
+        """The run's status, with the ingest's exit code under "exit"."""
         stderr.write_text(text)
+        stdout.write_text(out)
+        monkeypatch.setenv("VOL_STDOUT", str(stdout) if out else "")
         monkeypatch.setenv("INFO_OK", "1" if info_ok else "")
         monkeypatch.setenv("VOL_EMPTY", empty)
         monkeypatch.setenv("VHIR_INGEST_RUN_ID", run_id)
         args = argparse.Namespace(
-            path=str(image), case="c1", hostname="h", tier=1, plugins=plugins,
+            path=str(path or image), case="c1", hostname="h", tier=1, plugins=plugins,
             yes=True, timeout=10,
         )  # fmt: skip
-        cli.cmd_ingest_memory(args)
+        code = 0
+        try:
+            cli.cmd_ingest_memory(args)
+        except SystemExit as e:
+            code = e.code
         (status,) = [
             s for s in srv.idx_ingest_status(case_id="c1")["ingests"] if s["run_id"] == run_id
         ]
-        return status
+        return {**status, "exit": code}
 
     return run
 
@@ -95,6 +129,7 @@ def ingest(tmp_path, monkeypatch):
 def test_every_plugin_failing_to_save_symbols_fails_the_run_and_names_the_update(ingest, capsys):
     status = ingest(STDERR_2_27, "windows.pslist,windows.netscan", "mem-a")
     assert (status["status"], status["halt_reason"]) == ("failed", "all_plugins_failed")
+    assert status["exit"] == 1  # as every failed ingest exits
     # whole, not cut at 200 characters: the update comes after the cause
     assert status["message"] == (
         "Ingest failed (all_plugins_failed): every plugin failed (2); "
@@ -104,12 +139,54 @@ def test_every_plugin_failing_to_save_symbols_fails_the_run_and_names_the_update
 
 
 def test_the_pre_flight_finding_it_fails_the_run_and_names_the_update(ingest, capsys):
+    """The stub models a build printing "Unsatisfied requirement" to stderr.
+    Real 2.27.0 prints it to stdout (measured with --renderer json -q, on
+    windows.info and windows.pslist), so there the pre-flight doesn't fire:
+    the next row runs that split."""
     status = ingest(STDERR_2_27, "windows.pslist", "mem-b", info_ok=False)
     assert (status["status"], status["halt_reason"]) == ("failed", "all_plugins_failed")
     assert status["message"].endswith(f"the first cause: {SYMBOL_WRITE}. {pm.SYMBOL_WRITE_FIX}")
     # its own hint (download the symbols) would not help: the write fails
     err = capsys.readouterr().err
     assert pm.SYMBOL_WRITE_FIX in err and "Download symbols" not in err
+
+
+def test_2_27s_real_split_fails_the_run_with_the_symbol_write_cause(ingest, capsys):
+    status = ingest(
+        STDERR_2_27_SPLIT, "windows.pslist,windows.netscan", "mem-g",
+        info_ok=False, out=STDOUT_2_27,
+    )  # fmt: skip
+    assert (status["status"], status["halt_reason"]) == ("failed", "all_plugins_failed")
+    # the pre-flight read stderr and found no "Unsatisfied": both plugins ran
+    assert status["message"] == (
+        "Ingest failed (all_plugins_failed): every plugin failed (2); "
+        f"the first cause: {SYMBOL_WRITE}. {pm.SYMBOL_WRITE_FIX}"
+    )
+    assert "sudo cast install teamdfir/sift" in status["message"]
+    assert status["exit"] == 1
+
+
+@pytest.mark.skipif(not shutil.which("7z"), reason="needs 7z")
+def test_an_archive_whose_every_image_failed_fails(ingest, tmp_path, monkeypatch):
+    from opensearch_mcp import ops
+
+    monkeypatch.setattr(ops, "extraction_step", mock.MagicMock())
+    archive = tmp_path / "mem.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        for name in ("a.raw", "b.raw"):
+            z.writestr(name, b"\0" * 64)
+    status = ingest(STDERR_2_27, "windows.pslist", "mem-h", path=archive)
+    assert status["status"] == "failed"
+    assert status["exit"] == 1
+    (raw,) = [r for r in ingest_status.read_active_ingests() if r["run_id"] == "mem-h"]
+    assert raw["totals"] == {"images": 2, "images_failed": 2}
+    assert raw["error"] == "images that failed: a.raw (exit 1); b.raw (exit 1)"
+    images = {
+        s["run_id"]: s["status"]
+        for s in srv.idx_ingest_status(case_id="c1")["ingests"]
+        if s["run_id"].startswith("mem-h-")
+    }
+    assert images == {"mem-h-1": "failed", "mem-h-2": "failed"}
 
 
 def test_another_cause_is_named_without_the_update(ingest):

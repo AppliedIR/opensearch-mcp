@@ -1837,9 +1837,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 skipped = hb_results.get("skipped") if isinstance(hb_results, dict) else None
                 if skipped or failed_hosts:
                     why = (
-                        f"detections skipped: {skipped}. Install hayabusa on the PATH "
-                        "(https://github.com/Yamato-Security/hayabusa/releases) "
-                        "and re-run the ingest."
+                        f"detections skipped: {skipped}. Install it with "
+                        "`sudo cast install teamdfir/sift` (Hayabusa 3.8.1 with the "
+                        "rest of SIFT) or `vhir setup hayabusa` (the current Hayabusa "
+                        "only), then re-run the ingest."
                         if skipped
                         else "; ".join(
                             f"{host}: {v.get('error', 'failed')}"
@@ -3362,6 +3363,8 @@ def cmd_ingest_memory(args: argparse.Namespace, examiner: str = "unknown") -> No
         import shutil
 
         shutil.rmtree(_mem_extract_dir, ignore_errors=True)
+    if error:  # as every failed ingest does, so an archive's loop counts it
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
