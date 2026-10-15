@@ -94,7 +94,11 @@ def test_start_now_then_an_unchanged_confirm_marks_then_unmarks_and_rewrites_not
 
 
 def test_a_run_whose_hosts_are_confirmed_answers_started_at_once(client, tmp_path, monkeypatch):
-    """A real worker: the launch waits for it to pass the gate, then says so."""
+    """A real worker: the launch waits for it to pass the gate, then says so,
+    and the worker stores the row. It writes under vhir's own templates, which
+    it installs at its first write: template copies for this case would
+    outrank them, and the worker, a process of its own, refuses an index
+    whose vhir template is outranked."""
     import os
     import shutil
     import time
@@ -123,7 +127,15 @@ def test_a_run_whose_hosts_are_confirmed_answers_started_at_once(client, tmp_pat
     confirm_unit(case_dir, rows, "h1")  # the examiner confirmed it already
     register(case_dir, rows)
     c12 = wc.case_identity(case_dir)[0]
-    created = _scratch_templates.install(client, f"gr-{c12}", c12=c12)
+
+    def settled():  # the worker has ended
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            runs = [r for r in ingest_status.read_active_ingests() if r.get("case_id") == cid]
+            if not any(r.get("status") in ("running", "starting") for r in runs):
+                return
+            time.sleep(0.5)
+
     try:
         t0 = time.monotonic()
         resp = srv.idx_ingest_delimited(
@@ -132,12 +144,9 @@ def test_a_run_whose_hosts_are_confirmed_answers_started_at_once(client, tmp_pat
         assert resp["status"] == "started", resp
         assert time.monotonic() - t0 < srv._GATE_ANSWER_SECONDS
         assert "hosts_note" not in resp
+        settled()
+        client.indices.refresh(index=f"case-{c12}-*")
+        assert client.count(index=f"case-{c12}-delim-*")["count"] == 1  # the row is stored
     finally:
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:  # let the worker end before the cleanup
-            runs = [r for r in ingest_status.read_active_ingests() if r.get("case_id") == cid]
-            if not any(r.get("status") in ("running", "starting") for r in runs):
-                break
-            time.sleep(0.5)
+        settled()  # before the cleanup
         client.indices.delete(index=f"case-{c12}-*", ignore=[404])
-        _scratch_templates.remove(client, created)
