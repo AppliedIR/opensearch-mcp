@@ -418,3 +418,32 @@ def test_a_later_file_changed_after_the_hash_log_was_read_is_refused(case, tmp_p
     assert refused.value.path == str(later)
     now = later.stat()
     assert (now.st_ino, now.st_size, now.st_mtime_ns) == (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def test_a_file_deleted_after_the_walk_is_skipped(case, tmp_path, monkeypatch):
+    """A file gone by the time its turn comes is skipped, as when each file was
+    looked at as the walk reached it: the gate takes the rest, not an error."""
+    from sift_common import file_identity as fi
+
+    reg, out = _made_many(case, tmp_path, "hashed")
+    later = out / "f05.csv"  # not f00, whose gate reads the log
+    real = fi.completed_hashes
+
+    def then_delete(case_dir, paths):
+        found = real(case_dir, paths)
+        later.unlink(missing_ok=True)
+        return found
+
+    monkeypatch.setattr(fi, "completed_hashes", then_delete)
+    gated: list = []
+    real_gate_file = ops._gate_file
+    monkeypatch.setattr(
+        ops,
+        "_gate_file",
+        lambda pv, case, case_dir, f, *a: (
+            gated.append(f) or real_gate_file(pv, case, case_dir, f, *a)
+        ),
+    )
+    roots, folder = ops.gate(case, out)
+    assert roots == [reg] and folder == {}
+    assert str(later) not in gated and len(gated) == 19

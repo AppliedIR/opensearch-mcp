@@ -475,7 +475,7 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
         return _gate_file(pv, case, case_dir, real), {}
     from sift_common import file_identity as fi
 
-    files, keys = [], {}  # each file's stat key, taken before the hash log is
+    files, keys = [], {}  # each file's stat key, taken before the hash log is read
     for top, dirs, names in os.walk(real):
         dirs.sort()
         for n in sorted(names):
@@ -496,7 +496,8 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
 
     roots: dict = {}
     for f in files:
-        roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed))
+        if os.path.isfile(f) and not os.path.islink(f):  # one gone since the walk is skipped
+            roots.update((r["path"], r) for r in _gate_file(pv, case, case_dir, f, completed))
     return list(roots.values()), {}
 
 
