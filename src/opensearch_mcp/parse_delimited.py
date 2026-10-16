@@ -119,8 +119,9 @@ def _parse_zeek_header(path: Path) -> list[str]:
     return []
 
 
-def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
-    """Yield row dicts."""
+def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None, dropped=None):
+    """Yield row dicts. A Zeek or bodyfile data line with the wrong number of
+    fields isn't yielded; each one adds 1 to dropped[0] when dropped is given."""
     delim = delimiter or fmt.get("delimiter", ",")
     format_name = fmt.get("format", "csv")
 
@@ -135,6 +136,8 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
                     continue
                 values = line.split("\t")
                 if len(values) != len(fields):
+                    if dropped is not None:
+                        dropped[0] += 1
                     continue
                 yield {f: (None if v in _ZEEK_NULL else v) for f, v in zip(fields, values)}
 
@@ -146,6 +149,8 @@ def _iter_delimited(path: Path, fmt: dict, delimiter: str | None = None):
                     continue
                 parts = line.split("|")
                 if len(parts) != 11:
+                    if dropped is not None:
+                        dropped[0] += 1
                     continue
                 row = dict(zip(_BODYFILE_COLUMNS, parts))
                 for ts_col in ("atime", "mtime", "ctime", "crtime"):
@@ -236,6 +241,9 @@ def ingest_delimited(
 ) -> tuple[int, int, int, int]:
     """Ingest delimited file. Returns (indexed, skipped, bulk_failed, host_renamed).
 
+    skipped: rows outside the time window, and Zeek or bodyfile lines with the
+    wrong number of fields.
+
     on_progress: optional callable(indexed_so_far) for status updates on large files.
     id_root: a Hayabusa run's temp directory. An `EvtxFile` under it is hashed
     relative to it, so another run of the same image or archive (in another
@@ -260,7 +268,8 @@ def ingest_delimited(
     if format_name == "bodyfile" and not ts_field:
         ts_field = "mtime"
 
-    for record in _iter_delimited(path, fmt, delimiter):
+    dropped = [0]  # Zeek and bodyfile lines of the wrong field count
+    for record in _iter_delimited(path, fmt, delimiter, dropped):
         literal = record.get("@timestamp")  # the row's own, before a time field overwrites it
         if ts_field is None:
             ts_field = auto_detect_time_field(record)
@@ -363,4 +372,4 @@ def ingest_delimited(
         NO_TIME_FIELD.append(str(path.absolute()))
     if not_understood:
         TIME_NOT_UNDERSTOOD.append((str(path.absolute()), ts_field, not_understood))
-    return count, skipped, bulk_failed, host_renamed
+    return count, skipped + dropped[0], bulk_failed, host_renamed
