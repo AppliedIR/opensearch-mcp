@@ -859,6 +859,9 @@ def _detect_hostnames_from_filenames(path: Path, skipped: list | None = None) ->
     Supports two patterns:
     - Suffix: EvtxECmd-hostname.csv (ZimmermanTools)
     - Prefix: hayabusa-caseid-hostname.csv (Hayabusa pipeline output)
+    Each file's host is names_scan.filename_host's, its folder the context:
+    Kansa's hostname-Module.csv in a folder named for the host, or under
+    Kansa's Output_<14 digits>/<Module>/, gives the host, not the module.
     """
     if not path.is_dir():
         return set()
@@ -869,13 +872,13 @@ def _detect_hostnames_from_filenames(path: Path, skipped: list | None = None) ->
     files = files[:50]
     if not files:
         return set()
-    # Suffix pattern: tool-hostname.csv
+    from opensearch_mcp.names_scan import filename_host
+
     suffix_counts: Counter = Counter()
-    # Prefix pattern: tool-caseid-hostname.csv (last segment after last -)
     for f in files:
-        parts = f.stem.rsplit("-", 1)
-        if len(parts) == 2 and len(parts[1]) >= 2:
-            suffix_counts[parts[1].lower()] += 1
+        named = filename_host(f)
+        if named:
+            suffix_counts[named.lower()] += 1
     threshold = len(files) * 0.3
     return {h for h, c in suffix_counts.items() if c >= threshold}
 
