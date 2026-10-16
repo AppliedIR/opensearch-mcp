@@ -562,12 +562,13 @@ def _sum_counts(runs: list[tuple]) -> dict:
     return total if any(indexed for indexed, _ in runs) else {}
 
 
-def _filename_host(path: Path) -> str:
-    """The host a file's name gives, as server._detect_hostnames_from_filenames
-    reads it: the stem's last `-` segment (Tool-HOST.csv,
-    hayabusa-case-HOST.csv), lower-cased; "" when there is none."""
-    parts = path.stem.rsplit("-", 1)
-    return parts[1].lower() if len(parts) == 2 and len(parts[1]) >= 2 else ""
+def _filename_host(path: Path, hosts=()) -> str:
+    """The host a file's name gives (names_scan.filename_host, knowing the
+    hosts the run splits by: Kansa's <host>-<Module>.csv gives the host),
+    lower-cased; "" when there is none."""
+    from opensearch_mcp.names_scan import filename_host
+
+    return filename_host(path, hosts).lower()
 
 
 def _terminal_status(
@@ -2412,7 +2413,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             [] if is_recursive else sorted(_listed(input_path, lambda f: f.suffix.lower() in exts))
         )
         wanted = {h.lower() for h in auto_hosts}
-        unattributed = [f.name for f in flat if _filename_host(f) not in wanted]
+        unattributed = [f.name for f in flat if _filename_host(f, wanted) not in wanted]
         if unattributed:
             print(
                 f"Skipped {len(unattributed)} file(s) whose name gives none of the hosts "
@@ -2428,7 +2429,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             # (a recursive sub-run gates its own walk; a dry run writes nothing)
             _gate_walk(case_id, [
                 (input_path, h, _delim_files(input_path, [f for f in flat
-                                                          if _filename_host(f) == h.lower()]))
+                                                          if _filename_host(f, wanted)
+                                                          == h.lower()]))
                 for h in auto_hosts
             ], run_id or "")  # fmt: skip
         was_walking, _walking.active = getattr(_walking, "active", False), True
@@ -2437,7 +2439,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             sub_args.hostname = h
             sub_args.auto_hosts = ""
             if not is_recursive:
-                sub_args.only_files = [f for f in flat if _filename_host(f) == h.lower()]
+                sub_args.only_files = [f for f in flat if _filename_host(f, wanted) == h.lower()]
             print(f"\n--- Host: {h} ---")
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
             missed.extend(NO_TIME_FIELD)

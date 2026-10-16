@@ -468,12 +468,63 @@ def memory_unit(
     return unit
 
 
-def filename_host(path: Path) -> str:
-    """The host a file's name gives, as written: the stem's last `-` segment
-    (Tool-HOST.csv, hayabusa-case-HOST.csv); "" when there is none. The
-    auto-hosts detector reads the same segment, lower-cased."""
-    parts = Path(path).stem.rsplit("-", 1)
-    return parts[1] if len(parts) == 2 and len(parts[1]) >= 2 else ""
+_KANSA_RUN = re.compile(r"Output_\d{14}")
+# A DNS name (ASCII labels, the last all letters) or an IPv4 address.
+_DOTTED_HOST = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.[A-Za-z]{2,}")
+_IPV4 = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}")
+
+
+def _dotted_host(name: str) -> bool:
+    """Whether a name is written like a DNS name or an IPv4 address."""
+    if _IPV4.fullmatch(name):
+        return all(int(octet) <= 255 for octet in name.split("."))
+    return bool(_DOTTED_HOST.fullmatch(name))
+
+
+def _host_forms(name: str) -> set[str]:
+    """A name and its first DNS label, lower-cased, for comparing hosts."""
+    name = name.strip().lower()
+    return {name, name.split(".")[0]} - {""}
+
+
+def filename_host(path: Path, known=()) -> str:
+    """The host a file's name gives, as written; "" when there is none.
+
+    A stem `<left>-<last>` (split at its last `-`) names one of its parts:
+    `<last>` when it is a host this file is known by (its folder's name, or
+    one of `known`: a hostname argument, the hosts a run splits by), as in
+    Tool-HOST.csv; else `<left>` when that is one, as in Kansa's
+    <host>-<Module>.csv; else `<left>` when `<last>` is all digits (a date,
+    as in HOST-20261016.evtx: a computer name is never all digits); else
+    `<last>` (Tool-HOST.csv, hayabusa-case-HOST.csv). Names compare
+    case-insensitively, a part and a known host also by their first DNS
+    label (the folder's name whole: it may be a file's). One layout comes
+    first: Kansa's <Module>/<host>-<Module>.csv, where `<last>` is the
+    folder's name and `<left>` the host. It is told from a host folder of
+    Tool-HOST.csv files (`rd01/EvtxECmd-rd01.csv`) by the folder above
+    (Output_<14 digits>) or by a `<left>` written as a DNS name (ASCII
+    labels, the last all letters) or an IPv4 address. A dotted tool or case
+    part (hayabusa-2.16, EvtxECmd.v1, INC2023.001) is neither.
+    ingest_cli's split of a folder by host and server's detector read file
+    names with this rule too."""
+    path = Path(path)
+    parts = path.stem.rsplit("-", 1)
+    if len(parts) != 2 or len(parts[1]) < 2:
+        return ""
+    left, last = parts
+    folder = path.parent.name.lower()
+    if (
+        left
+        and last.lower() == folder
+        and (_KANSA_RUN.fullmatch(path.parent.parent.name) or _dotted_host(left))
+    ):
+        return left
+    hosts = {folder}.union(*(_host_forms(str(h)) for h in known if h))
+    if _host_forms(last) & hosts:
+        return last
+    if left and (_host_forms(left) & hosts or last.isdigit()):
+        return left
+    return last
 
 
 def files_unit(path: Path, hostname: str, files: list[Path], case_dir: Path | None) -> Unit:
@@ -481,7 +532,7 @@ def files_unit(path: Path, hostname: str, files: list[Path], case_dir: Path | No
     unit = Unit(locator=_rel(case_dir, path), source="log files")
     unit.add(hostname, "hostname argument", ARGUMENT)
     for f in files:
-        named = filename_host(f)
+        named = filename_host(f, (hostname,))
         if named:
             unit.add(named, f"{f.name} file name", FILE_NAME)
     _add_row_names(unit, [f for f in files if f.suffix.lower() in _ROW_SUFFIXES], case_dir)
