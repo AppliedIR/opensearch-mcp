@@ -45,16 +45,44 @@ def _entry(base, location):
         return None
 
 
+def _separator(base) -> str:
+    """The leaf file system's path separator ("\\" on NTFS and FAT), or "/"
+    when the file system can't be opened."""
+    try:
+        return resolver.Resolver.OpenFileSystem(base).PATH_SEPARATOR or "/"
+    except Exception:
+        return "/"
+
+
+def _windows_root(base) -> bool:
+    """Windows/System32 at the volume root, or under a folder of 4 characters
+    or fewer there (a KAPE layout's drive letter, C/Windows/System32), as
+    discover.find_volume_root looks for it on a mount."""
+    sep = _separator(base)
+    if _entry(base, sep.join(("", "Windows", "System32"))) is not None:
+        return True
+    root = _entry(base, sep)
+    try:
+        children = [c.name for c in root.sub_file_entries if c.IsDirectory()] if root else []
+    except Exception:
+        return False
+    for name in children:
+        if not name or len(name) > 4 or name.startswith("."):
+            continue
+        if _entry(base, sep.join(("", name, "Windows", "System32"))) is not None:
+            return True
+    return False
+
+
 def _os_and_zone(base) -> dict:
     out = {}
-    for os_name, marker in (
-        ("windows", "/Windows/System32"),
-        ("macos", "/System/Library"),
-        ("linux", "/etc"),
-    ):
-        if _entry(base, marker) is not None:
-            out["os"] = os_name
-            break
+    if _windows_root(base):
+        out["os"] = "windows"
+    else:  # these keep "/": a "\" file system with a root etc folder stays unmarked
+        for os_name, marker in (("macos", "/System/Library"), ("linux", "/etc")):
+            if _entry(base, marker) is not None:
+                out["os"] = os_name
+                break
     if out.get("os") in ("macos", "linux"):
         for location in ("/etc/localtime", "/private/etc/localtime"):
             fe = _entry(base, location)

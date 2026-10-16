@@ -329,10 +329,11 @@ def test_two_windows_installs_force_no_name_and_are_listed(tmp_path, registry, c
     assert ingest_cli._hostname_from_volumes(volumes, notes, "dual-boot-0a1b2c3d") is None
     ((label, note),) = notes
     assert label == "hostname"
-    assert note.startswith(
+    assert note == (
         "2 OS installs on this image (vol1: windows WIN10A, vol2: windows WIN11B); "
         "each is ingested as its own host (dual-boot-0a1b2c3d-vol1, dual-boot-0a1b2c3d-vol2). "
-        "Pass --hostname only if"
+        "The names come from the evidence: confirm in the Portal's Hosts tab whether they "
+        "are one machine"
     )
     assert note in capsys.readouterr().err
 
