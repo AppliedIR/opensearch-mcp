@@ -24,8 +24,8 @@ pytestmark = pytest.mark.host_gate
 WAITING = "Waiting for host confirmation"
 CUT = (
     ". Only 50 of the 696 waiting entries are listed: one for each host name in "
-    "each image, folder or archive, and one for each with no host name. The "
-    "Portal's Hosts tab lists every one"
+    "each file, folder, image or archive, and one for each of those with no host "
+    "name. The Portal's Hosts tab lists every one"
 )
 
 
