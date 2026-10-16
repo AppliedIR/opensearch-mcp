@@ -16,7 +16,7 @@ Forensic evidence indexing for [Valhuntir](https://github.com/AppliedIR/Valhunti
 
 A KAPE triage collection from 30 hosts produces ~50 million evidence records across hundreds of artifact types. An LLM reading these directly would consume billions of tokens and still miss patterns buried in the noise.
 
-opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM 17 purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits. The LLM focuses on investigation logic. The parsers handle the data.
+opensearch-mcp solves this by **parsing evidence programmatically and indexing it into OpenSearch**, then giving the LLM purpose-built query tools. The LLM asks structured questions ("show me all 4688 events where the parent process is cmd.exe") and gets precise answers — no token waste on raw log parsing, no missed evidence from context window limits. The LLM focuses on investigation logic. The parsers handle the data.
 
 ## What It Does
 
