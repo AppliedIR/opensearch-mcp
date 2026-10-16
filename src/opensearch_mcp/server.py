@@ -498,8 +498,8 @@ def _strip_hits(
     """Extract _source from hits with field exclusion and truncation.
 
     Default behavior (compact): excludes bloat fields and truncates
-    values > 500 chars. Pass empty exclude_fields and large max_chars
-    for full documents.
+    values > 500 chars; an object or list over that is cut from its JSON.
+    Pass empty exclude_fields and large max_chars for full documents.
     """
     results = []
     for hit in hits:
@@ -514,7 +514,10 @@ def _strip_hits(
         for key, val in src.items():
             if key in exclude_fields:
                 continue
-            sval = str(val) if not isinstance(val, str) else val
+            # an object or list is cut as JSON, never as a Python repr
+            sval = (
+                val if isinstance(val, str) else json.dumps(val, ensure_ascii=False, default=str)
+            )
             if len(sval) > max_chars:
                 doc[key] = sval[:max_chars] + "..."
                 truncated_fields.append(key)
