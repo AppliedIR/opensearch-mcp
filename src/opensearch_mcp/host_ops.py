@@ -361,7 +361,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _busy_reason(case_dir: Path) -> str:
+def _busy_reason(case_dir: Path, op) -> str:
     from opensearch_mcp.ingest_status import read_active_ingests
 
     try:
@@ -372,10 +372,12 @@ def _busy_reason(case_dir: Path) -> str:
         ]
     except Exception:
         runs = []
+    kind = op.get("kind") if isinstance(op, dict) else None
+    again = f"{kind} again" if kind in KINDS else "try again"
     if not runs:
-        return "a process holds the case lock"
+        return f"a process holds the case lock; {again} when it finishes"
     named = ", ".join(f"{r.get('run_id') or r.get('pid')} ({r.get('status')})" for r in runs)
-    return f"runs are writing into the case: {named}"
+    return f"runs are writing into the case: {named}; {again} when they finish"
 
 
 def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, client=None,
@@ -392,7 +394,7 @@ def run(case_dir, op: dict | None, examiner: str, resume: str | None = None, cli
     try:
         held.enter_context(hi.case_lock(root, shared=False))
     except hi.CaseLockBusy:
-        raise HostOpRefused(_busy_reason(root)) from None
+        raise HostOpRefused(_busy_reason(root, op)) from None
     with held:
         return _run_locked(root, op, examiner, resume, client, case_identity(root)[0], expect)
 
