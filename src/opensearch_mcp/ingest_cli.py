@@ -188,11 +188,12 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
             )
             for h in summary["hosts"]:
                 print(f"  {h['locator']}: {h['raw'] or '(none)'}: {h['reason']}", file=sys.stderr)
-        if run:
+        if run:  # the note is the line above; raw and locator as fields too
             hosts = [
                 {"hostname": h["raw"] or h["locator"],
                  "artifacts": [{"name": "host confirmation", "status": "awaiting",
-                                "note": f"{h['locator']}: {h['reason']}"}]}
+                                "note": f"{h['locator']}: {h['raw'] or '(none)'}: {h['reason']}",
+                                "raw": h["raw"], "locator": h["locator"]}]}
                 for h in summary["hosts"]
             ]  # fmt: skip
             write_status(case_id, os.getpid(), run, AWAITING, hosts,

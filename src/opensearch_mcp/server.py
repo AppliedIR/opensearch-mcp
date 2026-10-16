@@ -629,6 +629,18 @@ def _hayabusa_query(query: str, expr: str, case_id: str = "", client=None) -> st
 _GATE_ANSWER_SECONDS = 10.0  # how long a launch waits to say whether the run waits
 
 
+def _awaited_names(data: dict):
+    """The raw names an awaiting status waits on; a unit with no name shows
+    as `(no name) <locator>`. A status written without the raw field gives
+    its host's name."""
+    for h in data.get("hosts") or []:
+        for a in h.get("artifacts") or []:
+            if "locator" not in a:
+                yield str(h.get("hostname", ""))
+            else:
+                yield str(a.get("raw") or f"(no name) {a['locator']}")
+
+
 def _answer_after_gate(resp: dict, case_id: str, pid: int, run_id: str) -> dict:
     """Say whether a just-started run waits for host confirmation: watch its
     status until the worker passes the gate, waits at it, or ends. A run
@@ -651,6 +663,8 @@ def _answer_after_gate(resp: dict, case_id: str, pid: int, run_id: str) -> dict:
                 for h in data.get("hosts") or []
                 for a in h.get("artifacts") or []
             ]
+            if not resp.get("hosts"):  # each raw name it waits on, once
+                resp["hosts"] = list(dict.fromkeys(_awaited_names(data)))
             resp.update(
                 status=AWAITING,
                 unresolved=(data.get("totals") or {}).get("unresolved", len(hosts)),
@@ -2854,7 +2868,9 @@ def idx_ingest_status(case_id: str = "") -> dict:
                         f"{len(skipped)} file(s) not ingested: their names give none of the "
                         f"detected hosts ({shown}). Ingest them with an explicit hostname."
                     )
-                if a.get("note"):
+                if a.get("note") and "locator" in a:  # it names its locator and raw name
+                    s.setdefault("warnings", []).append(a["note"])
+                elif a.get("note"):
                     s.setdefault("warnings", []).append(f"{hostname}: {a['note']}")
                 if a.get("not_read"):
                     unread = a["not_read"]
