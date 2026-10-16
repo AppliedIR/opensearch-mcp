@@ -228,6 +228,32 @@ def test_a_busy_case_names_the_runs_writing_into_it(case, tmp_path, monkeypatch)
     assert hi.read_ops(case)["ops"] == {}
 
 
+@pytest.mark.parametrize(
+    "op, again",
+    [({"kind": "merge", "into": "A", "from": ["B"]}, "merge again"),
+     ({"kind": "rename", "machine": "A", "canonical": "X"}, "rename again"),
+     ({"kind": "split", "machine": "A", "keys": ["B"], "canonical": "X"}, "split again"),
+     ({"kind": "merge\n[evil]"}, "try again"), ({"kind": ["merge"]}, "try again"),
+     (None, "try again")],
+)  # fmt: skip
+@pytest.mark.parametrize("writing", [True, False], ids=["runs", "no runs"])
+def test_a_busy_case_says_to_ask_again_when_it_is_free(case, tmp_path, monkeypatch, op,
+                                                       again, writing):  # fmt: skip
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setattr(ingest_status, "_is_process_alive", lambda pid, run_id: True)
+    if writing:
+        ingest_status.write_status(case.name, os.getpid(), "run-77", "running", [], {}, "t0")
+    with hi.case_lock(case, shared=True):
+        with pytest.raises(host_ops.HostOpRefused) as e:
+            host_ops.run(case, op, "ex1", client=object())
+    assert str(e.value) == (
+        f"runs are writing into the case: run-77 (running); {again} when they finish"
+        if writing
+        else f"a process holds the case lock; {again} when it finishes"
+    )
+    assert hi.read_ops(case)["ops"] == {}
+
+
 def test_a_killed_lock_holder_lets_the_operation_take_the_case(case):
     """A writer holding the case shared, SIGKILLed with no cleanup."""
     import signal
