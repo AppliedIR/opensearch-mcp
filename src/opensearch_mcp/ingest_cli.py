@@ -22,7 +22,7 @@ from opensearch_mcp import write_context as wc
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest import discover, ingest
 from opensearch_mcp.ingest_counts import describe, stored_counts
-from opensearch_mcp.ingest_status import write_status
+from opensearch_mcp.ingest_status import left_out, write_status
 from opensearch_mcp.memory_tiers import TIERS
 from opensearch_mcp.parse_csv import ingest_csv
 from opensearch_mcp.paths import (
@@ -472,8 +472,16 @@ def _write_bg_status(
     skipped_files=None,
     not_read=None,
     note="",
+    rows_skipped=None,
+    files_not_read=0,
+    hosts_total=1,
+    hosts_failed=0,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
+
+    `rows_skipped` (a run's end) puts what it left out in the artifact: its
+    rows skipped and its `files_not_read`. `hosts_total`: the hosts a split
+    by host ingested (`hosts_failed` of them failed), 1 for one host.
 
     UAT 2026-04-23 follow-up: `status` is now passed through verbatim
     instead of being coerced to "complete"/"running". Callers can pass
@@ -512,6 +520,9 @@ def _write_bg_status(
         art["files_total"] = files_total
     if files_done:
         art["files_done"] = files_done
+    if rows_skipped is not None:
+        art["rows_skipped"] = rows_skipped
+        art["files_not_read"] = files_not_read
     done = 1 if status == "complete" else 0
     write_status(
         case_id=case_id,
@@ -523,8 +534,8 @@ def _write_bg_status(
             "indexed": indexed,
             "artifacts_complete": done,
             "artifacts_total": 1,
-            "hosts_total": 1,
-            "hosts_complete": done,
+            "hosts_total": hosts_total,
+            "hosts_complete": max(hosts_total - hosts_failed, 0) if done else 0,
             **_kept_now(),
         },
         started=started,
@@ -2313,7 +2324,10 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
         print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
         raise
 
-    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    print(
+        f"Done. {total:,} indexed, {left_out(total_sk, len(_json_failed_files))}, "
+        f"{total_bf} bulk failed."
+    )
     if no_time_field_note():
         print(no_time_field_note())
     if _json_failed_files:
@@ -2341,6 +2355,8 @@ def cmd_ingest_json(args: argparse.Namespace, examiner: str = "unknown") -> None
             error=final_error,
             bulk_failed=total_bf,
             not_read=not_read,
+            rows_skipped=total_sk,
+            files_not_read=len(_json_failed_files),
         )
     _exit_if_failed(final_status, final_error)
 
@@ -2402,7 +2418,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 f"Skipped {len(unattributed)} file(s) whose name gives none of the hosts "
                 f"({', '.join(sorted(wanted))}): {', '.join(unattributed)}"
             )
-        hosts_indexed = hosts_failed = hosts_files = 0
+        hosts_indexed = hosts_failed = hosts_files = hosts_sk = 0
         hosts_reason = ""
         host_counts: list[tuple] = []
         missed: list[str] = []  # each sub-run starts its own list
@@ -2433,6 +2449,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 host_counts.append((result[0], result[3]))
                 not_read.extend(result[4])
                 hosts_files += result[5]
+                hosts_sk += result[6]
         _walking.active = was_walking
         # Each host's own final write lands in this same status file, so the
         # last one would stand for the whole run; write the sum. A clean
@@ -2457,10 +2474,13 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 counts=_sum_counts(host_counts),
                 skipped_files=unattributed,
                 not_read=not_read,
+                rows_skipped=hosts_sk,
+                files_not_read=len(not_read),
+                hosts_total=len(auto_hosts),
             )
         _exit_if_failed(final_status, final_error)
         counts = _sum_counts(host_counts)
-        return hosts_indexed, hosts_failed, hosts_reason, counts, not_read, hosts_files
+        return hosts_indexed, hosts_failed, hosts_reason, counts, not_read, hosts_files, hosts_sk
 
     # Recursive mode: iterate subdirs as hosts in a single process
     if is_recursive and input_path.is_dir():
@@ -2477,7 +2497,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         from opensearch_mcp.bulk import ShardCapacityExhausted as _SCE
 
         _failed_subdirs: list[tuple[str, str]] = []  # (path, error[:200])
-        walk_indexed = walk_failed = walk_files = 0  # a failed subdir counts as one
+        walk_indexed = walk_failed = walk_files = walk_sk = 0  # a failed subdir counts as one
         walk_reason = ""
         walk_counts: list[tuple] = []
         walk_missed: list[str] = []  # each sub-run starts its own list
@@ -2503,6 +2523,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                     walk_counts.append((result[0], result[3]))
                     not_read.extend(result[4])
                     walk_files += result[5]
+                    walk_sk += result[6]
             except _SCE:
                 # Cluster capacity exhausted: halt the entire recursive
                 # walk, not just the current subdir. Re-raise past the
@@ -2552,11 +2573,15 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 bulk_failed_reason=walk_reason,
                 counts=_sum_counts(walk_counts),
                 not_read=not_read,
+                rows_skipped=walk_sk,
+                files_not_read=len(not_read),
+                hosts_total=len(subdirs),
+                hosts_failed=len(_failed_subdirs),
             )
         _exit_if_failed(final_status, final_error)
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
         counts = _sum_counts(walk_counts)
-        return walk_indexed, walk_failed, walk_reason, counts, not_read, walk_files
+        return walk_indexed, walk_failed, walk_reason, counts, not_read, walk_files, walk_sk
     NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
     TIME_NOT_UNDERSTOOD.clear()
     time_field = getattr(args, "time_field", None)
@@ -2721,7 +2746,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     counts = stored_counts(client, ",".join(sorted(touched)), file_aids) if touched else {}
     print(
-        f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed{describe(counts)}."
+        f"Done. {total:,} indexed, {left_out(total_sk, len(_delim_failed_files))}, "
+        f"{total_bf} bulk failed{describe(counts)}."
     )
     if no_time_field_note():
         print(no_time_field_note())
@@ -2750,10 +2776,12 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             bulk_failed=total_bf,
             counts=counts,
             not_read=not_read,
+            rows_skipped=total_sk,
+            files_not_read=len(_delim_failed_files),
         )
     _exit_if_failed(final_status, final_error)
     # The recursive walk shares this run's status file and sums these.
-    return total, total_bf, reason, counts, not_read, len(files)
+    return total, total_bf, reason, counts, not_read, len(files), total_sk
 
 
 # ---------------------------------------------------------------------------
@@ -2913,7 +2941,10 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
         print(f"ABORT: {HALT_CIRCUIT_BREAKER}: {_sce}", file=sys.stderr)
         raise
 
-    print(f"Done. {total:,} indexed, {total_sk} skipped, {total_bf} bulk failed.")
+    print(
+        f"Done. {total:,} indexed, {left_out(total_sk, len(_alog_failed_files))}, "
+        f"{total_bf} bulk failed."
+    )
     from opensearch_mcp.write_context import print_fill_report
 
     print_fill_report()
@@ -2942,6 +2973,8 @@ def cmd_ingest_accesslog(args: argparse.Namespace, examiner: str = "unknown") ->
             bulk_failed=total_bf,
             bulk_failed_reason=reason,
             not_read=failed + _alog_unindexed,
+            rows_skipped=total_sk,
+            files_not_read=len(failed),
         )
     _exit_if_failed(final_status, error)
 
