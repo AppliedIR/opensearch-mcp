@@ -553,12 +553,21 @@ def test_a_kape_image_is_one_host_named_by_its_registry_not_its_mount(tmp_path):
 # -- whose name the detected one is: the run's input decides, at both writers
 
 
-def _stored_origins(tmp_path, via, given=None):
+def _stored_origins(tmp_path, via, given=None, archive=False):
     """An image run on a KAPE volume in the order cmd_scan runs it: the host
     found and its unit set, the names scan recorded, then the write context
-    opened. The stored origins of each name, and the groups proposed."""
+    opened. The stored origins of each name, and the groups proposed. With
+    `archive`, the image is one of several in a registered archive, extracted
+    outside the case."""
     d, image = _image_case("dc01-triage.vhdx")
-    entry = {"path": str(image.resolve())} | ({"registered_via": via} if via else {})
+    inside = None
+    if archive:
+        inside = (_evidence(d, "pair.zip"), image.name)
+        image = tmp_path / "extracted" / image.name
+        image.parent.mkdir()
+        image.write_bytes(b"\0")
+    registered = inside[0] if inside else image
+    entry = {"path": str(registered.resolve())} | ({"registered_via": via} if via else {})
     (d / "evidence.json").write_text(json.dumps({"files": [entry]}))
     v = _kape_mount(tmp_path, "nbd3p1")
     notes: list = []
@@ -567,10 +576,12 @@ def _stored_origins(tmp_path, via, given=None):
     hosts = ingest_cli._discover_volumes(
         [v], hostname, True, "dc01-triage-c88f4709", notes, offsets={v: 32256}
     )
-    ingest_cli._set_units(hosts, d.name, image, tmp_path, hostname, origin, offsets={v: 32256})
-    names_scan.record(d, [names_scan.host_folder_unit(h, d, image) for h in hosts])
+    ingest_cli._set_units(
+        hosts, d.name, image, tmp_path, hostname, origin, offsets={v: 32256}, archive=inside
+    )
+    names_scan.record(d, [names_scan.host_folder_unit(h, d, registered) for h in hosts])
     for h in hosts:
-        wc.host_context(d, d.name, h, "run-1", input_path=image)
+        wc.host_context(d, d.name, h, "run-1", input_path=registered)
     state = host_identity.load(d)
     origins: dict = {}
     for (_unit, raw), info in state.names.items():
@@ -578,15 +589,17 @@ def _stored_origins(tmp_path, via, given=None):
     return {raw: sorted(o) for raw, o in origins.items()}, host_proposal.propose(state)
 
 
-def test_an_image_the_ai_registered_gives_its_detected_name_as_the_ais(tmp_path):
-    origins, groups = _stored_origins(tmp_path, "mcp")
+@pytest.mark.parametrize("archive", [False, True], ids=["image", "image in an archive"])
+def test_an_image_the_ai_registered_gives_its_detected_name_as_the_ais(tmp_path, archive):
+    origins, groups = _stored_origins(tmp_path, "mcp", archive=archive)
     assert origins["DC01"] == [names_scan.AI_WRITTEN]
     (group,) = [g for g in groups if any(raw == "DC01" for _, raw in g.pairs)]
     assert host_proposal.FLAG_AI_ONLY in group.flags
 
 
-def test_an_image_the_examiner_registered_gives_its_detected_name_as_evidence(tmp_path):
-    origins, groups = _stored_origins(tmp_path, None)
+@pytest.mark.parametrize("archive", [False, True], ids=["image", "image in an archive"])
+def test_an_image_the_examiner_registered_gives_its_detected_name_as_evidence(tmp_path, archive):
+    origins, groups = _stored_origins(tmp_path, None, archive=archive)
     assert origins["DC01"] == [names_scan.ARTIFACT]
     (group,) = [g for g in groups if any(raw == "DC01" for _, raw in g.pairs)]
     assert host_proposal.FLAG_AI_ONLY not in group.flags
