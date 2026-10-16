@@ -1,11 +1,13 @@
 """idx_host_inventory stays a page long however many names wait.
 
 Before, each run awaiting host confirmation returned every held name, and each
-name its whole evidence list, whatever `limit` said: UAT-B's limit=5 on a
-29-host Kansa case was 153,593 characters, and the client refused it. Now
-every list in the reply is paged by offset and limit and carries its total;
-each waiting run counts its held names by reason and gives a row per unit; a
-name shows its first 5 evidence items and their total. The host logs are real;
+name its whole evidence list, whatever `limit` said: limit=5 on a 29-host
+Kansa case was 153,593 characters, and the client refused it. Now the
+machines, the names without a machine, the suggestions and each waiting run's
+lists are paged by offset and limit and carry their total; each machine's own
+names list is returned whole; each waiting run counts its held names by reason
+and gives a row per unit; a name shows its first 5 evidence items and their
+total. The host logs are real;
 the cluster is a stand-in. Values are synthetic.
 """
 
@@ -53,7 +55,7 @@ def case(monkeypatch):
 
 
 def kansa(case, hosts=29, modules=MODULES, evidence=12):
-    """UAT-B's shape: per host folder, one unit holding the hostname given to
+    """A 29-host Kansa case's shape: per host folder, one unit holding the hostname given to
     the run, a name per Kansa module (from its file name) and two names its
     records carry, each read from `evidence` files. One run waits on all."""
     recs, units = [], []
@@ -105,7 +107,7 @@ def test_the_page_is_the_first_entries_in_the_gates_own_order(case):
 
 
 def test_a_name_shows_its_first_five_evidence_items_and_their_total(case):
-    kansa(case, hosts=1, evidence=200)  # G-020: ~200 evtx files per raw name
+    kansa(case, hosts=1, evidence=200)  # ~200 evtx files per raw name, as a real case gives
     inv = srv.idx_host_inventory()
     named = {n["raw"]: n for n in inv["names_without_machine"]}
     host = named["HOST00"]

@@ -4203,11 +4203,11 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
     confirms their hosts in the portal's Hosts tab). Changes nothing: the
     examiner confirms, names and merges machines.
 
-    Every list is paged by offset and limit and carries its total: the
+    These lists are paged by offset and limit and carry their total: the
     machines, the names without a machine, the suggestions, and each waiting
     run's units, its count per unit and its held names (each run also counts
-    its held names by reason). A name shows its first 5 evidence items and
-    their total.
+    its held names by reason). Each machine's own names list is returned
+    whole. A name shows its first 5 evidence items and their total.
 
     Args:
         case_id: The case (default: the active case).
