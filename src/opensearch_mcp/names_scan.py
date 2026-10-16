@@ -469,6 +469,16 @@ def memory_unit(
 
 
 _KANSA_RUN = re.compile(r"Output_\d{14}")
+# A DNS name (ASCII labels, the last all letters) or an IPv4 address.
+_DOTTED_HOST = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.[A-Za-z]{2,}")
+_IPV4 = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}")
+
+
+def _dotted_host(name: str) -> bool:
+    """Whether a name is written like a DNS name or an IPv4 address."""
+    if _IPV4.fullmatch(name):
+        return all(int(octet) <= 255 for octet in name.split("."))
+    return bool(_DOTTED_HOST.fullmatch(name))
 
 
 def _host_forms(name: str) -> set[str]:
@@ -492,8 +502,9 @@ def filename_host(path: Path, known=()) -> str:
     first: Kansa's <Module>/<host>-<Module>.csv, where `<last>` is the
     folder's name and `<left>` the host. It is told from a host folder of
     Tool-HOST.csv files (`rd01/EvtxECmd-rd01.csv`) by the folder above
-    (Output_<14 digits>) or by a dotted `<left>` (a DNS name or an address: no
-    module or tool name has a dot).
+    (Output_<14 digits>) or by a `<left>` written as a DNS name (ASCII
+    labels, the last all letters) or an IPv4 address. A dotted tool or case
+    part (hayabusa-2.16, EvtxECmd.v1, INC2023.001) is neither.
     ingest_cli's split of a folder by host and server's detector read file
     names with this rule too."""
     path = Path(path)
@@ -505,7 +516,7 @@ def filename_host(path: Path, known=()) -> str:
     if (
         left
         and last.lower() == folder
-        and (_KANSA_RUN.fullmatch(path.parent.parent.name) or "." in left.strip("."))
+        and (_KANSA_RUN.fullmatch(path.parent.parent.name) or _dotted_host(left))
     ):
         return left
     hosts = {folder}.union(*(_host_forms(str(h)) for h in known if h))

@@ -36,7 +36,7 @@ def scan_names(folder: Path, hostname: str, fs) -> set[str]:
     return {n.raw for n in names_scan.files_unit(folder, hostname, fs, None).names}
 
 
-# -- row 1: one host's Kansa files give one name, the host (probe p126's shape)
+# -- row 1: one host's Kansa files in a folder named for the host give one name, the host
 
 
 @pytest.mark.parametrize("host", ["rd01.shieldbase.com", "RD01.ShieldBase.com", "rd01"])
@@ -115,7 +115,7 @@ def test_a_hyphenated_host_in_its_folder_gives_the_host(tmp_path, hostname):
     assert scan_names(tmp_path / "web-01", hostname, fs) == {"web-01"} | ({hostname} - {""})
 
 
-# -- row 5: Start now on the Kansa shape makes one machine per host (probe p127's leg 2)
+# -- row 5: Start now on the Kansa shape makes one machine per host
 
 
 @pytest.mark.host_gate
@@ -154,8 +154,8 @@ def test_kansas_own_output_layout_gives_host_names_through_every_reader(tmp_path
 
 @pytest.mark.parametrize("parent", ["kansa-all", "evidence", "Output_2026101612000x"])
 def test_kansas_layout_under_any_folder_gives_dotted_hosts_through_every_reader(tmp_path, parent):
-    # the case reaches the run through its own folder name (a link, a copy):
-    # gate3's kansa-post-intrusion-all and kansa-rd01-dc01-dev01
+    # the case reaches the run through a folder of its own name (a link to the
+    # run, or a renamed copy of it)
     hosts = ["rd01.shieldbase.com", "dc01.shieldbase.com", "10.0.0.5"]
     for m in ["Netstat", "Arp", "SvcAll"]:
         fs = files(tmp_path / parent / m, [f"{h}-{m}.csv" for h in hosts])
@@ -195,10 +195,49 @@ def test_short_host_names_in_a_module_folder_not_under_a_kansa_run_give_the_modu
     (".-rd01.csv", (), "rd01"),                        # dots alone are no name
     ("..-rd01.csv", (), "rd01"),
     ("rd01.-rd01.csv", (), "rd01"),                    # an end dot alone isn't a dotted name
+    ("hayabusa-2.16-rd01.csv", (), "rd01"),            # a dotted tool version is no DNS name
+    ("EvtxECmd.v1-rd01.csv", (), "rd01"),
+    ("hayabusa-INC2023.001-rd01.csv", (), "rd01"),     # nor a dotted case number
+    ("hayabusa-2.16-rd01.csv", ("rd01",), "rd01"),
+    ("EvtxECmd.v1-rd01.csv", ("rd01",), "rd01"),
+    ("hayabusa-INC2023.001-rd01.csv", ("rd01",), "rd01"),
+    ("300.0.0.5-rd01.csv", (), "rd01"),                # an octet over 255 is no address
 ])  # fmt: skip
 def test_a_host_folder_of_tool_host_files_keeps_the_host(tmp_path, name, known, want):
     (f,) = files(tmp_path / "rd01", [name])
     assert names_scan.filename_host(f, known) == want
+
+
+def test_a_host_folder_of_dotted_tool_files_gives_the_host_to_the_split_and_the_detector(tmp_path):
+    names = ["hayabusa-2.16-rd01.csv", "EvtxECmd.v1-rd01.csv", "hayabusa-INC2023.001-rd01.csv"]
+    fs = files(tmp_path / "rd01", names)
+    assert _detect_hostnames_from_filenames(tmp_path / "rd01") == {"rd01"}
+    assert {ingest_cli._filename_host(f, {"rd01"}) for f in fs} == {"rd01"}
+    assert scan_names(tmp_path / "rd01", "", fs) == {"rd01"}
+
+
+@pytest.mark.parametrize("hosts", [
+    ["web_01.corp.example", "db_02.corp.example"],     # an underscore in a DNS label
+    ["10.0.0.5", "192.168.255.1"],                     # IPv4 addresses
+])  # fmt: skip
+def test_kansa_files_with_underscore_or_address_hosts_keep_the_host(tmp_path, hosts):
+    fs = files(tmp_path / "copy" / "Arp", [f"{h}-Arp.csv" for h in hosts])
+    assert {names_scan.filename_host(f) for f in fs} == set(hosts)
+    assert {ingest_cli._filename_host(f) for f in fs} == set(hosts)
+    assert _detect_hostnames_from_filenames(tmp_path / "copy" / "Arp") == set(hosts)
+
+
+@pytest.mark.parametrize("left", [
+    "300.0.0.5",            # an octet over 255
+    "rd01.shieldbase.c0m",  # a last label with a digit
+    "rd01.shieldbase.c",    # a one-letter last label
+    "rd01..com",            # an empty label
+    "rd\u00e9.example.com",  # a non-ASCII letter
+    "rd01.ex\u0430mple",     # a non-ASCII last label (Cyrillic a)
+])  # fmt: skip
+def test_a_left_part_not_written_as_a_dns_name_or_address_gives_the_module(tmp_path, left):
+    (f,) = files(tmp_path / "copy" / "Arp", [f"{left}-Arp.csv"])
+    assert names_scan.filename_host(f) == "Arp"
 
 
 @pytest.mark.parametrize("parent", [
