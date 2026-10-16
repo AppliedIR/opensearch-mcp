@@ -71,9 +71,9 @@ def test_a_host_wait_reply_gives_the_message_and_the_count(gate, monkeypatch, ca
     assert file["message"] in reply["message"]
 
 
-def _write(case_id, status, **kw):
+def _write(case_id, status, totals=None, **kw):
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    ingest_status.write_status(case_id, os.getpid(), RUN, status, [], {}, started, **kw)
+    ingest_status.write_status(case_id, os.getpid(), RUN, status, [], totals or {}, started, **kw)
     (reply,) = srv.idx_ingest_status(case_id=case_id)["ingests"]
     return reply
 
@@ -82,6 +82,16 @@ def test_a_slot_wait_reply_gives_the_slot_message_and_no_count(gate):  # noqa: F
     reply = _write(gate.case_id, host_gate.AWAITING, message=ingest_status.SLOT_WAIT)
     assert reply["status"] == host_gate.AWAITING
     assert reply["message"] == ingest_status.SLOT_WAIT
+    assert "unresolved" not in reply
+
+
+@pytest.mark.parametrize("totals", [{}, {"unresolved": 3}])
+def test_a_wait_with_no_message_gives_no_message_and_no_count(gate, totals):  # noqa: F811
+    """A waiting file written without a message: the reply says nothing it
+    doesn't have, and still answers."""
+    reply = _write(gate.case_id, host_gate.AWAITING, totals)
+    assert reply["status"] == host_gate.AWAITING
+    assert "message" not in reply
     assert "unresolved" not in reply
 
 
