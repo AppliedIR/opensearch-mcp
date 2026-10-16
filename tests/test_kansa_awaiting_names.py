@@ -1,7 +1,8 @@
 """A Kansa collection of 29 hosts by 24 modules that waits for host
 confirmation names each host: the launch's answer and idx_ingest_status give
-one distinct line per unit and raw name it shows, each carrying its host,
-and the answer's hosts are those hosts, never a module. The names come from the real names
+one distinct line per unit and raw name it shows, each carrying its host:
+all 29 by host, and the first 50 of the 696 by module. The answer's hosts
+are all 29 hosts, never a module. The names come from the real names
 scan and gate; names are synthetic."""
 
 from __future__ import annotations
@@ -48,17 +49,21 @@ def _pending(case_dir, layout):
     return host_gate.unresolved(hi.load(case_dir), [u.key for u in units])
 
 
-@pytest.mark.parametrize("layout", [_by_host, _by_module], ids=["by-host", "by-module"])
-def test_a_waiting_kansa_collection_names_each_host(gate, monkeypatch, layout):  # noqa: F811
+@pytest.mark.parametrize(
+    "layout, listed",
+    [(_by_host, 29), (_by_module, 50)],  # 29 entries; 696 entries, of which a status lists 50
+    ids=["by-host", "by-module"],
+)
+def test_a_waiting_kansa_collection_names_each_host(gate, monkeypatch, layout, listed):  # noqa: F811
     pending = _pending(gate.case_dir, layout(gate.case_dir / "evidence"))
     assert {e["raw"] for e in pending} == set(HOSTS)  # the gate waits on the hosts, no module
     data = _awaiting(gate, monkeypatch, pending)
     out = _answer(gate, monkeypatch, data, {"status": "started", "hosts": []})
     lines = out["unresolved_hosts"]
-    shown = pending[: len(lines)]  # the status carries the first entries
-    assert lines and lines == _lines(shown) and len(set(lines)) == len(lines)
+    assert len(lines) == listed and len(set(lines)) == listed
+    assert lines == _lines(pending[:listed])  # the status carries the first entries
     assert all(ln.split(": ")[1] in HOSTS for ln in lines)  # each line names its host
-    assert out["hosts"] == list(dict.fromkeys(e["raw"] for e in shown))
+    assert out["hosts"] == HOSTS  # the first 50 by-module entries hold all 29 names
     assert not any(m.lower() in ln.lower().split(": ")[1] for m in MODULES_24 for ln in lines)
     ingest_status._status_path_safe(gate.case_id, 4250, RUN).unlink()  # the answer's run
     p = ingest_status._status_path_safe(gate.case_id, os.getpid(), RUN)
