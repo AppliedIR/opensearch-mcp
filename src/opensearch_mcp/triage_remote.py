@@ -49,11 +49,12 @@ def _loop_result(
     succeeded: bool,
     write_failures: int = 0,
     unchecked_docs: int = 0,
+    unwritten: dict | None = None,
     **counts,
 ) -> dict:
     """Not 'complete' when a gateway loop stopped on consecutive call failures,
     when every call it made failed, when verdict writes failed, or when the
-    aggregation left values unread."""
+    aggregation left values unread. unwritten: the failed writes by verdict."""
     reasons = []
     if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES or (
         consecutive_failures and not succeeded
@@ -62,7 +63,12 @@ def _loop_result(
             "consecutive gateway call failures; windows-triage backend or gateway unavailable"
         )
     if write_failures:
-        reasons.append(f"{write_failures} verdicts could not be written to the index")
+        which = ", ".join(f"{v} {n}" for v, n in sorted((unwritten or {}).items()))
+        reasons.append(
+            f"{write_failures} verdicts could not be written to the index"
+            + (f" ({which})" if which else "")
+            + "; re-run idx_enrich_triage to write them"
+        )
         counts["write_failures"] = write_failures
     if unchecked_docs:
         reasons.append(
@@ -411,11 +417,14 @@ def _enrich_file_artifact(
 
     by_hash = {p: v for p, v in verdicts.items() if "verdict" not in v}
     plain = {p: v for p, v in verdicts.items() if "verdict" in v}
+    unwritten: dict = {}
     enriched, write_failures = _batch_stamp_verdicts(
-        client, index_pattern, path_field, plain, query
+        client, index_pattern, path_field, plain, query, unwritten
     )
     if by_hash:
-        more, failed = _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash)
+        more, failed = _stamp_by_hash(
+            client, index_pattern, path_field, hash_field, by_hash, unwritten
+        )
         enriched, write_failures = enriched + more, write_failures + failed
 
     if on_progress:
@@ -432,6 +441,7 @@ def _enrich_file_artifact(
             succeeded,
             write_failures,
             unchecked,
+            unwritten,
             **counts,
             enriched=enriched,
         ),
@@ -454,12 +464,15 @@ def _batch_stamp_verdicts(
     path_field: str,
     verdicts: dict,
     scope_query: str = "*",
-) -> int:
+    unwritten: dict | None = None,
+) -> tuple[int, int]:
     """Batch-stamp verdicts by grouping paths with identical verdicts.
 
     Groups paths by (verdict, confidence, is_lolbin) and issues
     update_by_query per group using terms queries. Chunks to 500 paths
-    per batch to avoid timeouts on large cases.
+    per batch to avoid timeouts on large cases. Each write runs as a task
+    the call waits on, so one that outlasts the client's read timeout is
+    still counted as written. unwritten gets the paths not written, by verdict.
     """
     from collections import defaultdict
 
@@ -521,9 +534,10 @@ def _batch_stamp_verdicts(
                 }
             paths_query = {"terms": {path_field: chunk}}
             try:
-                resp = client.update_by_query(
-                    index=index_pattern,
-                    body={
+                total_updated += _ubq_to_completion(
+                    client,
+                    index_pattern,
+                    {
                         "query": paths_query
                         if scope_query == "*"
                         else {
@@ -537,12 +551,12 @@ def _batch_stamp_verdicts(
                             "params": chunk_params,
                         },
                     },
-                    conflicts="proceed",
                     requests_per_second=1000,
                 )
-                total_updated += resp.get("updated", 0)
             except Exception as e:
                 failed_values += len(chunk)
+                if unwritten is not None:
+                    unwritten[verdict_str] = unwritten.get(verdict_str, 0) + len(chunk)
                 print(
                     f"  WARNING: batch update_by_query failed for {verdict_str}: {e}",
                     file=sys.stderr,
@@ -613,7 +627,7 @@ def _clear_stamps(client, case_ix):
 _CLEAR_WAIT = 3600  # seconds a clear may take before triage gives up on it
 
 
-def _ubq_to_completion(client, index, body, wait=_CLEAR_WAIT, poll=1.0) -> int:
+def _ubq_to_completion(client, index, body, wait=_CLEAR_WAIT, poll=1.0, **kw) -> int:
     """Run an update_by_query as a task and wait for it, returning its count.
 
     Called synchronously, a large one outlives the client's 10 s read timeout
@@ -627,6 +641,7 @@ def _ubq_to_completion(client, index, body, wait=_CLEAR_WAIT, poll=1.0) -> int:
         allow_no_indices=True,
         wait_for_completion=False,
         request_timeout=60,
+        **kw,
     )
     task = resp.get("task")
     if not task:  # nothing matched an index: no task was started
@@ -840,9 +855,13 @@ def _reference_mismatch(result: dict) -> dict:
     return dict(result, verdict="UNKNOWN", confidence="low", reasons=[_REFERENCE_MISMATCH])
 
 
-def _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash) -> tuple[int, int]:
+def _stamp_by_hash(
+    client, index_pattern, path_field, hash_field, by_hash, unwritten=None
+) -> tuple[int, int]:
     """Stamp each doc with the answer for its own path and hash; a doc with
-    no hash, or an empty one, takes the "" answer."""
+    no hash, or an empty one, takes the "" answer. Each write runs as a task
+    the call waits on; unwritten gets the paths not written, by verdict (a
+    path whose hashes have different verdicts counts once, as "A/B")."""
     source_path = path_field.removesuffix(".keyword")
     source_hash = hash_field.removesuffix(".keyword")
     script = (
@@ -872,10 +891,10 @@ def _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash) -> tu
             for p in chunk
         }
         try:
-            resp = _ubq(
+            updated += _ubq_to_completion(
                 client,
-                index=index_pattern,
-                body={
+                index_pattern,
+                {
                     "query": {"terms": {path_field: chunk}},
                     "script": {
                         "source": script,
@@ -883,12 +902,15 @@ def _stamp_by_hash(client, index_pattern, path_field, hash_field, by_hash) -> tu
                         "params": {"m": m, "pf": source_path, "hf": source_hash},
                     },
                 },
-                conflicts="proceed",
                 requests_per_second=1000,
             )
-            updated += resp.get("updated", 0)
-        except _WriteFailed:
+        except Exception as e:
+            print(f"  WARNING: update_by_query failed: {e}", file=sys.stderr)
             failed += len(chunk)
+            if unwritten is not None:
+                for p in chunk:
+                    v = "/".join(sorted({r["verdict"] for r in by_hash[p].values()}))
+                    unwritten[v] = unwritten.get(v, 0) + 1
     return updated, failed
 
 
