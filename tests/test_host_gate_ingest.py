@@ -25,6 +25,7 @@ import pytest
 from _helpers import make_windows_tree
 from sift_common import host_gate, host_proposal
 from sift_common import host_identity as hi
+from test_relative_evidence_path import env  # noqa: F401
 
 from opensearch_mcp import ingest_cli as cli
 from opensearch_mcp import ingest_status
@@ -509,8 +510,8 @@ def others():
     procs: list[subprocess.Popen] = []
 
     def spawn(run_id):
-        env = {**os.environ, "VHIR_INGEST_RUN_ID": run_id}
-        procs.append(subprocess.Popen(["sleep", "300"], env=env))
+        environ = {**os.environ, "VHIR_INGEST_RUN_ID": run_id}
+        procs.append(subprocess.Popen(["sleep", "300"], env=environ))
         pid = procs[-1].pid
         # Popen returns before the child's exec fills /proc/<pid>/environ
         want = f"VHIR_INGEST_RUN_ID={run_id}".encode()
@@ -899,3 +900,139 @@ def test_a_walks_leaves_never_end_its_run(gate, monkeypatch):
     assert out == {"ok": True}
     terminal = [i for i, st in enumerate(seen) if st in ("complete", "failed")]
     assert terminal == [len(seen) - 1]  # the walk ends its run, once, last
+
+
+# -- the awaiting answer names each raw name: N names, N lines
+
+
+_WRITE_STATUS = ingest_status.write_status
+LOC = "rd01-triage.vhdx!C@32256"
+REASON = "named only by the AI's reading of the evidence"
+DEMO_RAWS = ["RD01", "rd01", "RD01.shieldbase.lan", "base-rd-01", "WIN-7Q2LDJ4JUHN"]
+# raw names as evidence gives them: control characters, markup, other
+# scripts, a colon, the locator's own text, the stand-in for no name
+SEED_RAWS = ["\t", "a\rb", "\x1b[31mX", "a\x00b", "\x85", "ホスト", "<b>h</b>",
+             "x" * 300, "y" * 70_000, "a: b", LOC, "(none)", " "]  # fmt: skip
+
+
+def _awaiting(gate, monkeypatch, pending) -> dict:
+    """The status the worker's own gate writes while `pending` waits: the
+    run reaches the gate, the wait reports `pending` once, then it's cancelled."""
+    seen: list[dict] = []
+
+    def wait(case_dir, run_id, units, on_wait=None, **k):
+        on_wait(host_gate.summary(pending))
+        seen.append(gate.status())
+        raise host_gate.RunCancelled("row")
+
+    monkeypatch.setattr(host_gate, "wait_for_hosts", wait)
+    with pytest.raises(SystemExit):
+        cli._gate(gate.case_id, ["u1"], RUN)
+    (data,) = seen
+    assert data["status"] == host_gate.AWAITING
+    return data
+
+
+def _lines(pending):
+    return [f"{e['locator']}: {e['raw'] or '(none)'}: {e['reason']}" for e in pending]
+
+
+def _pending(raws, loc=LOC):
+    return [{"locator": loc, "raw": r, "reason": REASON} for r in raws]
+
+
+def _answer(gate, monkeypatch, data, resp, pid=4250):
+    monkeypatch.setattr(srv, "_GATE_ANSWER_SECONDS", 5.0)
+    p = ingest_status._status_path_safe(gate.case_id, pid, RUN)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data))
+    return srv._answer_after_gate(resp, gate.case_id, pid, RUN)
+
+
+@pytest.mark.parametrize("raws", [DEMO_RAWS, SEED_RAWS], ids=["demo", "seed"])
+def test_each_raw_name_gets_its_own_line_carrying_it_exactly(gate, monkeypatch, raws):
+    pending = _pending(raws)
+    data = _awaiting(gate, monkeypatch, pending)
+    out = _answer(gate, monkeypatch, data, {"status": "started", "hosts": []})
+    assert out["unresolved_hosts"] == _lines(pending)  # each line: its locator, raw, reason
+    assert len(set(out["unresolved_hosts"])) == len(raws)
+    assert out["hosts"] == raws  # each raw name as a field, in order
+
+
+def test_a_unit_with_no_name_shows_no_name_and_its_locator(gate, monkeypatch):
+    pending = (_pending([""], "mem.raw") + _pending(["(none)"], "other.raw")
+               + _pending([None], "third.raw"))  # fmt: skip
+    data = _awaiting(gate, monkeypatch, pending)
+    out = _answer(gate, monkeypatch, data, {"status": "started"})
+    assert out["unresolved_hosts"] == [
+        f"mem.raw: (none): {REASON}",
+        f"other.raw: (none): {REASON}",
+        f"third.raw: (none): {REASON}",
+    ]
+    # the stand-in a nameless unit prints is told apart by the hosts field
+    assert out["hosts"] == ["(no name) mem.raw", "(none)", "(no name) third.raw"]
+
+
+def test_a_name_on_two_units_is_one_host_and_two_lines(gate, monkeypatch):
+    pending = _pending(["RD01"], "a.vhdx!C") + _pending(["RD01"], "b.vhdx!C")
+    data = _awaiting(gate, monkeypatch, pending)
+    out = _answer(gate, monkeypatch, data, {"status": "started", "hosts": []})
+    assert out["unresolved_hosts"] == _lines(pending)
+    assert out["hosts"] == ["RD01"]
+
+
+def test_hosts_the_launch_named_are_kept(gate, monkeypatch):
+    data = _awaiting(gate, monkeypatch, _pending(["RD01"]))
+    out = _answer(gate, monkeypatch, data, {"status": "started", "hosts": ["h1"]})
+    assert out["hosts"] == ["h1"] and out["unresolved_hosts"] == _lines(_pending(["RD01"]))
+
+
+def test_a_launch_that_does_not_wait_gets_no_hosts(gate, monkeypatch):
+    for status in ("running", "complete", "failed"):
+        data = {"status": status, "hosts": [{"hostname": "RD01", "artifacts": []}],
+                "hosts_confirmed": status == "running", "error": "e"}  # fmt: skip
+        out = _answer(gate, monkeypatch, data, {"status": "started"})
+        assert "hosts" not in out and "unresolved_hosts" not in out
+
+
+def test_an_older_status_without_the_raw_field_reads_as_before(gate, monkeypatch):
+    note = {"name": "host confirmation", "note": "evidence/x: not confirmed"}
+    data = {"status": host_gate.AWAITING, "totals": {"unresolved": 1}, "message": "m",
+            "hosts": [{"hostname": "h1", "artifacts": [note]}]}  # fmt: skip
+    out = _answer(gate, monkeypatch, data, {"status": "started"})
+    assert out["unresolved_hosts"] == ["evidence/x: not confirmed"]
+    assert out["hosts"] == ["h1"]
+
+
+@pytest.mark.parametrize("tool", ["idx_ingest", "idx_ingest_json", "idx_ingest_memory"])
+def test_every_launch_that_waits_names_each_raw_name(env, gate, monkeypatch, tool):  # noqa: F811
+    pending = _pending(DEMO_RAWS)
+    monkeypatch.setattr(ingest_status, "write_status", _WRITE_STATUS)  # the worker's own
+    data = _awaiting(gate, monkeypatch, pending)
+    monkeypatch.setattr(ingest_status, "write_status", lambda *a, **k: None)  # env's launcher
+    monkeypatch.setattr(srv, "_GATE_ANSWER_SECONDS", 5.0)
+    monkeypatch.setattr(srv.audit, "log", lambda **kw: "aid-1")
+
+    def spawn(cmd, e, log, run_id):
+        p = ingest_status._status_path_safe("INC-RP1", 4251, run_id)
+        p.write_text(json.dumps(data))
+        return mock.MagicMock(pid=4251)
+
+    monkeypatch.setattr(srv, "_spawn_ingest", spawn)
+    path = {"idx_ingest": "evidence/mem.raw", "idx_ingest_json": "evidence/sec.json",
+            "idx_ingest_memory": "evidence/mem.raw"}[tool]  # fmt: skip
+    hostname = "h1" if tool == "idx_ingest_json" else ""
+    out = getattr(srv, tool)(path=path, hostname=hostname, dry_run=False)
+    assert out["status"] == host_gate.AWAITING, out
+    assert out["unresolved_hosts"] == _lines(pending)
+    assert out["hosts"] == DEMO_RAWS
+
+
+@pytest.mark.parametrize("raws", [DEMO_RAWS, SEED_RAWS, [""]], ids=["demo", "seed", "nameless"])
+def test_ingest_status_gives_one_line_per_raw_name(gate, monkeypatch, raws):
+    pending = _pending(raws)
+    data = _awaiting(gate, monkeypatch, pending)
+    p = ingest_status._status_path_safe(gate.case_id, os.getpid(), RUN)
+    p.write_text(json.dumps(data))
+    (status,) = srv.idx_ingest_status(case_id=gate.case_id)["ingests"]
+    assert status["warnings"] == _lines(pending)  # one locator, one raw name, per line

@@ -424,6 +424,8 @@ def image_candidates(image: Path, leaves: list[dict], case_dir: Path | None) -> 
     list read without mounting. Names come once a reader gets to them."""
     units = []
     for leaf in leaves:
+        if leaf.get("type") == "VSHADOW":
+            continue  # a volume's shadow copy: the volume itself is listed
         sel = leaf.get("selector") or {}
         # the label an image run of this volume uses, so both name one unit
         label = ":".join(v for v in (sel.get("partitions"), sel.get("volumes")) if v) or "fs"

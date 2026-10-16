@@ -188,11 +188,12 @@ def _gate(case_id: str, units: list[str], run_id: str = "") -> None:
             )
             for h in summary["hosts"]:
                 print(f"  {h['locator']}: {h['raw'] or '(none)'}: {h['reason']}", file=sys.stderr)
-        if run:
+        if run:  # the note is the line above; raw and locator as fields too
             hosts = [
                 {"hostname": h["raw"] or h["locator"],
                  "artifacts": [{"name": "host confirmation", "status": "awaiting",
-                                "note": f"{h['locator']}: {h['reason']}"}]}
+                                "note": f"{h['locator']}: {h['raw'] or '(none)'}: {h['reason']}",
+                                "raw": h["raw"], "locator": h["locator"]}]}
                 for h in summary["hosts"]
             ]  # fmt: skip
             write_status(case_id, os.getpid(), run, AWAITING, hosts,
@@ -779,6 +780,7 @@ def _set_units(
     from sift_common.host_identity import unit_locator as _locator
 
     from opensearch_mcp import names_scan
+    from opensearch_mcp.discover import find_volume_root
 
     case_dir = _case_dir_for(case_id)
     root, prefix = archive if archive else (input_path, "")
@@ -814,6 +816,8 @@ def _set_units(
         vol = next((v for v in (offsets or {}) if inside(h.volume_root, v) is not None), None)
         if vol is not None:
             rest = inside(h.volume_root, vol)
+            if find_volume_root(Path(vol)) == Path(h.volume_root):
+                rest = "."  # its drive-letter folder (KAPE) is the volume, as the dry run keys it
             pre = "/".join(x for x in (prefix, "" if rest == "." else rest) if x)
             h.unit_locator = names_scan.volume_locator(root, case_dir, offsets[vol], prefix=pre)
         else:
@@ -987,13 +991,15 @@ def _hostname_from_volumes(
     boot), no name is forced: each is ingested as its own host, named for the
     image and its volume, and a warning lists them. A Linux or macOS install
     is named for the image and its volume."""
-    from opensearch_mcp.discover import os_of_root
+    from opensearch_mcp.discover import find_volume_root, os_of_root
     from opensearch_mcp.hostname import detect_hostname_from_volume
 
-    installs = [(v, kind) for v in volumes if (kind := os_of_root(v))]
+    # the install on each volume: at its root, or under its drive-letter folder (KAPE)
+    roots = {v: find_volume_root(v) or v for v in volumes}
+    installs = [(v, kind) for v in volumes if (kind := os_of_root(roots[v]))]
 
     def native(v: Path, kind: str) -> str:
-        return (detect_hostname_from_volume(v) if kind == "windows" else None) or "?"
+        return (detect_hostname_from_volume(roots[v]) if kind == "windows" else None) or "?"
 
     if len(installs) > 1:
         found = ", ".join(f"{v.name}: {kind} {native(v, kind)}" for v, kind in installs)
@@ -1003,7 +1009,8 @@ def _hostname_from_volumes(
         )
         note = (
             f"{len(installs)} OS installs on this image ({found}); each is ingested "
-            f"as its own host ({hosts}). Pass --hostname only if they are one machine"
+            f"as its own host ({hosts}). The names come from the evidence: confirm in the "
+            "Portal's Hosts tab whether they are one machine"
         )
         notes.append(("hostname", note))
         print(f"  WARNING: {note}", file=sys.stderr)
@@ -1012,14 +1019,14 @@ def _hostname_from_volumes(
         v, kind = installs[0]
         print(f"  {kind} install on {v.name}: host {_volume_host_name(image_id, v)}")
         return None
-    detected = detect_hostname_from_volume(installs[0][0]) if installs else None
+    detected = detect_hostname_from_volume(roots[installs[0][0]]) if installs else None
     if detected:
         print(f"  Hostname from volume registry: {detected}")
     else:
         print(
-            "  WARNING: could not detect hostname from registry; "
-            "falling back to directory-scan (weaker signal — "
-            "consider passing --hostname <canonical> explicitly)",
+            "  WARNING: could not detect hostname from registry; the host names come "
+            "from the evidence's folder and file names (a weaker signal): confirm them "
+            "in the Portal's Hosts tab",
             file=sys.stderr,
         )
     return detected
