@@ -18,6 +18,8 @@ from test_names_scan import _Hive, windows_volume
 from opensearch_mcp import ingest_cli, names_scan
 from opensearch_mcp.discover import DiscoveredHost
 
+pytestmark = pytest.mark.host_gate  # the real gate, not the confirmed-hosts stand-in
+
 IMAGE_ID = "dc01-triage-c88f4709"
 MOUNT_NAME = f"{IMAGE_ID}-nbd3p1"
 
@@ -60,12 +62,16 @@ def test_a_mount_folder_name_is_never_recorded_or_proposed(tmp_path):
     assert MOUNT_NAME not in {e["raw"] for e in host_gate.unresolved(state, units)}
 
 
-def test_the_images_registry_name_is_still_proposed_and_no_folder_flag_holds_the_run(tmp_path):
+def test_the_images_registry_name_is_proposed_and_held_until_confirmed_with_no_folder_flag(
+    tmp_path,
+):
     d, hosts, units = _kape_image_run(tmp_path)
     state = hi.load(d)
     groups = [(g.canonical, [p[1] for p in g.pairs], g.flags) for g in hp.propose(state)]
     assert groups == [("DC01", ["DC01"], [])]
-    assert host_gate.unresolved(state, units) == []
+    # until the examiner confirms, the gate holds the registry name alone
+    held = [(e["raw"], e["reason"]) for e in host_gate.unresolved(state, units)]
+    assert held == [("DC01", host_gate.REASON_UNCONFIRMED)]
 
 
 def test_confirming_what_is_proposed_files_the_run_under_its_registry_name(tmp_path):
