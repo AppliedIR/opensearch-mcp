@@ -79,9 +79,10 @@ class TestResolveHayabusaRulesDir:
 
 
 class TestTheRulesOfTheBinaryThatRuns:
-    """cast installs Hayabusa 3.8.1 with its rules in one folder and links it
-    into ~/.local/bin. Rules elsewhere (an older /opt/hayabusa) came first and
-    ran with the newer binary. Layout as measured on a cast-updated SIFT:
+    """A cast-updated SIFT can hold Hayabusa 3.8.1 with its rules in one folder,
+    linked into ~/.local/bin (the current SIFT release installs none). Rules
+    elsewhere (an older /opt/hayabusa) came first and ran with the newer binary.
+    Layout as measured on a cast-updated SIFT:
     /opt/mulder-assets/hayabusa/{hayabusa-3.8.1-lin-x64-musl, rules/config}."""
 
     def _cast_install(self, tmp_path: Path) -> tuple[Path, Path]:

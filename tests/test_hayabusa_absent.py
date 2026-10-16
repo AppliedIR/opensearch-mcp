@@ -84,9 +84,9 @@ class TestTheIngestStatus:
         assert status["message"].startswith("Ingest complete with "), status["message"]
         (error,) = _hayabusa_errors(status)
         assert error.startswith("hayabusa/hayabusa-detection: detections skipped: hayabusa not")
-        # either installer, the user's choice
-        assert "`sudo cast install teamdfir/sift` (Hayabusa 3.8.1" in error
-        assert "`vhir setup hayabusa` (the current Hayabusa only)" in error
+        # Valhuntir's installer only: the current SIFT release has no Hayabusa
+        assert "cast install" not in error
+        assert "`vhir setup hayabusa` (the current Hayabusa release" in error
 
     @pytest.mark.parametrize("skip_triage", [True, False], ids=["triage skipped", "triage run"])
     def test_hayabusa_rules_missing(self, evtx_ingest, monkeypatch, skip_triage):
