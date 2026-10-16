@@ -161,7 +161,11 @@ idx_timeline(query="threat_intel.iocs.outcome:MATCH", interval="1h")
 
 ```bash
 # Triage baseline (via gateway to windows-triage-mcp)
-# Runs automatically after ingest, or manually:
+# Runs automatically at the end of a scan ingest (opensearch-ingest scan,
+# vhir ingest); --skip-triage turns it off. A re-run is MCP-only:
+# idx_enrich_triage, below.
+
+# Threat intel
 opensearch-ingest enrich-intel --case incident-001
 
 # Or via MCP:
