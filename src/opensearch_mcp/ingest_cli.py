@@ -2475,7 +2475,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 skipped_files=unattributed,
                 not_read=not_read,
                 rows_skipped=hosts_sk,
-                files_not_read=len(not_read),
+                files_not_read=len(not_read) + len(unattributed),
                 hosts_total=len(auto_hosts),
             )
         _exit_if_failed(final_status, final_error)

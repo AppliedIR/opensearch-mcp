@@ -161,6 +161,15 @@ def test_a_split_by_three_hosts_counts_three_and_sums_what_each_left_out(skips, 
     assert result[5:] == (5, 3)
 
 
+def test_a_split_by_host_counts_a_file_whose_name_gives_no_host_as_not_read(skips, tmp_path):
+    d = _files(tmp_path / "ev", {"logons-h1.csv": TWO_COLS, "logons-h2.csv": TWO_COLS,
+                                 "notes.csv": TWO_COLS})  # fmt: skip
+    skips.cmd_ingest_delimited(_dargs(d, hostname="", auto_hosts="h1,h2"))
+    st = _status()
+    assert any("not ingested" in w and "notes.csv" in w for w in st["warnings"]), st
+    assert "; 0 rows skipped, 1 file not read" in _detail(st)
+
+
 def test_a_split_by_one_host_counts_one(skips, tmp_path):
     d = _files(tmp_path / "ev", {"logons-h1.csv": TWO_COLS})
     skips.cmd_ingest_delimited(_dargs(d, hostname="", auto_hosts="h1"))
