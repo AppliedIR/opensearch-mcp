@@ -7,6 +7,7 @@ synthetic."""
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 
 import pytest
 from test_ingest_inputs_not_read import _files
@@ -38,8 +39,8 @@ def stub_bulk(monkeypatch):
     monkeypatch.setattr(pd, "flush_bulk", lambda client, actions, **k: (len(actions), 0))
 
 
-def _ingest(path, fmt):
-    return pd.ingest_delimited(path, None, "case-x-delimited-h", "h", fmt=fmt)
+def _ingest(path, fmt, **kw):
+    return pd.ingest_delimited(path, None, "case-x-delimited-h", "h", fmt=fmt, **kw)
 
 
 def test_a_short_zeek_line_is_one_row_skipped_on_the_done_line(bg, stub_bulk, tmp_path, capsys):  # noqa: F811
@@ -78,3 +79,9 @@ def test_clean_files_skip_nothing_and_blank_and_hash_lines_stay_uncounted(
 def test_every_dropped_line_counts(stub_bulk, tmp_path):
     p = _files(tmp_path, {"conn.log": ZEEK_GOOD + ZEEK_SHORT * 4 + "a\tb\tc\td\n"})
     assert _ingest(p / "conn.log", ZEEK_FMT) == (3, 5, 0, 0)
+
+
+def test_a_row_before_the_window_and_a_dropped_line_are_two_rows_skipped(stub_bulk, tmp_path):
+    p = _files(tmp_path, {"conn.log": ZEEK_GOOD + ZEEK_SHORT}) / "conn.log"
+    second_row = datetime.fromtimestamp(1700000002, tz=timezone.utc)  # the first row is earlier
+    assert _ingest(p, ZEEK_FMT, time_from=second_row) == (2, 2, 0, 0)
