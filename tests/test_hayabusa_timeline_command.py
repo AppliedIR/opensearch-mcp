@@ -132,7 +132,7 @@ def test_a_probe_that_fails_to_run_falls_back_to_csv_timeline(hb, monkeypatch):
     assert commands == ["csv-timeline"]
 
 
-# Hayabusa 3.8.1, the release `cast install teamdfir/sift` installs. Its answers
+# Hayabusa 3.8.1, the release found on cast-updated SIFT boxes. Its answers
 # as measured on the release binary (hayabusa-3.8.1-lin-x64-musl, zip sha256
 # 93c7fc58…bcee as the release API lists it): `dfir-timeline --help` exits 2
 # ("unrecognized subcommand", tip: csv-timeline); `csv-timeline --help` exits 0.

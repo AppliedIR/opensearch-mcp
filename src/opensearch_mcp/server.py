@@ -4068,9 +4068,9 @@ _HAYABUSA_TOP_QUERY = "Level:(emer OR crit OR critical OR high)"
 # Zero Hayabusa alerts because the engine isn't there, not because nothing matched.
 _HAYABUSA_ABSENT = (
     "Hayabusa not installed: evtx ingests ran no detections, so 0 alerts is not "
-    "a finding. Install it with `sudo cast install teamdfir/sift` (Hayabusa 3.8.1 "
-    "with the rest of SIFT) or `vhir setup hayabusa` (the current Hayabusa only), "
-    "then re-run the evtx ingest."
+    "a finding. Install it with `vhir setup hayabusa` (the current Hayabusa "
+    "release; the current SIFT release doesn't include it), then re-run the evtx "
+    "ingest."
 )
 
 

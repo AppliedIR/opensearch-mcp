@@ -1894,9 +1894,9 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 if skipped or failed_hosts:
                     why = (
                         f"detections skipped: {skipped}. Install it with "
-                        "`sudo cast install teamdfir/sift` (Hayabusa 3.8.1 with the "
-                        "rest of SIFT) or `vhir setup hayabusa` (the current Hayabusa "
-                        "only), then re-run the ingest."
+                        "`vhir setup hayabusa` (the current Hayabusa release; the "
+                        "current SIFT release doesn't include it), then re-run the "
+                        "ingest."
                         if skipped
                         else "; ".join(
                             f"{host}: {v.get('error', 'failed')}"
