@@ -4203,12 +4203,17 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
     confirms their hosts in the portal's Hosts tab). Changes nothing: the
     examiner confirms, names and merges machines.
 
+    Every list is paged by offset and limit and carries its total: the
+    machines, the names without a machine, the suggestions, and each waiting
+    run's units, its count per unit and its held names (each run also counts
+    its held names by reason). A name shows its first 5 evidence items and
+    their total.
+
     Args:
         case_id: The case (default: the active case).
-        offset: The first machine, and the first name without a machine, to
-            return, in their order (default 0).
-        limit: Machines, and names without a machine, per page (default 50,
-            max 200).
+        offset: The first item of each list to return, in its order (default
+            0).
+        limit: Items of each list per page (default 50, max 200).
     """
     from sift_common import host_gate
     from sift_common import host_identity as hi
@@ -4227,7 +4232,9 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
 
     def name(p) -> dict:
         info = state.names.get(p) or {}
-        return {"unit": p[0], "raw": p[1], "evidence": list(info.get("evidence") or []),
+        evidence = list(info.get("evidence") or [])
+        return {"unit": p[0], "raw": p[1], "evidence": evidence[:_INVENTORY_EVIDENCE],
+                "evidence_total": len(evidence),
                 "origins": list(info.get("origins") or []),
                 "flags": list(state.pair_flags.get(p) or [])}  # fmt: skip
 
@@ -4248,7 +4255,7 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
             continue
         held = host_gate.unresolved(state, run_units)
         if held:
-            pending.append({"run_id": run, "units": list(run_units), "unresolved": held})
+            pending.append(_held_page(run, list(run_units), held, offset, limit))
     states: dict[str, int] = {}
     for m in machines:
         states[m.state] = states.get(m.state, 0) + 1
@@ -4274,7 +4281,8 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
         "units": {u: state.units.get(u) or {} for u in units},
         "names_without_machine_total": len(unbound),
         "names_without_machine": [name(p) for p in unbound[offset : offset + limit]],
-        "suggestions": list(state.suggestions),
+        "suggestions_total": len(state.suggestions),
+        "suggestions": list(state.suggestions)[offset : offset + limit],
         "awaiting_host_confirmation": pending,
         **(
             {"host_note": f"host operation {op.get('id', '?')} is {op.get('state')}"} if op else {}
@@ -4288,6 +4296,33 @@ def idx_host_inventory(case_id: str = "", offset: int = 0, limit: int = 50) -> d
                 **_ingest_params(ingested)},
         result_summary=f"{len(machines)} machines, {len(page)} listed",
     )  # fmt: skip
+
+
+_INVENTORY_EVIDENCE = 5  # evidence items shown per name; the total is given
+
+
+def _held_page(run: str, units: list, held: list[dict], offset: int, limit: int) -> dict:
+    """One run awaiting host confirmation, a page long: its totals, its held
+    names counted by reason, a row per unit (count, first reason), and
+    `limit` of its units, unit rows and held names from `offset`."""
+    by_reason: dict[str, int] = {}
+    by_unit: dict[str, dict] = {}
+    for h in held:
+        by_reason[h["reason"]] = by_reason.get(h["reason"], 0) + 1
+        row = by_unit.setdefault(h["unit"], {"unit": h["unit"], "count": 0,
+                                             "first_reason": h["reason"]})  # fmt: skip
+        row["count"] += 1
+    rows = list(by_unit.values())
+    return {
+        "run_id": run,
+        "units_total": len(units),
+        "units": units[offset : offset + limit],
+        "unresolved_total": len(held),
+        "unresolved_by_reason": by_reason,
+        "unresolved_units_total": len(rows),
+        "unresolved_by_unit": rows[offset : offset + limit],
+        "unresolved": held[offset : offset + limit],
+    }
 
 
 def _docs_per_key(c12, keys: list[str], ingested: dict | None = None) -> tuple[dict | None, str]:
