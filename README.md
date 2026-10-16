@@ -27,7 +27,7 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 | Parser | Artifacts | Source |
 |--------|-----------|--------|
 | evtx | Windows Event Logs | pyevtx-rs (ECS-normalized) |
-| EZ Tools (10) | Shimcache, Amcache, MFT, USN, Registry (system hives, and each user's NTUSER.DAT and UsrClass.dat), Shellbags, Jumplists, LNK, Recyclebin, Timeline | Eric Zimmerman tools via wintools-mcp |
+| EZ Tools | Shimcache, Amcache, MFT, USN, Registry (system hives, and each user's NTUSER.DAT and UsrClass.dat), Shellbags, Jumplists, LNK, Recyclebin, Timeline | Eric Zimmerman tools via wintools-mcp |
 | Volatility 3 | Memory forensics (26 plugins, 3 tiers) | vol3 subprocess |
 | JSON/JSONL | Suricata EVE, tshark, Velociraptor, any JSON | Auto-detect format |
 | Delimited | CSV, TSV, Zeek TSV, bodyfile, L2T supertimelines | Auto-detect delimiter |
@@ -46,7 +46,7 @@ Every parser produces:
 - Full provenance: `host.name`, `host.id`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.content_hash`, `vhir.parse_method`, `pipeline_version`, and `vhir.original.path` and `vhir.original.sha256` when the ingest started from registered evidence
 - Proper `@timestamp` with timezone handling (local-time artifacts require `--source-timezone`)
 
-### Query (17 MCP Tools)
+### Query (MCP Tools)
 
 The LLM gets these tools via the MCP protocol:
 
@@ -93,7 +93,7 @@ opensearch-mcp parsers (15 types, programmatic, deterministic)
 OpenSearch (Docker, single-node, 4-12GB heap)
     |
     v
-17 MCP tools <-- LLM queries here (structured, ~500 tokens each)
+MCP tools <-- LLM queries here (structured, ~500 tokens each)
     |
     v
 Enrichment (triage baseline + threat intel, programmatic)
@@ -130,6 +130,8 @@ opensearch-ingest json /path/to/suricata/eve.json --hostname FW01 --case inciden
 opensearch-ingest delimited /path/to/zeek/logs/ --hostname SENSOR01 --case incident-001
 opensearch-ingest accesslog /path/to/apache/access.log --hostname WEB01 --case incident-001
 ```
+
+Every ingest waits until the hosts its evidence names are confirmed in the Examiner Portal's Hosts tab (`vhir portal`). Upload the list of machines in scope there before the first ingest; hosts on the list confirm as the evidence arrives. Until then the CLI prints only "Waiting for host confirmation (N host name(s)): ..." and the host names it waits on. Confirm them in the Hosts tab, or choose Start now there to let the run write with its hosts as proposed.
 
 ### 3. Query via MCP
 
@@ -223,7 +225,7 @@ Index templates are installed by the MCP server at its first verified
 OpenSearch connection (inside `ensure_winlog_pipeline` /
 `install_all_templates`). On a freshly set-up cluster, start the
 Valhuntir gateway (or the opensearch-mcp server) at least once before
-running `vhir idx ingest …` directly from the CLI.
+running `vhir ingest …` directly from the CLI.
 
 Direct CLI ingest on a cluster where templates have never been
 installed will create indices with OpenSearch's default dynamic
