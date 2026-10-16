@@ -23,6 +23,14 @@ SLOT_WAIT = (
 )
 
 
+def left_out(rows_skipped: int, files_not_read: int) -> str:
+    """What a run left out, said apart: rows skipped inside files it read, and
+    files it didn't read ("2 rows skipped, 1 file not read")."""
+    rows = "row" if rows_skipped == 1 else "rows"
+    files = "file" if files_not_read == 1 else "files"
+    return f"{rows_skipped:,} {rows} skipped, {files_not_read:,} {files} not read"
+
+
 def write_status(
     case_id: str,
     pid: int,

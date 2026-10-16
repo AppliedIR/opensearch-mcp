@@ -23,6 +23,7 @@ from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
 from opensearch_mcp.ingest_status import MAX_RUNNING as _MAX_RUNNING
+from opensearch_mcp.ingest_status import left_out
 from opensearch_mcp.paths import members
 
 logger = logging.getLogger(__name__)
@@ -2893,6 +2894,8 @@ def idx_ingest_status(case_id: str = "") -> dict:
                 if a_status == "complete":
                     icon = "done"
                     detail = f"{indexed:,} new" + _describe_counts(a)
+                    if "rows_skipped" in a:  # a delimited, JSON or access-log run
+                        detail += "; " + left_out(a["rows_skipped"], a.get("files_not_read", 0))
                     if a.get("implausible_time"):
                         n = a["implausible_time"]
                         detail += f"; {n:,} with an implausible time, @timestamp not set"
