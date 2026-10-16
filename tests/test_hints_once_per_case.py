@@ -74,7 +74,7 @@ def test_a_second_case_in_the_same_process_gets_its_hints():
 def test_anchor_nothing_new_gets_the_pointer_only():
     INDICES["a"] = [(idx("a", "evtx"), 5000)]
     assert heads("a") == ["EVTX indexed"]
-    assert hints("a") == POINTER
+    assert hints("a") == ["evtx indexed — call suggest_tools for investigation patterns"]
 
 
 def test_anchor_after_a_reset_hints_come_as_on_a_first_call():

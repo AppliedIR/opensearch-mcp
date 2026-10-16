@@ -22,6 +22,7 @@ from sift_common.audit import AuditWriter
 from opensearch_mcp.client import get_client
 from opensearch_mcp.ingest_counts import NOTE as _COUNTS_NOTE
 from opensearch_mcp.ingest_counts import describe as _describe_counts
+from opensearch_mcp.ingest_status import _LIVE
 from opensearch_mcp.ingest_status import MAX_RUNNING as _MAX_RUNNING
 from opensearch_mcp.paths import members
 
@@ -84,6 +85,23 @@ def _add_shimcache_reminder(resp: dict, index_pattern: str, docs: list) -> None:
         resp["discipline_reminder"] = "Shimcache/Amcache = PRESENCE only, not execution."
 
 
+def _elapsed_seconds(ing: dict) -> float:
+    """A finished run's own elapsed_seconds. A live run's status writes don't
+    pass it, so its time is counted from `started` (UTC when it names no zone)."""
+    stored = ing.get("elapsed_seconds", 0)
+    if ing.get("status") not in _LIVE:
+        return stored
+    from datetime import datetime, timezone
+
+    try:
+        started = datetime.fromisoformat(str(ing.get("started", "")))
+    except ValueError:
+        return stored
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(stored, (datetime.now(timezone.utc) - started).total_seconds())
+
+
 # --- Enrichment Token Budget: Layer 9 investigation hints decay ---
 _hints_delivered: set[tuple[str, str]] = set()  # (case, hint) already returned
 
@@ -137,9 +155,10 @@ def _add_investigation_hints(resp: dict, artifacts: dict, case: str) -> None:
     if not hints:
         return
     hints = [h for h in hints if (case, h) not in _hints_delivered]
-    if not hints:
+    if not hints:  # the pointer names only the types this case has
+        held = [n for n, has in (("MFT", has_mft), ("USN", has_usn), ("evtx", has_evtx)) if has]
         resp["investigation_hints"] = [
-            "MFT/USN/evtx indexed — call suggest_tools for investigation patterns"
+            f"{'/'.join(held)} indexed — call suggest_tools for investigation patterns"
         ]
         return
 
@@ -2822,7 +2841,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
     summaries = []
     for ing in ingests:
         status = ing.get("status", "unknown")
-        elapsed = ing.get("elapsed_seconds", 0)
+        elapsed = _elapsed_seconds(ing)
         minutes = int(elapsed // 60)
 
         totals = ing.get("totals", {})
