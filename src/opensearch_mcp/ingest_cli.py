@@ -807,9 +807,14 @@ def _set_units(
         except ValueError:
             return None
 
+    # The AI's input: the name its hive gives is the AI's too, as the scan
+    # records its other names, and never confirms a machine
+    ai_input = names_scan.file_origin(case_dir, root) == names_scan.AI_WRITTEN
     for h in hosts:
         if name_origin and hostname and h.hostname == hostname and h.name_origin == "folder":
             h.name_origin = name_origin
+        if ai_input and h.name_origin == names_scan.ARTIFACT:
+            h.name_origin = names_scan.AI_WRITTEN
         if h.unit_locator or tmpdir is None and h.image_path is None and not archive:
             continue  # a folder: its own volume root
         if h.image_path is not None:  # read straight off the image
