@@ -2832,7 +2832,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
     Args:
         case_id: Filter to this case (default: active case). "*" for all.
     """
-    from opensearch_mcp.ingest_status import read_active_ingests
+    from opensearch_mcp.ingest_status import AWAITING, read_active_ingests
 
     ingests = read_active_ingests()
 
@@ -2960,7 +2960,15 @@ def idx_ingest_status(case_id: str = "") -> dict:
         if any("stored" in a for h in ing.get("hosts", []) for a in h.get("artifacts", [])):
             s["counts_note"] = _COUNTS_NOTE
 
-        if status == "running":
+        if status == AWAITING and ing.get("message"):
+            s["message"] = ing["message"]  # a slot wait's, as written
+            if "unresolved" in totals:  # a host wait: the line the CLI prints
+                s["unresolved"] = totals["unresolved"]
+                s["message"] = (
+                    f"Waiting for host confirmation ({totals['unresolved']} host name(s)): "
+                    f"{ing['message']}."
+                )
+        elif status == "running":
             s["message"] = (
                 "Ingest in progress. Present the checklist above to the examiner. "
                 "Call idx_ingest_status() again in 30 seconds for updated progress."

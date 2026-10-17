@@ -57,7 +57,7 @@ def register(subparsers, registered: set) -> None:
             type=int,
             default=1,
             choices=sorted(TIERS),
-            help="Analysis depth (1=fast, 2=default, 3=deep)",
+            help="Analysis depth (1=fast, the default; 2=moderate; 3=deep)",
         )
         p.add_argument("--plugins", help="Specific plugins (comma-separated)")
         p.add_argument(
