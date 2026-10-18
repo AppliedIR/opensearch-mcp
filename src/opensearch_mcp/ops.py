@@ -103,7 +103,7 @@ def file_input(
     return entry, reg
 
 
-FOLDER_FILES = 5000  # the most files a folder's step names one by one
+FOLDER_FILES = 1100  # the most files a folder's step names one by one
 
 
 def folder_inputs(case_dir, path) -> tuple[list[dict], list[dict]] | None:

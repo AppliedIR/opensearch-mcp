@@ -199,7 +199,7 @@ def _extract_more(d, audit, folder, count):
         ops.extraction_step(audit, d, d / "evidence" / "triage.zip", folder, ["7z", "x"])
 
 
-@pytest.mark.parametrize("count", [0, 5001], ids=["no file", "over the bound"])
+@pytest.mark.parametrize("count", [0, 1101], ids=["no file", "over the bound"])
 def test_a_folder_outside_the_bound_keeps_the_folder(case, count):
     d, c, audit = case
     big = c / "Users" / "u1" / "Desktop"
@@ -213,8 +213,8 @@ def test_the_bound_itself_is_named_file_by_file(case):
     d, c, audit = case
     big = c / "Users" / "u1" / "Desktop"
     big.mkdir(parents=True)
-    _extract_more(d, audit, big, 5000)
+    _extract_more(d, audit, big, 1100)
     sid = _read_step(d, audit, big)
     t = _grade(d, sid)
-    assert len(_entry(d, sid)["inputs"]) == 5000
+    assert len(_entry(d, sid)["inputs"]) == 1100
     assert t.grade == "FULL"
