@@ -587,7 +587,11 @@ def gate(case_dir, path) -> tuple[list[dict], dict]:
 
 # what makes an input pass the gate: a declared origin (log_external_action)
 # grades DECLARED, which the gate refuses
-GATE_FIX = "re-make it with run_command from registered evidence, or register it as evidence"
+GATE_FIX = (
+    "re-make it with run_command from registered evidence or a recorded output, writing to a"
+    " relative path. A script you wrote is an input too, and it has no recorded origin."
+    " Register it as evidence only if the examiner supplied it"
+)
 
 
 def _refused(real: str, t) -> Refused:

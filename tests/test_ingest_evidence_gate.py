@@ -30,7 +30,11 @@ pytestmark = pytest.mark.evidence_gate
 
 UUID = "0123456789abcdef0123456789abcdef"
 RUN = "the run, recorded before any of its steps"
-REMEDY = "re-make it with run_command from registered evidence, or register it as evidence"
+REMEDY = (
+    "re-make it with run_command from registered evidence or a recorded output, writing to a"
+    " relative path. A script you wrote is an input too, and it has no recorded origin."
+    " Register it as evidence only if the examiner supplied it"
+)
 
 
 def _sha(p: Path) -> str:
@@ -290,6 +294,22 @@ def test_each_remedy_the_refusal_names_passes_the_gate(case, tmp_path, monkeypat
     made.write_bytes(original.read_bytes())
     _made(case, "run_command", original, made, _sha(made))
     assert _json(monkeypatch, made) == (0, ["events.jsonl"])
+
+
+def test_the_fix_says_where_to_write_and_what_to_register(case, monkeypatch):
+    """A re-made file is written to a relative path from inputs with a recorded
+    origin, which a script the AI wrote doesn't have; only a file the examiner
+    supplied is registered."""
+    loose = case / "loose" / "events.jsonl"
+    loose.parent.mkdir()
+    loose.write_text('{"a": 1}\n')
+    assert _json(monkeypatch, loose)[0] != 0
+    (refusal,) = _refusals(case)
+    fix = refusal["refused"]["fix"]
+    for part in ("run_command from registered evidence or a recorded output", "relative path",
+                 "script you wrote is an input", "no recorded origin",
+                 "only if the examiner supplied it"):  # fmt: skip
+        assert part in fix
 
 
 def test_a_registered_folder_is_taken_with_its_members_as_they_are(case, monkeypatch):
