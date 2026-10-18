@@ -21,7 +21,6 @@ import contextlib
 import json
 import os
 import re
-import stat
 import threading
 from pathlib import Path
 
@@ -101,43 +100,6 @@ def file_input(
     if produced_by:
         entry["produced_by"] = produced_by
     return entry, reg
-
-
-FOLDER_FILES = 1100  # the most files a folder's step names one by one
-
-
-def folder_inputs(case_dir, path) -> tuple[list[dict], list[dict]] | None:
-    """A folder's files as a step's ``(inputs, registered entries)``: each
-    regular, non-symlink file under it, recursively, as file_input records it
-    from this run's extraction manifest or the registry, never hashed here.
-    None (the step records the folder itself) when the walk hits an error,
-    finds no file or more than FOLDER_FILES, or reaches a file in neither: the
-    walk stops there."""
-    inputs, regs = [], []
-    made = _extracted()
-
-    def fail(err):
-        raise err
-
-    try:
-        for root, dirs, names in os.walk(path, onerror=fail):
-            dirs.sort()
-            for name in sorted(names):
-                p = os.path.join(root, name)
-                if not stat.S_ISREG(os.lstat(p).st_mode):
-                    continue
-                if len(inputs) == FOLDER_FILES:
-                    return None
-                known = os.path.realpath(p) in made
-                entry, reg = file_input(case_dir, p, None if known else "")
-                if reg is None and not known:
-                    return None
-                inputs.append(entry)
-                if reg:
-                    regs.append(reg)
-    except OSError:
-        return None
-    return (inputs, regs) if inputs else None
 
 
 def step_inputs(
