@@ -144,13 +144,18 @@ def step_inputs(
     case_dir, path, sha256: str | None = None, produced_by=None
 ) -> tuple[list[dict], list[dict], str]:
     """What a step reading ``path`` records: ``(inputs, registered entries,
-    SHA-256)``. A folder is its files (folder_inputs) when it can name them
-    all, with SHA-256 ""; otherwise ``path`` itself by file_input, with its
-    hash or the registry's. Raises OSError as file_input."""
+    SHA-256)``. A folder is one input, as sift run_command records it
+    (file_place.input_record), with its digest when this run extracted every
+    file in it or it may be hashed where it is, and SHA-256 ""; otherwise
+    ``path`` by file_input, with its hash or the registry's. Raises OSError as
+    file_input."""
     if sha256 is None and produced_by is None and os.path.isdir(path):
-        found = folder_inputs(case_dir, path)
-        if found is not None:
-            return found[0], found[1], ""
+        from sift_common import file_place
+
+        known = {real: made[0] for real, made in _extracted().items()}
+        entry, reg = file_place.input_record(case_dir, path, folder=True, known=known)
+        entry.setdefault("sha256", "")  # listed as "" in input_sha256s, as sift lists it
+        return [entry], [reg] if reg else [], reg["sha256"] if reg else ""
     entry, reg = file_input(case_dir, path, sha256, produced_by)
     return [entry], [reg] if reg else [], reg["sha256"] if reg else entry.get("sha256", "")
 
@@ -251,7 +256,7 @@ def read_step(
 ) -> tuple[str, str]:
     """Write the step that reads ``path``, before any of its records: the
     file, its place and hash (or the registry's), ``params`` (host, index,
-    run) and any ``outputs`` it wrote; a folder by its files (step_inputs).
+    run) and any ``outputs`` it wrote; a folder as one input (step_inputs).
     Returns ``(audit id, the file's SHA-256)``, "" for a folder. A file that
     can't be read gets a failure entry and raises Unreadable; an entry that
     can't be written raises NoEntry. Either way the file is not indexed."""
