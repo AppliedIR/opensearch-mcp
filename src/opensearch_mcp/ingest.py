@@ -1185,14 +1185,14 @@ def _ingest_plaso_volume(
             jsonl, pinfo = run_plaso_volume(parsers, source, workdir, read_as_root, zone, **run_kw)
             # one step per Plaso run: what it read and the JSONL it wrote,
             # recorded before the JSONL's records are indexed
-            src_in, src_reg = ops.file_input(case_dir, source)
+            src_in, src_reg, _sha = ops.step_inputs(case_dir, source)
             aid = ops.write(
                 audit,
                 "ingest_plaso",
                 params={**params, "parsers": parsers, "source": str(source)},
                 summary="recorded before its records were indexed",
-                inputs=[src_in],
-                input_registered=[src_reg] if src_reg else None,
+                inputs=src_in,
+                input_registered=src_reg or None,
                 outputs=[ops.output(jsonl)],
             )
             if not aid:

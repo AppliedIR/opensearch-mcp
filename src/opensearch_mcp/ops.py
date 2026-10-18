@@ -21,6 +21,7 @@ import contextlib
 import json
 import os
 import re
+import stat
 import threading
 from pathlib import Path
 
@@ -100,6 +101,58 @@ def file_input(
     if produced_by:
         entry["produced_by"] = produced_by
     return entry, reg
+
+
+FOLDER_FILES = 5000  # the most files a folder's step names one by one
+
+
+def folder_inputs(case_dir, path) -> tuple[list[dict], list[dict]] | None:
+    """A folder's files as a step's ``(inputs, registered entries)``: each
+    regular, non-symlink file under it, recursively, as file_input records it
+    from this run's extraction manifest or the registry, never hashed here.
+    None (the step records the folder itself) when the walk hits an error,
+    finds no file or more than FOLDER_FILES, or reaches a file in neither: the
+    walk stops there."""
+    inputs, regs = [], []
+    made = _extracted()
+
+    def fail(err):
+        raise err
+
+    try:
+        for root, dirs, names in os.walk(path, onerror=fail):
+            dirs.sort()
+            for name in sorted(names):
+                p = os.path.join(root, name)
+                if not stat.S_ISREG(os.lstat(p).st_mode):
+                    continue
+                if len(inputs) == FOLDER_FILES:
+                    return None
+                known = os.path.realpath(p) in made
+                entry, reg = file_input(case_dir, p, None if known else "")
+                if reg is None and not known:
+                    return None
+                inputs.append(entry)
+                if reg:
+                    regs.append(reg)
+    except OSError:
+        return None
+    return (inputs, regs) if inputs else None
+
+
+def step_inputs(
+    case_dir, path, sha256: str | None = None, produced_by=None
+) -> tuple[list[dict], list[dict], str]:
+    """What a step reading ``path`` records: ``(inputs, registered entries,
+    SHA-256)``. A folder is its files (folder_inputs) when it can name them
+    all, with SHA-256 ""; otherwise ``path`` itself by file_input, with its
+    hash or the registry's. Raises OSError as file_input."""
+    if sha256 is None and produced_by is None and os.path.isdir(path):
+        found = folder_inputs(case_dir, path)
+        if found is not None:
+            return found[0], found[1], ""
+    entry, reg = file_input(case_dir, path, sha256, produced_by)
+    return [entry], [reg] if reg else [], reg["sha256"] if reg else entry.get("sha256", "")
 
 
 def output(path) -> dict:
@@ -198,13 +251,13 @@ def read_step(
 ) -> tuple[str, str]:
     """Write the step that reads ``path``, before any of its records: the
     file, its place and hash (or the registry's), ``params`` (host, index,
-    run) and any ``outputs`` it wrote. Returns ``(audit id, the file's
-    SHA-256)``. A file that can't be read gets a failure entry and raises
-    Unreadable; an entry that can't be written raises NoEntry. Either way the
-    file is not indexed."""
+    run) and any ``outputs`` it wrote; a folder by its files (step_inputs).
+    Returns ``(audit id, the file's SHA-256)``, "" for a folder. A file that
+    can't be read gets a failure entry and raises Unreadable; an entry that
+    can't be written raises NoEntry. Either way the file is not indexed."""
     params = {**params, "file": str(path)}
     try:
-        entry, reg = file_input(case_dir, path, sha256, produced_by)
+        inputs, regs, sha = step_inputs(case_dir, path, sha256, produced_by)
     except OSError as e:
         write(audit, tool, params=params, summary=f"FAILED: {e}", inputs=[place(path)])
         raise Unreadable(str(e)) from e
@@ -213,14 +266,14 @@ def read_step(
         tool,
         params=params,
         summary="recorded before its records were indexed",
-        inputs=[entry],
-        input_registered=[reg] if reg else None,
+        inputs=inputs,
+        input_registered=regs or None,
         outputs=[output(o) for o in outputs or ()],
         extra=extra,
     )
     if not aid:
         raise NoEntry(NO_ENTRY)
-    return aid, (reg["sha256"] if reg else entry.get("sha256", ""))
+    return aid, sha
 
 
 def later(
