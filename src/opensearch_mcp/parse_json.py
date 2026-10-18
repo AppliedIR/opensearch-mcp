@@ -205,6 +205,11 @@ def ingest_json(
                 except (ValueError, OverflowError, OSError):
                     pass  # not an epoch we can read (ns, 10**400): the raw value stays
             elif val is not None:
+                try:  # Hayabusa's "2022-08-31 17:46:07.886 +00:00", read as parse_delimited does
+                    fmt_ = "%Y-%m-%d %H:%M:%S.%f %z"
+                    val = datetime.strptime(val, fmt_).astimezone(timezone.utc).isoformat()
+                except (ValueError, TypeError, OverflowError):  # not text, or out of range in UTC
+                    pass
                 record["@timestamp"] = val
 
         if (time_from or time_to) and record.get("@timestamp"):

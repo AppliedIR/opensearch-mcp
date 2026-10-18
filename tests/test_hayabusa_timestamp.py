@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from opensearchpy.serializer import JSONSerializer
 
-from opensearch_mcp import ingest, parse_delimited
+from opensearch_mcp import ingest, parse_delimited, parse_json
 
 HEADER = '"Timestamp","RuleTitle","Level","Computer","Channel","EventID","RecordID","Details"\n'
 ROWS = [
@@ -126,6 +126,22 @@ def test_a_rerun_overwrites_the_same_alerts():
         volatile_keys=parse_delimited._DELIM_VOLATILE,
     )
     assert before == after
+
+
+def test_hayabusa_jsonl_alerts_have_their_time_in_utc(tmp_path):
+    """Hayabusa's JSONL carries the same Timestamp form as its CSV."""
+    data = tmp_path / "hayabusa.jsonl"
+    data.write_text(
+        '{"Timestamp": "2022-08-31 17:46:07.886 +00:00", "RuleTitle": "a"}\n'
+        '{"Timestamp": "2022-09-01 02:46:07.886 +09:00", "RuleTitle": "b"}\n'
+    )
+    client = _Client()
+    parse_json.ingest_json(data, client, "case-x-json-hayabusa", "h")
+    got = {doc["RuleTitle"]: (doc["@timestamp"], doc["Timestamp"]) for _, doc in client.sent}
+    assert got == {
+        "a": ("2022-08-31T17:46:07.886000+00:00", "2022-08-31 17:46:07.886 +00:00"),
+        "b": ("2022-08-31T17:46:07.886000+00:00", "2022-09-01 02:46:07.886 +09:00"),
+    }
 
 
 def test_other_time_strings_are_left_as_they_were(tmp_path):
