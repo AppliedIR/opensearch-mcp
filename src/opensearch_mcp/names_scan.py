@@ -453,6 +453,25 @@ def noted_volume_unit(
     )
 
 
+# Disk and memory image and archive extensions the ingests read: a name taken
+# from a file name never keeps one (a host's DNS domain is never "img").
+_CONTAINER_SUFFIXES = frozenset(
+    (".vhdx", ".vhd", ".vmdk", ".e01", ".ex01", ".dd", ".raw", ".img", ".dmg", ".sparseimage",
+     ".vmem", ".dmp", ".mem", ".bin", ".lime", ".7z", ".zip", ".tar", ".tgz", ".gz")
+)  # fmt: skip
+
+
+def file_name_stem(name) -> str:
+    """A file's name without its extension and the image or archive
+    extensions before it: wkstn05-memory.img.7z gives wkstn05-memory,
+    Tool-HOST.csv gives Tool-HOST. Every name read from a file or
+    archive-member name is read from this."""
+    stem = Path(str(name)).stem
+    while Path(stem).suffix.lower() in _CONTAINER_SUFFIXES:
+        stem = Path(stem).stem
+    return stem
+
+
 def memory_unit(
     image: Path, given: Path, member: str, hostname: str, case_dir: Path | None
 ) -> Unit:
@@ -462,9 +481,9 @@ def memory_unit(
         source="memory image",
     )
     unit.add(hostname, "hostname argument", ARGUMENT)
-    unit.add(Path(image).stem, "memory image file name", FILE_NAME)
+    unit.add(file_name_stem(image), "memory image file name", FILE_NAME)
     if member:
-        unit.add(Path(given).stem, "archive file name", FILE_NAME)
+        unit.add(file_name_stem(given), "archive file name", FILE_NAME)
     return unit
 
 
@@ -508,7 +527,7 @@ def filename_host(path: Path, known=()) -> str:
     ingest_cli's split of a folder by host and server's detector read file
     names with this rule too."""
     path = Path(path)
-    parts = path.stem.rsplit("-", 1)
+    parts = file_name_stem(path).rsplit("-", 1)
     if len(parts) != 2 or len(parts[1]) < 2:
         return ""
     left, last = parts
