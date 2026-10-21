@@ -14,7 +14,7 @@ from opensearch_mcp.server import _detect_hostnames_from_filenames
 
 EXTS = [".img", ".raw", ".mem", ".vmem", ".dmp", ".lime", ".bin", ".dd", ".e01", ".Ex01",
         ".vhdx", ".vhd", ".vmdk", ".dmg", ".7z", ".zip", ".img.7z", ".raw.zip", ".vhdx.7z",
-        ".E01.ZIP", ".mem.tar.gz", ".vmdk.tgz"]  # fmt: skip
+        ".E01.ZIP", ".mem.tar.gz", ".vmdk.tgz", ".iso", ".iso.7z"]  # fmt: skip
 HOSTS = ["wkstn05", "wkstn05-memory", "wkstn05.shieldbase.com"]
 
 
@@ -62,6 +62,7 @@ def test_a_name_from_a_file_name_keeps_no_image_or_archive_extension(tmp_path, s
     "name, stem",
     [
         ("wkstn05-memory.img.7z", "wkstn05-memory"),
+        ("wkstn05-memory.iso.7z", "wkstn05-memory"),
         ("wkstn05.shieldbase.com.E01", "wkstn05.shieldbase.com"),
         ("Tool-HOST.csv", "Tool-HOST"),  # one extension, any kind, as before
         ("WKS70", "WKS70"),

@@ -457,7 +457,7 @@ def noted_volume_unit(
 # from a file name never keeps one (a host's DNS domain is never "img").
 _CONTAINER_SUFFIXES = frozenset(
     (".vhdx", ".vhd", ".vmdk", ".e01", ".ex01", ".dd", ".raw", ".img", ".dmg", ".sparseimage",
-     ".vmem", ".dmp", ".mem", ".bin", ".lime", ".7z", ".zip", ".tar", ".tgz", ".gz")
+     ".iso", ".vmem", ".dmp", ".mem", ".bin", ".lime", ".7z", ".zip", ".tar", ".tgz", ".gz")
 )  # fmt: skip
 
 
