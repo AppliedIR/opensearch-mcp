@@ -372,13 +372,13 @@ def _index_vol3_records(
     return count, bulk_failed, implausible
 
 
-_NAME_VARIABLES = ("COMPUTERNAME", "USERDOMAIN")
+# USERDOMAIN is the logon domain ("NT AUTHORITY", a domain), not the computer.
+_NAME_VARIABLES = ("COMPUTERNAME",)
 
 
 def observe_envar_names(records: list[dict]) -> list[str]:
-    """Record the image's COMPUTERNAME and USERDOMAIN values as names its
-    evidence gives. They are observations only: the image keeps the machine
-    it was given."""
+    """Record the image's COMPUTERNAME values as names its evidence gives.
+    They are observations only: the image keeps the machine it was given."""
     from sift_common import host_identity
 
     from opensearch_mcp.write_context import current

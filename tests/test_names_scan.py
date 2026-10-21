@@ -400,10 +400,35 @@ def test_a_memory_images_computer_name_variables_are_observed():
         {"Variable": "PATH", "Value": "C:\\x"},
     ]
     with wc.writing(ctx):
-        assert observe_envar_names(records) == ["WKS70", "CORP"]
+        assert observe_envar_names(records) == ["WKS70"]
     names = host_identity.load(d).names
     assert names[(ctx.unit, "WKS70")]["evidence"] == ["windows.envars COMPUTERNAME"]
     assert not host_identity.load(d).machines  # observed, not bound
+
+
+@pytest.mark.parametrize(
+    "var, value, named",
+    [
+        ("COMPUTERNAME", "WKSTN05", True),
+        ("computername", "WKSTN05", True),
+        ("USERDOMAIN", "NT AUTHORITY", False),  # a service's logon domain
+        ("USERDOMAIN", "Font Driver Host", False),
+        ("USERDOMAIN", "shieldbase", False),  # the user's domain
+        ("USERDOMAIN_ROAMINGPROFILE", "shieldbase", False),
+        ("LOGONSERVER", "\\\\DC01", False),
+        ("USERNAME", "WKSTN05$", False),
+    ],
+)
+def test_a_memory_images_host_names_come_from_computername_only(var, value, named):
+    from opensearch_mcp.parse_memory import observe_envar_names
+
+    d = case()
+    ctx = wc.open_unit(d, "evidence/m.raw", "M", source="memory image", origin="argument")
+    with wc.writing(ctx):
+        assert observe_envar_names([{"Variable": var, "Value": value, "PID": 4}]) == (
+            [value] if named else []
+        )
+    assert ((ctx.unit, value) in host_identity.load(d).names) is named
 
 
 def test_an_archives_disk_image_units_are_named_by_the_archive_and_the_image():
