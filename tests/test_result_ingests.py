@@ -143,7 +143,10 @@ SUMMARIES = {
     ),
     "idx_timeline": (
         lambda: srv.idx_timeline(index=INDEX),
-        {"timeline": {"buckets": [{"key_as_string": "2026-10-08T00:00:00Z", "doc_count": 9}]}},
+        {
+            "timeline": {"buckets": [{"key_as_string": "2026-10-08T00:00:00Z", "doc_count": 9}]},
+            "early": {"doc_count": 0},  # the default timeline also counts records before 1990
+        },
     ),
     "idx_field_values": (
         lambda: srv.idx_field_values(field="host.name", index=INDEX),

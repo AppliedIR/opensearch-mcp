@@ -1314,6 +1314,18 @@ _WINDOW = "are left out of time_from/time_to"
 _UNCHECKED = "couldn't check which indices lack an event time"  # the failed-read note's start
 
 
+def _floor() -> str:  # memory's plausible-time floor: a zero FILETIME (1601) leads no range
+    from opensearch_mcp.parse_memory import _EARLIEST_TIME
+
+    return _EARLIEST_TIME.date().isoformat()
+
+
+def _early_note(n: int, why: str) -> str:
+    day = _floor()
+    return (f"{n} record(s) have @timestamp before {day} (a zero FILETIME reads as "
+            f"1601-01-01) and {why}; idx_search query='@timestamp:<{day}' finds them")  # fmt: skip
+
+
 @server.tool()
 def idx_search(
     query: str,
@@ -1677,19 +1689,19 @@ def idx_timeline(
             "bool": {"must": [{"query_string": {"query": query}}, {"range": range_filter}]}
         }
 
+    hist: dict = {"field": time_field, "fixed_interval": interval, "min_doc_count": 1}
+    floor: dict = {}
+    if time_field == "@timestamp" and not time_from:  # no zero FILETIME (1601) leads it
+        hist["hard_bounds"] = {"min": _floor(), "max": 2**63 - 1}  # 3.5 fails on min alone
+        floor = {"early": {"filter": {"range": {"@timestamp": {"lt": _floor()}}}}}
     result = _os_call(
         client.search,
         index=index,
         body={
             "query": query_body,
             "aggs": {
-                "timeline": {
-                    "date_histogram": {
-                        "field": time_field,
-                        "fixed_interval": interval,
-                        "min_doc_count": 1,
-                    }
-                },
+                "timeline": {"date_histogram": hist},
+                **floor,
                 **_ingest_aggs(),
             },
             "size": 0,
@@ -1713,6 +1725,8 @@ def idx_timeline(
         if note := _untimed_note(client, index, why):
             resp["time_note"] = note
     _add_hint(resp, _stale_dates_hint(client, index, query, time_field))
+    if early := result["aggregations"].get("early", {}).get("doc_count"):
+        _add_hint(resp, _early_note(early, "aren't in this timeline"))
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
         resp,
@@ -2395,12 +2409,23 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
                 "aggs": {
                     "min_ts": {"min": {"field": "@timestamp"}},
                     "max_ts": {"max": {"field": "@timestamp"}},
+                    "timed": {
+                        "filter": {"range": {"@timestamp": {"gte": _floor()}}},
+                        "aggs": {"min_ts": {"min": {"field": "@timestamp"}}},
+                    },
+                    "early": {"filter": {"range": {"@timestamp": {"lt": _floor()}}}},
                 },
             },
         )
         shard_gap("Time range", ts_result)
-        min_val = _agg_time(ts_result["aggregations"]["min_ts"])
-        max_val = _agg_time(ts_result["aggregations"]["max_ts"])
+        aggs = ts_result["aggregations"]
+        if early := aggs.get("early", {}).get("doc_count"):
+            aggs = {**aggs, "min_ts": aggs["timed"]["min_ts"]}
+            resp.setdefault("warnings", []).append(
+                "Time range: " + _early_note(early, "aren't in time_range")
+            )
+        min_val = _agg_time(aggs["min_ts"])
+        max_val = _agg_time(aggs["max_ts"]) if min_val else None
         if min_val:
             time_range["earliest"] = min_val
         if max_val:
