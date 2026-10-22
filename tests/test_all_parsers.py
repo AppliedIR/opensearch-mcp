@@ -55,7 +55,7 @@ class TestJsonFormatDetection:
 
         f = tmp_path / "empty.json"
         f.write_text("")
-        assert _detect_json_format(f) == "unknown"
+        assert _detect_json_format(f) == "empty"
 
     def test_non_json(self, tmp_path):
         from opensearch_mcp.parse_json import _detect_json_format
