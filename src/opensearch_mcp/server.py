@@ -590,9 +590,16 @@ def _search_index(index: str, case_id: str, client) -> tuple[str, str]:
 
 
 def _mixed_type_refusal(client, index: str, field: str) -> dict | None:
-    """An error when field is ip in some target indices and keyword in others."""
+    """An error when field is in none of the target indices, or is ip in some
+    and keyword in others."""
     caps = _os_call(client.field_caps, index=index, fields=field)
     types = caps.get("fields", {}).get(field, {})
+    if not types and caps.get("indices") and not caps.get("failures"):
+        return {
+            "error": f"{field} is in none of the searched indices ({index}): 0 buckets "
+            "would not mean no values. Hosts are host.id (the machine) and host.name "
+            "(the raw name), both keyword with no .keyword sub-field."
+        }
     if "ip" in types and "keyword" in types:
         ip_idx = types["ip"].get("indices", [])
         kw_idx = types["keyword"].get("indices", [])
