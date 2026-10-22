@@ -568,6 +568,32 @@ def _refused(real: str, t) -> Refused:
     return Refused(real, t.reason, GATE_FIX if not fix or "log_external_action" in fix else fix)
 
 
+REGISTER_FIX = "call evidence_register on its folder again when the job is done, then ingest again"
+
+
+def _registering(pv, case, real: str, t) -> Refused | None:
+    """The no-origin refusal of a file in a folder evidence_register last
+    answered "hashing" for: it registers nothing until it is called again."""
+    if t.reason != pv.NO_ORIGIN:
+        return None
+    last, closed = {}, set()
+    for e, _line in sorted((x for xs in case.by_id.values() for x in xs),
+                           key=lambda x: case.order.get(id(x[0]), ())):  # fmt: skip
+        s = e.get("result_summary")
+        if e.get("tool") in ("hash_complete", "hash_failed"):
+            closed.add(e.get("job_id"))
+        elif e.get("tool") == "evidence_register" and isinstance(s, dict):
+            last[os.path.realpath(str(s.get("path") or (e.get("params") or {}).get("path")))] = s
+    for folder, s in last.items():
+        if s.get("status") == "hashing" and real.startswith(folder + os.sep):
+            job, left = s.get("job_id", ""), s.get("files_hashing", "?")
+            why = f"evidence_register is still hashing its folder (job {job}, {left} file(s) left)"
+            if job in closed:
+                why = f"evidence_register hashed its folder (job {job}) but wasn't called again"
+            return Refused(real, why, REGISTER_FIX)
+    return None
+
+
 def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list[dict]:
     p = place(real)
     at = {"realpath": real, "st_dev": p.get("st_dev"), "mnt_id": p.get("mnt_id")}
@@ -578,7 +604,7 @@ def _gate_file(pv, case, case_dir, real: str, completed=None, held=None) -> list
     outputs = pv._index(case, "outputs", lambda e, line: [
         (os.path.realpath(o), (e, line, h)) for o, h in pv._outputs(case, e)])  # fmt: skip
     if real not in outputs:  # no recorded origin can hold it: refused unhashed
-        raise _refused(real, t)
+        raise _registering(pv, case, real, t) or _refused(real, t)
     done = completed() if completed is not None else None
     sha = recorded_hash(case_dir, real, done=done, held=held) or sha256_file(Path(real))
     t = pv.trace_file(case, real, sha, **at)

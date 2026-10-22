@@ -621,3 +621,172 @@ def test_an_audit_log_rewritten_after_the_kept_load_is_read_again(case, tmp_path
     assert refused.value.path == str(later)
     now = log.stat()
     assert (now.st_ino, now.st_size, now.st_mtime_ns) == (lst.st_ino, lst.st_size, lst.st_mtime_ns)
+
+
+# evidence_register answers "hashing" for a folder with large files and
+# registers nothing until it is called again: the gate's no-origin refusal of
+# a file in it says so, and what to do, instead of blaming the file
+HASHING = "evidence_register is still hashing its folder (job {job}, {n} file(s) left)"
+HASHED = "evidence_register hashed its folder (job {job}) but wasn't called again"
+
+
+def _register_hashing(case: Path, folder: Path, job: str, n: int = 1) -> None:
+    """The entry case-mcp writes for an evidence_register that answered "hashing"."""
+    summary = {"status": "hashing", "job_id": job, "path": str(folder), "files_hashing": n}
+    AuditWriter("case-mcp", audit_dir=str(case / "audit")).log(
+        tool="evidence_register",
+        params={"path": str(folder), "description": ""},
+        result_summary=summary,
+    )
+
+
+@pytest.fixture
+def racing(case, monkeypatch):
+    """A folder of JSON files and one sparse file over the inline limit, whose
+    real background job (started as evidence_register starts it) is held
+    until `release` is set; `job` names it."""
+    import threading
+
+    from sift_common import file_identity as fi
+
+    folder = case / "evidence" / "vr"
+    folder.mkdir()
+    for i in range(3):
+        (folder / f"r{i}.json").write_text(f'{{"i": {i}}}\n')
+    big = folder / "big.json"
+    with open(big, "wb") as f:
+        f.truncate(fi.INLINE_LIMIT + 1)
+    release, real = threading.Event(), fi.hash_file
+    held = lambda p, *a, **k: (release.wait(30) if p == str(big) else 0) or real(p, *a, **k)  # noqa: E731
+    monkeypatch.setattr(fi, "hash_file", held)
+    files = sorted(str(p) for p in folder.iterdir())
+    batch = fi.hash_files_for_call(files, case_dir=case, requested_by="evidence_register")
+    assert batch.job_id and batch.pending == [str(big)]
+    _register_hashing(case, folder, batch.job_id)
+    r = argparse.Namespace(folder=folder, job=batch.job_id, release=release, fi=fi)
+    yield r
+    _hashed(r)  # the job closes inside its test
+
+
+def _hashed(r) -> None:
+    r.release.set()
+    log = r.folder.parents[1] / "audit" / "file-identity.jsonl"
+    deadline = time.monotonic() + 30
+    while r.job not in (log.read_text() if log.exists() else "") and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _refusal(case: Path) -> tuple[str, str]:
+    (refusal,) = _refusals(case)
+    return refusal["refused"]["reason"], refusal["refused"]["fix"]
+
+
+def test_a_folder_still_hashing_for_registration_is_refused_as_still_hashing(
+    case, racing, monkeypatch, capsys
+):
+    code, parsed = _json(monkeypatch, racing.folder)
+    assert racing.job in racing.fi._jobs.values()  # the job still runs: the race
+    assert code != 0 and parsed == []
+    assert _refusal(case) == (HASHING.format(job=racing.job, n=1), ops.REGISTER_FIX)
+    assert f"{ops.REGISTER_FIX}" in capsys.readouterr().err
+
+
+def test_a_folder_hashed_but_not_registered_again_is_refused_as_such(case, racing, monkeypatch):
+    _hashed(racing)
+    assert racing.job not in racing.fi._jobs.values()
+    code, parsed = _json(monkeypatch, racing.folder)
+    assert code != 0 and parsed == []
+    assert _refusal(case) == (HASHED.format(job=racing.job), ops.REGISTER_FIX)
+
+
+def test_a_file_in_a_folder_still_hashing_is_refused_as_still_hashing(case, racing, monkeypatch):
+    code, parsed = _json(monkeypatch, racing.folder / "r1.json")
+    assert code != 0 and parsed == []
+    assert _refusal(case) == (HASHING.format(job=racing.job, n=1), ops.REGISTER_FIX)
+
+
+def test_idx_ingest_on_a_folder_still_hashing_is_refused_as_still_hashing(case, racing):
+    args = argparse.Namespace(path=str(racing.folder), hostname="RD01", case=None, dry_run=False)
+    with pytest.raises(SystemExit) as e:
+        ingest_cli.cmd_ingest(args)
+    assert e.value.code != 0 and _runs(case, "idx_ingest") == []
+    assert _refusal(case) == (HASHING.format(job=racing.job, n=1), ops.REGISTER_FIX)
+
+
+@pytest.mark.parametrize("hashing", ["none", "a sibling folder", "a file, not a folder"])
+def test_a_folder_never_registered_keeps_todays_refusal(case, monkeypatch, capsys, hashing):
+    folder = case / "evidence" / "vr2"
+    folder.mkdir()
+    (folder / "a.json").write_text('{"a": 1}\n')
+    if hashing == "a sibling folder":  # a name that only starts with the hashing one's
+        _register_hashing(case, case / "evidence" / "vr", "hash-00000000000000a1")
+    elif hashing == "a file, not a folder":
+        _register_hashing(case, folder / "a.json", "hash-00000000000000a2")
+    code, parsed = _json(monkeypatch, folder)
+    assert code != 0 and parsed == []
+    why = "no recorded origin: made outside recorded tools"
+    assert _refusal(case) == (why, REMEDY)
+    assert f"Error: not ingested: {why}\n  {REMEDY}\n" in capsys.readouterr().err
+
+
+def test_another_refusal_in_a_folder_still_hashing_keeps_its_own_text(case, monkeypatch):
+    """Only the no-origin refusal names the hashing: a file under a recorded
+    mount point it wasn't read through keeps the mount's refusal and fix."""
+    folder = case / "evidence" / "vr"
+    f = folder / "mnt" / "a.json"
+    f.parent.mkdir(parents=True)
+    f.write_text('{"a": 1}\n')
+    AuditWriter("sift-mcp", audit_dir=str(case / "audit")).log(
+        tool="run_command",
+        params={"command": f"mount -o ro image.E01 {f.parent}"},
+        result_summary={"exit_code": 0},
+        extra={"mount": {"points": [{"realpath": str(f.parent.resolve()), "st_dev": -1}]}},
+    )
+    _register_hashing(case, folder, "hash-00000000000000c1")
+    code, parsed = _json(monkeypatch, f)
+    assert code != 0 and parsed == []
+    reason, fix = _refusal(case)
+    assert reason.startswith(f"{f.resolve()} is under a recorded mount point, but not read")
+    assert fix == "read it through the recorded mount, or record the mount it was read from"
+
+
+@pytest.mark.parametrize("origin", ["a recorded output", "a registered file"])
+def test_a_file_with_an_origin_in_a_folder_still_hashing_passes(
+    case, tmp_path, monkeypatch, origin
+):
+    folder = case / "evidence" / "vr"
+    made = folder / "out.csv"
+    made.parent.mkdir()
+    made.write_text("x,y\n1,2\n")
+    if origin == "a recorded output":
+        image = tmp_path / "srv" / "host.E01"
+        image.parent.mkdir()
+        image.write_bytes(b"EVF\x09\x0d\x0a\xff\x00" + b"q" * 64)
+        root = _register(case, image)
+        _made(case, "run_command", image, made, _sha(made))
+    else:
+        root = _register(case, made)
+    _register_hashing(case, folder, "hash-00000000000000b1")
+    assert _delimited(monkeypatch, made) == (0, ["out.csv"])
+    (run,) = _runs(case, "idx_ingest_delimited")
+    assert run["roots"] == [root]
+
+
+def test_the_status_reply_keeps_the_action_after_its_cut(case, tmp_path, monkeypatch):
+    """idx_ingest_status cuts a refusal to 200 characters: with a long path,
+    a long job id and a large count, the action still reaches the caller."""
+    from opensearch_mcp import ingest_status
+    from opensearch_mcp import server as srv
+
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setenv("VHIR_INGEST_RUN_ID", "run-hashing")
+    folder = case / "evidence" / ("velociraptor-collection-" * 6) / "results"
+    folder.mkdir(parents=True)
+    (folder / "a.json").write_text('{"a": 1}\n')
+    _register_hashing(case, folder, "hash-0123456789abcdef", n=99999)
+    code, _ = _json(monkeypatch, folder / "a.json")
+    (status,) = srv.idx_ingest_status(case_id="acme")["ingests"]
+    assert code != 0 and status["status"] == "failed"
+    assert status["message"].startswith("Ingest failed: not ingested: " + HASHING.format(
+        job="hash-0123456789abcdef", n=99999))  # fmt: skip
+    assert status["message"].endswith(ops.REGISTER_FIX)
