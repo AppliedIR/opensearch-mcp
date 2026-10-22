@@ -1804,7 +1804,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             if any(h.evtx_dir for h in hosts):
                 # Layer 6: update status to show Hayabusa phase
                 from opensearch_mcp.bulk import get_last_bulk_reason
-                from opensearch_mcp.ingest import run_hayabusa_batch
+                from opensearch_mcp.ingest import _compute_totals, run_hayabusa_batch
 
                 # The ingest's own reason: hayabusa's bulk writes replace it.
                 ingest_bulk_reason = get_last_bulk_reason()
@@ -1924,7 +1924,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
                         "artifacts_total": n_arts,
                         "artifacts_complete": n_arts - (1 if skipped or failed_hosts else 0),
                         "hosts_total": len(existing_hosts),
-                        "hosts_complete": hosts_complete,
+                        # as a run without hayabusa counts them: whatever hayabusa did
+                        "hosts_complete": _compute_totals(existing_hosts)["hosts_complete"],
                     },
                     hayabusa_started,
                     bulk_failed=total_bulk_failed,
