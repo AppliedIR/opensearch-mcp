@@ -72,9 +72,10 @@ def evtx_ingest(tmp_path, monkeypatch):
 
 def _hayabusa_errors(status: dict) -> list[str]:
     """The status's errors for the detection step. Other artifacts in the
-    tree fail where their parsers aren't installed, as on CI."""
+    tree fail where their parsers aren't installed, as on CI. The detections'
+    line names no host (SPEC-HC-018)."""
     assert any(i["artifact"] == "hayabusa-detection" for i in status["checklist"]), status
-    return [e for e in status.get("errors", []) if e.startswith("hayabusa/")]
+    return [e for e in status.get("errors", []) if e.startswith("hayabusa-detection: ")]
 
 
 class TestTheIngestStatus:
@@ -83,7 +84,7 @@ class TestTheIngestStatus:
         status = evtx_ingest()
         assert status["message"].startswith("Ingest complete with "), status["message"]
         (error,) = _hayabusa_errors(status)
-        assert error.startswith("hayabusa/hayabusa-detection: detections skipped: hayabusa not")
+        assert error.startswith("hayabusa-detection: detections skipped: hayabusa not")
         # Valhuntir's installer only: the current SIFT release has no Hayabusa
         assert "cast install" not in error
         assert "`vhir setup hayabusa` (the current Hayabusa release" in error
@@ -96,7 +97,7 @@ class TestTheIngestStatus:
         monkeypatch.setattr(ingest, "_resolve_hayabusa_rules_dir", lambda: None)
         status = evtx_ingest(skip_triage)
         assert status["message"].startswith("Ingest complete with "), status["message"]
-        assert _hayabusa_errors(status) == ["hayabusa/hayabusa-detection: host-a: rules_not_found"]
+        assert _hayabusa_errors(status) == ["hayabusa-detection: host-a: rules_not_found"]
 
     def test_hayabusa_ran(self, evtx_ingest, monkeypatch):
         _hayabusa(monkeypatch, installed=True)

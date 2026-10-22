@@ -1812,33 +1812,31 @@ def cmd_scan(args: argparse.Namespace) -> None:
                 hayabusa_started = datetime.now(timezone.utc).isoformat()
                 # BUG-4 fix: preserve full host/artifact checklist, append hayabusa
                 existing_hosts = [_rebuilt_status_host(h) for h in result.hosts]
-                existing_hosts.append(
-                    {
-                        "hostname": "hayabusa",
-                        "artifacts": [{"name": "hayabusa-detection", "status": "running"}],
-                    }
+                hosts_complete = sum(
+                    1
+                    for h in existing_hosts
+                    if all(a["status"] == "complete" for a in h["artifacts"])
                 )
-                n_arts = sum(len(h["artifacts"]) for h in existing_hosts)
+                # The detections are a line of their own: they name no host, and count as none
+                detections = {"name": "hayabusa-detection", "status": "running"}
+                statuses = [*existing_hosts, {"hostname": "", "artifacts": [detections]}]
+                n_arts = sum(len(h["artifacts"]) for h in statuses)
                 n_done = sum(
-                    1 for h in existing_hosts for a in h["artifacts"] if a["status"] == "complete"
+                    1 for h in statuses for a in h["artifacts"] if a["status"] == "complete"
                 )
                 write_status(
                     case_id,
                     os.getpid(),
                     run_id,
                     "running",
-                    existing_hosts,
+                    statuses,
                     {
                         "indexed": result.total_indexed,
                         **_kept_total(result),
                         "artifacts_total": n_arts,
                         "artifacts_complete": n_done,
                         "hosts_total": len(existing_hosts),
-                        "hosts_complete": sum(
-                            1
-                            for h in existing_hosts
-                            if all(a["status"] == "complete" for a in h["artifacts"])
-                        ),
+                        "hosts_complete": hosts_complete,
                     },
                     hayabusa_started,
                     elapsed_seconds=result.elapsed_seconds,
@@ -1908,30 +1906,25 @@ def cmd_scan(args: argparse.Namespace) -> None:
                             for host, v in failed_by_host.items()
                         )
                     )
-                    existing_hosts[-1]["artifacts"][0].update(
-                        {"status": "failed", "indexed": total_alerts, "error": why}
-                    )
+                    detections.update({"status": "failed", "indexed": total_alerts, "error": why})
                     print(f"Hayabusa: {why}")
                 else:
-                    existing_hosts[-1]["artifacts"][0].update(
-                        {"status": "complete", "indexed": total_alerts}
-                    )
+                    detections.update({"status": "complete", "indexed": total_alerts})
                 if empty_notes:  # neither a failure nor "0 alerts": say what it may be
-                    existing_hosts[-1]["artifacts"][0]["note"] = "; ".join(empty_notes)
+                    detections["note"] = "; ".join(empty_notes)
                 write_status(
                     case_id,
                     os.getpid(),
                     run_id,
                     "running",  # finished below, with the run's notes
-                    existing_hosts,
+                    statuses,
                     {
                         "indexed": result.total_indexed + total_alerts,
                         **_kept_total(result),
                         "artifacts_total": n_arts,
                         "artifacts_complete": n_arts - (1 if skipped or failed_hosts else 0),
                         "hosts_total": len(existing_hosts),
-                        "hosts_complete": len(existing_hosts)
-                        - (1 if skipped or failed_hosts else 0),
+                        "hosts_complete": hosts_complete,
                     },
                     hayabusa_started,
                     bulk_failed=total_bulk_failed,

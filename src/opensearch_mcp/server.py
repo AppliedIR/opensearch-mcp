@@ -2895,8 +2895,10 @@ def idx_ingest_status(case_id: str = "") -> dict:
                     )
                 if a.get("note") and "locator" in a:  # it names its locator and raw name
                     s.setdefault("warnings", []).append(a["note"])
-                elif a.get("note"):
-                    s.setdefault("warnings", []).append(f"{hostname}: {a['note']}")
+                elif a.get("note"):  # the detections' line names no host
+                    s.setdefault("warnings", []).append(
+                        f"{hostname}: {a['note']}" if hostname else a["note"]
+                    )
                 if a.get("not_read"):
                     unread = a["not_read"]
                     shown = "; ".join(unread[:10]) + ("; …" if len(unread) > 10 else "")
@@ -3015,7 +3017,7 @@ def idx_ingest_status(case_id: str = "") -> dict:
         elif status == "complete":
             invalidate_index_cache()  # new indices may exist
             errors = [
-                f"{item['host']}/{item['artifact']}: {item['detail']}"
+                f"{item['host'] + '/' if item['host'] else ''}{item['artifact']}: {item['detail']}"
                 for item in checklist
                 if item["status"] == "failed"
             ]
