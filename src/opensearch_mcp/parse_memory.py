@@ -292,6 +292,10 @@ def _vol3_doc_id(
 _EARLIEST_TIME = datetime(1990, 1, 1, tzinfo=timezone.utc)
 
 
+def _latest_time() -> datetime:  # nothing happened after now; a day covers local time as UTC
+    return datetime.now(timezone.utc) + timedelta(days=1)
+
+
 def _plausible_time(value) -> bool:
     """Between 1990 and a day from now. A value that doesn't parse isn't."""
     try:
@@ -300,7 +304,7 @@ def _plausible_time(value) -> bool:
         return False
     if t.tzinfo is None:
         t = t.replace(tzinfo=timezone.utc)
-    return _EARLIEST_TIME <= t <= datetime.now(timezone.utc) + timedelta(days=1)
+    return _EARLIEST_TIME <= t <= _latest_time()
 
 
 def _index_vol3_records(

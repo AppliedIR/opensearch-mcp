@@ -10,6 +10,7 @@ from opensearchpy import OpenSearch
 
 from opensearch_mcp import ops
 from opensearch_mcp.bulk import flush_bulk
+from opensearch_mcp.parse_memory import _plausible_time
 
 
 def _file_sha256(path: Path) -> str:
@@ -77,9 +78,7 @@ def _filetime(value: str) -> str | None:
         when = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=int(value) // 10)
     except (ValueError, OverflowError):
         return None
-    earliest = datetime(1990, 1, 1, tzinfo=timezone.utc)
-    latest = datetime.now(timezone.utc) + timedelta(days=1)
-    return when.isoformat() if earliest <= when <= latest else None
+    return when.isoformat() if _plausible_time(when.isoformat()) else None
 
 
 def parse_wer_dir(

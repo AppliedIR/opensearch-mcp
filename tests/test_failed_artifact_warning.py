@@ -44,7 +44,7 @@ class _Client:
     def search(self, index, body):
         if "hosts" in body.get("aggs", {}):
             return {"aggregations": {"hosts": {"buckets": [{"key": "dev01"}]}}}
-        return {"aggregations": {"min_ts": {}, "max_ts": {}}}
+        return {"aggregations": {"timed": {"min_ts": {}, "max_ts": {}}}}
 
     def count(self, index, body):
         return {"count": 0}

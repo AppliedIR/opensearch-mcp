@@ -126,8 +126,7 @@ def test_summary_warns_once_and_keeps_its_range(monkeypatch):
     c.cat.indices.return_value = [{"index": mft, "docs.count": "4"}]
     c.search.return_value = {
         "aggregations": {
-            "min_ts": {},
-            "max_ts": {},
+            "timed": {"doc_count": 0, "min_ts": {}, "max_ts": {}},
             "hosts": {"buckets": []},
             "by_index": {"buckets": []},
         }
@@ -185,7 +184,7 @@ def test_the_time_range_reads_epoch_ms_when_the_cluster_gives_no_string(monkeypa
     c = MagicMock()
     c.cat.indices.return_value = [{"index": mft, "docs.count": "4"}]
     c.search.return_value = {"aggregations": {
-        "min_ts": {"value": 1674309600000.0}, "max_ts": {"value": 1675242000000.0},
+        "timed": {"min_ts": {"value": 1674309600000.0}, "max_ts": {"value": 1675242000000.0}},
         "hosts": {"buckets": []}, "by_index": {"buckets": []}}}  # fmt: skip
     c.count.return_value = {"count": 0}
     serve(c, _mapping(untimed=[mft]), cat=False)

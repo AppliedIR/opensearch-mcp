@@ -68,8 +68,9 @@ class Cluster:
     def search(self, index=None, body=None, **kw):
         aggs = {}
         for name, spec in ((body or {}).get("aggs") or {}).items():
-            if name in ("min_ts", "max_ts"):
-                aggs[name] = {"value_as_string": "2026-01-01T00:00:00.000Z"}
+            if name == "timed":  # the plausible-time filter, its min and max inside
+                when = {"value_as_string": "2026-01-01T00:00:00.000Z"}
+                aggs[name] = {"doc_count": 1, "min_ts": when, "max_ts": when}
             elif "missing" in spec:
                 aggs[name] = {"doc_count": 0}
             elif name in ("result_ingests", "by_index"):

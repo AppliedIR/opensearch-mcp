@@ -37,7 +37,7 @@ class _Client:
     def search(self, index, body):
         if "hosts" in body.get("aggs", {}):
             return {"aggregations": {"hosts": {"buckets": [{"key": "host1"}]}}}
-        return {"aggregations": {"min_ts": {}, "max_ts": {}}}
+        return {"aggregations": {"timed": {"min_ts": {}, "max_ts": {}}}}
 
     def count(self, index, body):  # a failed host's own documents, for its warning
         return {"count": DOCS if "host.name" in str(body) else 0}

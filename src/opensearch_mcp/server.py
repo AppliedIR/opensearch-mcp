@@ -1401,10 +1401,30 @@ def _floor() -> str:  # memory's plausible-time floor: a zero FILETIME (1601) le
     return _EARLIEST_TIME.date().isoformat()
 
 
-def _early_note(n: int, why: str) -> str:
+def _ceiling() -> str:  # memory's plausible-time ceiling: no later time ends a range
+    from opensearch_mcp.parse_memory import _latest_time
+
+    return _latest_time().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _within(edge: str, query: str, bound: str) -> str:
+    """A note's query finds what its count counted: the caller's query and window, and the edge."""
+    return " AND ".join([*([f"({query})"] if query.strip() not in ("", "*") else []),
+                         *([bound] if bound else []), edge])  # fmt: skip
+
+
+def _early_note(n: int, why: str, query: str = "*", bound: str = "") -> str:
     day = _floor()
+    find = _within(f"@timestamp:<{day}", query, bound)
     return (f"{n} record(s) have @timestamp before {day} (a zero FILETIME reads as "
-            f"1601-01-01) and {why}; idx_search query='@timestamp:<{day}' finds them")  # fmt: skip
+            f"1601-01-01) and {why}; idx_search query='{find}' finds them")  # fmt: skip
+
+
+def _late_note(n: int, top: str, why: str, query: str = "*", bound: str = "") -> str:
+    find = _within(f'@timestamp:{{"{top}" TO *]', query, bound)
+    return (f"{n} record(s) have @timestamp after {top}, a day past now (a placeholder date, or "
+            f"a source clock set ahead) and {why}; "
+            f"idx_search query='{find}' finds them")  # fmt: skip
 
 
 @server.tool()
@@ -1752,18 +1772,26 @@ def idx_timeline(
         }
 
     hist: dict = {"field": time_field, "fixed_interval": interval, "min_doc_count": 1}
-    floor: dict = {}
-    if time_field == "@timestamp" and not time_from:  # no zero FILETIME (1601) leads it
-        hist["hard_bounds"] = {"min": _floor(), "max": 2**63 - 1}  # 3.5 fails on min alone
-        floor = {"early": {"filter": {"range": {"@timestamp": {"lt": _floor()}}}}}
+    timeline: dict = {"date_histogram": hist}
+    edges: dict = {}
+    top = _ceiling()
+    if time_field == "@timestamp" and not (time_from and time_to):  # an open end: plausible times
+        # A filter, not hard_bounds alone: OpenSearch rounds hard_bounds to the bucket key
+        span = {**({} if time_from else {"gte": _floor()}), **({} if time_to else {"lte": top})}
+        timeline = {"filter": {"range": {"@timestamp": span}}, "aggs": {"timeline": timeline}}
+        if not time_from:  # no zero FILETIME (1601) leads it, an array's value included
+            hist["hard_bounds"] = {"min": _floor(), "max": 2**63 - 1}  # 3.5 fails on min alone
+            edges["early"] = {"filter": {"range": {"@timestamp": {"lt": _floor()}}}}
+        if not time_to:
+            edges["late"] = {"filter": {"range": {"@timestamp": {"gt": top}}}}
     result = _os_call(
         client.search,
         index=index,
         body={
             "query": query_body,
             "aggs": {
-                "timeline": {"date_histogram": hist},
-                **floor,
+                "timeline": timeline,
+                **edges,
                 **_ingest_aggs(),
             },
             "size": 0,
@@ -1774,9 +1802,10 @@ def idx_timeline(
     if err := _no_index_matched(result, index, "idx_timeline", params):
         return err
 
+    hist_result = result["aggregations"]["timeline"]
     buckets = [
         {"time": b["key_as_string"], "count": b["doc_count"]}
-        for b in result["aggregations"]["timeline"]["buckets"]
+        for b in hist_result.get("timeline", hist_result)["buckets"]
     ]
 
     resp = {
@@ -1791,7 +1820,11 @@ def idx_timeline(
             resp["time_note"] = note
     _add_hint(resp, _stale_dates_hint(client, index, query, time_field))
     if early := result["aggregations"].get("early", {}).get("doc_count"):
-        _add_hint(resp, _early_note(early, "aren't in this timeline"))
+        bound = time_to and f'@timestamp:[* TO "{time_to}"]'
+        _add_hint(resp, _early_note(early, "aren't in this timeline", query, bound))
+    if late := result["aggregations"].get("late", {}).get("doc_count"):
+        bound = time_from and f'@timestamp:["{time_from}" TO *]'
+        _add_hint(resp, _late_note(late, top, "aren't in this timeline", query, bound))
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
         resp,
@@ -2458,31 +2491,37 @@ def idx_case_summary(case_id: str = "", include_fields: bool = False) -> dict:
 
     # Time range (single query for both min and max)
     time_range: dict = {}
+    top = _ceiling()
     try:
         ts_result = client.search(
             index=pattern,
             body={
                 "size": 0,
                 "aggs": {
-                    "min_ts": {"min": {"field": "@timestamp"}},
-                    "max_ts": {"max": {"field": "@timestamp"}},
                     "timed": {
-                        "filter": {"range": {"@timestamp": {"gte": _floor()}}},
-                        "aggs": {"min_ts": {"min": {"field": "@timestamp"}}},
+                        "filter": {"range": {"@timestamp": {"gte": _floor(), "lte": top}}},
+                        "aggs": {
+                            "min_ts": {"min": {"field": "@timestamp"}},
+                            "max_ts": {"max": {"field": "@timestamp"}},
+                        },
                     },
                     "early": {"filter": {"range": {"@timestamp": {"lt": _floor()}}}},
+                    "late": {"filter": {"range": {"@timestamp": {"gt": top}}}},
                 },
             },
         )
         shard_gap("Time range", ts_result)
         aggs = ts_result["aggregations"]
         if early := aggs.get("early", {}).get("doc_count"):
-            aggs = {**aggs, "min_ts": aggs["timed"]["min_ts"]}
             resp.setdefault("warnings", []).append(
                 "Time range: " + _early_note(early, "aren't in time_range")
             )
-        min_val = _agg_time(aggs["min_ts"])
-        max_val = _agg_time(aggs["max_ts"]) if min_val else None
+        if late := aggs.get("late", {}).get("doc_count"):
+            resp.setdefault("warnings", []).append(
+                "Time range: " + _late_note(late, top, "aren't in time_range")
+            )
+        min_val = _agg_time(aggs["timed"]["min_ts"])
+        max_val = _agg_time(aggs["timed"]["max_ts"]) if min_val else None
         if min_val:
             time_range["earliest"] = min_val
         if max_val:
