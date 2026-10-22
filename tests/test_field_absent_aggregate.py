@@ -1,55 +1,61 @@
-"""A field in none of the searched indices is refused, not answered with 0 buckets.
+"""Which searched indices hold the field idx_aggregate and idx_field_values name.
 
-host.name and host.id are keyword in every template, with no .keyword
-sub-field: idx_aggregate(field="host.name.keyword") used to answer
-buckets [] over millions of documents, with no warning. field_caps already
-runs before the aggregation; when it finds the field in none of the searched
-indices, both terms tools say so and name the host fields.
-
-A real sub-field (Path.keyword), a field in only some indices, a field_caps
-call that fails or reports failures, and a pattern matching no index answer
-as before.
+One get_mapping, filtered to the field's top-level name, says how each index
+maps it, a red index too; cat.indices with expand_wildcards=open names the
+indices a search reads, so closed and hidden ones aren't counted. A field in
+none of them, an object, a wildcard or list, and an ip/keyword mix are
+refused before the search. A field in only some answers, with a field_note
+naming the indices without it.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+from _mapping_shapes import cat_indices, get_mapping
 from opensearchpy.exceptions import ConnectionTimeout
 
 from opensearch_mcp import server as srv
 
 EVTX, SHIM = "case-acme-evtx-a", "case-acme-shimcache-a"
+BOTH = f"{EVTX},{SHIM}"
 MAPPED = {
-    EVTX: {"host.name": "keyword", "host.id": "keyword", "event.code": "long"},
-    SHIM: {
-        "host.name": "keyword",
-        "host.id": "keyword",
-        "Path": "text",
-        "Path.keyword": "keyword",
-    },
-}
+    EVTX: {"host.name": "keyword", "host.id": "keyword", "event.code": "long",
+           "source.ip": "ip", "hn": {"type": "alias", "path": "host.name"}},
+    SHIM: {"host.name": "keyword", "host.id": "keyword", "Path": "text",
+           "Path.keyword": "keyword", "source.ip": "keyword",
+           "hn": {"type": "alias", "path": "host.name"}},
+}  # fmt: skip
 TOOLS = {"idx_aggregate": ("buckets", "key"), "idx_field_values": ("values", "value")}
 
 
 class Cluster:
-    """field_caps answers per index from MAPPED, the way OpenSearch 3.5.0 lists
-    a field's types; every search answers one bucket."""
+    """get_mapping and cat.indices answer from `mapped` as OpenSearch 3.5.0
+    does, leaving the `closed` indices out of an open-only call; every search
+    answers one bucket."""
 
-    def __init__(self, caps=None):
-        self.caps, self.searches = caps, []
+    def __init__(self, mapped=MAPPED, closed=(), fail=None):
+        self.calls: list[tuple[str, dict]] = []
+        self.searches: list[str] = []
+        shapes = {"get_mapping": get_mapping(mapped), "cat": cat_indices(mapped)}
 
-    def field_caps(self, index, fields, **kw):
-        if isinstance(self.caps, Exception):
-            raise self.caps
-        if self.caps is not None:
-            return self.caps
-        names = [i for i in MAPPED if i in index.split(",")]
-        types: dict = {}
-        for name in names:
-            if t := MAPPED[name].get(fields):
-                types.setdefault(t, {"type": t, "aggregatable": True, "indices": []})
-                types[t]["indices"].append(name)
-        return {"indices": names, "fields": {fields: types} if types else {}}
+        def call(name):
+            def answer(**kw):
+                self.calls.append((name, kw))
+                if fail:
+                    raise fail
+                got = shapes[name](**kw)
+                if kw.get("expand_wildcards") != "open":
+                    return got
+                if name == "cat":
+                    return [r for r in got if r["index"] not in closed]
+                return {i: m for i, m in got.items() if i not in closed}
+
+            return answer
+
+        self.indices = SimpleNamespace(get_mapping=call("get_mapping"))
+        self.cat = SimpleNamespace(indices=call("cat"))
 
     def search(self, index=None, body=None, **kw):
         self.searches.append(index)
@@ -66,60 +72,108 @@ def run(monkeypatch):
     monkeypatch.setattr(srv.audit, "log", lambda **kw: "aid-1")
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
 
-    def go(cluster, tool, field, index=f"{EVTX},{SHIM}"):
+    def go(cluster, tool, field, index=BOTH):
         monkeypatch.setattr(srv, "_get_os", lambda: cluster)
         return getattr(srv, tool)(field=field, index=index)
 
     return go
 
 
+def answered(reply, tool):
+    out, key = TOOLS[tool]
+    assert "error" not in reply
+    return [b[key] for b in reply[out]]
+
+
+HOSTS = "Hosts are host.id (the machine) and host.name (the raw name)"
+NONE = "{} is in none of the 2 searched indices ({}): 0 buckets would not mean no values."
+REFUSED = [
+    ("host.*", "'host.*' is not one field name"),
+    ("host.id,host.name", "'host.id,host.name' is not one field name"),
+    ("host", "host is an object, not a field: aggregate one of its fields "
+             "(host.id, host.name)."),
+    ("no.such.field", NONE.format("no.such.field", BOTH)),
+    ("host.name.keyword", NONE.format("host.name.keyword", BOTH) + " " + HOSTS),
+    ("source.ip", f"source.ip is mapped as ip in ['{EVTX}'] and as keyword in ['{SHIM}']"),
+]  # fmt: skip
+
+
 @pytest.mark.parametrize("tool", TOOLS)
-@pytest.mark.parametrize("field", ["host.name.keyword", "no.such.field"])
-def test_a_field_in_no_searched_index_is_refused(run, tool, field):
+@pytest.mark.parametrize(("field", "error"), REFUSED)
+def test_a_field_no_search_can_answer_is_refused_before_the_search(run, tool, field, error):
     cluster = Cluster()
     reply = run(cluster, tool, field)
-    assert field in reply["error"]
-    assert "none of the searched indices" in reply["error"]
-    assert f"{EVTX},{SHIM}" in reply["error"]
-    assert "host.id" in reply["error"] and "host.name" in reply["error"]
+    assert reply["error"].startswith(error)
+    assert (HOSTS in reply["error"]) == (field == "host.name.keyword")
     assert cluster.searches == []
+    if "not one field name" in error:
+        assert cluster.calls == []
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-@pytest.mark.parametrize("field", ["Path.keyword", "host.name", "host.id"])
-def test_a_mapped_field_or_sub_field_still_answers(run, tool, field):
-    out, key = TOOLS[tool]
-    reply = run(Cluster(), tool, field)
-    assert "error" not in reply
-    assert [b[key] for b in reply[out]] == ["WKSTN05"]
+@pytest.mark.parametrize(("field", "index"), [
+    ("host.name", BOTH), ("host.id", BOTH), ("hn", BOTH), ("Path.keyword", SHIM),
+    ("host.name", EVTX), ("event.code", EVTX),
+])  # fmt: skip
+def test_a_field_every_searched_index_holds_answers_with_no_note(run, tool, field, index):
+    cluster = Cluster()
+    reply = run(cluster, tool, field, index=index)
+    assert answered(reply, tool) == ["WKSTN05"] and "field_note" not in reply
+    assert cluster.searches == [index]
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_a_field_in_only_some_indices_answers_as_before(run, tool):
-    out, key = TOOLS[tool]
+def test_one_mapping_and_one_open_listing_decide_it(run, tool):
+    cluster = Cluster()
+    run(cluster, tool, "Path.keyword")
+    assert cluster.calls == [
+        ("cat", {"index": BOTH, "format": "json", "h": "index", "expand_wildcards": "open"}),
+        ("get_mapping", {"index": BOTH, "expand_wildcards": "open", "allow_no_indices": True,
+                         "ignore_unavailable": True, "filter_path": "*.mappings.properties.Path"}),
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("tool", TOOLS)
+def test_a_field_in_some_searched_indices_names_the_others(run, tool):
     reply = run(Cluster(), tool, "event.code")
-    assert "error" not in reply and "note" not in reply
-    assert [b[key] for b in reply[out]] == ["WKSTN05"]
+    assert answered(reply, tool) == ["WKSTN05"]
+    assert reply["field_note"] == (
+        f"event.code is in 1 of the 2 searched indices; not in {SHIM}: 0 there is not 'no values'."
+    )
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_a_field_caps_call_that_fails_raises_as_before(run, tool):
-    with pytest.raises(RuntimeError, match="connection temporarily lost"):
-        run(Cluster(ConnectionTimeout("TIMEOUT", "timed out", None)), tool, "host.name.keyword")
+def test_the_note_names_five_indices_then_a_count(run, tool):
+    many = {f"case-acme-x-{n}": {"host.id": "keyword"} for n in range(8)}
+    many["case-acme-x-0"]["event.code"] = "long"
+    reply = run(Cluster(many), tool, "event.code", index="case-acme-x-*")
+    lack = ", ".join(f"case-acme-x-{n}" for n in range(1, 6))
+    assert reply["field_note"] == (
+        f"event.code is in 1 of the 8 searched indices; not in {lack}, and 2 more: "
+        "0 there is not 'no values'."
+    )
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_field_caps_failures_are_not_read_as_absence(run, tool):
-    caps = {"indices": [EVTX], "fields": {}, "failures": [{"indices": [SHIM]}]}
-    out, key = TOOLS[tool]
-    reply = run(Cluster(caps), tool, "host.name.keyword")
-    assert "error" not in reply
-    assert [b[key] for b in reply[out]] == ["WKSTN05"]
+def test_a_closed_index_is_not_counted(run, tool):
+    mapped = {**MAPPED, "case-acme-old-a": {"event.code": "long"}}
+    reply = run(Cluster(mapped, closed={"case-acme-old-a"}), tool, "no.such.field",
+                index="case-acme-*")  # fmt: skip
+    assert reply["error"].startswith("no.such.field is in none of the 2 searched indices")
+    reply = run(Cluster(mapped, closed={"case-acme-old-a"}), tool, "event.code",
+                index="case-acme-*")  # fmt: skip
+    assert "1 of the 2 searched" in reply["field_note"]
 
 
 @pytest.mark.parametrize("tool", TOOLS)
-def test_a_pattern_matching_no_index_answers_as_before(run, tool):
-    cluster = Cluster({"indices": [], "fields": {}})
+def test_a_pattern_matching_no_index_is_left_to_the_search(run, tool):
+    cluster = Cluster()
     reply = run(cluster, tool, "host.name.keyword", index="case-acme-nothing-*")
-    assert "error" not in reply
+    assert answered(reply, tool) == ["WKSTN05"]
     assert cluster.searches == ["case-acme-nothing-*"]
+
+
+@pytest.mark.parametrize("tool", TOOLS)
+def test_a_mapping_call_that_fails_raises_as_before(run, tool):
+    with pytest.raises(RuntimeError, match="connection temporarily lost"):
+        run(Cluster(fail=ConnectionTimeout("TIMEOUT", "timed out", None)), tool, "host.name")

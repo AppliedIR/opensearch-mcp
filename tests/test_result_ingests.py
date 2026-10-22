@@ -17,6 +17,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from _mapping_shapes import serve
 
 import opensearch_mcp.server as srv
 
@@ -37,6 +38,7 @@ def _hit(n, aid, nested=False):
 def os_(monkeypatch):
     c = MagicMock()
     c.cat.indices.return_value = [{"index": INDEX, "status": "open"}]
+    serve(c, {INDEX: {"@timestamp": "date", "host.name": "keyword"}}, cat=False)
     logged = []
     monkeypatch.setattr(srv, "_get_os", lambda: c)
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)

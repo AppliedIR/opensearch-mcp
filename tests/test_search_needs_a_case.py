@@ -47,7 +47,7 @@ def no_case(monkeypatch):
 @pytest.mark.parametrize("tool", sorted(CALLS))
 def test_with_no_case_each_search_tool_refuses_without_asking_the_cluster(client, no_case, tool):
     assert CALLS[tool]() == REFUSAL
-    for method in (client.search, client.count, client.field_caps, client.cat.indices):
+    for method in (client.search, client.count, client.indices.get_mapping, client.cat.indices):
         method.assert_not_called()
 
 

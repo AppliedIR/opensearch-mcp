@@ -19,6 +19,7 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+from _mapping_shapes import get_mapping
 
 from opensearch_mcp import server as srv
 
@@ -27,6 +28,9 @@ EVTX, SHIM, DELIM, CLI = (
 )
 EXPANSION = ("failed to create query: field expansion for [*] matches too many fields, "
              "limit: 1024, got: 3346")  # fmt: skip
+# Every index maps the fields these rows read, as the cat rows list them.
+FIELDS = {"@timestamp": "date", "host.id": "keyword", "host.name": "keyword", "Path": "text",
+          "winlog.event_data.ScriptBlockText": "text"}  # fmt: skip
 TEXT_AGG = ("Text fields are not optimised for operations that require per-document field "
             "data like aggregations and sorting, so these operations are disabled by default. "
             "Please use a keyword field instead. Alternatively, set fielddata=true on [{f}] in "
@@ -52,18 +56,14 @@ class Cluster:
         self.timed_out, self.counts = timed_out, counts or {}
         self.cat = SimpleNamespace(indices=self._cat)
         self.rows = [{"index": i, "docs.count": "1", "health": "green"} for i in indices]
-        self.indices = SimpleNamespace(
-            get_mapping=lambda **k: {}, get_field_mapping=lambda **k: {}
-        )
+        mapped = get_mapping({i: FIELDS for i in indices})
+        self.indices = SimpleNamespace(get_mapping=lambda index, **k: mapped("*", **k))
 
     def _reply(self):
         return {"took": 1, "timed_out": self.timed_out, "_shards": copy.deepcopy(self.shards)}
 
     def _cat(self, index=None, **kw):
         return list(self.rows)
-
-    def field_caps(self, **kw):
-        return {"fields": {}}
 
     def search(self, index=None, body=None, **kw):
         aggs = {}

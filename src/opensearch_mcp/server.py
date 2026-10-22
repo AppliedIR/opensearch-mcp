@@ -589,26 +589,79 @@ def _search_index(index: str, case_id: str, client) -> tuple[str, str]:
     return _resolve_index(index, case_id, client)
 
 
-def _mixed_type_refusal(client, index: str, field: str) -> dict | None:
-    """An error when field is in none of the target indices, or is ip in some
-    and keyword in others."""
-    caps = _os_call(client.field_caps, index=index, fields=field)
-    types = caps.get("fields", {}).get(field, {})
-    if not types and caps.get("indices") and not caps.get("failures"):
-        return {
-            "error": f"{field} is in none of the searched indices ({index}): 0 buckets "
-            "would not mean no values. Hosts are host.id (the machine) and host.name "
-            "(the raw name), both keyword with no .keyword sub-field."
-        }
-    if "ip" in types and "keyword" in types:
-        ip_idx = types["ip"].get("indices", [])
-        kw_idx = types["keyword"].get("indices", [])
-        return {
-            "error": f"{field} is mapped as ip in {ip_idx} and as keyword in {kw_idx}: "
-            "one aggregation can't combine them. Aggregate each set with index=<those names>, "
-            "or narrow the pattern."
-        }
-    return None
+def _mapping_of(client, index: str, field: str) -> dict[str, dict]:
+    """{index: its mapping of `field`} for the open indices `index` names that
+    map it (a multi-field such as Path.keyword too). get_mapping returns a red
+    index's mapping; _mapping/field and field_caps leave that index out."""
+    top, *rest = field.split(".")
+    got = client.indices.get_mapping(
+        index=index,
+        expand_wildcards="open",
+        allow_no_indices=True,
+        ignore_unavailable=True,
+        filter_path=f"*.mappings.properties.{top}",
+    )
+    out = {}
+    for name, body in (got or {}).items():
+        m = body["mappings"]["properties"][top]
+        for part in rest:
+            m = (m.get("properties") or m.get("fields") or {}).get(part) if m else None
+        if m:
+            out[name] = m
+    return out
+
+
+def _field_holders(
+    client, index: str, field: str
+) -> tuple[dict[str, list[str]], set[str], list[str]]:
+    """How the open indices `index` names map `field`: {type: [indices]} where
+    it is a field (an alias as its target's type), its fields where it is an
+    object, and every index named, a red one included, as a search counts it."""
+    rows = client.cat.indices(index=index, format="json", h="index", expand_wildcards="open")
+    names = sorted(r["index"] for r in rows or [])
+    types: dict[str, list[str]] = {}
+    subs: set[str] = set()
+    for name, m in sorted(_mapping_of(client, index, field).items()):
+        if m.get("type") == "alias":
+            m = _mapping_of(client, name, m.get("path", "")).get(name) or {}
+        if m.get("type") and "properties" not in m:
+            types.setdefault(m["type"], []).append(name)
+        else:
+            subs.update(f"{field}.{sub}" for sub in m.get("properties") or {})
+    return types, subs, names
+
+
+def _field_refusal(client, index: str, field: str) -> tuple[dict | None, str]:
+    """(an error or None, a note). Refused: not one field name, in none of the
+    indices `index` names, an object there, or ip in some and keyword in
+    others. The note names the indices without it when only some hold it."""
+    if "*" in field or "," in field:
+        why = "a terms aggregation on a wildcard or a list gives 0 buckets"
+        return {"error": f"{field!r} is not one field name: {why}. Name one, e.g. host.id."}, ""
+    types, subs, names = _os_call(_field_holders, client, index, field)
+    held = sorted({n for ns in types.values() for n in ns})
+    lack = [n for n in names if n not in held]
+    err = ""
+    if not names:  # no index matched: the search reply says so
+        pass
+    elif not held and subs:
+        err = f"{field} is an object, not a field: aggregate one of its fields "
+        err += f"({', '.join(sorted(subs)[:8])})."
+    elif not held:
+        err = f"{field} is in none of the {len(names)} searched indices ({index}): 0 buckets "
+        err += "would not mean no values."
+        if field.startswith("host"):
+            err += " Hosts are host.id (the machine) and host.name (the raw name), both "
+            err += "keyword with no .keyword sub-field."
+    elif "ip" in types and "keyword" in types:
+        err = f"{field} is mapped as ip in {types['ip']} and as keyword in {types['keyword']}: "
+        err += "one aggregation can't combine them. Aggregate each set with index=<those "
+        err += "names>, or narrow the pattern."
+    elif lack:
+        more = f", and {len(lack) - 5} more" if len(lack) > 5 else ""
+        note = f"{field} is in {len(held)} of the {len(names)} searched indices; not in "
+        return None, note + f"{', '.join(lack[:5])}{more}: 0 there is not 'no values'."
+    return ({"error": err}, "") if err else (None, "")
 
 
 def _hayabusa_index(case_id: str = "", client=None) -> str:
@@ -1289,12 +1342,10 @@ def _untimed_note(client, index: str, why: str) -> str:
     from opensearch_mcp.write_context import artifact_type_of
 
     try:
-        got = client.indices.get_field_mapping(
-            index=index, fields="@timestamp", allow_no_indices=True, ignore_unavailable=True
-        )
+        types, _, every = _field_holders(client, index, "@timestamp")
     except Exception as e:
         return f"{_UNCHECKED} ({type(e).__name__}); EZ-tool CSV indices {why}"
-    names = sorted(n for n, m in (got or {}).items() if not (m or {}).get("mappings"))
+    names = sorted(set(every) - {n for ns in types.values() for n in ns})
     if not names:
         return ""
     fields = {c.index_suffix: c.time_field for c in TOOLS.values() if c.time_field}
@@ -1562,7 +1613,8 @@ def idx_aggregate(
     if err:
         return {"error": err}
     limit = min(limit, 500)
-    if refusal := _mixed_type_refusal(client, index, field):
+    refusal, note = _field_refusal(client, index, field)
+    if refusal:
         return refusal
 
     result = _os_call(
@@ -1589,6 +1641,7 @@ def idx_aggregate(
         "total_docs": result["hits"]["total"]["value"],
         "buckets": buckets,
         "truncated": len(buckets) >= limit,
+        **({"field_note": note} if note else {}),
         **_shard_gap(result, case_id),
     }
     _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
@@ -1758,7 +1811,8 @@ def idx_field_values(
     if err:
         return {"error": err}
     limit = min(limit, 500)
-    if refusal := _mixed_type_refusal(client, index, field):
+    refusal, note = _field_refusal(client, index, field)
+    if refusal:
         return refusal
 
     result = _os_call(
@@ -1780,7 +1834,7 @@ def idx_field_values(
     ]
 
     resp = {"field": field, "values": values, "truncated": len(values) >= limit,
-            **_shard_gap(result, case_id)}  # fmt: skip
+            **({"field_note": note} if note else {}), **_shard_gap(result, case_id)}  # fmt: skip
     return _logged_query(
         resp,
         tool="idx_field_values",

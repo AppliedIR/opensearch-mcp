@@ -67,7 +67,7 @@ KEYWORD_SET = {"10.1.2.3": 2, "10.1.2.4": 1, "192.168.7.9": 1, "*": 1}
 
 
 def _types(client, index, field):
-    return set(client.field_caps(index=index, fields=field)["fields"].get(field, {}))
+    return set(srv._field_holders(client, index, field)[0])
 
 
 @pytest.fixture(scope="module")
@@ -160,10 +160,17 @@ AUDITED = []
 
 @pytest.fixture
 def tools(cluster, monkeypatch):
-    """The real tools on the test cluster; searches and field_caps recorded."""
+    """The real tools on the test cluster; searches and field-holder reads recorded."""
     client, tag = cluster
-    seen = {"search": [], "field_caps": []}
+    seen = {"search": [], "holders": []}
     spy = _Spy(client, seen)
+    holders = srv._field_holders
+
+    def recorded(client, index, field):
+        seen["holders"].append(index)
+        return holders(client, index, field)
+
+    monkeypatch.setattr(srv, "_field_holders", recorded)
     monkeypatch.setattr(srv, "_get_os", lambda: spy)
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
     AUDITED.clear()
@@ -187,10 +194,6 @@ class _Spy:
         result = self._client.search(*a, **kw)
         self._seen["search"].append((kw.get("index"), (result.get("_shards") or {}).get("failed")))
         return result
-
-    def field_caps(self, *a, **kw):
-        self._seen["field_caps"].append(kw.get("index"))
-        return self._client.field_caps(*a, **kw)
 
 
 def _buckets(result):
@@ -334,7 +337,7 @@ def test_the_type_check_reads_the_indices_the_aggregation_reads(tools, tool):
     """Not every case: another case's mix must not refuse this one."""
     tag, seen = tools
     getattr(srv, tool)(field="source.ip", case_id=f"{tag}-other")
-    assert seen["field_caps"] == [f"case-{tag}-other-*"]
+    assert seen["holders"] == [f"case-{tag}-other-*"]
 
 
 @pytest.mark.parametrize("tool", TOOLS)

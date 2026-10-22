@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from _mapping_shapes import serve
 from sift_common import host_identity
 
 import opensearch_mcp.server as srv
@@ -28,7 +29,7 @@ def _summary(monkeypatch, aggs):
         "aggregations": {**aggs, "hosts": {"buckets": []}, "by_index": {"buckets": []}}
     }
     c.count.return_value = {"count": 0}
-    c.indices.get_field_mapping.return_value = {}
+    serve(c, {evtx: {"@timestamp": "date"}}, cat=False)
     monkeypatch.setattr(srv, "_get_os", lambda: c)
     return srv.idx_case_summary(case_id="acme"), c
 
@@ -73,7 +74,7 @@ def test_summary_of_only_1601_records_names_them_and_keeps_the_rest(monkeypatch)
 def client(monkeypatch):
     c = MagicMock()
     c.cluster.health.return_value = {"status": "green"}
-    c.indices.get_field_mapping.return_value = {}
+    serve(c, {})
     monkeypatch.setattr(srv, "_client", None)
     monkeypatch.setattr(srv, "_client_verified", False)
     with (patch("opensearch_mcp.server.get_client", return_value=c),
