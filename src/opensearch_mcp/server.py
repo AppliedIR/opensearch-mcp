@@ -589,6 +589,14 @@ def _search_index(index: str, case_id: str, client) -> tuple[str, str]:
     return _resolve_index(index, case_id, client)
 
 
+# OpenSearch's metadata fields, as 3.5.0's field_caps lists them: part of every
+# index, never in its mapping's properties.
+_METADATA_FIELDS = frozenset({
+    "_id", "_index", "_routing", "_ignored", "_doc_count", "_field_names", "_source",
+    "_seq_no", "_version", "_nested_path", "_data_stream_timestamp", "_feature",
+})  # fmt: skip
+
+
 def _mapping_of(client, index: str, field: str) -> dict[str, dict]:
     """{index: its mapping of `field`} for the open indices `index` names that
     map it (a multi-field such as Path.keyword too). get_mapping returns a red
@@ -616,9 +624,12 @@ def _field_holders(
 ) -> tuple[dict[str, list[str]], set[str], list[str]]:
     """How the open indices `index` names map `field`: {type: [indices]} where
     it is a field (an alias as its target's type), its fields where it is an
-    object, and every index named, a red one included, as a search counts it."""
+    object, and every index named, a red one included, as a search counts it.
+    A metadata field is held by every index named."""
     rows = client.cat.indices(index=index, format="json", h="index", expand_wildcards="open")
     names = sorted(r["index"] for r in rows or [])
+    if field in _METADATA_FIELDS:
+        return {"metadata": names}, set(), names
     types: dict[str, list[str]] = {}
     subs: set[str] = set()
     for name, m in sorted(_mapping_of(client, index, field).items()):
@@ -635,8 +646,12 @@ def _field_refusal(client, index: str, field: str) -> tuple[dict | None, str]:
     """(an error or None, a note). Refused: not one field name, in none of the
     indices `index` names, an object there, or ip in some and keyword in
     others. The note names the indices without it when only some hold it."""
+    why = ""
     if "*" in field or "," in field:
         why = "a terms aggregation on a wildcard or a list gives 0 buckets"
+    elif not all(part.strip() for part in field.split(".")):
+        why = "a part of it is empty"
+    if why:
         return {"error": f"{field!r} is not one field name: {why}. Name one, e.g. host.id."}, ""
     types, subs, names = _os_call(_field_holders, client, index, field)
     held = sorted({n for ns in types.values() for n in ns})
