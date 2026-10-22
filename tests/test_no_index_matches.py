@@ -62,6 +62,24 @@ def tools(scratch, monkeypatch):
     return tag
 
 
+# each query tool and what it needs beyond a query and a scope
+TOOLS = {
+    "idx_search": {},
+    "idx_count": {},
+    "idx_aggregate": {"field": "event.code"},
+    "idx_field_values": {"field": "event.code"},
+    "idx_timeline": {},
+}
+
+
+def _total(tool, result):
+    """The documents a live answer counted, by where each tool reports them."""
+    if tool == "idx_field_values":
+        return sum(v["count"] for v in result["values"])
+    key = {"idx_search": "total", "idx_count": "count"}.get(tool, "total_docs")
+    return result[key]
+
+
 def _no_index(result, pattern):
     return result == {
         "error": f"No open index matches {pattern!r}: nothing was searched. "
@@ -80,28 +98,28 @@ def _no_index(result, pattern):
     ],
     ids=["mistyped case id", "type never ingested", "no part of a comma pattern", "closed only"],
 )
-@pytest.mark.parametrize("tool", ["idx_search", "idx_count"])
+@pytest.mark.parametrize("tool", TOOLS)
 def test_a_pattern_matching_no_open_index_is_an_error(tools, where, tool):
     from opensearch_mcp.case_scope import case_read_scope
 
     kw = where(tools)
-    result = getattr(srv, tool)(query="event.code:4624", **kw)
+    result = getattr(srv, tool)(query="event.code:4624", **TOOLS[tool], **kw)
     pattern = kw.get("index") or case_read_scope(kw["case_id"], srv._get_os())
     assert _no_index(result, pattern), result
     (entry,) = AUDITED
     assert entry["tool"] == tool and entry["params"]["scope"] == pattern
     assert entry["params"]["index"] == kw.get("index", "")  # what was asked for
     assert entry["result_summary"] == "no open index matched"
+    assert entry["params"].get("field") == TOOLS[tool].get("field")
+    if tool == "idx_timeline":
+        assert entry["params"]["interval"] == "1h"
 
 
-@pytest.mark.parametrize("tool", ["idx_search", "idx_count"])
+@pytest.mark.parametrize("tool", TOOLS)
 def test_a_case_with_no_hits_still_answers_zero(tools, tool):
-    result = getattr(srv, tool)(query="event.code:9999", case_id=f"{tools}-a")
+    result = getattr(srv, tool)(query="event.code:9999", case_id=f"{tools}-a", **TOOLS[tool])
     assert "error" not in result, result
-    if tool == "idx_count":
-        assert result["count"] == 0
-    else:
-        assert result["total"] == 0
+    assert _total(tool, result) == 0
 
 
 def test_a_time_range_that_excludes_everything_still_answers_zero(tools):
@@ -111,8 +129,15 @@ def test_a_time_range_that_excludes_everything_still_answers_zero(tools):
     assert "error" not in result and result["total"] == 0, result
 
 
-@pytest.mark.parametrize("tool", ["idx_search", "idx_count"])
+@pytest.mark.parametrize("tool", TOOLS)
 def test_a_wildcard_across_indices_with_hits_answers_as_before(tools, tool):
-    result = getattr(srv, tool)(query="event.code:4624", index=f"case-{tools}-a-evtx-*")
+    index = f"case-{tools}-a-evtx-*"
+    result = getattr(srv, tool)(query="event.code:4624", index=index, **TOOLS[tool])
     assert "error" not in result, result
-    assert (result["count"] if tool == "idx_count" else result["total"]) == 2
+    assert _total(tool, result) == 2
+
+
+@pytest.mark.parametrize("case", ["ax", "b"], ids=["mistyped case id", "closed only"])
+def test_docs_per_key_with_no_open_index_counts_nothing(tools, case):
+    counts, note = srv._docs_per_key(f"{tools}-{case}", ["k1"])
+    assert (counts, note) == ({}, "no open index of the case: no documents counted")

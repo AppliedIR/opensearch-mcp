@@ -1006,14 +1006,22 @@ def _registered_original(p: Path) -> bool:
     return False
 
 
-def _no_index_matched(result: dict, index: str) -> dict | None:
-    """An error when the pattern matched no open index, so nothing was searched."""
-    if result.get("_shards", {}).get("total") == 0:
-        return {
-            "error": f"No open index matches {index!r}: nothing was searched. "
-            "Check the case id or index pattern."
-        }
-    return None
+def _searched_nothing(result: dict) -> bool:
+    """Whether the pattern matched no open index: the reply then has no aggregations."""
+    return (result.get("_shards") or {}).get("total") == 0
+
+
+def _no_index_matched(result: dict, index: str, tool: str, params: dict) -> dict | None:
+    """An error when nothing was searched, audited as tool's call."""
+    if not _searched_nothing(result):
+        return None
+    err = {
+        "error": f"No open index matches {index!r}: nothing was searched. "
+        "Check the case id or index pattern."
+    }
+    if aid := audit.log(tool=tool, params=params, result_summary="no open index matched"):
+        err["audit_id"] = aid
+    return err
 
 
 _PARTIAL_LOW = (
@@ -1412,14 +1420,8 @@ def idx_search(
         index=index,
         body=search_body,
     )
-    if err := _no_index_matched(result, index):
-        aid = audit.log(
-            tool="idx_search",
-            params={"query": query, "index": requested, "scope": index, "limit": limit},
-            result_summary="no open index matched",
-        )
-        if aid:
-            err["audit_id"] = aid
+    params = {"query": query, "index": requested, "scope": index, "limit": limit}
+    if err := _no_index_matched(result, index, "idx_search", params):
         return err
 
     total = result["hits"]["total"]["value"]
@@ -1473,13 +1475,7 @@ def idx_search(
         resp,
         tool="idx_search",
         queried=case_id,
-        params={
-            "query": query,
-            "index": requested,
-            "scope": index,
-            "limit": limit,
-            **_hit_params(result["hits"]["hits"]),
-        },  # fmt: skip
+        params={**params, **_hit_params(result["hits"]["hits"])},
         result_summary=f"{total} total, {len(docs)} returned",
     )
 
@@ -1520,14 +1516,8 @@ def idx_count(
             "track_total_hits": True,
         },
     )
-    if err := _no_index_matched(result, index):
-        aid = audit.log(
-            tool="idx_count",
-            params={"query": query, "index": requested, "scope": index},
-            result_summary="no open index matched",
-        )
-        if aid:
-            err["audit_id"] = aid
+    params = {"query": query, "index": requested, "scope": index}
+    if err := _no_index_matched(result, index, "idx_count", params):
         return err
     count = result["hits"]["total"]["value"]
     resp = {"count": count, **_shard_gap(result, case_id)}
@@ -1537,7 +1527,7 @@ def idx_count(
         resp,
         tool="idx_count",
         queried=case_id,
-        params={"query": query, "index": requested, "scope": index, **_ingest_params(result)},
+        params={**params, **_ingest_params(result)},
         result_summary=f"count={count}",
     )
 
@@ -1585,6 +1575,9 @@ def idx_aggregate(
             "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
         },
     )
+    params = {"field": field, "query": query, "index": requested, "scope": index}
+    if err := _no_index_matched(result, index, "idx_aggregate", params):
+        return err
 
     buckets = [
         {"key": b["key"], "count": b["doc_count"]}
@@ -1603,13 +1596,7 @@ def idx_aggregate(
         resp,
         tool="idx_aggregate",
         queried=case_id,
-        params={
-            "field": field,
-            "query": query,
-            "index": requested,
-            "scope": index,
-            **_ingest_params(result),
-        },  # fmt: skip
+        params={**params, **_ingest_params(result)},
         result_summary=f"{len(buckets)} buckets",
     )
 
@@ -1715,6 +1702,9 @@ def idx_timeline(
             "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
         },
     )
+    params = {"query": query, "index": requested, "scope": index, "interval": interval}
+    if err := _no_index_matched(result, index, "idx_timeline", params):
+        return err
 
     buckets = [
         {"time": b["key_as_string"], "count": b["doc_count"]}
@@ -1739,13 +1729,7 @@ def idx_timeline(
         resp,
         tool="idx_timeline",
         queried=case_id,
-        params={
-            "query": query,
-            "index": requested,
-            "scope": index,
-            "interval": interval,
-            **_ingest_params(result),
-        },  # fmt: skip
+        params={**params, **_ingest_params(result)},
         result_summary=f"{len(buckets)} buckets",
     )
 
@@ -1786,6 +1770,9 @@ def idx_field_values(
             "size": 0,
         },
     )
+    params = {"field": field, "query": query, "index": requested, "scope": index}
+    if err := _no_index_matched(result, index, "idx_field_values", params):
+        return err
 
     values = [
         {"value": b["key"], "count": b["doc_count"], "doc_count": b["doc_count"]}
@@ -1798,13 +1785,7 @@ def idx_field_values(
         resp,
         tool="idx_field_values",
         queried=case_id,
-        params={
-            "field": field,
-            "query": query,
-            "index": requested,
-            "scope": index,
-            **_ingest_params(result),
-        },  # fmt: skip
+        params={**params, **_ingest_params(result)},
         result_summary=f"{len(values)} values",
     )
 
@@ -4413,6 +4394,8 @@ def _docs_per_key(c12, keys: list[str], ingested: dict | None = None) -> tuple[d
         return None, "document counts unavailable: the cluster didn't answer"
     if ingested is not None:
         ingested.update(resp)
+    if _searched_nothing(resp):
+        return {}, "no open index of the case: no documents counted"
     counts = {b["key"]: b["doc_count"] for b in resp["aggregations"]["k"]["buckets"]}
     failed = int((resp.get("_shards") or {}).get("failed") or 0)
     if resp.get("timed_out") or failed:
