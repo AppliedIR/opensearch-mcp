@@ -31,8 +31,25 @@ _JSON_VOLATILE = {
 }
 
 
+_BOM = b"\xef\xbb\xbf"
+_JSON_SPACE = b" \t\r\n"  # JSON's whitespace; never str.strip()'s (NBSP, \x1c-\x1f)
+
+
+def _no_content(path: Path) -> bool:
+    """A file of 0 bytes, or of JSON whitespace only after an optional UTF-8 BOM."""
+    with open(path, "rb") as f:
+        chunk = f.read(65536)
+        if chunk.startswith(_BOM):
+            chunk = chunk[len(_BOM) :]
+        while chunk:
+            if chunk.strip(_JSON_SPACE):
+                return False
+            chunk = f.read(65536)
+    return True
+
+
 def _detect_json_format(path: Path) -> str:
-    """Detect: 'jsonl', 'json_array', 'json_single', or 'unknown'.
+    """Detect: 'jsonl', 'json_array', 'json_single', 'empty' or 'unknown'.
 
     Format matrix:
       - jsonl       — each line is a complete JSON object (NDJSON)
@@ -42,12 +59,15 @@ def _detect_json_format(path: Path) -> str:
                       Covers client_info.json / collection_context.json
                       from Velociraptor and any other producer that
                       pretty-prints a single object (UAT 2026-04-24).
+      - empty       — no content (see _no_content): a result of 0 rows
       - unknown     — file cannot be classified; caller rejects it
 
     `json_single` is detected by a full-file parse fallback when line 1
     is a bare `{`. That fallback is size-capped (200MB) for the same
     reason json_array is — streaming isn't possible on a bare object.
     """
+    if _no_content(path):
+        return "empty"
     with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -88,7 +108,7 @@ def _detect_json_format(path: Path) -> str:
 
 
 def _iter_json_records(path: Path, fmt: str):
-    """Yield dicts from JSON/JSONL file."""
+    """Yield dicts from JSON/JSONL file (none for an 'empty' one)."""
     if fmt == "jsonl":
         with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
             for lineno, line in enumerate(f, 1):
