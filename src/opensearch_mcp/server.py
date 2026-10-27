@@ -441,6 +441,7 @@ _SEARCH_EXCLUDE_FIELDS = frozenset(
 )
 
 _MAX_FIELD_CHARS = 500
+_MAX_LIST_ITEMS = 100
 
 
 def _host_review(case_id: str = "") -> tuple[set[str], str]:
@@ -509,16 +510,38 @@ def _annotate_hosts(resp: dict, case_id: str, client=None, index="", query_body=
     return resp
 
 
+def _cut_leaves(val, path: str, chars: int, items: int | None, cut: list[str]):
+    """`val` with each string over `chars` cut and each list over `items`
+    kept to its first ones; objects and lists keep their shape. Each cut's
+    path (`a.b`, `a[0]`, `a[100:]`) is added to `cut`."""
+    if isinstance(val, str):
+        if len(val) > chars:
+            cut.append(path)
+            return val[:chars] + "..."
+        return val
+    if isinstance(val, dict):
+        return {k: _cut_leaves(v, f"{path}.{k}", chars, items, cut) for k, v in val.items()}
+    if isinstance(val, list):
+        keep = val if items is None else val[:items]
+        out = [_cut_leaves(v, f"{path}[{i}]", chars, items, cut) for i, v in enumerate(keep)]
+        if len(keep) < len(val):
+            cut.append(f"{path}[{items}:]")
+        return out
+    return val
+
+
 def _strip_hits(
     hits: list[dict],
     exclude_fields: frozenset[str] = _SEARCH_EXCLUDE_FIELDS,
     max_chars: int = _MAX_FIELD_CHARS,
+    max_items: int | None = _MAX_LIST_ITEMS,
 ) -> list[dict]:
     """Extract _source from hits with field exclusion and truncation.
 
-    Default behavior (compact): excludes bloat fields and truncates
-    values > 500 chars; an object or list over that is cut from its JSON.
-    Pass empty exclude_fields and large max_chars for full documents.
+    Default behavior (compact): excludes bloat fields; long text values
+    (over 500 characters) are cut, and lists keep their first 100 elements;
+    `_truncated` lists each cut by its path. Pass empty exclude_fields, large
+    max_chars and no max_items for full documents.
     """
     results = []
     for hit in hits:
@@ -533,15 +556,7 @@ def _strip_hits(
         for key, val in src.items():
             if key in exclude_fields:
                 continue
-            # an object or list is cut as JSON, never as a Python repr
-            sval = (
-                val if isinstance(val, str) else json.dumps(val, ensure_ascii=False, default=str)
-            )
-            if len(sval) > max_chars:
-                doc[key] = sval[:max_chars] + "..."
-                truncated_fields.append(key)
-            else:
-                doc[key] = val
+            doc[key] = _cut_leaves(val, key, max_chars, max_items, truncated_fields)
 
         if truncated_fields:
             doc["_truncated"] = truncated_fields
@@ -1447,9 +1462,11 @@ def idx_search(
     Index names carry no host (case-<id>-<type>-…), so never pick an index for
     a host. idx_host_inventory lists the machines.
 
-    Results are compact by default -- bloat fields excluded, long values
-    truncated to 500 chars. Use compact=False for full documents, or
-    idx_get_event(id, index) to fetch individual full documents.
+    Results are compact by default -- bloat fields excluded; long text
+    values (over 500 characters) are cut, and lists keep their first 100
+    elements; `_truncated` lists each cut by its path. Use compact=False for
+    full documents, or idx_get_event(id, index) to fetch individual full
+    documents.
 
     IMPORTANT: OpenSearch tokenizes on dots/hyphens. For filename searches,
     include the extension: 'ServiceUpdater.exe' not 'ServiceUpdater'.
@@ -1515,7 +1532,9 @@ def idx_search(
     if compact:
         docs = _strip_hits(result["hits"]["hits"])
     else:
-        docs = _strip_hits(result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999)
+        docs = _strip_hits(
+            result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999, max_items=None
+        )
 
     resp: dict = {"total": total, "returned": len(docs), "results": docs, "compact": compact}
     gap = _shard_gap(result, case_id)
@@ -1546,8 +1565,9 @@ def idx_search(
     _add_hint(resp, _stale_dates_hint(client, index, query))
     if compact:
         resp["note"] = (
-            "Results are compact — bloat fields excluded, long values truncated. "
-            "Use idx_get_event(id, index) for full documents."
+            "Results are compact — bloat fields excluded; long text values (over 500 "
+            "characters) are cut, and lists keep their first 100 elements; `_truncated` "
+            "lists each cut by its path. Use idx_get_event(id, index) for full documents."
         )
 
     # Detect when query targets indices with different field naming.
