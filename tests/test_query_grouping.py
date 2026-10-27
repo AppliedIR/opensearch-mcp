@@ -263,6 +263,7 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+f:/etc* g:/ +h:1", True),  # a : just before the closing /
         ("+f:/a b-c/ +g:1", False),  # a mark inside a word starts nothing
         ("+f:/.*[(]/ +g:1", False),  # with no space, a ( stays in the regex
+        ("+f:/a +b c/ +g:1", True),  # a mark right after the first space
     ],
 )
 def test_the_level_rule(reading, fires):
@@ -319,8 +320,9 @@ def test_a_regex_with_a_space_beside_required_clauses_gives_no_note():
 )
 def test_a_long_value_with_many_spaces_is_read_in_one_pass(text):
     t0 = time.perf_counter()
-    note_of(text)
+    note = note_of(text)
     took = time.perf_counter() - t0
+    assert note == ""  # every clause is required
     assert took < 1, took  # a loose ceiling for slow runners: about 0.05 s here
 
 
