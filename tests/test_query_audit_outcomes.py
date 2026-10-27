@@ -229,12 +229,13 @@ def test_the_sift_common_floor_carries_every_name_imported_from_it():
 SRC = Path(__file__).resolve().parents[1] / "src"
 NEEDLES = ("not recorded", "_NOT_RECORDED", "Audit write failed",
            "is no longer a case (no CASE.yaml)")  # fmt: skip
-# Lines that say "not recorded" of something other than a call's entry
+# Lines that say "not recorded" of something other than a call's entry, and why
 ALLOWED = {
     "opensearch_mcp/containers.py: raise RuntimeError("
-    'f"{path.name}: its extraction was not recorded: {e}") from None',
+    'f"{path.name}: its extraction was not recorded: {e}") from None': "an extraction's"
+    " failure, raised to its caller",
     "opensearch_mcp/ingest_cli.py: except ops.NoEntry as e:"
-    "  # unreadable (its failure recorded) or not recorded",
+    "  # unreadable (its failure recorded) or not recorded": "code comment, not reply text",
 }
 
 
