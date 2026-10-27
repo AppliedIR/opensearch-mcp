@@ -43,6 +43,16 @@ def _clean_ip(value: str | None) -> str | None:
     return value.strip()
 
 
+def _header_sid(system: dict) -> str | None:
+    """System/Security@UserID: the SID in the record header, often the
+    account the provider ran as. None when absent or empty, whatever shape
+    `Security` has (null on most Security records)."""
+    sec = system.get("Security")
+    attrs = sec.get("#attributes") if isinstance(sec, dict) else None
+    uid = attrs.get("UserID") if isinstance(attrs, dict) else None
+    return uid if isinstance(uid, str) and uid else None
+
+
 def normalize_event(data: dict) -> dict:
     """Flatten pyevtx-rs quirks before indexing.
 
@@ -109,6 +119,7 @@ def normalize_event(data: dict) -> dict:
         "host.name": system.get("Computer"),
         "@timestamp": tc,
         "winlog.provider_name": provider_name,
+        "winlog.user.identifier": _header_sid(system),
         "user.name": payload.get("TargetUserName") or payload.get("User"),
         "user.effective.name": payload.get("SubjectUserName"),
         "source.ip": _clean_ip(payload.get("IpAddress") or payload.get("Address")),

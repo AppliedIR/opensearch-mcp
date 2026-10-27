@@ -763,6 +763,7 @@ def _ingest_hosts(
                         )
                         _update_status()
 
+                wc.SID_DROPPED.pop(index_name, None)  # this run's records say their own
                 for file_idx, evtx_file in enumerate(evtx_files):
                     params = {"hostname": host.hostname, "index_name": index_name,
                               "run_id": run_id}  # fmt: skip
@@ -810,7 +811,12 @@ def _ingest_hosts(
                             "ingest_evtx",
                             f"{cnt} indexed, {sk} skipped"
                             + (f", truncated: {cut}" if cut else "")
-                            + (f", {bf} bulk failed" if bf else ""),
+                            + (f", {bf} bulk failed" if bf else "")
+                            + (
+                                f"; {wc.SID_DROPPED[index_name]}"
+                                if index_name in wc.SID_DROPPED
+                                else ""
+                            ),
                             {**params, "file": str(evtx_file), "bulk_failed": bf},
                         )
                         # Per-file status update
@@ -837,6 +843,17 @@ def _ingest_hosts(
                             ops.later(audit, aid, "ingest_evtx", f"FAILED: {e}",
                                       {**params, "file": str(evtx_file)})  # fmt: skip
 
+                sid_note = wc.SID_DROPPED.get(index_name)
+                if sid_note:
+                    import sys
+
+                    print(f"NOTE: {sid_note}", file=sys.stderr)
+                    # The result keeps it too: the status after hayabusa is rebuilt from it
+                    ar.note = "; ".join(filter(None, [ar.note, sid_note]))
+                    if evtx_status:
+                        evtx_status["note"] = "; ".join(
+                            filter(None, [evtx_status.get("note"), sid_note])
+                        )
                 if evtx_status:
                     evtx_status["status"] = "failed" if ar.error else "complete"
                     evtx_status["indexed"] = ar.indexed

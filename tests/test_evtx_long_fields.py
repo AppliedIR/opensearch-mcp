@@ -93,9 +93,10 @@ def test_the_other_limits_are_unchanged():
     assert p["process.command_line"]["fields"]["keyword"] == kw(2048)
 
 
-def test_only_the_two_event_data_limits_changed():
+def test_only_the_two_event_data_limits_and_the_header_sid_changed():
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
+    assert m["properties"].pop("winlog.user.identifier") == {"type": "keyword"}
     m["dynamic_templates"][0][RULE]["mapping"]["ignore_above"] = 1024
     m["properties"]["winlog.event_data.Data.#text"]["ignore_above"] = 1024
     canon = json.dumps(t, sort_keys=True).encode()
@@ -220,7 +221,8 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
         "dynamic_templates": [rule(8191)],
         "properties": {"winlog": {"properties": {"event_data": {"properties": {
             "ContextInfo": kw(8191), "Details": kw(8191), "Payload": kw(8191),
-            "Data": {"properties": {"#text": kw(8191)}}}}}}},
+            "Data": {"properties": {"#text": kw(8191)}}}},
+            "user": {"properties": {"identifier": {"type": "keyword"}}}}}},
     }]  # fmt: skip
     assert cluster.limits(IDX) == {
         "Payload": 8191, "Details": 8191, "ContextInfo": 8191, "ScriptBlockText": 32766,
@@ -229,7 +231,8 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     assert result["status"] == "ok" and result["evtx_failed"] == []
     assert result["evtx_patched"] == {IDX: [
         "winlog.event_data.ContextInfo", "winlog.event_data.Data.#text",
-        "winlog.event_data.Details", "winlog.event_data.Payload", RULE]}  # fmt: skip
+        "winlog.event_data.Details", "winlog.event_data.Payload", RULE,
+        "winlog.user.identifier"]}  # fmt: skip
 
 
 def test_a_second_install_sends_the_patched_index_nothing():

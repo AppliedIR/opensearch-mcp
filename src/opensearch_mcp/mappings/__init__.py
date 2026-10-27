@@ -500,9 +500,13 @@ def _evtx_limits() -> tuple[dict[str, int], int, dict]:
     return explicit, entry[_EVTX_RULE]["mapping"]["ignore_above"], entry
 
 
-def _event_data(mapping: dict) -> dict:
-    """The `winlog.event_data` properties of an index's mapping."""
-    for key in ("winlog", "event_data"):
+_SID = "identifier"  # winlog.user.identifier, the header SID
+
+
+def _event_data(mapping: dict, child: str = "event_data") -> dict:
+    """The `winlog.event_data` (or `winlog.<child>`) properties of an index's
+    mapping."""
+    for key in ("winlog", child):
         mapping = mapping.get("properties", {}).get(key, {})
         if not isinstance(mapping, dict):
             return {}
@@ -553,9 +557,11 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
     A template applies only when an index is made, and a dynamic rule maps
     only fields not mapped yet: so each index's full mapping is read, and one
     `put_mapping` replaces its event-data rule and raises each keyword field
-    below the template's limit for its path. A limit is never lowered, and an
-    index already at the template's limits is sent nothing. Records already
-    stored keep the limit they were indexed with."""
+    below the template's limit for its path. The same put maps the header
+    SID (`winlog.user.identifier`) `keyword` where it isn't mapped, so an old
+    index never maps it by guess. A limit is never lowered, and an index
+    already at the template's limits is sent nothing. Records already stored
+    keep the limit they were indexed with."""
     results: dict[str, Any] = {"patched": {}, "unchanged": [], "failed": []}
     explicit, rule, entry = _evtx_limits()
     try:
@@ -578,17 +584,27 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
         raised = rules
         if _low_rule(rules, rule) is not None:
             raised = [entry if _EVTX_RULE in e else e for e in rules]
-        if not props and raised == rules:
+        sid_missing = _SID not in _event_data(mapping, "user")
+        if not props and raised == rules and not sid_missing:
             results["unchanged"].append(index)
             continue
         put: dict[str, Any] = {}
         if raised != rules:
             put["dynamic_templates"] = raised
+        winlog: dict[str, Any] = {}
         if props:
-            put["properties"] = {"winlog": {"properties": {"event_data": {"properties": props}}}}
+            winlog["event_data"] = {"properties": props}
+        if sid_missing:
+            winlog["user"] = {"properties": {_SID: {"type": "keyword"}}}
+        if winlog:
+            put["properties"] = {"winlog": {"properties": winlog}}
         try:
             client.indices.put_mapping(index=index, body=put)
-            results["patched"][index] = sorted(low) + ([_EVTX_RULE] if raised != rules else [])
+            results["patched"][index] = (
+                sorted(low)
+                + ([_EVTX_RULE] if raised != rules else [])
+                + (["winlog.user.identifier"] if sid_missing else [])
+            )
         except Exception as e:  # one index's refusal doesn't stop the others
             logger.warning("patch_evtx_indices: %s failed: %s", index, e)
             results["failed"].append({"index": index, "error": str(e)})

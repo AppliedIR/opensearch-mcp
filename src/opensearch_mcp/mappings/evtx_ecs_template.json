@@ -51,6 +51,9 @@
         "user.effective.name": {
           "type": "keyword"
         },
+        "winlog.user.identifier": {
+          "type": "keyword"
+        },
         "winlog.channel": {
           "type": "keyword"
         },
