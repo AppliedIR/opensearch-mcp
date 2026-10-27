@@ -1243,6 +1243,7 @@ _OPTIONAL = (
 )
 _NOT_CHECKED = "The query's AND/OR grouping wasn't checked ({})."
 _UNMAPPED = 'MatchNoDocsQuery("unmapped fields ['
+_CLAUSE = re.compile(r" (?:[+#]|\(*[\w.@*-]+[:(])")  # a space, then +, #, a field: or Name(
 
 
 def _levels(text: str) -> list[dict]:
@@ -1252,8 +1253,10 @@ def _levels(text: str) -> list[dict]:
     start with ("" for none) and where " | " joins them. A backslash-escaped
     character, the space included, a phrase (a "..." after a colon, with any ~N),
     a regex (a /.../ after a colon, to its first unescaped / when a space, a ")"
-    or the end follows that and no ")" on the way closes a paren opened before
-    it) and a MatchNoDocsQuery("...") reason belong to their clause."""
+    or the end follows that and no clause starts on the way) and a
+    MatchNoDocsQuery("...") reason belong to their clause. A value that only
+    may be a regex (a prefix renders as f:/etc*) is read as plain text, so an
+    unsure reading keeps the note."""
     stack = [{"at": 0, "marks": set(), "bars": [], "term": False}]
     done: list[dict] = []
     i, start = 0, True
@@ -1269,11 +1272,10 @@ def _levels(text: str) -> list[dict]:
         if ch == '"' and text[i - 1 : i] == ":":
             close = '"'
         if ch == "/" and text[i - 1 : i] == ":":
-            end, depth = i + 1, 0
-            while end < len(text) and text[end] != "/" and depth >= 0:
-                depth += {"(": 1, ")": -1}.get(text[end], 0)
+            end = i + 1
+            while end < len(text) and text[end] != "/" and not _CLAUSE.match(text, end):
                 end += 2 if text[end] == "\\" else 1
-            if depth >= 0 and end < len(text) and text[end + 1 : end + 2] in " )":
+            if end < len(text) and text[end + 1 : end + 2] in " )":
                 i = end + 1
                 continue
         if close:

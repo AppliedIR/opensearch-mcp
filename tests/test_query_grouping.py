@@ -225,10 +225,23 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+ConstantScore(f:/etc) ConstantScore(other:foo) +ConstantScore(g:/)", True),
         ("+ConstantScore(g:/) ConstantScore(other:foo) +ConstantScore(f:/etc)", True),
         ("+ConstantScore(a:/tmp) ConstantScore(o:x) +ConstantScore(b:/) +e:1", True),
-        ("+ConstantScore(a:/x) ConstantScore(b:y/) +c:1", True),  # a regex closes no outer (
+        ("+ConstantScore(a:/x) ConstantScore(b:y/) +c:1", True),  # no clause starts in a regex
         ("+e:1 +(+c:d +f:/a b/)", False),  # a regex can end at its group's )
         ("+f:a/b c +g:d/", True),  # only a / after a colon opens one
+        ("+f:a/b c/ +g", True),
         ("+f:/a d +g:b/c", True),
+        ("+f:/a d +g:b/", True),
+        ("+f:/a d -g:b/ +h", True),
+        ("+f:/a d #g:b/", True),
+        ("+winlog.event_data.Payload:/etc* ConstantScore(o:foo) +ConstantScore(g:/)", True),
+        ("+f:/tmp* ConstantScore(g:x/) +h:1", True),  # a prefix renders as f:/etc*
+        ("+f:/etc* o:x/ +h:1", True),
+        ("+f:/etc* a.b@c*d-e:x/ +h:1", True),  # each character a field can have
+        ("+f:/etc* (o:x/) +h:1", True),
+        ("+(+a:1 +ConstantScore(P:/etc)) (c:d e:f)", True),
+        ("+P:/.*(Set|Get) x.*/ +IndexOrDocValuesQuery(q)", False),  # a regex's own parens
+        ("+f:/[)] a/ +g", False),
+        ('+f:/"a)b" c/ +g:y', False),
     ],
 )
 def test_the_level_rule(reading, fires):
