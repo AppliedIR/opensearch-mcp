@@ -99,7 +99,7 @@ def test_search_window_notes_and_drops_the_extension_hint(client):
 
 def test_search_without_a_window_reads_no_mapping(client):
     r = srv.idx_search(query="*")
-    assert "time_note" not in r and r["hint"].startswith("No results. If searching for filenames")
+    assert "time_note" not in r and r["hint"].startswith("No results. A keyword field")
     reads = [c.kwargs["filter_path"] for c in client.indices.get_mapping.call_args_list]
     assert "*.mappings.properties.@timestamp" not in reads
 
@@ -164,7 +164,7 @@ def test_a_failed_mapping_read_makes_no_have_none_claim(client):
     r = srv.idx_search(query="event.code:4624", time_from="2023-01-21T00:00:00Z")
     assert r["time_note"].startswith("couldn't check which indices lack an event time")
     assert "have none" not in r["hint"]
-    assert r["hint"].startswith("No results. If searching for filenames")
+    assert r["hint"].startswith("No results. A keyword field")
 
 
 def test_a_page_past_the_end_is_not_said_to_have_no_event_time(client):

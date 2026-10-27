@@ -209,7 +209,7 @@ _FIELD_HINT_EVTX_EVTXECMD = (
     "EvtxECmd queries: EventId:4624 AND PayloadData1:*username*, "
     "EventId:4688 AND ExecutableInfo:*process*, "
     "EventId:7045 AND PayloadData1:*servicename*, "
-    "EventId:4624 AND PayloadData2:*LogonType 3* (lateral movement).\n"
+    'EventId:4624 AND PayloadData2:"LogonType 3" (lateral movement).\n'
     "Prefer native evtx when available — proper ECS fields. For native evtx records "
     "only, query (<your query>) AND _exists_:winlog.channel; omit index, and pass "
     "case_id unless this case is active."
@@ -1228,6 +1228,128 @@ def _add_hint(resp: dict, hint: str) -> None:
         resp["hint"] = hint + (f" {resp['hint']}" if resp.get("hint") else "")
 
 
+def _query_clause(query: str) -> dict:
+    """The AI's query string as the clause the query tools search with, built
+    here alone so that _query_note asks OpenSearch about the clause that ran."""
+    return {"query_string": {"query": query}}
+
+
+_OPTIONAL = (
+    "OpenSearch read this query with some clauses optional: beside AND (or +), a clause "
+    "joined only by OR doesn't have to match, so it neither widens nor narrows the result. "
+    "To match A and either B or C, write A AND (B OR C); A AND B OR C AND D requires all "
+    "four, so write (A AND B) OR (C AND D) for either pair. OpenSearch's reading "
+    "(+ = must match): "
+)
+_NOT_CHECKED = "The query's AND/OR grouping wasn't checked ({})."
+_UNMAPPED = 'MatchNoDocsQuery("unmapped fields ['
+
+
+def _levels(text: str) -> list[dict]:
+    """The levels of one OpenSearch explanation, innermost first: the whole of
+    it and each (...) group not inside a term (a "(" after a letter, digit or _
+    is a term's, as in ConstantScore(...)). Each has the marks its clauses
+    start with ("" for none) and where " | " joins them. A backslash-escaped
+    character, the space included, a phrase (a "..." after a colon, with any ~N)
+    and a MatchNoDocsQuery("...") reason belong to their clause."""
+    stack = [{"at": 0, "marks": set(), "bars": [], "term": False}]
+    done: list[dict] = []
+    i, start = 0, True
+    while i < len(text):
+        top, ch = stack[-1], text[i]
+        if start and not top["term"] and ch != " ":
+            top["marks"].add(ch if ch in "+-#" else "")
+            start = False
+        if ch == "\\":
+            i += 2
+            continue
+        close = '")' if text.startswith('MatchNoDocsQuery("', i) else ""
+        if ch == '"' and text[i - 1 : i] == ":":
+            close = '"'
+        if close:
+            end = text.find(close, i + 1)
+            i = len(text) if end < 0 else end + len(close)
+            continue
+        if ch == "(":
+            term = text[i - 1 : i].isalnum() or text[i - 1 : i] == "_"
+            stack.append({"at": i + 1, "marks": set(), "bars": [], "term": term})
+            start = True
+        elif ch == ")" and len(stack) > 1:
+            done.append({**stack.pop(), "end": i})
+            start = False
+        elif ch == " " and not top["term"]:
+            start = True
+            if text.startswith(" | ", i):
+                top["bars"].append(i)
+        i += 1
+    done += [{**level, "end": len(text)} for level in reversed(stack)]
+    return [level for level in done if not level["term"]]
+
+
+def _reading(text: str, level: dict, levels: list[dict]) -> str:
+    """The level that fired, each " | " group in it (a field expansion) shown
+    as its field count and first member, cut at 300 characters."""
+    groups, last = [], -1
+    for g in sorted(levels, key=lambda g: g["at"]):
+        if g["bars"] and g["at"] > max(level["at"], last) and g["end"] < level["end"]:
+            groups.append(g)
+            last = g["end"]
+    out = text[level["at"] : level["end"]]
+    for g in reversed(groups):
+        a, b = g["at"] - 1 - level["at"], g["end"] + 1 - level["at"]
+        out = f"{out[:a]}({len(g['bars']) + 1} fields: {text[g['at'] : g['bars'][0]]}){out[b:]}"
+    return out if len(out) <= 300 else out[:300] + "…"
+
+
+def _grouping_note(answer: dict) -> str:
+    """query_note from OpenSearch's _validate/query?explain=true answer alone,
+    never the query string. When a level of any valid explanation has a + or #
+    clause beside an unmarked one, the unmarked one is optional: OpenSearch's
+    reading of that level, from the explanation with the fewest unmapped-field
+    leaves (a field its index lacks), the first on a tie. Otherwise, when an
+    index wasn't read, the grouping wasn't checked, and how many weren't. ""
+    when every index was read."""
+    explained = answer.get("explanations") or []
+    trapped = []
+    for e in explained:
+        text = e.get("explanation") if e.get("valid") is True else None
+        levels = _levels(text) if isinstance(text, str) else []
+        for level in levels:
+            if level["marks"] & {"+", "#"} and "" in level["marks"]:
+                trapped.append((text.count(_UNMAPPED), text, level, levels))
+                break
+    if trapped:
+        _, text, level, levels = min(trapped, key=lambda t: t[0])
+        return _OPTIONAL + _reading(text, level, levels)
+    bad = [e for e in explained
+           if e.get("valid") is not True or not isinstance(e.get("explanation"), str)]  # fmt: skip
+    if bad:
+        why = str(bad[0].get("error") or "no reading").rsplit("Exception: ", 1)[-1][:150]
+        return _NOT_CHECKED.format(f"{len(bad)} of {len(explained)} indices: {why}")
+    if not explained:
+        return _NOT_CHECKED.format("no index checked: OpenSearch gave no reading")
+    if answer.get("valid") is not True:
+        return _NOT_CHECKED.format("OpenSearch called the query invalid")
+    return ""
+
+
+def _query_note(resp: dict, client, index: str, clause: dict) -> None:
+    """Once per query tool call, after its search succeeded: how OpenSearch
+    read `clause` on the same `index` (_grouping_note), as `query_note`. Its
+    own 5 s limit; a check that fails says so and changes nothing else."""
+    try:
+        answer = client.indices.validate_query(
+            index=index, body={"query": clause}, explain=True, request_timeout=5
+        )
+        note = _grouping_note(answer)
+    except ConnectionTimeout:
+        note = _NOT_CHECKED.format("no index checked: it timed out after 5 s")
+    except Exception as e:
+        note = _NOT_CHECKED.format(f"no index checked: {type(e).__name__}")
+    if note:
+        resp["query_note"] = note
+
+
 _INGEST_AGG_CAP = 1000
 
 
@@ -1484,9 +1606,13 @@ def idx_search(
     truncated to 500 chars. Use compact=False for full documents, or
     idx_get_event(id, index) to fetch individual full documents.
 
-    IMPORTANT: OpenSearch tokenizes on dots/hyphens. For filename searches,
-    include the extension: 'ServiceUpdater.exe' not 'ServiceUpdater'.
-    Use wildcards for partial matches: '*ServiceUpdater*'. IP-typed fields
+    IMPORTANT: a keyword field (most of winlog.event_data.*) holds the whole value as
+    one case-sensitive term, so a wildcard covers the rest of the value:
+    winlog.event_data.NewProcessName:*lsass.exe finds C:\\Windows\\System32\\lsass.exe;
+    lsass.exe or *LSASS.EXE there finds nothing. A text field
+    (script_block_text) is split into words: quote a phrase,
+    script_block_text:"Set-Alias"; a wildcard matches within one word
+    (script_block_text:set*), so script_block_text:*Set?Alias* finds nothing. IP-typed fields
     (source.ip on most indices) return nothing for wildcards: use CIDR,
     source.ip:"10.1.2.0/24". Across a case with older indices, OR the two:
     source.ip:10.1.2.* OR source.ip:"10.1.2.0/24".
@@ -1521,16 +1647,15 @@ def idx_search(
         sort_spec["unmapped_type"] = "date"
     sort_body = [{sort_field: sort_spec}]
 
-    query_body: dict = {"query_string": {"query": query}}
+    clause = _query_clause(query)
+    query_body: dict = clause
     if time_from or time_to:
         range_filter: dict = {"@timestamp": {}}
         if time_from:
             range_filter["@timestamp"]["gte"] = time_from
         if time_to:
             range_filter["@timestamp"]["lte"] = time_to
-        query_body = {
-            "bool": {"must": [{"query_string": {"query": query}}, {"range": range_filter}]}
-        }
+        query_body = {"bool": {"must": [clause, {"range": range_filter}]}}
 
     search_body: dict = {
         "query": query_body,
@@ -1574,9 +1699,10 @@ def idx_search(
         )
     elif not total and not gap:  # partial, or past the last page: never "No results"
         resp["hint"] = (
-            "No results. If searching for filenames, include the extension "
-            "(e.g., 'svchost.exe' not 'svchost'). Use wildcards for partial: "
-            "'*svchost*'. OpenSearch tokenizes on dots/hyphens. " + _IP_WILDCARD_HINT
+            "No results. A keyword field (most of winlog.event_data.*) matches the whole value, "
+            "case-sensitive: wildcard the rest, winlog.event_data.NewProcessName:*lsass.exe. "
+            "A text field (script_block_text) matches words: quote a phrase, "
+            'script_block_text:"Set-Alias". ' + _IP_WILDCARD_HINT
         )
     elif _IP_WILDCARD.search(query):
         # Hits from indices that keep the address as text don't mean the
@@ -1595,6 +1721,7 @@ def idx_search(
     _add_field_hint(resp, index, client)
 
     _add_shimcache_reminder(resp, index, docs)
+    _query_note(resp, client, index, clause)
     _annotate_hosts(resp, case_id, hits=result["hits"]["hits"])
     return _logged_query(
         resp,
@@ -1631,11 +1758,12 @@ def idx_count(
     if err:
         return {"error": err}
     # a search of no records, so the same request records the ingests counted
+    clause = _query_clause(query)
     result = _os_call(
         client.search,
         index=index,
         body={
-            "query": {"query_string": {"query": query}},
+            "query": clause,
             "aggs": _ingest_aggs(),
             "size": 0,
             "track_total_hits": True,
@@ -1647,7 +1775,8 @@ def idx_count(
     count = result["hits"]["total"]["value"]
     resp = {"count": count, **_shard_gap(result, case_id)}
     _add_hint(resp, _stale_dates_hint(client, index, query))
-    _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}})
+    _query_note(resp, client, index, clause)
+    _annotate_hosts(resp, case_id, client, index, clause)
     return _logged_query(
         resp,
         tool="idx_count",
@@ -1691,11 +1820,12 @@ def idx_aggregate(
     if refusal:
         return refusal
 
+    clause = _query_clause(query)
     result = _os_call(
         client.search,
         index=index,
         body={
-            "query": {"query_string": {"query": query}},
+            "query": clause,
             "aggs": {"agg": {"terms": {"field": field, "size": limit}}, **_ingest_aggs()},
             "size": 0,
             "track_total_hits": True,  # total_docs is reported; otherwise it stops at 10,000
@@ -1718,7 +1848,8 @@ def idx_aggregate(
         **({"field_note": note} if note else {}),
         **_shard_gap(result, case_id),
     }
-    _annotate_hosts(resp, case_id, client, index, {"query_string": {"query": query}}, field)
+    _query_note(resp, client, index, clause)
+    _annotate_hosts(resp, case_id, client, index, clause, field)
     return _logged_query(
         resp,
         tool="idx_aggregate",
@@ -1799,16 +1930,15 @@ def idx_timeline(
     if err:
         return {"error": err}
 
-    query_body: dict = {"query_string": {"query": query}}
+    clause = _query_clause(query)
+    query_body: dict = clause
     if time_from or time_to:
         range_filter: dict = {time_field: {}}
         if time_from:
             range_filter[time_field]["gte"] = time_from
         if time_to:
             range_filter[time_field]["lte"] = time_to
-        query_body = {
-            "bool": {"must": [{"query_string": {"query": query}}, {"range": range_filter}]}
-        }
+        query_body = {"bool": {"must": [clause, {"range": range_filter}]}}
 
     hist: dict = {"field": time_field, "fixed_interval": interval, "min_doc_count": 1}
     timeline: dict = {"date_histogram": hist}
@@ -1864,6 +1994,7 @@ def idx_timeline(
     if late := result["aggregations"].get("late", {}).get("doc_count"):
         bound = time_from and f'@timestamp:["{time_from}" TO *]'
         _add_hint(resp, _late_note(late, top, "aren't in this timeline", query, bound))
+    _query_note(resp, client, index, clause)
     _annotate_hosts(resp, case_id, client, index, query_body)
     return _logged_query(
         resp,
@@ -1902,11 +2033,12 @@ def idx_field_values(
     if refusal:
         return refusal
 
+    clause = _query_clause(query)
     result = _os_call(
         client.search,
         index=index,
         body={
-            "query": {"query_string": {"query": query}},
+            "query": clause,
             "aggs": {"values": {"terms": {"field": field, "size": limit}}, **_ingest_aggs()},
             "size": 0,
         },
@@ -1922,6 +2054,7 @@ def idx_field_values(
 
     resp = {"field": field, "values": values, "truncated": len(values) >= limit,
             **({"field_note": note} if note else {}), **_shard_gap(result, case_id)}  # fmt: skip
+    _query_note(resp, client, index, clause)
     return _logged_query(
         resp,
         tool="idx_field_values",
