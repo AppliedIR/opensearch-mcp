@@ -15,6 +15,7 @@ from opensearchpy.exceptions import (
     AuthorizationException,
     ConnectionTimeout,
     RequestError,
+    TransportError,
 )
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
@@ -378,8 +379,11 @@ def _os_call(fn, *args, **kwargs):
         raise RuntimeError(
             "OpenSearch authentication failed. Check opensearch.yaml credentials."
         ) from e
-    except RequestError as e:
-        # 400 Bad Request — malformed query, missing field, etc.
+    except TransportError as e:
+        # 400 Bad Request — malformed query, missing field, etc. — or a search
+        # no shard could run (500 for too many nested clauses)
+        if not isinstance(e, RequestError) and e.error != "search_phase_execution_exception":
+            raise
         info = getattr(e, "info", None) or {}
         err = info.get("error", {})
         reason = err.get("reason", str(e)) if isinstance(err, dict) else str(e)
@@ -1097,13 +1101,29 @@ _PARTIAL_LOW = (
     "answered, and 0 is not 'no match'."
 )
 _TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
+_UNFIELDED = (
+    (
+        "matches too many fields",
+        "; that index searches every field for a term with no field named, and "
+        "has too many: name a field (field:value; in evtx, winlog.event_data.<Name>:<value>)",
+    ),
+    (
+        "too many nested clauses",
+        "; the query expanded past OpenSearch's clause limit: name the fields, or "
+        "quote a path or URL (a /.../ is read as a regular expression)",
+    ),
+)
 
 
 def _repair(reason: str, case: str, index: str) -> str:
-    """What repairs a shard failure: a field that is text where a keyword was
+    """What repairs a shard failure: a term with no field named that expands
+    past OpenSearch's limits, or a field that is text where a keyword was
     meant. A vhir.* field is text only in an index made without its template;
     any other is aggregated through a keyword form, in that index alone (a
     case-wide aggregation leaves out every index without it)."""
+    for text, fix in _UNFIELDED:
+        if text in reason:
+            return fix
     m = _TEXT_FIELD.search(reason)
     if not m:
         return ""
@@ -1480,7 +1500,10 @@ def idx_search(
     sort_field, _, sort_order = sort.partition(":")
     if sort_order not in ("asc", "desc", ""):
         sort_order = "desc"
-    sort_body = [{sort_field: {"order": sort_order or "desc", "unmapped_type": "date"}}]
+    sort_spec = {"order": sort_order or "desc"}
+    if sort_field not in ("_score", "_doc"):  # not fields: no unmapped_type
+        sort_spec["unmapped_type"] = "date"
+    sort_body = [{sort_field: sort_spec}]
 
     query_body: dict = {"query_string": {"query": query}}
     if time_from or time_to:

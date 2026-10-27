@@ -32,6 +32,7 @@ from opensearch_mcp.ingest import ingest
 
 TEMPLATE = Path(mappings.__file__).parent / "evtx_ecs_template.json"
 RULE = "winlog_event_data_strings"
+ALL = "winlog.event_data_all"
 # The template as 0.6.4 shipped it, with both event-data limits set back to 1024
 SHIPPED_064 = "3abf027226722ab8bd8561baf82e5d3469143deef4b1185e1ae1e09cc52348e7"
 
@@ -50,13 +51,15 @@ def _template():
 
 
 def _resolve(m, path):
-    """A path's mapping as OpenSearch picks it: the explicit property, else
-    the first dynamic rule whose path_match matches."""
+    """A string's mapping as OpenSearch picks it: the explicit property, else
+    the first dynamic rule for strings whose path_match matches."""
     if path in m["properties"]:
         return m["properties"][path]
     for entry in m["dynamic_templates"]:
         (body,) = entry.values()
-        if fnmatch.fnmatchcase(path, body.get("path_match", "*")):
+        if body.get("match_mapping_type", "string") == "string" and fnmatch.fnmatchcase(
+            path, body.get("path_match", "*")
+        ):
             return body["mapping"]
     return None
 
@@ -79,8 +82,9 @@ def _resolve(m, path):
 )
 def test_an_event_data_string_is_indexed_up_to_8191(field):
     m = _template()
-    assert _resolve(m, f"winlog.event_data.{field}") == kw(8191)
-    assert list(m["dynamic_templates"][0]) == [RULE]  # the rule, first, by its name
+    assert _resolve(m, f"winlog.event_data.{field}") == {**kw(8191), "copy_to": ALL}
+    # the dates rule first (a date-detected value is never a string), then this one
+    assert [list(e)[0] for e in m["dynamic_templates"]] == ["winlog_event_data_dates", RULE]
 
 
 def test_the_other_limits_are_unchanged():
@@ -93,9 +97,12 @@ def test_the_other_limits_are_unchanged():
     assert p["process.command_line"]["fields"]["keyword"] == kw(2048)
 
 
-def test_only_the_two_event_data_limits_changed():
+def test_only_the_two_event_data_limits_and_the_unfielded_set_changed():
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
+    # the unfielded set (W3): the dates rule, copy_to, the catch-all, lenient
+    del m["dynamic_templates"][0], m["dynamic_templates"][0][RULE]["mapping"]["copy_to"]
+    del m["properties"][ALL], t["template"]["settings"]["index.query_string.lenient"]
     m["dynamic_templates"][0][RULE]["mapping"]["ignore_above"] = 1024
     m["properties"]["winlog.event_data.Data.#text"]["ignore_above"] = 1024
     canon = json.dumps(t, sort_keys=True).encode()
