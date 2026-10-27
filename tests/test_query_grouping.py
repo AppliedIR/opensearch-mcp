@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import lzma
+import time
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,9 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+f:/etc* x\no:y/ +h:1", True),  # a value can hold a line break
         ("+f:/etc* x/y +h:1", True),  # a / inside a later term closes nothing
         ("+f:/etc* x", True),  # no closing /
+        ("+f:/etc* g:/ +h:1", True),  # a : just before the closing /
+        ("+f:/a b-c/ +g:1", False),  # a mark inside a word starts nothing
+        ("+f:/.*[(]/ +g:1", False),  # with no space, a ( stays in the regex
     ],
 )
 def test_the_level_rule(reading, fires):
@@ -303,6 +307,21 @@ def test_a_regex_with_a_space_beside_required_clauses_gives_no_note():
     assert text.startswith("+winlog.event_data.Payload:/x | y/ +") and text.endswith(optional)
     assert note_of(text).startswith(srv._OPTIONAL + "+winlog.event_data.Payload:/x | y/ +")
     assert note_of(text.removesuffix(optional)) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "+f:/" + "a " * 50000 + "x/ +g:1",  # one keyword value near the term cap and over
+        "+(" + " | ".join(["f:/" + "a " * 4000 + "x/"] * 30) + ") +g:1",  # a field expansion
+    ],
+    ids=["one-term", "expansion"],
+)
+def test_a_long_value_with_many_spaces_is_read_in_one_pass(text):
+    t0 = time.perf_counter()
+    note_of(text)
+    took = time.perf_counter() - t0
+    assert took < 1, took  # a loose ceiling for slow runners: about 0.05 s here
 
 
 ROWS = [(name, r) for name in ("real0", "escapes", "phrases") for r in SETS[name]["rows"]]

@@ -1243,7 +1243,7 @@ _OPTIONAL = (
 )
 _NOT_CHECKED = "The query's AND/OR grouping wasn't checked ({})."
 _UNMAPPED = 'MatchNoDocsQuery("unmapped fields ['
-_CLAUSE = re.compile(r" (?:[+#-]|.*[:(])", re.S)  # a space, then a mark, or a : or ( later
+_CLAUSE = re.compile(r" [+#-]|[:(]")  # from the first space: a space, then a mark, or a : or (
 
 
 def _levels(text: str) -> list[dict]:
@@ -1276,10 +1276,11 @@ def _levels(text: str) -> list[dict]:
             end = i + 1
             while end < len(text) and text[end] != "/":
                 end += 2 if text[end] == "\\" else 1
+            space = text.find(" ", i, end)
             if (
                 end < len(text)
                 and text[end + 1 : end + 2] in " )"
-                and not _CLAUSE.search(text, i, end)
+                and (space < 0 or not _CLAUSE.search(text, space, end))
             ):
                 i = end + 1
                 continue
