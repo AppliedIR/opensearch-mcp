@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 from pathlib import Path
 
 import pytest
@@ -146,19 +147,102 @@ def test_a_case_writer_for_a_moved_case_creates_nothing(pointer, tmp_path):
     assert not case.exists()
 
 
+# --- an audit folder from the environment is not a case ---------------------
+
+
+def test_beside_an_audit_folder_with_no_parent_the_response_is_saved(
+    pointer, tmp_path, monkeypatch
+):
+    folder = tmp_path / "not" / "yet" / "audit"
+    monkeypatch.setenv("VHIR_AUDIT_DIR", str(folder))
+    reply = _query()
+    assert "warning" not in reply and "audit" not in reply, reply
+    saved = folder.parent / "extractions" / reply["audit_id"] / "response.json"
+    assert json.loads(saved.read_text())["audit_id"] == reply["audit_id"]
+    (entry,) = [json.loads(x) for x in (folder / "opensearch-mcp.jsonl").read_text()
+                .splitlines()]  # fmt: skip
+    assert entry["response"]["path"] == str(saved) and entry["case_id"] == "yet"
+
+
+def test_beside_an_unwritable_audit_folder_the_query_says_so(pointer, tmp_path, monkeypatch):
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    parent.chmod(0o500)
+    monkeypatch.setenv("VHIR_AUDIT_DIR", str(parent / "audit"))
+    try:
+        reply = _query()
+    finally:
+        parent.chmod(0o700)
+    assert {k: reply[k] for k in RESULT} == RESULT and "audit_id" not in reply
+    warning = reply.get("warning", "")
+    assert warning.startswith("Audit write failed — not recorded: its response was not"
+                              " saved ([Errno 13]"), reply  # fmt: skip
+    assert _files(parent) == []
+
+
+# --- the sift-common it needs ------------------------------------------------
+
+# The first sift-common version carrying each name the source imports from it
+FIRST = {
+    "sift_common.SYSTEM_DIRS": "0.6.4",
+    "sift_common.resolve_case_dir": "0.5.1",
+    "sift_common.file_identity": "0.6.4",
+    "sift_common.file_place": "0.6.4",
+    "sift_common.host_gate": "0.6.4",
+    "sift_common.host_identity": "0.6.4",
+    "sift_common.host_proposal": "0.6.4",
+    "sift_common.provenance": "0.6.4",
+    "sift_common.audit.AuditWriter": "0.1.0",
+    "sift_common.audit.AuditOutcome": "0.6.5.2",
+    "sift_common.audit.is_case": "0.6.5.2",
+    "sift_common.audit.mkdir_in_case": "0.6.5.2",
+    "sift_common.content_hash.content_hash": "0.6.4",
+    "sift_common.file_identity.NotRegularFile": "0.6.4",
+    "sift_common.file_identity.hash_file": "0.6.4",
+    "sift_common.host_gate.host_list_hint": "0.6.4",
+    "sift_common.host_identity.spelling": "0.6.4",
+    "sift_common.host_identity.unit_locator": "0.6.4",
+}
+
+
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(p) for p in text.split("."))
+
+
+def test_the_sift_common_floor_carries_every_name_imported_from_it():
+    imported = {
+        f"{m[1]}.{name.split(' as ')[0].strip()}"
+        for p in sorted((Path(__file__).parents[1] / "src").rglob("*.py"))
+        for m in re.finditer(
+            r"^\s*from (sift_common[\w.]*) import ([\w, ]+)$", p.read_text(encoding="utf-8"), re.M
+        )
+        for name in m[2].split(",")
+    }
+    assert imported - FIRST.keys() == set()
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
+    floor = re.search(r'"sift-common>=([\d.]+)"', pyproject)[1]
+    assert _version(floor) >= max(_version(FIRST[n]) for n in imported)
+
+
 # --- the census: no query site writes an audit text of its own -------------
 
 SRC = Path(__file__).resolve().parents[1] / "src"
-TEXTS = ("action not recorded", "reasoning not recorded", "for shell evidence",
-         "_NOT_RECORDED", "Audit write failed", "not recorded: no case",
-         "is no longer a case (no CASE.yaml)")  # fmt: skip
+NEEDLES = ("not recorded", "_NOT_RECORDED", "Audit write failed",
+           "is no longer a case (no CASE.yaml)")  # fmt: skip
+# Lines that say "not recorded" of something other than a call's entry
+ALLOWED = {
+    "opensearch_mcp/containers.py: raise RuntimeError("
+    'f"{path.name}: its extraction was not recorded: {e}") from None',
+    "opensearch_mcp/ingest_cli.py: except ops.NoEntry as e:"
+    "  # unreadable (its failure recorded) or not recorded",
+}
 
 
 def test_no_site_writes_an_audit_outcome_text_of_its_own():
     hits = [
-        f"{p.relative_to(SRC)}:{n}: {line.strip()}"
+        f"{p.relative_to(SRC)}: {line.strip()}"
         for p in sorted(SRC.rglob("*.py"))
-        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-        if any(t in line for t in TEXTS) and "logger." not in line
+        for line in p.read_text(encoding="utf-8").splitlines()
+        if any(t in line for t in NEEDLES)
     ]
-    assert hits == []
+    assert [h for h in hits if h not in ALLOWED] == []

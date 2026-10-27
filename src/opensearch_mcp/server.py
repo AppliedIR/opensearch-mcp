@@ -1239,27 +1239,32 @@ def _logged_query(resp: dict, queried: str = "", **entry) -> dict:
     import contextlib
     import hashlib
 
-    from sift_common.audit import is_case, mkdir_in_case
+    from sift_common.audit import AuditOutcome, is_case, mkdir_in_case
 
     # One case per call, taken as it starts: the id is minted for it, and the
     # response and the entry go to it only while it is still a case
     res = audit.resolve()
     aid = audit._next_audit_id()
     out = {**resp, "audit_id": aid}
-    saved = root = None
-    if res.outcome == "case" and is_case(res.path):
-        root = Path(res.path)
-    elif res.outcome == "audit_dir":  # an explicit audit folder: beside it
-        root = Path(res.path).parent
-    if root is not None:
+    saved = None
+    # Beside VHIR_AUDIT_DIR (not a case: made as needed), or in the case
+    root = Path(res.audit_dir).parent if res.audit_dir else Path(res.path)
+    if res.audit_dir or (res.outcome == "case" and is_case(root)):
         try:
-            folder = mkdir_in_case(root, "extractions", aid)
+            if res.audit_dir:
+                folder = root / "extractions" / aid
+                folder.mkdir(parents=True)
+            else:
+                folder = mkdir_in_case(root, "extractions", aid)
             data = json.dumps(out, ensure_ascii=False, default=str).encode("utf-8")
             (folder / "response.json").write_bytes(data)
             saved = {"path": str(folder / "response.json"),
                      "sha256": hashlib.sha256(data).hexdigest()}  # fmt: skip
         except OSError as e:
             logger.warning("query response not saved: %s", e)
+            if res.audit_dir or is_case(root):  # not a case moved away
+                why = f"its response was not saved ({e})"
+                return AuditOutcome("write_failed", detail=why).note(dict(resp))
         entry.setdefault("case_id", root.name)  # that case's, too
         if queried and queried != root.name:
             entry["params"] = {**(entry.get("params") or {}), "queried_case": queried}
