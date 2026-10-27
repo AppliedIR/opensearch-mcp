@@ -150,8 +150,8 @@ ALL_FAILED = {  # OpenSearch 3.5.0's 400, measured on an index over 1,024 fields
 
 
 FIX = (  # the expansion's repair (W3)
-    "; that index searches every field for a term with no field named, and has too many: "
-    "name a field (field:value; in evtx, winlog.event_data.<Name>:<value>)"
+    "; a term with no field named, or a field pattern, expanded to more fields than that "
+    "index allows: name one field (field:value; in evtx, winlog.event_data.<Name>:<value>)"
 )
 
 

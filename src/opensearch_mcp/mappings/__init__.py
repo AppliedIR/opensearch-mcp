@@ -158,8 +158,9 @@ def _declared_fields(props: dict, prefix: str = ""):
 def with_default_field(body: dict) -> dict:
     """`body` (the evtx template) with the fields an unfielded query term
     searches: every field it declares. Its rules copy each event-data value
-    into one of them, winlog.event_data_all, so the list doesn't grow with an
-    index's event-data names (OpenSearch's default, every field, fails past
+    into one of them, winlog.event_data_all (a date also into
+    winlog.event_data_dates_all, read as a date), so the list doesn't grow with
+    an index's event-data names (OpenSearch's default, every field, fails past
     1024 of them)."""
     tpl = body["template"]
     fields = _declared_fields(tpl["mappings"]["properties"])

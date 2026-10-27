@@ -10,7 +10,10 @@ keeps its shape; a query that fails there names its fix.
   strings rule; a field added to the template file is searched with no other
   edit.
 - (b) What repairs a query too many fields or clauses failed, said by the
-  error (every shard failed) and by the partial answer (some did).
+  error (every shard failed) and by the partial answer (some did). A search
+  failure is a `Query error:` only when OpenSearch's status blames the query
+  (400, 500, or too many buckets at any status); any other raises as it was.
+  idx_search's docstring says a comparison needs a field.
 - (c) idx_search sorts on _score and _doc as they are, not as fields.
 - (d) The install raises an old index's own rule's limit and nothing else.
 - (e) What parse_evtx writes, a batch sent again included: every key is a
@@ -39,7 +42,9 @@ from opensearch_mcp import bulk, mappings, parse_evtx
 from opensearch_mcp import write_context as wc
 
 TEMPLATE = Path(mappings.__file__).parent / "evtx_ecs_template.json"
-ALL = "winlog.event_data_all"
+ALL, DATES_ALL = "winlog.event_data_all", "winlog.event_data_dates_all"
+DATE_FORMAT = "strict_date_optional_time||yyyy/MM/dd HH:mm:ss||yyyy/MM/dd||epoch_millis"
+DATES_MAP = {"type": "date", "format": DATE_FORMAT, "ignore_malformed": True, "doc_values": False}
 DATES, STRINGS = "winlog_event_data_dates", "winlog_event_data_strings"
 
 
@@ -73,10 +78,11 @@ def test_an_unfielded_term_searches_every_declared_field_and_the_catch_all():
     assert sorted(listed) == sorted(_paths({**shipped, **mappings.HOST_KEY_FIELDS}))
     assert len(listed) == len(set(listed))
     # index: false (vhir.rid), a multi-field, the catch-all; no stamp key evtx never gets
-    assert {"vhir.rid", "process.command_line.keyword", ALL} <= set(listed)
+    assert {"vhir.rid", "process.command_line.keyword", ALL, DATES_ALL} <= set(listed)
     assert "vhir.id_scheme" not in listed
     assert tpl["settings"]["index.query_string.lenient"] is True
     assert tpl["mappings"]["properties"][ALL] == {**kw(8191), "doc_values": False}
+    assert tpl["mappings"]["properties"][DATES_ALL] == DATES_MAP
 
 
 def test_the_dates_rule_comes_before_the_strings_rule_and_both_copy():
@@ -84,7 +90,7 @@ def test_the_dates_rule_comes_before_the_strings_rule_and_both_copy():
     assert [list(e)[0] for e in rules] == [DATES, STRINGS]
     dates, strings = rules[0][DATES], rules[1][STRINGS]
     assert dates["match_mapping_type"] == "date"
-    assert dates["mapping"] == {"type": "date", "copy_to": ALL}
+    assert dates["mapping"] == {"type": "date", "copy_to": [ALL, DATES_ALL]}
     assert strings["mapping"] == {**kw(8191), "copy_to": ALL}
 
 
@@ -104,24 +110,32 @@ def test_a_field_added_to_the_template_file_is_searched_with_no_other_edit(tmp_p
 EVTX = "case-acac00000001-evtx-0"
 EXPANSION = ("failed to create query: field expansion for [*] matches too many fields, "
              "limit: 1024, got: 3346")  # fmt: skip
+# a field pattern the AI named, escaped (unescaped, `winlog.event_data.*:x` is a parse error)
+PATTERN = ("failed to create query: field expansion for [winlog.event_data.*] matches too "
+           "many fields, limit: 1024, got: 3305")  # fmt: skip
 NESTED = "Query contains too many nested clauses; maxClauseCount is set to 1024"
+EXPANDED = (
+    "; a term with no field named, or a field pattern, expanded to more fields than that "
+    "index allows: name one field (field:value; in evtx, winlog.event_data.<Name>:<value>)"
+)
 REPAIR = {
-    "expansion": (
-        "; that index searches every field for a term with no field named, and has too "
-        "many: name a field (field:value; in evtx, winlog.event_data.<Name>:<value>)"
-    ),
+    "expansion": EXPANDED,
+    "pattern": EXPANDED,
     "nested": (
         "; the query expanded past OpenSearch's clause limit: name the fields, or quote a "
         "path or URL (a /.../ is read as a regular expression)"
     ),
 }
+REASON = {"expansion": EXPANSION, "pattern": PATTERN, "nested": NESTED}
+QUERY = {"expansion": "*mimikatz*", "pattern": r"winlog.event_data.\*:x", "nested": "*mimikatz*"}
 
 
 def _all_failed(kind: str) -> TransportError:
     """The error each failure raises when every shard fails: a 400 whose root
-    cause names the index (expansion), a 500 whose root cause doesn't (nested)."""
-    if kind == "expansion":
-        cause = {"type": "query_shard_exception", "reason": EXPANSION, "index": EVTX}
+    cause names the index (expansion, pattern), a 500 whose root cause doesn't
+    (nested)."""
+    if kind in ("expansion", "pattern"):
+        cause = {"type": "query_shard_exception", "reason": REASON[kind], "index": EVTX}
         status, cls = 400, RequestError
     else:
         cause = {"type": "too_many_nested_clauses", "reason": NESTED}
@@ -149,10 +163,9 @@ class _Failing(Cluster):
 @pytest.mark.parametrize("tool", sorted(tools()))
 def test_a_query_every_shard_failed_says_its_repair(run, tool, kind):  # noqa: F811
     with pytest.raises(ValueError) as e:
-        run(_Failing(_all_failed(kind)), tool, **tools(index=EVTX)[tool])
-    where = f" ({EVTX})" if kind == "expansion" else ""  # the root cause's own index
-    reason = EXPANSION if kind == "expansion" else NESTED
-    said = f"Query error: all shards failed: {reason}{where} ({EVTX}{REPAIR[kind]})"
+        run(_Failing(_all_failed(kind)), tool, **tools(QUERY[kind], index=EVTX)[tool])
+    where = f" ({EVTX})" if kind != "nested" else ""  # the root cause's own index
+    said = f"Query error: all shards failed: {REASON[kind]}{where} ({EVTX}{REPAIR[kind]})"
     assert str(e.value) == said
     assert "include_fields" not in str(e.value)
 
@@ -160,11 +173,11 @@ def test_a_query_every_shard_failed_says_its_repair(run, tool, kind):  # noqa: F
 @pytest.mark.parametrize("kind", list(REPAIR))
 @pytest.mark.parametrize("tool", sorted(tools()))
 def test_a_query_some_shards_failed_says_its_repair(run, tool, kind):  # noqa: F811
-    reason, cls = (EXPANSION, "query_shard_exception") if kind == "expansion" else (
-        NESTED, "too_many_nested_clauses")  # fmt: skip
+    reason = REASON[kind]
+    cls = "too_many_nested_clauses" if kind == "nested" else "query_shard_exception"
     shards = {"total": 5, "successful": 1, "skipped": 0, "failed": 4,
               "failures": failures(EVTX, reason, cls)}  # fmt: skip
-    reply = run(Cluster(shards), tool, **tools()[tool])
+    reply = run(Cluster(shards), tool, **tools(QUERY[kind])[tool])
     assert reply["partial"] is True and reply["failed_indices"] == [EVTX]
     assert f"{EVTX}: {reason}{REPAIR[kind]}" in reply["partial_warning"]
     assert "include_fields" not in reply["partial_warning"]
@@ -174,6 +187,74 @@ def test_another_server_error_is_raised_as_it_was(run):  # noqa: F811
     error = TransportError(503, "unavailable_shards_exception", {})
     with pytest.raises(TransportError):
         run(_Failing(error), "idx_search", query="x", index=EVTX)
+
+
+BUCKETS = ("Trying to create too many buckets. Must be less than or equal to: [65535] but "
+           "was [70000]. This limit can be set by changing the [search.max_buckets] cluster "
+           "level setting.")  # fmt: skip
+INTERVAL = "; use a larger interval or a shorter time window (time_from/time_to)"
+WINDOW = ("Result window is too large, from + size must be less than or equal to: [10000] "
+          "but was [20010]. See the scroll api for a more efficient way to request large data "
+          "sets. This limit can be set by changing the [index.max_result_window] index level "
+          "parameter.")  # fmt: skip
+BREAKER = ("[parent] Data too large, data for [<http_request>] would be [1031798784/984mb], "
+           "which is larger than the limit of [1020054732/972.7mb]")  # fmt: skip
+
+
+def _search_failed(status: int, *causes: dict, caused_by: dict | None = None, reason=None):
+    """A search_phase_execution_exception at `status`: its root causes, a
+    failed shard for each, and its caused_by (the first cause unless given)."""
+    shards = [{"shard": 0, "index": EVTX, "node": "n1", "reason": c} for c in causes]
+    error = {"root_cause": list(causes), "type": "search_phase_execution_exception",
+             "reason": "all shards failed" if reason is None else reason, "phase": "query",
+             "grouped": True, "failed_shards": shards}  # fmt: skip
+    if caused_by or causes:
+        error["caused_by"] = caused_by or causes[0]
+    cls = RequestError if status == 400 else TransportError
+    return cls(status, "search_phase_execution_exception", {"error": error, "status": status})
+
+
+# OpenSearch's status says whose fault a failed search is: the query's (400, 500,
+# or too many buckets, which it answers as a 503), or the cluster's (no shard, a breaker)
+@pytest.mark.parametrize(
+    "error, said",
+    [
+        (_search_failed(400, {"type": "illegal_argument_exception", "reason": WINDOW}),
+         f"Query error: all shards failed: {WINDOW}"),
+        (_search_failed(500, {"type": "illegal_state_exception", "reason": "unexpected state"}),
+         "Query error: all shards failed: unexpected state"),
+        (_search_failed(503, caused_by={"type": "too_many_buckets_exception", "reason": BUCKETS,
+                                        "max_buckets": 65535}, reason=""),
+         f"Query error: {BUCKETS}{INTERVAL}"),
+        (_search_failed(503), None),  # no shard available
+        (_search_failed(429, {"type": "circuit_breaking_exception", "reason": BREAKER,
+                              "bytes_wanted": 1031798784, "bytes_limit": 1020054732,
+                              "durability": "TRANSIENT"}), None),
+        (_search_failed(502), None),
+        (_search_failed(504), None),
+    ],
+    ids=["400", "500 another reason", "503 too many buckets", "503 no shard", "429 breaker",
+         "502", "504"],
+)  # fmt: skip
+@pytest.mark.parametrize("tool", ["idx_search", "idx_count", "idx_timeline"])
+def test_the_status_decides_if_a_failed_search_is_a_query_error(run, tool, error, said):  # noqa: F811
+    if said is None:  # as at base: the error itself, its status kept
+        with pytest.raises(TransportError) as e:
+            run(_Failing(error), tool, **tools(index=EVTX)[tool])
+        assert e.value is error and e.value.status_code == error.status_code
+        return
+    with pytest.raises(ValueError) as e:
+        run(_Failing(error), tool, **tools(index=EVTX)[tool])
+    assert str(e.value) == said
+    assert "clause limit" not in said  # no rule keyed on the nested-clause text
+
+
+def test_idx_search_says_a_comparison_needs_a_field():
+    from opensearch_mcp import server
+
+    doc = " ".join(server.idx_search.__doc__.split())
+    assert "A comparison (>, <, >=, <=) needs a field: '@timestamp:>2024-01-25'." in doc
+    assert "On evtx indices an unfielded one ('>2024-01-25') matches nothing." in doc
 
 
 # --- (c) Sort keys -----------------------------------------------------------
@@ -216,10 +297,11 @@ def _after_upgrade(limit: int) -> dict:
     ed["Data"]["properties"]["#text"] = kw(8191)
     index["mappings"]["properties"]["winlog"]["properties"]["event_data_all"] = {
         **kw(8191), "doc_values": False}  # fmt: skip
+    index["mappings"]["properties"]["winlog"]["properties"]["event_data_dates_all"] = DATES_MAP
     strings = rule(limit)
     strings[STRINGS]["mapping"]["copy_to"] = ALL
     dates = {DATES: {"path_match": "winlog.event_data.*", "match_mapping_type": "date",
-                     "mapping": {"type": "date", "copy_to": ALL}}}  # fmt: skip
+                     "mapping": {"type": "date", "copy_to": [ALL, DATES_ALL]}}}  # fmt: skip
     index["mappings"]["dynamic_templates"] = [dates, strings]
     return index
 
@@ -256,6 +338,7 @@ def test_the_patch_raises_an_indexs_own_rule_and_nothing_else(index, rules):
     assert put["dynamic_templates"] == rules
     if not any(DATES in e for e in index["mappings"]["dynamic_templates"]):
         assert ALL not in json.dumps(put) and "event_data_all" not in json.dumps(put)
+        assert "event_data_dates_all" not in json.dumps(put)
     client.indices.put_settings.assert_not_called()
     assert result["patched"][IDX][-1] == STRINGS
 

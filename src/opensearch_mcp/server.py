@@ -381,15 +381,24 @@ def _os_call(fn, *args, **kwargs):
         ) from e
     except TransportError as e:
         # 400 Bad Request — malformed query, missing field, etc. — or a search
-        # no shard could run (500 for too many nested clauses)
-        if not isinstance(e, RequestError) and e.error != "search_phase_execution_exception":
-            raise
+        # OpenSearch's status blames on the query: 500 (too many nested
+        # clauses), or any status when it asked for too many buckets (503).
+        # Any other status is the cluster's (no shard, a breaker): raised as is.
         info = getattr(e, "info", None) or {}
-        err = info.get("error", {})
+        err = info.get("error", {}) if isinstance(info, dict) else {}
+        cause = err.get("caused_by") if isinstance(err, dict) else None
+        buckets = isinstance(cause, dict) and cause.get("type") == "too_many_buckets_exception"
+        if not isinstance(e, RequestError) and not (
+            e.error == "search_phase_execution_exception" and (e.status_code == 500 or buckets)
+        ):
+            raise
         reason = err.get("reason", str(e)) if isinstance(err, dict) else str(e)
         root = (err.get("root_cause") or [{}])[0] if isinstance(err, dict) else {}
         if isinstance(root, dict) and root.get("reason"):  # what failed, and where
-            reason += f": {root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
+            where = f"{root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
+            reason = f"{reason}: {where}" if reason else where
+        if buckets and cause.get("reason"):
+            reason = f"{reason}: {cause['reason']}" if reason else str(cause["reason"])
         named = []  # each failed index whose own reason has a repair, with it
         shards = err.get("failed_shards") if isinstance(err, dict) else None
         for f in shards if isinstance(shards, list) else ():
@@ -400,6 +409,8 @@ def _os_call(fn, *args, **kwargs):
         if named:
             more = f"; and {len(named) - 5} more indices" if len(named) > 5 else ""
             reason += f" ({'; '.join(i + fix for i, fix in named[:5])}{more})"
+        if buckets:
+            reason += _BUCKETS
         raise ValueError(f"Query error: {reason}") from e
 
 
@@ -1104,8 +1115,9 @@ _TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
 _UNFIELDED = (
     (
         "matches too many fields",
-        "; that index searches every field for a term with no field named, and "
-        "has too many: name a field (field:value; in evtx, winlog.event_data.<Name>:<value>)",
+        "; a term with no field named, or a field pattern, expanded to more fields "
+        "than that index allows: name one field (field:value; in evtx, "
+        "winlog.event_data.<Name>:<value>)",
     ),
     (
         "too many nested clauses",
@@ -1113,6 +1125,7 @@ _UNFIELDED = (
         "quote a path or URL (a /.../ is read as a regular expression)",
     ),
 )
+_BUCKETS = "; use a larger interval or a shorter time window (time_from/time_to)"
 
 
 def _repair(reason: str, case: str, index: str) -> str:
@@ -1477,6 +1490,8 @@ def idx_search(
     (source.ip on most indices) return nothing for wildcards: use CIDR,
     source.ip:"10.1.2.0/24". Across a case with older indices, OR the two:
     source.ip:10.1.2.* OR source.ip:"10.1.2.0/24".
+    A comparison (>, <, >=, <=) needs a field: '@timestamp:>2024-01-25'. On
+    evtx indices an unfielded one ('>2024-01-25') matches nothing.
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').

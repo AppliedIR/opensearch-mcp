@@ -20,7 +20,10 @@
             "match_mapping_type": "date",
             "mapping": {
               "type": "date",
-              "copy_to": "winlog.event_data_all"
+              "copy_to": [
+                "winlog.event_data_all",
+                "winlog.event_data_dates_all"
+              ]
             }
           }
         },
@@ -40,6 +43,12 @@
         "winlog.event_data_all": {
           "type": "keyword",
           "ignore_above": 8191,
+          "doc_values": false
+        },
+        "winlog.event_data_dates_all": {
+          "type": "date",
+          "format": "strict_date_optional_time||yyyy/MM/dd HH:mm:ss||yyyy/MM/dd||epoch_millis",
+          "ignore_malformed": true,
           "doc_values": false
         },
         "event.code": {
