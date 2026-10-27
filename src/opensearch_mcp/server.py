@@ -1491,7 +1491,8 @@ def idx_search(
     source.ip:"10.1.2.0/24". Across a case with older indices, OR the two:
     source.ip:10.1.2.* OR source.ip:"10.1.2.0/24".
     A comparison (>, <, >=, <=) needs a field: '@timestamp:>2024-01-25'. On
-    evtx indices an unfielded one ('>2024-01-25') matches nothing.
+    evtx indices an unfielded one ('>2024-01-25') compares no dates: any hits
+    come from other fields' text.
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').

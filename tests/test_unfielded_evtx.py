@@ -254,7 +254,11 @@ def test_idx_search_says_a_comparison_needs_a_field():
 
     doc = " ".join(server.idx_search.__doc__.split())
     assert "A comparison (>, <, >=, <=) needs a field: '@timestamp:>2024-01-25'." in doc
-    assert "On evtx indices an unfielded one ('>2024-01-25') matches nothing." in doc
+    assert (
+        "On evtx indices an unfielded one ('>2024-01-25') compares no dates: any hits come "
+        "from other fields' text."
+    ) in doc
+    assert "matches nothing" not in doc
 
 
 # --- (c) Sort keys -----------------------------------------------------------
