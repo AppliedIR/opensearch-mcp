@@ -228,6 +228,7 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+ConstantScore(a:/x) ConstantScore(b:y/) +c:1", True),  # a regex closes no outer (
         ("+e:1 +(+c:d +f:/a b/)", False),  # a regex can end at its group's )
         ("+f:a/b c +g:d/", True),  # only a / after a colon opens one
+        ("+f:/a d +g:b/c", True),
     ],
 )
 def test_the_level_rule(reading, fires):
