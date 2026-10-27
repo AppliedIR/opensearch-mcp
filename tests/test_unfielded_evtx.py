@@ -201,6 +201,9 @@ BREAKER = ("[parent] Data too large, data for [<http_request>] would be [1031798
            "which is larger than the limit of [1020054732/972.7mb]")  # fmt: skip
 
 
+STATE = {"type": "illegal_state_exception", "reason": "unexpected state"}
+
+
 def _search_failed(status: int, *causes: dict, caused_by: dict | None = None, reason=None):
     """A search_phase_execution_exception at `status`: its root causes, a
     failed shard for each, and its caused_by (the first cause unless given)."""
@@ -223,6 +226,9 @@ def _search_failed(status: int, *causes: dict, caused_by: dict | None = None, re
          f"Query error: all shards failed: {WINDOW}"),
         (_search_failed(500, {"type": "illegal_state_exception", "reason": "unexpected state"}),
          "Query error: all shards failed: unexpected state"),
+        # no top-level reason: the root cause's alone, with its index
+        (_search_failed(500, {**STATE, "index": EVTX}, reason=""),
+         f"Query error: unexpected state ({EVTX})"),
         (_search_failed(503, caused_by={"type": "too_many_buckets_exception", "reason": BUCKETS,
                                         "max_buckets": 65535}, reason=""),
          f"Query error: {BUCKETS}{INTERVAL}"),
@@ -232,9 +238,13 @@ def _search_failed(status: int, *causes: dict, caused_by: dict | None = None, re
                               "durability": "TRANSIENT"}), None),
         (_search_failed(502), None),
         (_search_failed(504), None),
+        # a 500 that isn't a failed search phase is the cluster's
+        (TransportError(500, "illegal_state_exception",
+                        {"error": {"root_cause": [STATE], "type": "illegal_state_exception",
+                                   "reason": "unexpected state"}, "status": 500}), None),
     ],
-    ids=["400", "500 another reason", "503 too many buckets", "503 no shard", "429 breaker",
-         "502", "504"],
+    ids=["400", "500 another reason", "500 no top reason", "503 too many buckets",
+         "503 no shard", "429 breaker", "502", "504", "500 not a search phase"],
 )  # fmt: skip
 @pytest.mark.parametrize("tool", ["idx_search", "idx_count", "idx_timeline"])
 def test_the_status_decides_if_a_failed_search_is_a_query_error(run, tool, error, said):  # noqa: F811
