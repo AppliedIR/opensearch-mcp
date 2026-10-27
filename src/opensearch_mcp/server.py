@@ -1250,8 +1250,10 @@ def _levels(text: str) -> list[dict]:
     it and each (...) group not inside a term (a "(" after a letter, digit or _
     is a term's, as in ConstantScore(...)). Each has the marks its clauses
     start with ("" for none) and where " | " joins them. A backslash-escaped
-    character, the space included, a phrase (a "..." after a colon, with any ~N)
-    and a MatchNoDocsQuery("...") reason belong to their clause."""
+    character, the space included, a phrase (a "..." after a colon, with any ~N),
+    a regex (a /.../ after a colon, to its first unescaped / when a space, a ")"
+    or the end follows that) and a MatchNoDocsQuery("...") reason belong to
+    their clause."""
     stack = [{"at": 0, "marks": set(), "bars": [], "term": False}]
     done: list[dict] = []
     i, start = 0, True
@@ -1266,6 +1268,13 @@ def _levels(text: str) -> list[dict]:
         close = '")' if text.startswith('MatchNoDocsQuery("', i) else ""
         if ch == '"' and text[i - 1 : i] == ":":
             close = '"'
+        if ch == "/" and text[i - 1 : i] == ":":
+            end = i + 1
+            while end < len(text) and text[end] != "/":
+                end += 2 if text[end] == "\\" else 1
+            if end < len(text) and text[end + 1 : end + 2] in " )":
+                i = end + 1
+                continue
         if close:
             end = text.find(close, i + 1)
             i = len(text) if end < 0 else end + len(close)

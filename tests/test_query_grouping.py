@@ -172,6 +172,13 @@ def test_an_unread_index_is_never_read_for_a_trap():
     assert srv._grouping_note({"valid": True, "explanations": [trap_unread]}).startswith(
         NOT_CHECKED
     )
+    not_true = {"index": EVTX, "valid": "true", "explanation": TRAP}
+    assert srv._grouping_note({"valid": True, "explanations": [not_true]}).startswith(NOT_CHECKED)
+
+
+def test_an_unread_index_s_reason_is_cut_at_150_characters():
+    note = srv._grouping_note({"valid": False, "explanations": [unread("x" * 200)]})
+    assert note == f"{NOT_CHECKED}1 of 1 indices: {'x' * 150})."
 
 
 @pytest.mark.parametrize("tool", sorted(tools()))
@@ -207,6 +214,13 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ('+a +f:"x y"~2', False),
         ('+a +f:"x y" c', True),
         ("+a +ConstantScore(f:x y)", False),  # a keyword phrase renders unquoted
+        ("+a +x_(+b c)", False),  # a ( after _ is a term's too
+        ("+f:/x | y/ +g", False),  # a regex belongs to its term
+        ("+f:/x | y/ +g c", True),
+        ("+f:/a\\/b c/ +g", False),  # to its first unescaped /
+        ("+f:/x (a b/ +g", False),
+        ("+ConstantScore(f:/c x) +g d", True),  # a keyword value starting with /
+        ("+ConstantScore(f:/c x) +g:/p q/", False),  # ends at a / before a space, ) or the end
     ],
 )
 def test_the_level_rule(reading, fires):
@@ -235,6 +249,22 @@ def test_an_unfielded_query_quotes_its_trap_from_the_tail_of_a_long_reading():
     assert required in reading and optional in reading and len(reading) <= 300
     clean = {r["query"]: r for r in SETS["real0"]["rows"]}
     assert "mimikatz OR event.code:4624" not in clean  # the guard is a bed row
+
+
+def test_a_regex_with_a_space_beside_required_clauses_gives_no_note():
+    """Captured escapes row 8, then the same reading without its OR clause."""
+    row = {r["row"]: r for r in SETS["escapes"]["rows"]}[8]
+    assert row["query"] == (
+        "winlog.event_data.Payload:/x | y/ AND event.code:4103 OR event.code:4104"
+    )
+    text = row["explanations"][0]["explanation"]
+    optional = (
+        " IndexOrDocValuesQuery(indexQuery=event.code:[4104 TO 4104],"
+        " dvQuery=event.code:[4104 TO 4104])"
+    )
+    assert text.startswith("+winlog.event_data.Payload:/x | y/ +") and text.endswith(optional)
+    assert note_of(text).startswith(srv._OPTIONAL + "+winlog.event_data.Payload:/x | y/ +")
+    assert note_of(text.removesuffix(optional)) == ""
 
 
 ROWS = [(name, r) for name in ("real0", "escapes", "phrases") for r in SETS[name]["rows"]]
