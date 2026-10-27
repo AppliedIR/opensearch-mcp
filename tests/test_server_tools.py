@@ -179,13 +179,10 @@ class TestIdxSearch:
         call_body = mock_client.search.call_args[1]["body"]
         assert call_body["size"] == 200
 
-    def test_validates_sort_order_invalid_becomes_desc(self, mock_client):
-        mock_client.search.return_value = {
-            "hits": {"total": {"value": 0}, "hits": []},
-        }
-        idx_search(query="*", sort="@timestamp:INVALID")
-        call_body = mock_client.search.call_args[1]["body"]
-        assert call_body["sort"][0]["@timestamp"]["order"] == "desc"
+    def test_validates_sort_order_invalid_is_refused(self, mock_client):
+        r = idx_search(query="*", sort="@timestamp:INVALID")
+        assert r["error"].startswith("sort order must be asc or desc (got 'INVALID')")
+        mock_client.search.assert_not_called()
 
     def test_audit_id_in_response(self, mock_client):
         mock_client.search.return_value = {

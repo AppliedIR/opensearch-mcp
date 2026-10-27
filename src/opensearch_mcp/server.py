@@ -694,6 +694,76 @@ def _field_refusal(client, index: str, field: str) -> tuple[dict | None, str]:
     return ({"error": err}, "") if err else (None, "")
 
 
+def _sort_check(client, index: str, field: str, order: str, windowed: bool):
+    """idx_search's sort, checked against how the indices `index` names map
+    `field`: (an error, the unmapped_type to send, a sort_note, the @timestamp
+    holders). The @timestamp holders, or what reading them raised, are read
+    once, when the sort or a window needs them. @timestamp is never refused."""
+    err = note = ""
+    if order.lower() not in ("asc", "desc", ""):
+        err = f"sort order must be asc or desc (got '{order}'): e.g. Created0x10:asc"
+    elif not field or any(c in field for c in ", *"):
+        err = "sort takes one field:order (e.g. Created0x10:asc)"
+    elif field in _METADATA_FIELDS and field not in ("_id", "_index"):
+        err = f"{field} is a metadata field; idx_search sorts by _score, _doc, _id, _index "
+        err += "or a mapped field"
+    if err:
+        return err, "", "", None
+    ts = None
+    if field == "@timestamp" or windowed:
+        try:
+            ts = _field_holders(client, index, "@timestamp")
+        except Exception as e:  # searched as today, with the couldn't-check note
+            ts = e
+    if field == "@timestamp" and isinstance(ts, Exception) and not windowed:  # else time_note
+        why = "sort after the others, in no order"
+        note = f"{_UNCHECKED} ({type(ts).__name__}); EZ-tool CSV indices {why}"
+    elif field == "@timestamp" and isinstance(ts, tuple) and ts[2] and not ts[0]:
+        own = sorted({_time_field_of(n) for n in ts[2]} - {None})[:3]
+        see = "its own date field (see idx_case_summary(include_fields=true))"
+        note = "No searched index has @timestamp, so results are in no order. Sort by "
+        note += (
+            f"the index's own date field, e.g. {', '.join(f + ':asc' for f in own)}."
+            if own
+            else f"{see}."
+        )
+    if field in ("@timestamp", "_score", "_doc", "_id", "_index"):
+        return "", "date", note, ts
+
+    def some(ns: list[str]) -> str:
+        return ", ".join(ns[:5]) + (f", and {len(ns) - 5} more" if len(ns) > 5 else "")
+
+    types, _, names = _os_call(_field_holders, client, index, field)
+    held = sorted({n for ns in types.values() for n in ns})
+    if not names:  # no index matched: the search reply says so
+        pass
+    elif not held:
+        err = f"{field} is in no searched index's mapping ({index})"
+        parent = field.removesuffix(".keyword")
+        pt = _os_call(_field_holders, client, index, parent)[0] if parent != field else {}
+        if len(pt) == 1 and "text" not in pt:
+            want = f"{parent}:{order.lower() or 'desc'}"
+            err += f"; {parent} is ({next(iter(pt))}) there: sort by {want}"
+        else:
+            err += ": find a sortable field with idx_case_summary(include_fields=true)"
+    elif "text" in types:
+        err = f"{field} is text in {some(types['text'])}: text fields can't sort"
+        if len(_os_call(_field_holders, client, index, f"{field}.keyword")[0]) == 1:
+            err += f"; sort by {field}.keyword"
+    elif len(types) > 1:
+        sets = " and ".join(f"as {t} in {some(ns)}" for t, ns in sorted(types.items()))
+        err = f"{field} is mapped {sets}: one sort can't combine them. Sort each set with "
+        err += "index=<those names>, or narrow the pattern."
+    if err or not held:
+        return err, "date", "", ts
+    lack = [n for n in names if n not in held]
+    if windowed and isinstance(ts, tuple):  # the window leaves the untimed indices out
+        lack = [n for n in lack if any(n in ns for ns in ts[0].values())]
+    note = f"{field} is in {len(held)} of the {len(names)} searched indices; documents from "
+    note += f"{some(lack)}, if any match, come after the sorted ones, in no order"
+    return "", next(iter(types)), note if lack else "", ts
+
+
 def _hayabusa_index(case_id: str = "", client=None) -> str:
     """The Hayabusa alert indices of case_id, or of the active case; ""
     when there's no case."""
@@ -1380,26 +1450,34 @@ def _hit_params(hits: list) -> dict:
     return out
 
 
-def _untimed_note(client, index: str, why: str) -> str:
+def _time_field_of(name: str) -> str | None:
+    """The time field of index `name`'s EZ tool, if it has one."""
+    from opensearch_mcp.tools import TOOLS
+    from opensearch_mcp.write_context import artifact_type_of
+
+    fields = {c.index_suffix: c.time_field for c in TOOLS.values() if c.time_field}
+    return fields.get(artifact_type_of(name))
+
+
+def _untimed_note(client, index: str, why: str, held=None) -> str:
     """The indices `index` names whose mapping has no @timestamp (the EZ-tool
     CSV indices idx_ingest makes; other routes' templates map it), which a
     window, the default timeline and the case time range leave out: a note
     naming them, or "". Read from the mapping, so an index whose records all
-    fall outside a window isn't named. A failed read says so."""
-    from opensearch_mcp.tools import TOOLS
-    from opensearch_mcp.write_context import artifact_type_of
-
+    fall outside a window isn't named. A failed read says so. `held` is
+    idx_search's own read of the @timestamp holders (or what it raised)."""
     try:
-        types, _, every = _field_holders(client, index, "@timestamp")
+        if isinstance(held, Exception):
+            raise held
+        types, _, every = held or _field_holders(client, index, "@timestamp")
     except Exception as e:
         return f"{_UNCHECKED} ({type(e).__name__}); EZ-tool CSV indices {why}"
     names = sorted(set(every) - {n for ns in types.values() for n in ns})
     if not names:
         return ""
-    fields = {c.index_suffix: c.time_field for c in TOOLS.values() if c.time_field}
 
     def one(n: str) -> str:
-        f = fields.get(artifact_type_of(n))
+        f = _time_field_of(n)
         return f"{n} (time field {f})" if f else n
 
     more = f", and {len(names) - 5} more indices" if len(names) > 5 else ""
@@ -1502,7 +1580,10 @@ def idx_search(
             active case; with no index, case_id or active case, it refuses.
         limit: Max results (default 50, max 200).
         offset: Skip first N results for pagination (default 0).
-        sort: Sort field:order (default @timestamp:desc).
+        sort: Sort field:order, order asc or desc (default @timestamp:desc). One
+            field. A text field sorts only by its .keyword sub-field. EZ-tool CSV
+            indices have no @timestamp: sort them by their own date field (e.g.
+            Created0x10:asc).
         time_from: Start time (ISO 8601, e.g., '2023-01-25T14:00:00Z').
         time_to: End time (ISO 8601).
     """
@@ -1513,12 +1594,17 @@ def idx_search(
         return {"error": err}
     limit = min(limit, 200)
 
-    sort_field, _, sort_order = sort.partition(":")
-    if sort_order not in ("asc", "desc", ""):
-        sort_order = "desc"
-    sort_spec = {"order": sort_order or "desc"}
+    sort_field, colon, sort_order = sort.rpartition(":")
+    if not colon:  # no order word
+        sort_field, sort_order = sort, ""
+    err, unmapped, sort_note, ts = _sort_check(
+        client, index, sort_field, sort_order, bool(time_from or time_to)
+    )
+    if err:
+        return {"error": err}
+    sort_spec = {"order": sort_order.lower() or "desc"}
     if sort_field not in ("_score", "_doc"):  # not fields: no unmapped_type
-        sort_spec["unmapped_type"] = "date"
+        sort_spec["unmapped_type"] = unmapped
     sort_body = [{sort_field: sort_spec}]
 
     query_body: dict = {"query_string": {"query": query}}
@@ -1562,8 +1648,10 @@ def idx_search(
     if total_capped:
         resp["total_capped"] = True
         resp["total_note"] = f"At least {total} results. Use idx_count for exact total."
-    if (time_from or time_to) and (note := _untimed_note(client, index, _WINDOW)):
+    if (time_from or time_to) and (note := _untimed_note(client, index, _WINDOW, ts)):
         resp["time_note"] = note
+    if sort_note:
+        resp["sort_note"] = sort_note
     # "have none" only when the window found nothing and the note names the indices:
     # never on a failed read, nor on a page past the end of what the window found,
     # nor when some shards didn't answer
