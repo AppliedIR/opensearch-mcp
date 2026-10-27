@@ -756,7 +756,7 @@ def _sort_check(client, index: str, field: str, order: str, windowed: bool):
     elif "text" in types:
         err = f"{field} is text in {some(types['text'])}: text fields can't sort"
         if sortable(f"{field}.keyword"):
-            err += f"; sort by {field}.keyword"
+            err += f"; sort by {field}.keyword:{order.lower() or 'desc'}"
     elif len(types) > 1:
         sets = " and ".join(f"as {t} in {some(ns)}" for t, ns in sorted(types.items()))
         err = f"{field} is mapped {sets}: one sort can't combine them. Sort each set with "

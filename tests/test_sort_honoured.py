@@ -175,7 +175,7 @@ def test_the_default_sort_with_no_timestamp_searches_with_a_note(client, index, 
 def test_a_text_field_is_refused_naming_its_keyword(client, index):
     r = srv.idx_search(query="*", index=index or "", sort="FileName:asc")
     assert _refused(client, r) == (
-        f"FileName is text in {MFT}: text fields can't sort; sort by FileName.keyword"
+        f"FileName is text in {MFT}: text fields can't sort; sort by FileName.keyword:asc"
     )
 
 
@@ -190,8 +190,17 @@ def test_text_in_one_index_and_keyword_in_another_is_refused(client):
     _mapped(client, {f"{C}-delim-1": {"FileName": "keyword"}})
     r = srv.idx_search(query="*", sort="FileName:asc")
     assert _refused(client, r) == (
-        f"FileName is text in {MFT}: text fields can't sort; sort by FileName.keyword"
+        f"FileName is text in {MFT}: text fields can't sort; sort by FileName.keyword:asc"
     )
+
+
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_the_keyword_hint_fed_back_sorts_in_the_asked_order(client, order):
+    """R18: the hint keeps the order the call asked for, as rule 4's does."""
+    err = _refused(client, srv.idx_search(query="*", index=MFT, sort=f"FileName:{order}"))
+    r = srv.idx_search(query="*", index=MFT, sort=re.search(r"sort by (\S+)$", err)[1])
+    assert "error" not in r and r["total"] == 1
+    assert _sort(client) == [{"FileName.keyword": {"order": order, "unmapped_type": "keyword"}}]
 
 
 # --- SPEC-007: the sort Args text -----------------------------------------------------
@@ -416,8 +425,10 @@ def test_a_window_that_leaves_out_every_keyword_holder_sends_keyword(client):
     ("Created0x10.keyword:asc", MFT, {}, "Created0x10:asc"),
     ("Created0x10.keyword", MFT, {}, "Created0x10:desc"),  # no order word: the default
     ("Created0x10.keyword:ASC", MFT, {}, "Created0x10:asc"),  # as it is sent
-    ("FileName:asc", MFT, {}, "FileName.keyword"),
-    ("FileName:asc", "", {f"{C}-delim-1": {"FileName": "keyword"}}, "FileName.keyword"),
+    ("FileName:asc", MFT, {}, "FileName.keyword:asc"),
+    ("FileName", MFT, {}, "FileName.keyword:desc"),  # no order word: the default
+    ("FileName:ASC", MFT, {}, "FileName.keyword:asc"),
+    ("FileName:asc", "", {f"{C}-delim-1": {"FileName": "keyword"}}, "FileName.keyword:asc"),
     ("_id.keyword:asc", "", {}, "_id:asc"),
     ("F:asc", "", {f"{C}-delim-1": {"F": "text", "F.keyword": "text"}}, None),  # rule 5
     ("_source.keyword:asc", "", {}, None),  # rule 7
