@@ -612,20 +612,21 @@ _METADATA_FIELDS = frozenset({
 })  # fmt: skip
 
 
-def _mapping_of(client, index: str, field: str) -> dict[str, dict]:
+def _mapping_of(client, index: str, field: str, seen: dict) -> dict[str, dict]:
     """{index: its mapping of `field`} for the open indices `index` names that
     map it (a multi-field such as Path.keyword too). get_mapping returns a red
     index's mapping; _mapping/field and field_caps leave that index out."""
     top, *rest = field.split(".")
-    got = client.indices.get_mapping(
-        index=index,
-        expand_wildcards="open",
-        allow_no_indices=True,
-        ignore_unavailable=True,
-        filter_path=f"*.mappings.properties.{top}",
-    )
+    if top not in seen:  # one read per top-level name: Path and Path.keyword share it
+        seen[top] = client.indices.get_mapping(
+            index=index,
+            expand_wildcards="open",
+            allow_no_indices=True,
+            ignore_unavailable=True,
+            filter_path=f"*.mappings.properties.{top}",
+        )
     out = {}
-    for name, body in (got or {}).items():
+    for name, body in (seen[top] or {}).items():
         m = body["mappings"]["properties"][top]
         for part in rest:
             m = (m.get("properties") or m.get("fields") or {}).get(part) if m else None
@@ -635,21 +636,24 @@ def _mapping_of(client, index: str, field: str) -> dict[str, dict]:
 
 
 def _field_holders(
-    client, index: str, field: str
+    client, index: str, field: str, seen: dict | None = None
 ) -> tuple[dict[str, list[str]], set[str], list[str]]:
     """How the open indices `index` names map `field`: {type: [indices]} where
     it is a field (an alias as its target's type), its fields where it is an
     object, and every index named, a red one included, as a search counts it.
     A metadata field is held by every index named."""
-    rows = client.cat.indices(index=index, format="json", h="index", expand_wildcards="open")
-    names = sorted(r["index"] for r in rows or [])
+    seen = {} if seen is None else seen  # calls given one seen (same index) share reads
+    if "." not in seen:  # no top-level name has a dot
+        rows = client.cat.indices(index=index, format="json", h="index", expand_wildcards="open")
+        seen["."] = sorted(r["index"] for r in rows or [])
+    names = seen["."]
     if field in _METADATA_FIELDS:
         return {"metadata": names}, set(), names
     types: dict[str, list[str]] = {}
     subs: set[str] = set()
-    for name, m in sorted(_mapping_of(client, index, field).items()):
+    for name, m in sorted(_mapping_of(client, index, field, seen).items()):
         if m.get("type") == "alias":
-            m = _mapping_of(client, name, m.get("path", "")).get(name) or {}
+            m = _mapping_of(client, name, m.get("path", ""), {}).get(name) or {}
         if m.get("type") and "properties" not in m:
             types.setdefault(m["type"], []).append(name)
         else:
@@ -721,26 +725,22 @@ def _sort_check(client, index: str, field: str, order: str, windowed: bool):
     elif field == "@timestamp" and isinstance(ts, tuple) and ts[2] and not ts[0]:
         own = sorted({_time_field_of(n) for n in ts[2]} - {None})[:3]
         see = "its own date field (see idx_case_summary(include_fields=true))"
+        eg = f"the index's own date field, e.g. {', '.join(f + ':asc' for f in own)}"
         note = "No searched index has @timestamp, so results are in no order. Sort by "
-        note += (
-            f"the index's own date field, e.g. {', '.join(f + ':asc' for f in own)}."
-            if own
-            else f"{see}."
-        )
+        note += f"{eg if own else see}."
     if field in ("@timestamp", "_score", "_doc", "_id", "_index"):
         return "", "date", note, ts
 
     def some(ns: list[str]) -> str:
         return ", ".join(ns[:5]) + (f", and {len(ns) - 5} more" if len(ns) > 5 else "")
 
-    types, _, names = _os_call(_field_holders, client, index, field)
+    seen: dict = {}  # the field, its parent and its .keyword: one read
+    types, _, names = _os_call(_field_holders, client, index, field, seen)
     held = sorted({n for ns in types.values() for n in ns})
-    if not names:  # no index matched: the search reply says so
-        pass
-    elif not held:
+    if names and not held:  # (no index matched: the search reply says so)
         err = f"{field} is in no searched index's mapping ({index})"
         parent = field.removesuffix(".keyword")
-        pt = _os_call(_field_holders, client, index, parent)[0] if parent != field else {}
+        pt = _os_call(_field_holders, client, index, parent, seen)[0] if parent != field else {}
         if len(pt) == 1 and "text" not in pt:
             want = f"{parent}:{order.lower() or 'desc'}"
             err += f"; {parent} is ({next(iter(pt))}) there: sort by {want}"
@@ -748,7 +748,7 @@ def _sort_check(client, index: str, field: str, order: str, windowed: bool):
             err += ": find a sortable field with idx_case_summary(include_fields=true)"
     elif "text" in types:
         err = f"{field} is text in {some(types['text'])}: text fields can't sort"
-        if len(_os_call(_field_holders, client, index, f"{field}.keyword")[0]) == 1:
+        if len(_os_call(_field_holders, client, index, f"{field}.keyword", seen)[0]) == 1:
             err += f"; sort by {field}.keyword"
     elif len(types) > 1:
         sets = " and ".join(f"as {t} in {some(ns)}" for t, ns in sorted(types.items()))

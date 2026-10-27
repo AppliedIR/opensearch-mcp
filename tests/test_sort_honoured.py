@@ -133,6 +133,15 @@ def test_a_keyword_form_no_index_holds_names_its_parent(client):
     )
 
 
+@pytest.mark.parametrize("sort", ["Created0x10.keyword:asc", "FileName:asc"])
+def test_a_field_and_its_parent_or_keyword_are_one_read(client, sort):
+    """R15 (SPEC-012): the parent hint and the .keyword hint reuse the field's
+    own reads: one field-mapping read, one index list."""
+    _refused(client, srv.idx_search(query="*", index=MFT, sort=sort))
+    assert _holder_reads(client) == [f"*.mappings.properties.{sort.split('.')[0].split(':')[0]}"]
+    assert [k.kwargs["index"] for k in client.cat.indices.call_args_list].count(MFT) == 1
+
+
 def test_a_field_no_index_holds_is_refused(client):
     r = srv.idx_search(query="*", index=MFT, sort="NoSuchField:asc")
     assert _refused(client, r) == f"NoSuchField is in no searched index's mapping ({MFT}): {SEE}"
