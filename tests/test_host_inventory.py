@@ -16,6 +16,7 @@ import uuid
 import pytest
 from sift_common import host_gate
 from sift_common import host_identity as hi
+from sift_common.audit import AuditOutcome
 
 from opensearch_mcp import server as srv
 from opensearch_mcp import write_context as wc
@@ -234,7 +235,9 @@ def test_the_inventory_records_the_ingests_of_the_records_it_counted(case, monke
 
     logged = []
     monkeypatch.setattr(srv, "_get_os", lambda: Counted({key: 7}))
-    monkeypatch.setattr(srv.audit, "log", lambda **kw: logged.append(kw) or "aid-1")
+    monkeypatch.setattr(
+        srv.audit, "record", lambda **kw: logged.append(kw) or AuditOutcome(audit_id="aid-1")
+    )
     inv = srv.idx_host_inventory()
     (entry,) = logged
     assert entry["tool"] == "idx_host_inventory" and inv["audit_id"] == entry["audit_id"]

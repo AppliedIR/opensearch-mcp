@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from sift_common import host_identity
+from sift_common.audit import AuditOutcome
 
 import opensearch_mcp.server as srv
 from opensearch_mcp.server import (
@@ -191,7 +192,9 @@ class TestIdxSearch:
         mock_client.search.return_value = {
             "hits": {"total": {"value": 0}, "hits": []},
         }
-        with patch.object(srv.audit, "log", return_value="audit-123") as log:
+        with patch.object(
+            srv.audit, "record", return_value=AuditOutcome(audit_id="audit-123")
+        ) as log:
             resp = idx_search(query="*")
         assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 
@@ -245,7 +248,9 @@ class TestIdxCount:
 
     def test_audit_id_in_response(self, mock_client):
         mock_client.search.return_value = {"hits": {"total": {"value": 0}, "hits": []}}
-        with patch.object(srv.audit, "log", return_value="audit-456") as log:
+        with patch.object(
+            srv.audit, "record", return_value=AuditOutcome(audit_id="audit-456")
+        ) as log:
             resp = idx_count()
         assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 

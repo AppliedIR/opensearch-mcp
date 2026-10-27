@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 from _mapping_shapes import get_mapping
+from sift_common.audit import AuditOutcome
 
 from opensearch_mcp import server as srv
 
@@ -99,7 +100,9 @@ def run(tmp_path, monkeypatch):
     """`run(cluster, tool, **kw)`: the tool's reply against `cluster`, with no
     case active unless `case` names one."""
     audited = []
-    monkeypatch.setattr(srv.audit, "log", lambda **kw: audited.append(kw) or "aid-1")
+    monkeypatch.setattr(
+        srv.audit, "record", lambda **kw: audited.append(kw) or AuditOutcome(audit_id="aid-1")
+    )
     monkeypatch.setenv("VHIR_CASES_DIR", str(tmp_path / "cases"))
     (tmp_path / "cases" / "acme").mkdir(parents=True)
     (tmp_path / "cases" / "acme" / "CASE.yaml").write_text(

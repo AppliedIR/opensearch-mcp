@@ -26,7 +26,7 @@ UUID = {"alpha": "a1a10000-0001-4000-8000-000000000000",
         "bravo": "b2b20000-0002-4000-8000-000000000000"}  # fmt: skip
 BRAVO = "case-b2b200000002-evtx-0"
 OK = {"total": 2, "successful": 2, "skipped": 0, "failed": 0}
-NOT_RECORDED = "not recorded: no active case, or the audit write failed"
+NOT_RECORDED = "not recorded: no case was active for this call"
 TOOLS = {t: {k: v for k, v in kw.items() if k != "index"} for t, kw in tools().items()}
 
 
