@@ -735,20 +735,27 @@ def _sort_check(client, index: str, field: str, order: str, windowed: bool):
         return ", ".join(ns[:5]) + (f", and {len(ns) - 5} more" if len(ns) > 5 else "")
 
     seen: dict = {}  # the field, its parent and its .keyword: one read
+
+    def sortable(f: str) -> dict:  # f's holders, if a hint to sort by f passes the rules (R10)
+        if f in _METADATA_FIELDS and f not in ("_id", "_index"):
+            return {}
+        t = _os_call(_field_holders, client, index, f, seen)[0]
+        return t if len(t) == 1 and "text" not in t else {}
+
     types, _, names = _os_call(_field_holders, client, index, field, seen)
     held = sorted({n for ns in types.values() for n in ns})
     if names and not held:  # (no index matched: the search reply says so)
         err = f"{field} is in no searched index's mapping ({index})"
         parent = field.removesuffix(".keyword")
-        pt = _os_call(_field_holders, client, index, parent, seen)[0] if parent != field else {}
-        if len(pt) == 1 and "text" not in pt:
+        pt = sortable(parent) if parent != field else {}
+        if pt:
             want = f"{parent}:{order.lower() or 'desc'}"
             err += f"; {parent} is ({next(iter(pt))}) there: sort by {want}"
         else:
             err += ": find a sortable field with idx_case_summary(include_fields=true)"
     elif "text" in types:
         err = f"{field} is text in {some(types['text'])}: text fields can't sort"
-        if len(_os_call(_field_holders, client, index, f"{field}.keyword", seen)[0]) == 1:
+        if sortable(f"{field}.keyword"):
             err += f"; sort by {field}.keyword"
     elif len(types) > 1:
         sets = " and ".join(f"as {t} in {some(ns)}" for t, ns in sorted(types.items()))

@@ -5,6 +5,7 @@ hold sorts with a note naming the indices whose documents come after."""
 from __future__ import annotations
 
 import inspect
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -313,6 +314,23 @@ def test_no_index_matched_gives_the_no_index_error(client, sort):
     assert "sort_note" not in r
 
 
+def test_an_empty_index_list_makes_no_timestamp_claim(client):
+    """R6: the reads found no index, yet the search answers (an index made since):
+    no note that no searched index has @timestamp."""
+    serve(client, {})
+    r = srv.idx_search(query="*")
+    assert r["total"] == 1 and "sort_note" not in r
+
+
+def test_the_no_timestamp_note_names_three_own_date_fields(client):
+    names = [f"{C}-{t}-0" for t in ("amcache", "lnk", "mft", "usn")]
+    _mapped(client, {n: {"Path": "keyword"} for n in names})
+    r = srv.idx_search(query="*", index=",".join(names))
+    assert r["sort_note"].endswith(
+        "e.g. Created0x10:asc, FileKeyLastWriteTimestamp:asc, TargetModified:asc."
+    )
+
+
 def test_a_failed_read_of_timestamp_searches_with_a_note(client):
     """R7: the default sort is never refused; it searches as today."""
     client.indices.get_mapping.side_effect = ConnectionTimeout("TIMEOUT", "read timed out", None)
@@ -326,7 +344,9 @@ def test_a_failed_read_of_timestamp_searches_with_a_note(client):
 def test_a_failed_read_with_a_window_notes_it_once(client):
     client.indices.get_mapping.side_effect = ConnectionTimeout("TIMEOUT", "read timed out", None)
     r = srv.idx_search(query="*", time_from="2024-01-01T00:00:00Z")
-    assert r["time_note"].startswith("couldn't check which indices lack an event time")
+    assert r["time_note"].startswith(
+        "couldn't check which indices lack an event time (ConnectionTimeout)"  # its own class
+    )
     assert "sort_note" not in r and r["total"] == 1
 
 
@@ -383,6 +403,37 @@ def test_a_window_that_leaves_out_every_holder_says_so(client, more):
         "@timestamp): results are in no order. Search those indices without time_from/time_to "
         "to sort by Created0x10."
     )
+
+
+def test_a_window_that_leaves_out_every_keyword_holder_sends_keyword(client):
+    _mapped(client, {LNK: {"TargetPath": "keyword"}})
+    r = srv.idx_search(query="*", sort="TargetPath:asc", time_from="2024-01-01T00:00:00Z")
+    assert r["sort_note"].startswith(f"TargetPath is only in {LNK}, which the time range ")
+    assert _sort(client) == [{"TargetPath": {"order": "asc", "unmapped_type": "keyword"}}]
+
+
+@pytest.mark.parametrize("sort, index, extra, hint", [
+    ("Created0x10.keyword:asc", MFT, {}, "Created0x10:asc"),
+    ("Created0x10.keyword", MFT, {}, "Created0x10:desc"),  # no order word: the default
+    ("Created0x10.keyword:ASC", MFT, {}, "Created0x10:asc"),  # as it is sent
+    ("FileName:asc", MFT, {}, "FileName.keyword"),
+    ("FileName:asc", "", {f"{C}-delim-1": {"FileName": "keyword"}}, "FileName.keyword"),
+    ("_id.keyword:asc", "", {}, "_id:asc"),
+    ("F:asc", "", {f"{C}-delim-1": {"F": "text", "F.keyword": "text"}}, None),  # rule 5
+    ("_source.keyword:asc", "", {}, None),  # rule 7
+    ("_routing.keyword:asc", "", {}, None),
+])  # fmt: skip
+def test_a_hint_names_a_sort_that_is_accepted(client, sort, index, extra, hint):
+    """R10: a refusal's hint, fed back to idx_search, is accepted; a form the
+    rules refuse is never named."""
+    _mapped(client, extra)
+    got = re.search(
+        r"sort by (\S+)$", _refused(client, srv.idx_search(query="*", index=index, sort=sort))
+    )
+    if got:
+        r = srv.idx_search(query="*", index=index, sort=got[1])
+        assert "error" not in r and [*_sort(client)[0]] == [got[1].split(":")[0]]
+    assert (got and got[1]) == hint
 
 
 def test_a_text_only_parent_is_not_named(client):
