@@ -218,7 +218,7 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+f:/x | y/ +g", False),  # a regex belongs to its term
         ("+f:/x | y/ +g c", True),
         ("+f:/a\\/b c/ +g", False),  # to its first unescaped /
-        ("+f:/x (a b/ +g", False),
+        ("+f:/x (a b/ +g", True),  # unsure: a ( may open a group
         ("+ConstantScore(f:/c x) +g d", True),  # a keyword value starting with /
         ("+ConstantScore(f:/c x) +g:/p q/", False),  # ends at a / before a space, ) or the end
         ("+ConstantScore(f:/c x) d +g:/p/", True),
@@ -236,12 +236,29 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+winlog.event_data.Payload:/etc* ConstantScore(o:foo) +ConstantScore(g:/)", True),
         ("+f:/tmp* ConstantScore(g:x/) +h:1", True),  # a prefix renders as f:/etc*
         ("+f:/etc* o:x/ +h:1", True),
-        ("+f:/etc* a.b@c*d-e:x/ +h:1", True),  # each character a field can have
+        ("+f:/etc* a.b@c*d-e:x/ +h:1", True),  # a field name can hold most characters
         ("+f:/etc* (o:x/) +h:1", True),
         ("+(+a:1 +ConstantScore(P:/etc)) (c:d e:f)", True),
         ("+P:/.*(Set|Get) x.*/ +IndexOrDocValuesQuery(q)", False),  # a regex's own parens
         ("+f:/[)] a/ +g", False),
         ('+f:/"a)b" c/ +g:y', False),
+        ("+f:/etc* (+o:x/ +h:1)", True),  # a nested group renders as (+, (# or (-
+        ("+ConstantScore(f:/etc) (+o:*x/ +h:1)", True),
+        ("+f:/etc* (#o:x/ #h:1)", True),
+        ("+f:/etc* ((#o:x/ #h:1)) +k:1", True),
+        ("+f:/etc* (-o:x/ +h:1)", True),
+        ("+f:/etc* (-*x/ +h:1)", True),
+        ("+f:/etc* $x:y/ +h:1", True),
+        ("+f:/etc* a%b:x/ +h:1", True),
+        ("+f:/etc* a[0]:x/ +h:1", True),
+        ("+f:/etc* a]b:x/ +h:1", True),
+        ("+f:/etc* «a»:x/ +h:1", True),
+        ("+f:/etc* x +*y/ +h:1", True),  # a mark starts a clause
+        ("+f:/etc* x -*y/ +h:1", True),
+        ("+f:/etc* x #*y/ +h:1", True),
+        ("+f:/etc* x\no:y/ +h:1", True),  # a value can hold a line break
+        ("+f:/etc* x/y +h:1", True),  # a / inside a later term closes nothing
+        ("+f:/etc* x", True),  # no closing /
     ],
 )
 def test_the_level_rule(reading, fires):

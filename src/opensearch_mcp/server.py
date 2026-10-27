@@ -1243,7 +1243,7 @@ _OPTIONAL = (
 )
 _NOT_CHECKED = "The query's AND/OR grouping wasn't checked ({})."
 _UNMAPPED = 'MatchNoDocsQuery("unmapped fields ['
-_CLAUSE = re.compile(r" (?:[+#]|\(*[\w.@*-]+[:(])")  # a space, then +, #, a field: or Name(
+_CLAUSE = re.compile(r" (?:[+#-]|.*[:(])", re.S)  # a space, then a mark, or a : or ( later
 
 
 def _levels(text: str) -> list[dict]:
@@ -1253,7 +1253,8 @@ def _levels(text: str) -> list[dict]:
     start with ("" for none) and where " | " joins them. A backslash-escaped
     character, the space included, a phrase (a "..." after a colon, with any ~N),
     a regex (a /.../ after a colon, to its first unescaped / when a space, a ")"
-    or the end follows that and no clause starts on the way) and a
+    or the end follows that and nothing after a space in it may start a clause:
+    a mark, or a : or ( later) and a
     MatchNoDocsQuery("...") reason belong to their clause. A value that only
     may be a regex (a prefix renders as f:/etc*) is read as plain text, so an
     unsure reading keeps the note."""
@@ -1273,9 +1274,13 @@ def _levels(text: str) -> list[dict]:
             close = '"'
         if ch == "/" and text[i - 1 : i] == ":":
             end = i + 1
-            while end < len(text) and text[end] != "/" and not _CLAUSE.match(text, end):
+            while end < len(text) and text[end] != "/":
                 end += 2 if text[end] == "\\" else 1
-            if end < len(text) and text[end + 1 : end + 2] in " )":
+            if (
+                end < len(text)
+                and text[end + 1 : end + 2] in " )"
+                and not _CLAUSE.search(text, i, end)
+            ):
                 i = end + 1
                 continue
         if close:
