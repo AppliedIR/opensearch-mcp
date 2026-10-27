@@ -222,6 +222,12 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+ConstantScore(f:/c x) +g d", True),  # a keyword value starting with /
         ("+ConstantScore(f:/c x) +g:/p q/", False),  # ends at a / before a space, ) or the end
         ("+ConstantScore(f:/c x) d +g:/p/", True),
+        ("+ConstantScore(f:/etc) ConstantScore(other:foo) +ConstantScore(g:/)", True),
+        ("+ConstantScore(g:/) ConstantScore(other:foo) +ConstantScore(f:/etc)", True),
+        ("+ConstantScore(a:/tmp) ConstantScore(o:x) +ConstantScore(b:/) +e:1", True),
+        ("+ConstantScore(a:/x) ConstantScore(b:y/) +c:1", True),  # a regex closes no outer (
+        ("+e:1 +(+c:d +f:/a b/)", False),  # a regex can end at its group's )
+        ("+f:a/b c +g:d/", True),  # only a / after a colon opens one
     ],
 )
 def test_the_level_rule(reading, fires):
