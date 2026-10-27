@@ -17,6 +17,7 @@ from opensearchpy.exceptions import (
     RequestError,
 )
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
+from sift_common import close_tool_arguments
 from sift_common.audit import AuditWriter
 
 from opensearch_mcp.client import get_client
@@ -1449,7 +1450,7 @@ def idx_search(
 
     Results are compact by default -- bloat fields excluded, long values
     truncated to 500 chars. Use compact=False for full documents, or
-    idx_get_event(id, index) to fetch individual full documents.
+    idx_get_event(event_id, index) to fetch individual full documents.
 
     IMPORTANT: OpenSearch tokenizes on dots/hyphens. For filename searches,
     include the extension: 'ServiceUpdater.exe' not 'ServiceUpdater'.
@@ -1547,7 +1548,7 @@ def idx_search(
     if compact:
         resp["note"] = (
             "Results are compact — bloat fields excluded, long values truncated. "
-            "Use idx_get_event(id, index) for full documents."
+            "Use idx_get_event(event_id, index) for full documents."
         )
 
     # Detect when query targets indices with different field naming.
@@ -4605,6 +4606,11 @@ def _case_host_fix_impl(raw: str, new_canonical: str) -> dict:
     if aid:
         resp["audit_id"] = aid
     return resp
+
+
+# Last, after every tool registers: an argument a tool doesn't declare is
+# refused by name instead of silently dropped
+close_tool_arguments(server)
 
 
 def main():

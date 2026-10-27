@@ -60,7 +60,9 @@ def test_a_file_that_isnt_regular_is_an_oserror_and_isnt_read(tmp_path, kind):
 def test_it_requires_a_sift_common_with_file_identity():
     """0.6.4 is the first sift-common with file_identity; an older one would
     fail at import, so it can't be installed under this one."""
+    import re
     from pathlib import Path
 
     pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text()
-    assert '"sift-common>=0.6.4",' in pyproject
+    floor = re.search(r'"sift-common>=([0-9.]+)"', pyproject).group(1)
+    assert tuple(map(int, floor.split("."))) >= (0, 6, 4)
