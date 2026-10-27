@@ -221,6 +221,7 @@ def test_a_partial_search_with_a_failed_check_says_both(run, tool):  # noqa: F81
         ("+f:/x (a b/ +g", False),
         ("+ConstantScore(f:/c x) +g d", True),  # a keyword value starting with /
         ("+ConstantScore(f:/c x) +g:/p q/", False),  # ends at a / before a space, ) or the end
+        ("+ConstantScore(f:/c x) d +g:/p/", True),
     ],
 )
 def test_the_level_rule(reading, fires):
