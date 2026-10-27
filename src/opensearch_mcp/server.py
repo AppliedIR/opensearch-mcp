@@ -758,7 +758,13 @@ def _sort_check(client, index: str, field: str, order: str, windowed: bool):
         return err, "date", "", ts
     lack = [n for n in names if n not in held]
     if windowed and isinstance(ts, tuple):  # the window leaves the untimed indices out
-        lack = [n for n in lack if any(n in ns for ns in ts[0].values())]
+        timed = {n for ns in ts[0].values() for n in ns}
+        if not timed & set(held):
+            note = f"{field} is only in {some(held)}, which the time range leaves out (they have "
+            note += "no @timestamp): results are in no order. Search those indices without "
+            note += f"time_from/time_to to sort by {field}."
+            return "", next(iter(types)), note, ts
+        lack = [n for n in lack if n in timed]
     note = f"{field} is in {len(held)} of the {len(names)} searched indices; documents from "
     note += f"{some(lack)}, if any match, come after the sorted ones, in no order"
     return "", next(iter(types)), note if lack else "", ts

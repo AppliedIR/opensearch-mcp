@@ -90,13 +90,6 @@ def test_a_bad_order_word_is_refused(client, word):
     assert _holder_reads(client) == []
 
 
-def test_a_second_sort_after_the_order_is_refused(client):
-    """Split at the last ':' (R13), the field is 'Created0x10:asc,EntryNumber':
-    rule 2 refuses it."""
-    r = srv.idx_search(query="*", index=MFT, sort="Created0x10:asc,EntryNumber:desc")
-    assert _refused(client, r) == ONE_FIELD
-
-
 @pytest.mark.parametrize("word, sent", [("ASC", "asc"), ("Asc", "asc"), ("DESC", "desc")])
 def test_the_order_word_is_matched_in_any_case_and_sent_lowercase(client, word, sent):
     srv.idx_search(query="*", index=MFT, sort=f"Created0x10:{word}")
@@ -114,6 +107,14 @@ def test_no_order_word_is_desc(client):
 @pytest.mark.parametrize("sort", ["a,b:asc", "*:asc", "Created*:asc", "File Name:asc", ":asc", ""])
 def test_not_one_field_is_refused(client, sort):
     assert _refused(client, srv.idx_search(query="*", index=MFT, sort=sort)) == ONE_FIELD
+    assert _holder_reads(client) == []
+
+
+def test_a_second_sort_after_the_order_is_refused(client):
+    """R17: split at the last ':' (R13), the field is 'Created0x10:asc,EntryNumber':
+    rule 2 refuses it, with no search and no read."""
+    r = srv.idx_search(query="*", index=MFT, sort="Created0x10:asc,EntryNumber:desc")
+    assert _refused(client, r) == ONE_FIELD
     assert _holder_reads(client) == []
 
 
@@ -364,9 +365,24 @@ def test_a_window_leaves_the_untimed_indices_out_of_the_note(client):
 
 def test_no_note_when_the_window_leaves_out_every_index_lacking_it(client):
     _mapped(client, {LNK: {"TargetModified": "date"}})
-    r = srv.idx_search(query="*", index=f"{MFT},{LNK}", sort="Created0x10:asc", time_to="2025")
+    r = srv.idx_search(query="*", index=f"{EVTX},{LNK}", sort="winlog.channel:asc", time_to="2025")
     assert "sort_note" not in r
-    assert _sort(client) == [{"Created0x10": {"order": "asc", "unmapped_type": "date"}}]
+    assert _sort(client) == [{"winlog.channel": {"order": "asc", "unmapped_type": "keyword"}}]
+
+
+@pytest.mark.parametrize("more", [0, 6])
+def test_a_window_that_leaves_out_every_holder_says_so(client, more):
+    """R16: Created0x10 is only in untimed mft indices, which the range leaves out;
+    the names take rule 8's form."""
+    extra = {f"{C}-mft-{i}": {"Created0x10": "date"} for i in range(1, more + 1)}
+    _mapped(client, extra)
+    r = srv.idx_search(query="*", sort="Created0x10:asc", time_from="2024-01-01T00:00:00Z")
+    names = f"{MFT}, " + ", ".join(sorted(extra)[:4]) + ", and 2 more" if more else MFT
+    assert r["total"] == 1 and r["sort_note"] == (
+        f"Created0x10 is only in {names}, which the time range leaves out (they have no "
+        "@timestamp): results are in no order. Search those indices without time_from/time_to "
+        "to sort by Created0x10."
+    )
 
 
 def test_a_text_only_parent_is_not_named(client):
