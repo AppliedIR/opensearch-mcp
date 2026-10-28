@@ -1486,46 +1486,53 @@ def _ingest_params(result: dict) -> dict:
     return out
 
 
-_NOT_RECORDED = "not recorded: no active case, or the audit write failed"
-
-
 def _logged_query(resp: dict, queried: str = "", **entry) -> dict:
     """Write a query's audit entry, and save its response, as returned to the
     AI, beside it: `extractions/<audit id>/response.json`, its SHA-256 on the
     entry, so a quote of the response can be checked against what the AI was
     given. A query naming another case (`queried`, the tool's case_id) says
     which case it read. Returns the response with its audit id; without an
-    entry, the response saying it wasn't recorded, and nothing saved."""
+    entry, the response saying why, and nothing saved."""
+    import contextlib
     import hashlib
 
-    audit_dir = audit._get_audit_dir()
-    aid = audit._next_audit_id(audit_dir)
+    from sift_common.audit import AuditOutcome, is_case, mkdir_in_case
+
+    # One case per call, taken as it starts: the id is minted for it, and the
+    # response and the entry go to it only while it is still a case
+    res = audit.resolve()
+    aid = audit._next_audit_id()
     out = {**resp, "audit_id": aid}
     saved = None
-    if audit_dir is not None:
-        folder = Path(audit_dir).parent / "extractions" / aid
+    # Beside VHIR_AUDIT_DIR (not a case: made as needed), or in the case
+    root = Path(res.audit_dir).parent if res.audit_dir else Path(res.path)
+    if res.audit_dir or (res.outcome == "case" and is_case(root)):
         try:
-            folder.mkdir(parents=True, exist_ok=False)
+            if res.audit_dir:
+                folder = root / "extractions" / aid
+                folder.mkdir(parents=True)
+            else:
+                folder = mkdir_in_case(root, "extractions", aid)
             data = json.dumps(out, ensure_ascii=False, default=str).encode("utf-8")
             (folder / "response.json").write_bytes(data)
             saved = {"path": str(folder / "response.json"),
                      "sha256": hashlib.sha256(data).hexdigest()}  # fmt: skip
         except OSError as e:
             logger.warning("query response not saved: %s", e)
-    # The entry goes where its id was minted and its response saved: the case
-    # resolved once, as the call started, whatever is active by now
-    writer = audit
-    if audit_dir is not None:
-        writer = AuditWriter(mcp_name=audit.mcp_name, audit_dir=str(audit_dir))
-        entry.setdefault("case_id", Path(audit_dir).parent.name)  # that case's, too
-        if queried and queried != Path(audit_dir).parent.name:
+            if res.audit_dir or is_case(root):  # not a case moved away
+                why = f"its response was not saved ({e})"
+                return AuditOutcome("write_failed", detail=why).note(dict(resp))
+        entry.setdefault("case_id", root.name)  # that case's, too
+        if queried and queried != root.name:
             entry["params"] = {**(entry.get("params") or {}), "queried_case": queried}
-    logged = writer.log(audit_id=aid, extra={"response": saved} if saved else None, **entry)
-    if logged is None:
+    extra = {"response": saved} if saved else None
+    outcome = audit.record(audit_id=aid, extra=extra, case_dir=res, **entry)
+    if outcome.audit_id is None:
         if saved:  # an entry that wasn't written leaves no file of its own
             Path(saved["path"]).unlink(missing_ok=True)
-            Path(saved["path"]).parent.rmdir()
-        return {**resp, "audit": _NOT_RECORDED}
+            with contextlib.suppress(OSError):  # gone with its case
+                Path(saved["path"]).parent.rmdir()
+        return outcome.note(dict(resp))
     return out
 
 

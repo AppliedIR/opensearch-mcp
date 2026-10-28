@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from _mapping_shapes import serve
+from sift_common.audit import AuditOutcome
 
 import opensearch_mcp.server as srv
 
@@ -42,7 +43,9 @@ def os_(monkeypatch):
     logged = []
     monkeypatch.setattr(srv, "_get_os", lambda: c)
     monkeypatch.setattr(srv, "_get_active_case", lambda: None)
-    monkeypatch.setattr(srv.audit, "log", lambda **kw: (logged.append(kw), "aid-9")[1])
+    monkeypatch.setattr(
+        srv.audit, "record", lambda **kw: logged.append(kw) or AuditOutcome(audit_id="aid-9")
+    )
     monkeypatch.setattr(srv, "_add_field_hint", lambda *a, **k: None)
     monkeypatch.setattr(srv, "_annotate_hosts", lambda *a, **k: None)
     return c, logged
@@ -247,14 +250,23 @@ def test_a_query_s_entry_stays_in_the_case_its_id_was_minted_for(os_, tmp_path, 
     a, b = tmp_path / "case-a", tmp_path / "case-b"
     for d in (a, b):
         (d / "audit").mkdir(parents=True)
+        (d / "CASE.yaml").write_text(f"case_id: {d.name}\n")
     home = tmp_path / "home"
     (home / ".vhir").mkdir(parents=True)
-    (home / ".vhir" / "active_case").write_text(str(b))  # b is active by the time it logs
+    pointer = home / ".vhir" / "active_case"
+    pointer.write_text(str(a))
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("VHIR_ACTIVE_CASE", raising=False)
+    for var in ("VHIR_ACTIVE_CASE", "VHIR_CASE_DIR", "VHIR_AUDIT_DIR"):
+        monkeypatch.delenv(var, raising=False)
     writer = AuditWriter("opensearch-mcp")
-    dirs = iter([a / "audit", b / "audit", b / "audit"])  # switched after the first
-    monkeypatch.setattr(writer, "_get_audit_dir", lambda *x, **k: next(dirs))
+    real = writer.resolve
+
+    def then_switch(*x, **k):  # b is active by the time it logs
+        got = real(*x, **k)
+        pointer.write_text(str(b))
+        return got
+
+    monkeypatch.setattr(writer, "resolve", then_switch)
     monkeypatch.setattr(srv, "audit", writer)
     monkeypatch.setattr(srv, "_resolve_index", lambda *a, **k: (INDEX, None))
     c.get.return_value = _hit(1, "x-001")

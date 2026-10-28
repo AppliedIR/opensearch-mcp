@@ -5,6 +5,7 @@ with no ingest id. Values are synthetic."""
 from __future__ import annotations
 
 import pytest
+from sift_common.audit import AuditOutcome
 from test_host_keys_cluster import cases, client, write  # noqa: F401
 
 from opensearch_mcp import server as srv
@@ -25,7 +26,7 @@ def test_each_summary_tool_logs_the_ingests_it_counted(client, cases, monkeypatc
     client.index(index=f"case-{c12}-evtx-0", id="5", body=dict(doc), refresh=True)
     monkeypatch.setattr(srv, "_get_active_case", lambda: case.name)
     logged = []
-    monkeypatch.setattr(srv.audit, "log", lambda **kw: logged.append(kw))
+    monkeypatch.setattr(srv.audit, "record", lambda **kw: logged.append(kw) or AuditOutcome())
     assert srv.idx_count(query="*")["count"] == 6
     assert srv.idx_aggregate(field="event.code")["total_docs"] == 6
     assert srv.idx_timeline(interval="1d")["total_docs"] == 6

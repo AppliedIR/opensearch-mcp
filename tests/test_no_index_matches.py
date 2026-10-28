@@ -11,6 +11,7 @@ import uuid
 
 import _scratch_templates
 import pytest
+from sift_common.audit import AuditOutcome
 
 from opensearch_mcp import server as srv
 
@@ -59,6 +60,7 @@ def tools(scratch, monkeypatch):
         return f"aid-{len(AUDITED)}"
 
     monkeypatch.setattr(srv.audit, "log", log)
+    monkeypatch.setattr(srv.audit, "record", lambda **kw: AuditOutcome(audit_id=log(**kw)))
     return tag
 
 

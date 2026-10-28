@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sift_common.audit import AuditOutcome
 
 import opensearch_mcp.server as srv
 from opensearch_mcp.server import idx_list_detections
@@ -308,19 +309,23 @@ class TestDetectionsResponseSchema:
 class TestDetectionsAudit:
     def test_audit_id_in_response(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()
-        with patch.object(srv.audit, "log", return_value="audit-789") as log:
+        with patch.object(
+            srv.audit, "record", return_value=AuditOutcome(audit_id="audit-789")
+        ) as log:
             resp = idx_list_detections()
         assert resp["audit_id"] == log.call_args.kwargs["audit_id"]  # the entry written
 
     def test_no_audit_id_when_none(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()
-        with patch.object(srv.audit, "log", return_value=None):
+        with patch.object(srv.audit, "record", return_value=AuditOutcome("write_failed")):
             resp = idx_list_detections()
         assert "audit_id" not in resp
 
     def test_audit_params_recorded(self, mock_client):
         mock_client.transport.perform_request.return_value = _empty_response()
-        with patch.object(srv.audit, "log", return_value="a1") as mock_log:
+        with patch.object(
+            srv.audit, "record", return_value=AuditOutcome(audit_id="a1")
+        ) as mock_log:
             idx_list_detections(severity="critical", limit=10, offset=20)
         call_kwargs = mock_log.call_args[1]
         assert call_kwargs["tool"] == "idx_list_detections"
@@ -333,7 +338,9 @@ class TestDetectionsAudit:
             "total_findings": 3,
             "findings": [_make_finding(), _make_finding(id="f2"), _make_finding(id="f3")],
         }
-        with patch.object(srv.audit, "log", return_value="a1") as mock_log:
+        with patch.object(
+            srv.audit, "record", return_value=AuditOutcome(audit_id="a1")
+        ) as mock_log:
             idx_list_detections()
         assert mock_log.call_args[1]["result_summary"] == "3 findings"
 
@@ -441,7 +448,11 @@ class TestDetectionsToolRegistration:
 class TestDetectionsRecordWhatTheyMatched:
     def _logged(self, mock_client):
         logged = []
-        with patch.object(srv.audit, "log", side_effect=lambda **kw: logged.append(kw) or "a1"):
+        with patch.object(
+            srv.audit,
+            "record",
+            side_effect=lambda **kw: logged.append(kw) or AuditOutcome(audit_id="a1"),
+        ):
             resp = idx_list_detections()
         return resp, logged
 
