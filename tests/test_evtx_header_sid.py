@@ -395,10 +395,12 @@ def test_a_refused_put_is_in_the_runs_result_and_its_audit_entry(tmp_path, monke
     assert [s for t, s in entries if t == "ingest_evtx"] == [f"500 indexed, 0 skipped; {note}"]
 
 
-def _two_files(tmp_path, monkeypatch, first_fails):
-    """Two files of one host into one index: file 0's records go in without
-    the SID (it isn't mapped), and it then fails if `first_fails`; file 1's
-    find the field mapped. Returns the two files' ingest_evtx summaries."""
+def _two_files(tmp_path, monkeypatch, fails=None, cut_fails=False):
+    """Two files of one host into one index: the first file parsed has its
+    records go in without the SID (it isn't mapped), the second finds the field
+    mapped. File `fails` fails after its flush; with `cut_fails`, file 0 fails
+    in its truncation check, before its parse. Returns the files'
+    ingest_evtx summaries."""
     monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
     monkeypatch.setattr(wc, "_SID_KEYWORD", set())
     monkeypatch.setattr(wc, "SID_DROPS", [])
@@ -410,18 +412,26 @@ def _two_files(tmp_path, monkeypatch, first_fails):
     host.evtx_dir = evtx
     index = "case-c1-evtx-0"
     kinds = iter([None, "keyword"])
+    files = iter(range(2))
     client = MagicMock()
     client.count.side_effect = Exception("no index")
 
     def parse_and_index(**kw):
-        kind = next(kinds)
+        n, kind = next(files), next(kinds)
         mapping = {FIELD: {"mapping": {"identifier": {"type": kind}}}} if kind else {}
         client.indices.get_field_mapping.return_value = {index: {"mappings": mapping}}
         action = {"_index": index, "_source": {FIELD: SID}}
         dropped = wc._sid_unmapped(client, [action], "case-", [True], wc.current().unit)
-        if kind is None and first_fails:
+        if n == fails:
             raise OSError("the file broke after its first flush")
         return (500, 0, 0) if dropped else (7, 0, 0)
+
+    cuts = iter(range(2))
+
+    def evtx_truncation(path):
+        if next(cuts) == 0 and cut_fails:
+            raise OSError("the truncation check failed")
+        return []
 
     entries = []
     monkeypatch.setattr(ops, "later", lambda audit, aid, tool, summary, *a, **k: entries.append(
@@ -432,6 +442,7 @@ def _two_files(tmp_path, monkeypatch, first_fails):
         patch("opensearch_mcp.write_context.index_name", return_value=index),
         patch("opensearch_mcp.mappings.evtx_limit_note", return_value=""),
         patch("opensearch_mcp.ingest.parse_and_index", side_effect=parse_and_index),
+        patch("opensearch_mcp.ingest.evtx_truncation", side_effect=evtx_truncation),
         patch("opensearch_mcp.ingest.sha256_file", return_value="h"),
     ):
         ingest(hosts=[host], client=client, audit=audit, case_id="c1",
@@ -444,7 +455,7 @@ def test_a_file_that_fails_after_a_dropping_flush_names_the_drop_in_its_audit(
     tmp_path, monkeypatch
 ):
     note = _note("case-c1-evtx-0", "it isn't mapped")
-    assert _two_files(tmp_path, monkeypatch, first_fails=True) == [
+    assert _two_files(tmp_path, monkeypatch, fails=0) == [
         f"FAILED: the file broke after its first flush; {note}",
         "7 indexed, 0 skipped",
     ]
@@ -452,9 +463,29 @@ def test_a_file_that_fails_after_a_dropping_flush_names_the_drop_in_its_audit(
 
 def test_a_files_audit_names_only_the_drops_of_that_file(tmp_path, monkeypatch):
     note = _note("case-c1-evtx-0", "it isn't mapped")
-    assert _two_files(tmp_path, monkeypatch, first_fails=False) == [
+    assert _two_files(tmp_path, monkeypatch) == [
         f"500 indexed, 0 skipped; {note}",
         "7 indexed, 0 skipped",
+    ]
+
+
+def test_a_file_that_fails_after_an_earlier_files_drop_names_no_drop_in_its_audit(
+    tmp_path, monkeypatch
+):
+    note = _note("case-c1-evtx-0", "it isn't mapped")
+    assert _two_files(tmp_path, monkeypatch, fails=1) == [
+        f"500 indexed, 0 skipped; {note}",
+        "FAILED: the file broke after its first flush",
+    ]
+
+
+def test_a_file_that_fails_before_its_parse_is_audited_and_the_next_file_runs(
+    tmp_path, monkeypatch
+):
+    note = _note("case-c1-evtx-0", "it isn't mapped")
+    assert _two_files(tmp_path, monkeypatch, cut_fails=True) == [
+        "FAILED: the truncation check failed",
+        f"500 indexed, 0 skipped; {note}",
     ]
 
 
