@@ -206,10 +206,11 @@ DEPTH = srv._MAX_NESTING
 def tool(search, monkeypatch):
     c = srv._get_os()
 
-    def run(source):
+    def run(source, compact=True):
         hit = {"_id": "d1", "_index": INDEX, "_source": source}
         c.search.return_value = {"hits": {"total": {"value": 1}, "hits": [hit]}}
-        out = asyncio.run(srv.server.call_tool("idx_search", {"query": "*", "index": INDEX}))
+        args = {"query": "*", "index": INDEX, "compact": compact}
+        out = asyncio.run(srv.server.call_tool("idx_search", args))
         content = out[0] if isinstance(out, tuple) else out
         return json.loads(content[0].text)
 
@@ -228,6 +229,29 @@ def _dicts(n):
     for _ in range(n):
         v = {"a": v}
     return v
+
+
+def _mixed(n):
+    v = "x"
+    for i in range(n):
+        v = [v] if i % 2 else {"a": v}
+    return v
+
+
+def _down(v, n, path):
+    for _ in range(n):
+        v, path = (v[0], path + "[0]") if isinstance(v, list) else (v["a"], path + ".a")
+    return v, path
+
+
+def _head(v):
+    """The first CAP characters of the JSON text of a list or object nested
+    more than CAP deep: its opening brackets and keys."""
+    text = ""
+    while len(text) < CAP:
+        text += "[" if isinstance(v, list) else '{"a": '
+        v, _ = _down(v, 1, "")
+    return text[:CAP]
 
 
 def _at(v, n, key):
@@ -280,3 +304,69 @@ def test_the_compact_hints_name_idx_get_events_event_id_parameter(tool):
     assert hint in tool({"a": 1})["note"]
     (info,) = [t for t in asyncio.run(srv.server.list_tools()) if t.name == "idx_search"]
     assert hint in info.description
+
+
+# Past the bound the JSON text is built without recursion, so a value nested
+# deeper than Python's stack (near 1000 frames on 3.10) still comes back as text.
+
+
+@pytest.mark.parametrize("n", [925, 975, 999, 1000, 3000])
+@pytest.mark.parametrize("make", [_lists, _dicts, _mixed], ids=["lists", "objects", "mixed"])
+def test_a_value_nested_past_the_stack_limit_comes_back_as_listed_text(tool, make, n):
+    src = make(n)
+    (doc,) = tool({"deep": src})["results"]
+    kept, path = _down(doc["deep"], DEPTH, "deep")
+    rest, _ = _down(src, DEPTH, "deep")
+    assert kept == _head(rest) + "..."
+    assert doc["_truncated"] == [_why(path, True)]
+
+
+@pytest.mark.parametrize("n", [DEPTH + 1, 100])
+@pytest.mark.parametrize("make", [_lists, _dicts], ids=["lists", "objects"])
+def test_twin_the_full_view_keeps_nesting_past_the_bound_in_its_shape(tool, make, n):
+    (doc,) = tool({"deep": make(n)}, compact=False)["results"]
+    assert doc["deep"] == make(n)
+    assert "_truncated" not in doc
+
+
+ZOO = {
+    "s": 'a "quoted" \\ line\n',
+    "n": -3,
+    "f": 1.5,
+    "big": 10**30,
+    "inf": float("inf"),
+    "t": True,
+    "no": False,
+    "z": None,
+    "e": [],
+    "o": {},
+    "l": [1, [2, {"k": "v"}], "x"],
+}
+
+
+@pytest.mark.parametrize("member", [ZOO, list(range(300))], ids=["every-type", "wide"])
+def test_twin_text_past_the_bound_is_the_values_json_text(tool, member):
+    deep = ["x", member]
+    for _ in range(DEPTH):
+        deep = [deep]
+    (doc,) = tool({"deep": deep})["results"]
+    text = json.dumps(["x", member], ensure_ascii=False)
+    long = len(text) > CAP
+    assert _at(doc["deep"], DEPTH, 0) == (_cut(text) if long else text)
+    assert doc["_truncated"] == [_why("deep" + "[0]" * DEPTH, long)]
+
+
+def test_non_ascii_text_past_the_bound_stays_as_written(tool):
+    cafe = "café"
+    for _ in range(DEPTH + 2):
+        cafe = [cafe]
+    name = {"名前": "Привет"}
+    for _ in range(DEPTH):
+        name = {"a": name}
+    (doc,) = tool({"cafe": cafe, "name": name})["results"]
+    assert _at(doc["cafe"], DEPTH, 0) == '[["café"]]'
+    assert _at(doc["name"], DEPTH, "a") == '{"名前": "Привет"}'
+    assert doc["_truncated"] == [
+        _why("cafe" + "[0]" * DEPTH, False),
+        _why("name" + ".a" * DEPTH, False),
+    ]

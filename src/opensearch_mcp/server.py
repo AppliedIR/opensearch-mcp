@@ -529,6 +529,46 @@ def _annotate_hosts(resp: dict, case_id: str, client=None, index="", query_body=
     return resp
 
 
+_JSON_END = object()
+
+
+def _json_members(val):
+    """(text before it, member) for each member of a list or object, then its
+    closing bracket paired with _JSON_END."""
+    if isinstance(val, dict):
+        for i, (k, v) in enumerate(val.items()):
+            # the key as json writes one, or json's TypeError for a key it refuses
+            key = json.dumps({k: 0}, ensure_ascii=False)[1:-4]
+            yield ("{" if i == 0 else ", ") + key + ": ", v
+        yield ("}" if val else "{}"), _JSON_END
+    else:
+        for i, v in enumerate(val):
+            yield ("[" if i == 0 else ", "), v
+        yield ("]" if val else "[]"), _JSON_END
+
+
+def _json_text(val, chars: int) -> str:
+    """`json.dumps(val, ensure_ascii=False, default=str)`, stopped once it is
+    past `chars` characters. Lists and objects are walked from a stack, not by
+    recursion, so no depth of nesting runs out of Python's stack."""
+    out: list[str] = []
+    size = 0
+    todo = [iter([("", val)])]
+    while todo and size <= chars:
+        step = next(todo[-1], None)
+        if step is None:
+            todo.pop()
+            continue
+        text, v = step
+        if isinstance(v, (dict, list, tuple)):
+            todo.append(_json_members(v))
+        elif v is not _JSON_END:
+            text += json.dumps(v, ensure_ascii=False, default=str)
+        out.append(text)
+        size += len(text)
+    return "".join(out)
+
+
 def _cut_leaves(
     val,
     path: str,
@@ -544,7 +584,7 @@ def _cut_leaves(
     nested `depth` deep becomes its JSON text, cut as a string is, and its
     path is added with that reason whatever the text's length."""
     if depth is not None and level >= depth and isinstance(val, (dict, list)):
-        text = json.dumps(val, ensure_ascii=False, default=str)
+        text = _json_text(val, chars)
         why = f"{path} (as JSON text: nested {depth} levels deep"
         if len(text) > chars:
             cut.append(f"{why}; cut at {chars} characters)")
