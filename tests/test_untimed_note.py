@@ -97,11 +97,11 @@ def test_search_window_notes_and_drops_the_extension_hint(client):
                          "time_note have none, so the window left them out.")  # fmt: skip
 
 
-def test_search_without_a_window_reads_no_mapping(client):
+def test_search_without_a_window_reads_only_the_sort_check(client):
     r = srv.idx_search(query="*")
     assert "time_note" not in r and r["hint"].startswith("No results. If searching for filenames")
     reads = [c.kwargs["filter_path"] for c in client.indices.get_mapping.call_args_list]
-    assert "*.mappings.properties.@timestamp" not in reads
+    assert reads.count("*.mappings.properties.@timestamp") == 1  # the sort's check only (W2b)
 
 
 @pytest.mark.parametrize("field, window, why", [

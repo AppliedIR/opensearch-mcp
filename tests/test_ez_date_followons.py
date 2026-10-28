@@ -138,10 +138,11 @@ def test_a_fresh_index_gives_no_such_hint(two_indices, tool):
     assert "made before 0.6.5" not in QUERIES[tool](NEW).get("hint", "")
 
 
-def test_a_query_naming_no_ez_date_never_reads_the_mappings(two_indices):
+def test_a_query_naming_no_ez_date_reads_only_the_sort_check(two_indices):
     srv.idx_count(query="FileName:evil.exe", index="case-*")
     srv.idx_search(query="Created0x10_note:x", index="case-*")  # not the field itself
-    two_indices.indices.get_mapping.assert_not_called()
+    reads = [c.kwargs["filter_path"] for c in two_indices.indices.get_mapping.call_args_list]
+    assert reads == ["*.mappings.properties.@timestamp"]  # the default sort's own check (W2b)
 
 
 # --- every measured EZ date column is typed ------------------------------------
