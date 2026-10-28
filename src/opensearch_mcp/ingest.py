@@ -768,6 +768,7 @@ def _ingest_hosts(
                     params = {"hostname": host.hostname, "index_name": index_name,
                               "run_id": run_id}  # fmt: skip
                     aid = ""
+                    file_since = len(wc.SID_DROPS)
                     try:
                         aid, file_hash = ops.read_step(
                             audit, "ingest_evtx", evtx_file, case_dir=case_dir, params=params
@@ -781,7 +782,6 @@ def _ingest_hosts(
                             truncated.append(f"{evtx_file.name}: {cut}")
                             if evtx_status:
                                 evtx_status["truncated"] = truncated
-                        file_since = len(wc.SID_DROPS)
                         with wc.op(aid):
                             cnt, sk, bf = parse_and_index(
                                 evtx_path=evtx_file,
@@ -838,7 +838,9 @@ def _ingest_hosts(
                         else:
                             ar.error = f"{evtx_file.name}: {e}"
                         if aid:  # one that failed before its step: read_step recorded it
-                            ops.later(audit, aid, "ingest_evtx", f"FAILED: {e}",
+                            file_note = wc.sid_note(index_name, ctx.unit, file_since)
+                            ops.later(audit, aid, "ingest_evtx",
+                                      f"FAILED: {e}" + (f"; {file_note}" if file_note else ""),
                                       {**params, "file": str(evtx_file)})  # fmt: skip
 
                 sid_note = wc.sid_note(index_name, ctx.unit)  # this host's, this run's

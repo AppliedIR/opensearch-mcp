@@ -395,6 +395,69 @@ def test_a_refused_put_is_in_the_runs_result_and_its_audit_entry(tmp_path, monke
     assert [s for t, s in entries if t == "ingest_evtx"] == [f"500 indexed, 0 skipped; {note}"]
 
 
+def _two_files(tmp_path, monkeypatch, first_fails):
+    """Two files of one host into one index: file 0's records go in without
+    the SID (it isn't mapped), and it then fails if `first_fails`; file 1's
+    find the field mapped. Returns the two files' ingest_evtx summaries."""
+    monkeypatch.setattr(ingest_status, "_STATUS_DIR", tmp_path / "status")
+    monkeypatch.setattr(wc, "_SID_KEYWORD", set())
+    monkeypatch.setattr(wc, "SID_DROPS", [])
+    evtx = tmp_path / "evtx"
+    evtx.mkdir()
+    for name in ("Application.evtx", "System.evtx"):
+        (evtx / name).write_bytes(b"\0" * 70000)
+    host = DiscoveredHost(hostname="HOST1", volume_root=tmp_path)
+    host.evtx_dir = evtx
+    index = "case-c1-evtx-0"
+    kinds = iter([None, "keyword"])
+    client = MagicMock()
+    client.count.side_effect = Exception("no index")
+
+    def parse_and_index(**kw):
+        kind = next(kinds)
+        mapping = {FIELD: {"mapping": {"identifier": {"type": kind}}}} if kind else {}
+        client.indices.get_field_mapping.return_value = {index: {"mappings": mapping}}
+        action = {"_index": index, "_source": {FIELD: SID}}
+        dropped = wc._sid_unmapped(client, [action], "case-", [True], wc.current().unit)
+        if kind is None and first_fails:
+            raise OSError("the file broke after its first flush")
+        return (500, 0, 0) if dropped else (7, 0, 0)
+
+    entries = []
+    monkeypatch.setattr(ops, "later", lambda audit, aid, tool, summary, *a, **k: entries.append(
+        (tool, summary)))  # fmt: skip
+    audit = MagicMock()
+    audit._next_audit_id.return_value = "aid-1"
+    with (
+        patch("opensearch_mcp.write_context.index_name", return_value=index),
+        patch("opensearch_mcp.mappings.evtx_limit_note", return_value=""),
+        patch("opensearch_mcp.ingest.parse_and_index", side_effect=parse_and_index),
+        patch("opensearch_mcp.ingest.sha256_file", return_value="h"),
+    ):
+        ingest(hosts=[host], client=client, audit=audit, case_id="c1",
+               reduced_log_names=None, status_pid=os.getpid(),
+               status_run_id="run-evtx")  # fmt: skip
+    return [s for t, s in entries if t == "ingest_evtx"]
+
+
+def test_a_file_that_fails_after_a_dropping_flush_names_the_drop_in_its_audit(
+    tmp_path, monkeypatch
+):
+    note = _note("case-c1-evtx-0", "it isn't mapped")
+    assert _two_files(tmp_path, monkeypatch, first_fails=True) == [
+        f"FAILED: the file broke after its first flush; {note}",
+        "7 indexed, 0 skipped",
+    ]
+
+
+def test_a_files_audit_names_only_the_drops_of_that_file(tmp_path, monkeypatch):
+    note = _note("case-c1-evtx-0", "it isn't mapped")
+    assert _two_files(tmp_path, monkeypatch, first_fails=False) == [
+        f"500 indexed, 0 skipped; {note}",
+        "7 indexed, 0 skipped",
+    ]
+
+
 # --- per process: the drop record and the install's account are a run's own -----
 
 UUID = "0123456789abcdef0123456789abcdef"
