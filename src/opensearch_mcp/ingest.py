@@ -241,6 +241,7 @@ def ingest(
     from opensearch_mcp.bulk import get_already_present
 
     present_before = get_already_present()
+    wc.SID_DROPS.clear()  # the drop record is this run's own
 
     def _totals() -> dict:
         totals = _compute_totals(status_hosts)
@@ -767,6 +768,7 @@ def _ingest_hosts(
                     params = {"hostname": host.hostname, "index_name": index_name,
                               "run_id": run_id}  # fmt: skip
                     aid = ""
+                    file_since = len(wc.SID_DROPS)
                     try:
                         aid, file_hash = ops.read_step(
                             audit, "ingest_evtx", evtx_file, case_dir=case_dir, params=params
@@ -804,13 +806,15 @@ def _ingest_hosts(
                             sha256=file_hash,
                             doc_count=cnt,
                         )
+                        file_note = wc.sid_note(index_name, ctx.unit, file_since)
                         ops.later(
                             audit,
                             aid,
                             "ingest_evtx",
                             f"{cnt} indexed, {sk} skipped"
                             + (f", truncated: {cut}" if cut else "")
-                            + (f", {bf} bulk failed" if bf else ""),
+                            + (f", {bf} bulk failed" if bf else "")
+                            + (f"; {file_note}" if file_note else ""),
                             {**params, "file": str(evtx_file), "bulk_failed": bf},
                         )
                         # Per-file status update
@@ -834,9 +838,22 @@ def _ingest_hosts(
                         else:
                             ar.error = f"{evtx_file.name}: {e}"
                         if aid:  # one that failed before its step: read_step recorded it
-                            ops.later(audit, aid, "ingest_evtx", f"FAILED: {e}",
+                            file_note = wc.sid_note(index_name, ctx.unit, file_since)
+                            ops.later(audit, aid, "ingest_evtx",
+                                      f"FAILED: {e}" + (f"; {file_note}" if file_note else ""),
                                       {**params, "file": str(evtx_file)})  # fmt: skip
 
+                sid_note = wc.sid_note(index_name, ctx.unit)  # this host's, this run's
+                if sid_note:
+                    import sys
+
+                    print(f"NOTE: {sid_note}", file=sys.stderr)
+                    # The result keeps it too: the status after hayabusa is rebuilt from it
+                    ar.note = "; ".join(filter(None, [ar.note, sid_note]))
+                    if evtx_status:
+                        evtx_status["note"] = "; ".join(
+                            filter(None, [evtx_status.get("note"), sid_note])
+                        )
                 if evtx_status:
                     evtx_status["status"] = "failed" if ar.error else "complete"
                     evtx_status["indexed"] = ar.indexed

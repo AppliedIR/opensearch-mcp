@@ -13,6 +13,7 @@ from opensearchpy import OpenSearch
 from opensearch_mcp import __version__
 from opensearch_mcp.bulk import flush_bulk
 from opensearch_mcp.normalize import normalize_event
+from opensearch_mcp.write_context import HEADER_SID_KEY
 
 _PIPELINE_VERSION = f"opensearch-mcp-{__version__}"
 _FILE_HEADER = 4096  # the evtx file header block
@@ -170,7 +171,10 @@ def parse_and_index(
             doc["vhir.vss_id"] = vss_id
         doc["vhir.parse_method"] = "pyevtx-rs"
 
-        actions.append({"_index": index_name, "_id": doc_hash, "_source": doc})
+        # its winlog.user.identifier is the record header's SID (never sent)
+        actions.append(
+            {"_index": index_name, "_id": doc_hash, "_source": doc, HEADER_SID_KEY: True}
+        )
 
         if len(actions) >= 1000:
             flushed, failed = flush_bulk(client, actions)

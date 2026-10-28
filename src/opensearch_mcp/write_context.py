@@ -358,6 +358,80 @@ SECOND_COPY: dict[tuple[str, str, str], str] = {}
 # Machine fields the evidence carried and the stamp removed, per (case, unit name, type)
 REMOVED: dict[tuple[str, str, str], int] = {}
 
+# The header SID goes only into an index that maps it `keyword` (the template's,
+# or one the install's forward map patched); elsewhere the record goes without it.
+# Only the native evtx parser's records carry it from the header: they are
+# marked (HEADER_SID_KEY), and another writer's field is its own, kept as sent.
+SID_FIELD = "winlog.user.identifier"
+HEADER_SID_KEY = "_vhir_header_sid"  # never sent
+_SID_KEYWORD: set[str] = set()  # indices read as mapping it keyword
+# (unit, index, why) for each batch that went without it, this run's (the
+# ingest clears it at its start): never cleared within a run, so a later
+# keyword read hides no earlier drop
+SID_DROPS: list[tuple[str, str, str]] = []
+
+
+def sid_note(index: str, unit: str, since: int = 0) -> str:
+    """The drops of `unit`'s records into `index` recorded from `since` on,
+    every distinct cause in the order they happened ("" for none)."""
+    causes = list(dict.fromkeys(why for u, i, why in SID_DROPS[since:] if (u, i) == (unit, index)))
+    if not causes:
+        return ""
+    return f"{index}: records went in without {SID_FIELD} (the record header's SID): " + (
+        "; then ".join(causes)
+    )
+
+
+def _install_why(installed: dict, index: str) -> str:
+    """Why the install didn't map the field on `index`, if it says ("" if not)."""
+    failed = installed.get("evtx_failed") or []
+    refused = next((f.get("error") for f in failed
+                    if f.get("index") == index and f.get("field") == SID_FIELD), None)  # fmt: skip
+    if refused:
+        return f"the mapping update was refused ({str(refused)[:200]})"
+    unread = next((f.get("error") for f in failed if f.get("index") == "case-*-evtx-*"), None)
+    if unread:
+        return f"the install couldn't read the evtx mappings to add it ({str(unread)[:200]})"
+    if installed and installed.get("status") not in ("ok", "partial"):
+        return f"the install's forward map didn't run ({str(installed.get('error'))[:200]})"
+    return ""
+
+
+def _sid_unmapped(client, actions: list[dict], prefix: str, header=None, unit="") -> set[str]:
+    """The case indices among `actions` whose records carry the header SID
+    (`header[n]`: the native parser's) but whose mapping doesn't map it
+    `keyword`: their records (`unit`'s) go without it, and why is added to
+    SID_DROPS."""
+    from opensearch_mcp import mappings
+
+    wanted = {
+        str(a.get("_index", ""))
+        for n, a in enumerate(actions)
+        if header and n < len(header) and header[n]
+        and SID_FIELD in (a.get("_source") or {}) and str(a.get("_index", "")).startswith(prefix)
+    }  # fmt: skip
+    drop = set()
+    for index in sorted(wanted - _SID_KEYWORD):
+        try:
+            got = client.indices.get_field_mapping(index=index, fields=SID_FIELD)
+        except Exception as e:
+            got, why = {}, f"its mapping couldn't be read ({str(e)[:200]})"
+        else:
+            why = "it isn't mapped"
+        try:
+            kind = got[index]["mappings"][SID_FIELD]["mapping"]["identifier"]["type"]
+            why = f"it is mapped {kind}"
+        except (KeyError, TypeError):
+            kind = None
+        if kind == "keyword":
+            _SID_KEYWORD.add(index)
+            continue
+        drop.add(index)
+        if why == "it isn't mapped":  # the install's own account, when it gives one
+            why = _install_why(mappings._INSTALLED or {}, index) or why
+        SID_DROPS.append((unit, index, why))
+    return drop
+
 
 def _v1_names(ctx: WriteContext) -> tuple[str, list[str]]:
     """(the case id pre-0.6.4 names were built from, the unit's names as a
@@ -625,6 +699,7 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
     # a parser that batches several files' records names each record's step;
     # the marker is never sent
     steps = [str(a.pop(STEP_KEY, "") or "") for a in actions]
+    header = [bool(a.pop(HEADER_SID_KEY, False)) for a in actions]
     ctx = current()
     if ctx is not None:
         open_step = current_op()
@@ -639,12 +714,18 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
 
             ensure_v1_imported(client, ctx.case_dir)  # before any name binds
             _imported.add(ctx.case_dir)
-        stamp(ctx, actions, steps)
+        indices = {str(a.get("_index", "")) for a in actions}
+        indices = {i for i in indices if i.startswith(prefix)}
+        drop: set[int] = set()
         if client is not None:
-            for index in {str(a.get("_index", "")) for a in actions}:
-                if index.startswith(f"case-{ctx.c12}-"):
-                    prepare_index(client, index)
-                    note_second_copy(client, ctx, index)
+            for index in indices:  # before the stamp: the hash covers what is stored
+                prepare_index(client, index)
+            unmapped = _sid_unmapped(client, actions, prefix, header, ctx.unit)
+            drop = {n for n, a in enumerate(actions) if header[n] and a.get("_index") in unmapped}
+        stamp(ctx, actions, steps, drop)
+        if client is not None:
+            for index in indices:
+                note_second_copy(client, ctx, index)
         return
     for action in actions:
         if _V2_INDEX.match(str(action.get("_index", ""))):
@@ -655,11 +736,14 @@ def stamp_or_refuse(actions: list[dict], client=None) -> None:
 STEP_KEY = "_vhir_op"
 
 
-def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None) -> None:
+def stamp(
+    ctx: WriteContext, actions: list[dict], steps: list[str] | None = None, drop=frozenset()
+) -> None:
     """Set the machine, unit and id fields of every action into ``ctx``'s case,
     and the step each record was written under: its own when its parser
     batches several files (``steps``), else the step open on this thread,
-    whatever id the parser gave it."""
+    whatever id the parser gave it. The records at the positions in ``drop``
+    go without the header SID."""
     from opensearch_mcp.ops import run_roots
 
     prefix = f"case-{ctx.c12}-"
@@ -700,6 +784,8 @@ def stamp(ctx: WriteContext, actions: list[dict], steps: list[str] | None = None
             action["_id"] = doc_id(key, str(rid))
             if action.get(OLD_RID_KEY):  # the id 0.6.4 stored it under
                 action[OLD_ID_KEY] = doc_id(key, str(action[OLD_RID_KEY]))
+        if n in drop:
+            src.pop(SID_FIELD, None)
         # last, over the record as it is sent: its stored _source hashes alike
         src["vhir.content_hash"] = content_hash(src)
         if action.get("_op_type", "index") == "index":

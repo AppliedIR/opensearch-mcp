@@ -97,9 +97,10 @@ def test_the_other_limits_are_unchanged():
     assert p["process.command_line"]["fields"]["keyword"] == kw(2048)
 
 
-def test_only_the_two_event_data_limits_and_the_unfielded_set_changed():
+def test_only_the_two_event_data_limits_the_unfielded_set_and_the_header_sid_changed():
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
+    assert m["properties"].pop("winlog.user.identifier") == {"type": "keyword"}
     # the unfielded set (W3): the dates rule, copy_to, both catch-alls, lenient
     del m["dynamic_templates"][0], m["dynamic_templates"][0][RULE]["mapping"]["copy_to"]
     del m["properties"][ALL], t["template"]["settings"]["index.query_string.lenient"]
@@ -229,6 +230,9 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
         "properties": {"winlog": {"properties": {"event_data": {"properties": {
             "ContextInfo": kw(8191), "Details": kw(8191), "Payload": kw(8191),
             "Data": {"properties": {"#text": kw(8191)}}}}}}},
+    }, {  # the header SID's own put, after the raise
+        "properties": {"winlog": {"properties": {
+            "user": {"properties": {"identifier": {"type": "keyword"}}}}}},
     }]  # fmt: skip
     assert cluster.limits(IDX) == {
         "Payload": 8191, "Details": 8191, "ContextInfo": 8191, "ScriptBlockText": 32766,
@@ -237,7 +241,8 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     assert result["status"] == "ok" and result["evtx_failed"] == []
     assert result["evtx_patched"] == {IDX: [
         "winlog.event_data.ContextInfo", "winlog.event_data.Data.#text",
-        "winlog.event_data.Details", "winlog.event_data.Payload", RULE]}  # fmt: skip
+        "winlog.event_data.Details", "winlog.event_data.Payload", RULE,
+        "winlog.user.identifier"]}  # fmt: skip
 
 
 def test_a_second_install_sends_the_patched_index_nothing():
@@ -271,12 +276,16 @@ def test_a_rule_already_above_the_templates_is_kept():
 
 
 def test_a_refused_patch_is_reported_and_the_other_indices_are_patched():
+    """The refused raise costs neither the other index's raise nor the
+    refusing index's own SID put."""
     other = "case-9203c4a7e4d8-evtx-host2"
     cluster = _Cluster({IDX: _index_064(), other: _index_064()}, refuse={IDX})
     result = mappings.ensure_winlog_pipeline(cluster.client())
     assert result["status"] == "partial"
     assert [f["index"] for f in result["evtx_failed"]] == [IDX]
-    assert list(result["evtx_patched"]) == [other] and cluster.limits(other)["rule"] == 8191
+    assert sorted(result["evtx_patched"]) == [IDX, other] and cluster.limits(other)["rule"] == 8191
+    assert result["evtx_patched"][IDX] == ["winlog.user.identifier"]
+    assert cluster.limits(IDX)["rule"] == 1024
 
 
 def test_a_closed_index_isnt_read_or_patched():
