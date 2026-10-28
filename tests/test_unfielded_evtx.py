@@ -298,6 +298,9 @@ def test_score_and_doc_sort_as_they_are_and_fields_as_fields(run, sort, sent):  
 # --- (d) The install's patch over old and new indices ------------------------
 
 IDX = "case-9203c4a7e4d8-evtx-0"
+SID = "winlog.user.identifier"
+SID_PUT = {"properties": {"winlog": {"properties": {
+    "user": {"properties": {"identifier": {"type": "keyword"}}}}}}}  # fmt: skip
 
 
 def _after_upgrade(limit: int) -> dict:
@@ -340,21 +343,25 @@ def _current() -> dict:
     ],
     ids=["1024 index", "current index", "after the upgrade", "after the upgrade, rule lowered"],
 )
-def test_the_patch_raises_an_indexs_own_rule_and_nothing_else(index, rules):
+def test_the_patch_raises_an_indexs_own_rule_then_maps_the_header_sid_and_nothing_else(
+    index, rules
+):
     cluster = _Cluster({IDX: copy.deepcopy(index)})
     client = cluster.client()
     result = mappings.patch_evtx_indices(client)
-    sent = cluster.to(IDX)
+    # these indices predate the header SID, so its own put comes last, and only it
+    *puts, sid = cluster.to(IDX)
+    assert sid == SID_PUT
     if rules is None:
-        assert sent == [] and result["unchanged"] == [IDX]
+        assert puts == [] and result == {"patched": {IDX: [SID]}, "unchanged": [], "failed": []}
         return
-    (put,) = sent
+    (put,) = puts
     assert put["dynamic_templates"] == rules
     if not any(DATES in e for e in index["mappings"]["dynamic_templates"]):
         assert ALL not in json.dumps(put) and "event_data_all" not in json.dumps(put)
         assert "event_data_dates_all" not in json.dumps(put)
     client.indices.put_settings.assert_not_called()
-    assert result["patched"][IDX][-1] == STRINGS
+    assert result["patched"][IDX][-2:] == [STRINGS, SID]
 
 
 # --- (e) What parse_evtx writes ------------------------------------------------
