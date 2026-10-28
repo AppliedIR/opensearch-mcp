@@ -110,6 +110,10 @@ def _gate_walk(case_id: str, leaves: list[tuple], run_id: str = "") -> None:
 # it is skipped, and named in the run's status
 _linked_skipped: list[str] = []
 
+# A delimited run's files read with nothing to index: "path (empty)" or
+# "path (no rows)". Each leaf starts its own list; a walk collects them.
+_no_rows: list[str] = []
+
 
 def _listed(folder: Path, keep) -> list[Path]:
     """`folder`'s entries a folder ingest reads: `keep(entry)`, and not a link
@@ -476,6 +480,7 @@ def _write_bg_status(
     files_not_read=0,
     hosts_total=1,
     hosts_failed=0,
+    no_rows=None,
 ):
     """Write status for background ingest (delimited/json/accesslog/enrich).
 
@@ -516,6 +521,8 @@ def _write_bg_status(
         art["skipped_files"] = list(skipped_files)
     if not_read:  # files that failed, or were not recognized: "path (reason)"
         art["not_read"] = list(not_read)
+    if no_rows:  # read, with nothing to index: "path (empty)" or "path (no rows)"
+        art["no_rows"] = list(no_rows)
     if files_total:
         art["files_total"] = files_total
     if files_done:
@@ -2424,6 +2431,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         missed: list[str] = []  # each sub-run starts its own list
         not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
+        no_rows: list[str] = []
         if not is_recursive and not getattr(args, "dry_run", False):
             # (a recursive sub-run gates its own walk; a dry run writes nothing)
             _gate_walk(case_id, [
@@ -2443,6 +2451,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             result = cmd_ingest_delimited(sub_args, examiner=examiner)
             missed.extend(NO_TIME_FIELD)
             not_understood.extend(TIME_NOT_UNDERSTOOD)
+            no_rows.extend(_no_rows)
             if result:
                 hosts_indexed += result[0]
                 hosts_failed += result[1]
@@ -2457,6 +2466,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # no-op (no hosts) still ends `complete`.
         NO_TIME_FIELD[:] = list(dict.fromkeys(missed))
         TIME_NOT_UNDERSTOOD[:] = not_understood
+        _no_rows[:] = no_rows
         final_status, final_error = _terminal_status(
             hosts_indexed, hosts_failed, hosts_reason, hosts_files, not_read
         )
@@ -2478,6 +2488,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 rows_skipped=hosts_sk,
                 files_not_read=len(not_read) + len(unattributed),
                 hosts_total=len(auto_hosts),
+                no_rows=no_rows,
             )
         _exit_if_failed(final_status, final_error)
         counts = _sum_counts(host_counts)
@@ -2504,6 +2515,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         walk_missed: list[str] = []  # each sub-run starts its own list
         walk_not_understood: list[tuple[str, str, int]] = []
         not_read: list[str] = []
+        walk_no_rows: list[str] = []
         if not getattr(args, "dry_run", False):  # a dry run writes nothing: no gate
             _gate_walk(case_id, [(d, d.name, _delim_files(d)) for d in subdirs], run_id or "")
         was_walking, _walking.active = getattr(_walking, "active", False), True
@@ -2517,6 +2529,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 result = cmd_ingest_delimited(sub_args, examiner=examiner)
                 walk_missed.extend(NO_TIME_FIELD)
                 walk_not_understood.extend(TIME_NOT_UNDERSTOOD)
+                walk_no_rows.extend(_no_rows)
                 if result:
                     walk_indexed += result[0]
                     walk_failed += result[1]
@@ -2555,6 +2568,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         # any terminal status and the atexit guard mislabels it failed.
         NO_TIME_FIELD[:] = list(dict.fromkeys(walk_missed))
         TIME_NOT_UNDERSTOOD[:] = walk_not_understood
+        _no_rows[:] = walk_no_rows
         final_status, final_error = _terminal_status(
             walk_indexed, walk_failed, walk_reason, walk_files, not_read
         )
@@ -2578,6 +2592,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 files_not_read=len(not_read),
                 hosts_total=len(subdirs),
                 hosts_failed=len(_failed_subdirs),
+                no_rows=walk_no_rows,
             )
         _exit_if_failed(final_status, final_error)
         # A caller summing hosts (`--auto-hosts` with `--recursive`) reads these.
@@ -2585,6 +2600,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
         return walk_indexed, walk_failed, walk_reason, counts, not_read, walk_files, walk_sk
     NO_TIME_FIELD.clear()  # this run's files only (a wrapper collects them)
     TIME_NOT_UNDERSTOOD.clear()
+    _no_rows.clear()
     time_field = getattr(args, "time_field", None)
     delimiter = getattr(args, "delimiter", None)
     format_override = getattr(args, "format", None)
@@ -2607,7 +2623,7 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     files = _delim_files(input_path, getattr(args, "only_files", None))
 
-    from opensearch_mcp.parse_delimited import _detect_delimited_format
+    from opensearch_mcp.parse_delimited import _detect_delimited_format, _no_content
 
     if run_id:
         _write_bg_status(
@@ -2634,43 +2650,61 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 indexed=indexed_so_far,
             )
 
-    from opensearch_mcp.bulk import ShardCapacityExhausted
+    from opensearch_mcp.bulk import ShardCapacityExhausted, counting_present
     from opensearch_mcp.ingest_status import HALT_CIRCUIT_BREAKER
     from opensearch_mcp.paths import stem_type
     from opensearch_mcp.write_context import index_name as _index_name
 
     _open_unit(case_id, input_path, hostname, source="delimited", files=files)
     total = total_sk = total_bf = 0
-    touched: set[str] = set()
+    empties = 0  # empty files whose entry is written: read, and out of the file count
+    touched: set[str] = set()  # indices sent a record this run (indexed or already present)
     _delim_failed_files: list[tuple[str, str]] = []  # (path, error[:200])
     try:
         for idx, f in enumerate(files):
-            fmt = {"format": format_override} if format_override else _detect_delimited_format(f)
-            detected = fmt.get("format", "csv")
-            user_suffix = getattr(args, "index_suffix", None)
-            if user_suffix:
-                prefix, _, stem = user_suffix.partition("-")
-                if prefix not in ("delim", "zeek", "bodyfile") or not stem:
-                    prefix, stem = "delim", user_suffix
-            elif detected in ("zeek", "bodyfile"):
-                prefix, stem = detected, f.stem
-            else:
-                prefix, stem = "delim", f.stem
-            suffix = stem_type(prefix, stem)
-            index_name = _index_name(suffix)
-            print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
-            if detected == "unknown":
-                print("skipped (unrecognized format)")
-                _delim_failed_files.append((str(f), "unrecognized format"))
-                continue
-            aid, why = _file_entry(audit, "ingest_delimited", f, hostname, index_name, run_id)
-            if not aid:
-                _delim_failed_files.append((str(f), why))
-                print(f"skipped ({why})")
-                continue
-            file_aids.append(aid)
-            try:
-                with wc.op(aid):
+            aid = ""
+            try:  # per-file isolation, from the file's first read on
+                if not format_override:
+                    fmt = _detect_delimited_format(f)
+                elif _no_content(f):  # a file with no content has no format
+                    fmt = {"format": "empty"}
+                else:
+                    fmt = {"format": format_override}
+                detected = fmt.get("format", "csv")
+                if detected == "empty":  # read: its entry names no index, as none is written
+                    aid, why = _file_entry(audit, "ingest_delimited", f, hostname, "", run_id)
+                    if not aid:
+                        _delim_failed_files.append((str(f), why))
+                        print(f"  {f.name} (empty): skipped ({why})")
+                        continue
+                    _file_outcome(audit, aid, "ingest_delimited", "0 indexed: no content", f)
+                    empties += 1
+                    _no_rows.append(f"{f} (empty)")
+                    print(f"  {f.name}: empty, nothing to index")
+                    continue
+                user_suffix = getattr(args, "index_suffix", None)
+                if user_suffix:
+                    prefix, _, stem = user_suffix.partition("-")
+                    if prefix not in ("delim", "zeek", "bodyfile") or not stem:
+                        prefix, stem = "delim", user_suffix
+                elif detected in ("zeek", "bodyfile"):
+                    prefix, stem = detected, f.stem
+                else:
+                    prefix, stem = "delim", f.stem
+                suffix = stem_type(prefix, stem)
+                index_name = _index_name(suffix)
+                print(f"  {f.name} ({detected}) -> {index_name}...", end=" ", flush=True)
+                if detected == "unknown":
+                    print("skipped (unrecognized format)")
+                    _delim_failed_files.append((str(f), "unrecognized format"))
+                    continue
+                aid, why = _file_entry(audit, "ingest_delimited", f, hostname, index_name, run_id)
+                if not aid:
+                    _delim_failed_files.append((str(f), why))
+                    print(f"skipped ({why})")
+                    continue
+                file_aids.append(aid)
+                with wc.op(aid), counting_present() as present:
                     cnt, sk, bf, hr = ingest_delimited(
                         f,
                         client,
@@ -2694,7 +2728,10 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 total += cnt
                 total_sk += sk
                 total_bf += bf
-                touched.add(index_name)
+                if cnt or present[0]:  # a record indexed, or already in the case
+                    touched.add(index_name)
+                elif not (sk or bf):
+                    _no_rows.append(f"{f} (no rows)")
                 _file_outcome(
                     audit,
                     aid,
@@ -2729,8 +2766,9 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
                 # (tracked below) so operators see "N skipped" in the
                 # summary, not silent data loss.
                 _delim_failed_files.append((str(f), str(e)[:200]))
-                print(f"skipped ({e})")
-                _file_outcome(audit, aid, "ingest_delimited", f"FAILED: {str(e)[:200]}", f)
+                print(f"skipped ({e})" if aid else f"  {f.name}: skipped ({e})")
+                if aid:
+                    _file_outcome(audit, aid, "ingest_delimited", f"FAILED: {str(e)[:200]}", f)
     except ShardCapacityExhausted as _sce:
         write_status(
             case_id=case_id,
@@ -2762,7 +2800,8 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
 
     reason = get_last_bulk_reason()
     not_read = [f"{p} ({e})" for p, e in _delim_failed_files]
-    final_status, final_error = _terminal_status(total, total_bf, reason, len(files), not_read)
+    read_files = len(files) - empties  # the files with content, and any still not read
+    final_status, final_error = _terminal_status(total, total_bf, reason, read_files, not_read)
     if run_id:
         _write_bg_status(
             case_id,
@@ -2779,10 +2818,11 @@ def cmd_ingest_delimited(args: argparse.Namespace, examiner: str = "unknown") ->
             not_read=not_read,
             rows_skipped=total_sk,
             files_not_read=len(_delim_failed_files),
+            no_rows=_no_rows,
         )
     _exit_if_failed(final_status, final_error)
     # The recursive walk shares this run's status file and sums these.
-    return total, total_bf, reason, counts, not_read, len(files), total_sk
+    return total, total_bf, reason, counts, not_read, read_files, total_sk
 
 
 # ---------------------------------------------------------------------------
