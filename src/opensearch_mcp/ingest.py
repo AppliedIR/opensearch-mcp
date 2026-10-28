@@ -241,6 +241,7 @@ def ingest(
     from opensearch_mcp.bulk import get_already_present
 
     present_before = get_already_present()
+    wc.SID_DROPS.clear()  # the drop record is this run's own
 
     def _totals() -> dict:
         totals = _compute_totals(status_hosts)
@@ -763,7 +764,6 @@ def _ingest_hosts(
                         )
                         _update_status()
 
-                wc.SID_DROPPED.pop(index_name, None)  # this run's records say their own
                 for file_idx, evtx_file in enumerate(evtx_files):
                     params = {"hostname": host.hostname, "index_name": index_name,
                               "run_id": run_id}  # fmt: skip
@@ -781,6 +781,7 @@ def _ingest_hosts(
                             truncated.append(f"{evtx_file.name}: {cut}")
                             if evtx_status:
                                 evtx_status["truncated"] = truncated
+                        file_since = len(wc.SID_DROPS)
                         with wc.op(aid):
                             cnt, sk, bf = parse_and_index(
                                 evtx_path=evtx_file,
@@ -805,6 +806,7 @@ def _ingest_hosts(
                             sha256=file_hash,
                             doc_count=cnt,
                         )
+                        file_note = wc.sid_note(index_name, ctx.unit, file_since)
                         ops.later(
                             audit,
                             aid,
@@ -812,11 +814,7 @@ def _ingest_hosts(
                             f"{cnt} indexed, {sk} skipped"
                             + (f", truncated: {cut}" if cut else "")
                             + (f", {bf} bulk failed" if bf else "")
-                            + (
-                                f"; {wc.SID_DROPPED[index_name]}"
-                                if index_name in wc.SID_DROPPED
-                                else ""
-                            ),
+                            + (f"; {file_note}" if file_note else ""),
                             {**params, "file": str(evtx_file), "bulk_failed": bf},
                         )
                         # Per-file status update
@@ -843,7 +841,7 @@ def _ingest_hosts(
                             ops.later(audit, aid, "ingest_evtx", f"FAILED: {e}",
                                       {**params, "file": str(evtx_file)})  # fmt: skip
 
-                sid_note = wc.SID_DROPPED.get(index_name)
+                sid_note = wc.sid_note(index_name, ctx.unit)  # this host's, this run's
                 if sid_note:
                     import sys
 
