@@ -57,7 +57,10 @@ class Cluster:
         self.cat = SimpleNamespace(indices=self._cat)
         self.rows = [{"index": i, "docs.count": "1", "health": "green"} for i in indices]
         mapped = get_mapping({i: FIELDS for i in indices})
-        self.indices = SimpleNamespace(get_mapping=lambda index, **k: mapped("*", **k))
+        clean = {"valid": True, "explanations": [{"index": DELIM, "valid": True,
+                                                  "explanation": "*:*"}]}  # fmt: skip
+        self.indices = SimpleNamespace(get_mapping=lambda index, **k: mapped("*", **k),
+                                       validate_query=lambda **k: clean)  # fmt: skip
 
     def _reply(self):
         return {"took": 1, "timed_out": self.timed_out, "_shards": copy.deepcopy(self.shards)}
