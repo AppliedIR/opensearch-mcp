@@ -458,6 +458,9 @@ _SEARCH_EXCLUDE_FIELDS = frozenset(
 
 _MAX_FIELD_CHARS = 500
 _MAX_LIST_ITEMS = 100
+# an object or list this deep comes back as its JSON text: the reply's serializer
+# refuses nesting past about 255, and 3.10's stack ends near 500
+_MAX_NESTING = 64
 
 
 def _host_review(case_id: str = "") -> tuple[set[str], str]:
@@ -526,20 +529,44 @@ def _annotate_hosts(resp: dict, case_id: str, client=None, index="", query_body=
     return resp
 
 
-def _cut_leaves(val, path: str, chars: int, items: int | None, cut: list[str]):
+def _cut_leaves(
+    val,
+    path: str,
+    chars: int,
+    items: int | None,
+    cut: list[str],
+    depth: int | None = None,
+    level: int = 0,
+):
     """`val` with each string over `chars` cut and each list over `items`
     kept to its first ones; objects and lists keep their shape. Each cut's
-    path (`a.b`, `a[0]`, `a[100:]`) is added to `cut`."""
+    path (`a.b`, `a[0]`, `a[100:]`) is added to `cut`. An object or list
+    nested `depth` deep becomes its JSON text, cut as a string is, and its
+    path is added with that reason whatever the text's length."""
+    if depth is not None and level >= depth and isinstance(val, (dict, list)):
+        text = json.dumps(val, ensure_ascii=False, default=str)
+        why = f"{path} (as JSON text: nested {depth} levels deep"
+        if len(text) > chars:
+            cut.append(f"{why}; cut at {chars} characters)")
+            return text[:chars] + "..."
+        cut.append(why + ")")
+        return text
     if isinstance(val, str):
         if len(val) > chars:
             cut.append(path)
             return val[:chars] + "..."
         return val
     if isinstance(val, dict):
-        return {k: _cut_leaves(v, f"{path}.{k}", chars, items, cut) for k, v in val.items()}
+        return {
+            k: _cut_leaves(v, f"{path}.{k}", chars, items, cut, depth, level + 1)
+            for k, v in val.items()
+        }
     if isinstance(val, list):
         keep = val if items is None else val[:items]
-        out = [_cut_leaves(v, f"{path}[{i}]", chars, items, cut) for i, v in enumerate(keep)]
+        out = [
+            _cut_leaves(v, f"{path}[{i}]", chars, items, cut, depth, level + 1)
+            for i, v in enumerate(keep)
+        ]
         if len(keep) < len(val):
             cut.append(f"{path}[{items}:]")
         return out
@@ -551,13 +578,16 @@ def _strip_hits(
     exclude_fields: frozenset[str] = _SEARCH_EXCLUDE_FIELDS,
     max_chars: int = _MAX_FIELD_CHARS,
     max_items: int | None = _MAX_LIST_ITEMS,
+    max_depth: int | None = _MAX_NESTING,
 ) -> list[dict]:
     """Extract _source from hits with field exclusion and truncation.
 
     Default behavior (compact): excludes bloat fields; long text values
     (over 500 characters) are cut, and lists keep their first 100 elements;
-    `_truncated` lists each cut by its path. Pass empty exclude_fields, large
-    max_chars and no max_items for full documents.
+    `_truncated` lists each cut by its path; an object or list nested
+    `max_depth` deep comes back as its JSON text, listed with that reason.
+    Pass empty exclude_fields, large max_chars and no max_items or max_depth
+    for full documents.
     """
     results = []
     for hit in hits:
@@ -572,7 +602,7 @@ def _strip_hits(
         for key, val in src.items():
             if key in exclude_fields:
                 continue
-            doc[key] = _cut_leaves(val, key, max_chars, max_items, truncated_fields)
+            doc[key] = _cut_leaves(val, key, max_chars, max_items, truncated_fields, max_depth)
 
         if truncated_fields:
             doc["_truncated"] = truncated_fields
@@ -1822,7 +1852,11 @@ def idx_search(
         docs = _strip_hits(result["hits"]["hits"])
     else:
         docs = _strip_hits(
-            result["hits"]["hits"], exclude_fields=frozenset(), max_chars=999999, max_items=None
+            result["hits"]["hits"],
+            exclude_fields=frozenset(),
+            max_chars=999999,
+            max_items=None,
+            max_depth=None,
         )
 
     resp: dict = {"total": total, "returned": len(docs), "results": docs, "compact": compact}

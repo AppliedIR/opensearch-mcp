@@ -12,6 +12,9 @@ idx_search runs as the MCP tool does.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -188,3 +191,92 @@ def test_twin_excluded_fields_stay_out_and_others_keep_their_order(search):
     assert excluded not in doc
     assert list(doc) == ["_id", "_index", "a", "b", "c", "_truncated"]
     assert doc["_truncated"] == ["a.CommandLine", "b"]
+
+
+# Deep values, through the MCP tool call: the reply's serializer refuses nesting
+# past about 255 levels, so the walk stops at _MAX_NESTING and a deeper object or
+# list comes back as its JSON text, cut as a long string is. `_truncated` lists
+# it with the depth as its reason whatever its length, so a JSON string never
+# stands silently where an object or list was.
+
+DEPTH = srv._MAX_NESTING
+
+
+@pytest.fixture
+def tool(search, monkeypatch):
+    c = srv._get_os()
+
+    def run(source):
+        hit = {"_id": "d1", "_index": INDEX, "_source": source}
+        c.search.return_value = {"hits": {"total": {"value": 1}, "hits": [hit]}}
+        out = asyncio.run(srv.server.call_tool("idx_search", {"query": "*", "index": INDEX}))
+        content = out[0] if isinstance(out, tuple) else out
+        return json.loads(content[0].text)
+
+    return run
+
+
+def _lists(n):
+    v = "x"
+    for _ in range(n):
+        v = [v]
+    return v
+
+
+def _dicts(n):
+    v = "x"
+    for _ in range(n):
+        v = {"a": v}
+    return v
+
+
+def _at(v, n, key):
+    for _ in range(n):
+        v = v[key]
+    return v
+
+
+def _why(path, long):
+    reason = f" (as JSON text: nested {DEPTH} levels deep"
+    return path + reason + (f"; cut at {CAP} characters)" if long else ")")
+
+
+@pytest.mark.parametrize("n", [260, 600])
+def test_a_list_nested_past_the_serializer_limit_comes_back_as_listed_text(tool, n):
+    resp = tool({"deep": _lists(n), "ok": 1})
+    (doc,) = resp["results"]
+    text = json.dumps(_lists(n - DEPTH), ensure_ascii=False)
+    long = len(text) > CAP  # 260 deep is 395 characters of text, 600 deep is 1075
+    assert _at(doc["deep"], DEPTH, 0) == (_cut(text) if long else text)
+    assert doc["ok"] == 1
+    assert doc["_truncated"] == [_why("deep" + "[0]" * DEPTH, long)]
+
+
+def test_an_object_nested_past_the_serializer_limit_comes_back_as_listed_text(tool):
+    resp = tool({"deep": _dicts(260)})
+    (doc,) = resp["results"]
+    text = json.dumps(_dicts(260 - DEPTH), ensure_ascii=False)
+    assert _at(doc["deep"], DEPTH, "a") == _cut(text)
+    assert doc["_truncated"] == [_why("deep" + ".a" * DEPTH, True)]
+
+
+@pytest.mark.parametrize(
+    "make, key, step", [(_lists, 0, "[0]"), (_dicts, "a", ".a")], ids=["lists", "objects"]
+)
+def test_twin_nesting_up_to_the_bound_keeps_its_shape_and_one_more_level_is_listed_text(
+    tool, make, key, step
+):
+    (doc,) = tool({"deep": make(DEPTH)})["results"]
+    assert doc["deep"] == make(DEPTH)
+    assert "_truncated" not in doc
+    (doc,) = tool({"deep": make(DEPTH + 1)})["results"]
+    assert _at(doc["deep"], DEPTH, key) == json.dumps(make(1))
+    assert doc["_truncated"] == [_why("deep" + step * DEPTH, False)]
+
+
+def test_the_compact_hints_name_idx_get_events_event_id_parameter(tool):
+    hint = "idx_get_event(event_id, index)"
+    assert list(inspect.signature(srv.idx_get_event).parameters)[:2] == ["event_id", "index"]
+    assert hint in tool({"a": 1})["note"]
+    (info,) = [t for t in asyncio.run(srv.server.list_tools()) if t.name == "idx_search"]
+    assert hint in info.description
