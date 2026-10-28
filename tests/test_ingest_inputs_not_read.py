@@ -181,7 +181,7 @@ def test_a_recursive_walk_names_what_each_host_left_out(delim, tmp_path):
     (w,) = _not_read(st)
     assert "2 file(s)" in w, w
     assert f"{d / 'h1' / 'hashes.csv'} (unrecognized format)" in w, w
-    assert f"{d / 'h2'} (" in w and "Permission denied" in w, w
+    assert f"{d / 'h2' / 'a-locked.csv'} ([Errno 13] Permission denied" in w, w
 
 
 def test_auto_hosts_names_a_hosts_one_column_file(delim, tmp_path):

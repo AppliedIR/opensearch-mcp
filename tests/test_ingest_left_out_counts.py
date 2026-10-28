@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 from unittest import mock
 
 import pytest
@@ -184,9 +185,34 @@ def test_a_recursive_walk_counts_its_subdirectories_and_the_one_that_failed(skip
         "h3/logons.csv": TWO_COLS})  # fmt: skip
     result = skips.cmd_ingest_delimited(_dargs(d, hostname="", recursive=True))
     st = _status()
-    # h3 failed whole: 2 of 3 complete; a failed subdirectory counts as one not read
-    assert (st["hosts_total"], st["hosts_complete"]) == (3, 2), st
+    # h3's locked file is one not read, h1's one-column file the other; every host completes
+    assert (st["hosts_total"], st["hosts_complete"]) == (3, 3), st
     assert "; 3 rows skipped, 2 files not read" in _detail(st)
+    assert result[6] == 3
+
+
+def test_a_subdirectory_that_fails_whole_counts_as_one_not_read_and_not_complete(
+    skips, tmp_path, monkeypatch
+):
+    from opensearch_mcp import parse_delimited as pd
+
+    d = _files(tmp_path / "ev", {
+        "h1/logons.csv": TWO_COLS, "h2/a-skips.csv": TWO_COLS,
+        "h3/logons.csv": TWO_COLS})  # fmt: skip
+    stub = pd.ingest_delimited
+
+    def ingest(path, *a, **k):  # h3 is gone by its turn, as a share dropped mid-walk
+        if path.parent.name == "h2":
+            shutil.rmtree(d / "h3")
+        return stub(path, *a, **k)
+
+    monkeypatch.setattr(pd, "ingest_delimited", ingest)
+    result = skips.cmd_ingest_delimited(_dargs(d, hostname="", recursive=True))
+    st = _status()
+    # h3's folder can't be listed: 2 of 3 complete; a failed subdirectory counts as one not read
+    assert (st["hosts_total"], st["hosts_complete"]) == (3, 2), st
+    assert "; 3 rows skipped, 1 file not read" in _detail(st)
+    assert any(f"{d / 'h3'} (" in w for w in st["warnings"]), st["warnings"]
     assert result[6] == 3
 
 

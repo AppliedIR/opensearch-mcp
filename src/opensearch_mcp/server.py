@@ -3027,6 +3027,13 @@ def idx_ingest_status(case_id: str = "") -> dict:
                         f"{hostname}: {a['name']}: {len(unread)} file(s) or folder(s) were not "
                         f"ingested, or only in part ({shown})"
                     )
+                if a.get("no_rows"):  # read, with nothing to index: not a failure
+                    nothing = a["no_rows"]
+                    shown = "; ".join(nothing[:10]) + ("; …" if len(nothing) > 10 else "")
+                    s.setdefault("warnings", []).append(
+                        f"{hostname}: {a['name']}: {len(nothing)} file(s) had no rows to index "
+                        f"({shown})"
+                    )
                 for key, text in _DROPPED_EVTX.items():
                     if a.get(key):
                         names = a[key]

@@ -43,6 +43,17 @@ _BODYFILE_COLUMNS = [
 _ZEEK_NULL = {"-", "(empty)", ""}
 
 
+def _no_content(path: Path) -> bool:
+    """No character but space, tab, CR or LF once decoded, BOM dropped (what
+    PowerShell's Export-Csv writes for a host with nothing to report: ff fe).
+    Reads up to the first other character, however far into the file."""
+    with open(path, "r", encoding=_detect_encoding(path), errors="replace", newline="") as f:
+        while chunk := f.read(65536):
+            if chunk.strip(" \t\r\n"):
+                return False
+    return True
+
+
 def _detect_delimited_format(path: Path) -> dict:
     """Auto-detect format, delimiter, header style.
 
@@ -59,7 +70,11 @@ def _detect_delimited_format(path: Path) -> dict:
     silently rejected Hayabusa (89k+ hits dropped per rd01 ingest).
     Multi-line quoted fields stitch correctly because we feed the
     joined head to a single csv.reader rather than per-line counting.
+
+    A file with no content (see _no_content) is "empty": read, nothing in it.
     """
+    if _no_content(path):
+        return {"format": "empty"}
     encoding = _detect_encoding(path)
     with open(path, "r", encoding=encoding, errors="replace") as f:
         first_lines = []
@@ -257,6 +272,8 @@ def ingest_delimited(
 
     if fmt is None:
         fmt = _detect_delimited_format(path)
+    if fmt.get("format") == "empty":
+        raise ValueError(f"{path.name} has no content")
     if fmt.get("format") == "unknown":
         raise ValueError(f"Cannot detect delimited format of {path.name}")
 
