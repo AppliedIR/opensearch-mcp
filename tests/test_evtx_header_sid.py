@@ -535,32 +535,58 @@ class _FieldLimit:
 
 @pytest.mark.template_install
 def test_a_new_childs_clean_install_names_its_own_refusal_not_an_earlier_read_error(
-    write, monkeypatch
+    acme, monkeypatch
 ):
-    """W5-11(c) in one process. Install 1 (ensure_installed_once) can't read
-    the evtx mappings, and a drop names that. A new ingest child then starts:
-    its install record, drop record and keyword cache start empty (reset here
-    as a new child's are). Its install reads cleanly and the SID's put is
-    refused at the field limit: its drop names the refusal, and not the
-    earlier read error."""
+    """W5-11(c) in one process, each drop by an ingest() run. Install 1
+    (ensure_installed_once) can't read the evtx mappings, and run 1's drop
+    names that. A new ingest child then starts: its install record, drop
+    record and keyword cache start empty (reset here as a new child's are).
+    Its install reads cleanly and the SID's put is refused at the field
+    limit: run 2's drop names the refusal, and not the earlier read error."""
     from test_evtx_long_fields import _index_064
 
-    cluster = _FieldLimit({write.index: _index_064()}, full={write.index})
+    index = f"case-{UUID[:12]}-evtx-0"
+    monkeypatch.setattr(mappings, "_INSTALLED", None)
+    monkeypatch.setattr(wc, "_SID_KEYWORD", set())
+    monkeypatch.setattr(wc, "SID_DROPS", [])
+    monkeypatch.setattr(wc, "prepare_index", lambda client, index: None)
+    monkeypatch.setattr(wc, "note_second_copy", lambda client, ctx, index: None)
+    monkeypatch.setattr(wc, "_imported", {acme})
+    cluster = _FieldLimit({index: _index_064()}, full={index})
+
+    def client():
+        c = cluster.client()
+        c.count.side_effect = Exception("no index")
+
+        def field_mapping(index, fields):  # what the cluster holds for the SID
+            m = cluster.cluster.state[index]["mappings"].get("properties", {})
+            got = m.get("winlog", {}).get("properties", {}).get("user", {})
+            got = got.get("properties", {}).get("identifier")
+            return {index: {"mappings": {fields: {"mapping": {"identifier": got}}} if got else {}}}
+
+        c.indices.get_field_mapping.side_effect = field_mapping
+        return c
+
     cluster.unread = RuntimeError("ConnectionTimeout: read timed out")
-    first = mappings.ensure_installed_once(cluster.client())
+    c1 = client()
+    first = mappings.ensure_installed_once(c1)
     assert {"index": mappings._TEMPLATE_PATTERN,
             "error": "ConnectionTimeout: read timed out"} in first["evtx_failed"]  # fmt: skip
-    write(SID, kind=None)
-    assert wc.sid_note(write.index, write.unit) == _note(write.index, (
+    sent1, sent2 = [], []
+    ar1 = _ingest_one(acme, c1, "System.evtx", sent1)
+    assert ar1.note == _note(index, (
         "the install couldn't read the evtx mappings to add it "
         "(ConnectionTimeout: read timed out)"))  # fmt: skip
+    assert sent1 and all(FIELD not in a["_source"] for a in sent1)
 
     monkeypatch.setattr(mappings, "_INSTALLED", None)  # a new child
     monkeypatch.setattr(wc, "SID_DROPS", [])
     monkeypatch.setattr(wc, "_SID_KEYWORD", set())
     cluster.unread = None
-    second = mappings.ensure_installed_once(cluster.client())
-    assert second["evtx_failed"] == [{"index": write.index, "error": LIMIT, "field": FIELD}]
-    write(SID, kind=None)
-    assert wc.sid_note(write.index, write.unit) == _note(
-        write.index, f"the mapping update was refused ({LIMIT})")  # fmt: skip
+    c2 = client()
+    second = mappings.ensure_installed_once(c2)
+    assert second["evtx_failed"] == [{"index": index, "error": LIMIT, "field": FIELD}]
+    ar2 = _ingest_one(acme, c2, "Application.evtx", sent2)
+    assert ar2.note == _note(index, f"the mapping update was refused ({LIMIT})")
+    assert (ar2.indexed, ar2.bulk_failed) == (3, 0)
+    assert sent2 and all(FIELD not in a["_source"] for a in sent2)
