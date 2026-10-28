@@ -144,6 +144,30 @@ def with_host_key_fields(body: dict) -> dict:
     return body
 
 
+def _declared_fields(props: dict, prefix: str = ""):
+    """Every field `props` declares, by dotted path, with its multi-fields;
+    `index: false` ones too, as an unfielded `*` query finds their values."""
+    for name, m in props.items():
+        if isinstance(m.get("properties"), dict):
+            yield from _declared_fields(m["properties"], f"{prefix}{name}.")
+            continue
+        yield prefix + name
+        yield from (f"{prefix}{name}.{sub}" for sub in m.get("fields") or {})
+
+
+def with_default_field(body: dict) -> dict:
+    """`body` (the evtx template) with the fields an unfielded query term
+    searches: every field it declares. Its rules copy each event-data value
+    into one of them, winlog.event_data_all (a date also into
+    winlog.event_data_dates_all, read as a date), so the list doesn't grow with
+    an index's event-data names (OpenSearch's default, every field, fails past
+    1024 of them)."""
+    tpl = body["template"]
+    fields = _declared_fields(tpl["mappings"]["properties"])
+    tpl["settings"]["index.query.default_field"] = list(fields)
+    return body
+
+
 def template_type_tokens() -> frozenset[str]:
     """The artifact type of every shipped template pattern (`case-*-<type>-*`),
     from the pattern table (a test keeps it equal to the files), so a template
@@ -484,10 +508,9 @@ _EVENT_DATA = "winlog.event_data"
 _EVTX_RULE = "winlog_event_data_strings"
 
 
-def _evtx_limits() -> tuple[dict[str, int], int, dict]:
+def _evtx_limits() -> tuple[dict[str, int], int]:
     """The evtx template's event-data keyword limits: each explicit
-    property's ({dotted path: limit}), the dynamic rule's, and the rule's
-    entry as the template gives it."""
+    property's ({dotted path: limit}) and the dynamic rule's."""
     m = _load_json(_EVTX_TEMPLATE_FILE)["template"]["mappings"]
     explicit = {
         path: body["ignore_above"]
@@ -497,7 +520,7 @@ def _evtx_limits() -> tuple[dict[str, int], int, dict]:
         and "ignore_above" in body
     }
     entry = next(e for e in m["dynamic_templates"] if _EVTX_RULE in e)
-    return explicit, entry[_EVTX_RULE]["mapping"]["ignore_above"], entry
+    return explicit, entry[_EVTX_RULE]["mapping"]["ignore_above"]
 
 
 def _event_data(mapping: dict) -> dict:
@@ -547,17 +570,24 @@ def _low_rule(rules: list, rule: int) -> int | None:
     return None
 
 
+def _raised_rule(entry: dict, rule: int) -> dict:
+    """An index's own event-data rule with only its limit raised: never the
+    template's entry, whose copy_to an index made before it has no field for."""
+    body = entry[_EVTX_RULE]
+    return {_EVTX_RULE: {**body, "mapping": {**body["mapping"], "ignore_above": rule}}}
+
+
 def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
     """Raise the event-data limits on every open evtx index to the template's.
 
     A template applies only when an index is made, and a dynamic rule maps
     only fields not mapped yet: so each index's full mapping is read, and one
-    `put_mapping` replaces its event-data rule and raises each keyword field
+    `put_mapping` raises its own event-data rule's limit and each keyword field
     below the template's limit for its path. A limit is never lowered, and an
     index already at the template's limits is sent nothing. Records already
     stored keep the limit they were indexed with."""
     results: dict[str, Any] = {"patched": {}, "unchanged": [], "failed": []}
-    explicit, rule, entry = _evtx_limits()
+    explicit, rule = _evtx_limits()
     try:
         current = client.indices.get_mapping(
             index=_TEMPLATE_PATTERN,
@@ -576,8 +606,8 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
         low, props = _low_event_data(_event_data(mapping), _EVENT_DATA, explicit, rule)
         rules = mapping.get("dynamic_templates") or []
         raised = rules
-        if _low_rule(rules, rule) is not None:
-            raised = [entry if _EVTX_RULE in e else e for e in rules]
+        if _low_rule(rules, rule) is not None:  # the index's own rule, only its limit raised
+            raised = [_raised_rule(e, rule) if _EVTX_RULE in e else e for e in rules]
         if not props and raised == rules:
             results["unchanged"].append(index)
             continue
@@ -651,7 +681,7 @@ def evtx_limit_note(client, index: str) -> str:
             got = client.indices.get_mapping(index=index)
         except NotFoundError:
             return ""
-        explicit, rule, _ = _evtx_limits()
+        explicit, rule = _evtx_limits()
         body = _dict(got, "the mapping reply").get(index)
         mapping = _dict(_dict(body, f"the reply for {index}").get("mappings"), "its mappings")
         rules = mapping.get("dynamic_templates")
@@ -839,7 +869,7 @@ def ensure_winlog_pipeline(client, audit=None, stamp_indices: str = "") -> dict[
             client.indices.delete_index_template(name=_LEGACY_TEMPLATE_NAME, ignore=[404])
         except Exception as _legacy_e:
             logger.debug("legacy evtx template delete non-fatal: %s", _legacy_e)
-        template_body = with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE))
+        template_body = with_default_field(with_host_key_fields(_load_json(_EVTX_TEMPLATE_FILE)))
         _check_registry(template_body, _EVTX_TEMPLATE_FILE.name, _TEMPLATE_PRIORITY,
                         (_TEMPLATE_PATTERN,))  # fmt: skip
         client.indices.put_index_template(name=_TEMPLATE_NAME, body=template_body)

@@ -9,22 +9,48 @@
     "settings": {
       "index.mapping.total_fields.limit": 5000,
       "index.default_pipeline": "winlog_data_normalize_v1",
-      "index.number_of_replicas": 0
+      "index.number_of_replicas": 0,
+      "index.query_string.lenient": true
     },
     "mappings": {
       "dynamic_templates": [
+        {
+          "winlog_event_data_dates": {
+            "path_match": "winlog.event_data.*",
+            "match_mapping_type": "date",
+            "mapping": {
+              "type": "date",
+              "copy_to": [
+                "winlog.event_data_all",
+                "winlog.event_data_dates_all"
+              ]
+            }
+          }
+        },
         {
           "winlog_event_data_strings": {
             "path_match": "winlog.event_data.*",
             "match_mapping_type": "string",
             "mapping": {
               "type": "keyword",
-              "ignore_above": 8191
+              "ignore_above": 8191,
+              "copy_to": "winlog.event_data_all"
             }
           }
         }
       ],
       "properties": {
+        "winlog.event_data_all": {
+          "type": "keyword",
+          "ignore_above": 8191,
+          "doc_values": false
+        },
+        "winlog.event_data_dates_all": {
+          "type": "date",
+          "format": "strict_date_optional_time||yyyy/MM/dd HH:mm:ss||yyyy/MM/dd||epoch_millis",
+          "ignore_malformed": true,
+          "doc_values": false
+        },
         "event.code": {
           "type": "integer"
         },

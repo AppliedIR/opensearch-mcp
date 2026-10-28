@@ -15,6 +15,7 @@ from opensearchpy.exceptions import (
     AuthorizationException,
     ConnectionTimeout,
     RequestError,
+    TransportError,
 )
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
 from sift_common.audit import AuditWriter
@@ -378,14 +379,26 @@ def _os_call(fn, *args, **kwargs):
         raise RuntimeError(
             "OpenSearch authentication failed. Check opensearch.yaml credentials."
         ) from e
-    except RequestError as e:
-        # 400 Bad Request — malformed query, missing field, etc.
+    except TransportError as e:
+        # 400 Bad Request — malformed query, missing field, etc. — or a search
+        # OpenSearch's status blames on the query: 500 (too many nested
+        # clauses), or any status when it asked for too many buckets (503).
+        # Any other status is the cluster's (no shard, a breaker): raised as is.
         info = getattr(e, "info", None) or {}
-        err = info.get("error", {})
+        err = info.get("error", {}) if isinstance(info, dict) else {}
+        cause = err.get("caused_by") if isinstance(err, dict) else None
+        buckets = isinstance(cause, dict) and cause.get("type") == "too_many_buckets_exception"
+        if not isinstance(e, RequestError) and not (
+            e.error == "search_phase_execution_exception" and (e.status_code == 500 or buckets)
+        ):
+            raise
         reason = err.get("reason", str(e)) if isinstance(err, dict) else str(e)
         root = (err.get("root_cause") or [{}])[0] if isinstance(err, dict) else {}
         if isinstance(root, dict) and root.get("reason"):  # what failed, and where
-            reason += f": {root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
+            where = f"{root['reason']}" + (f" ({root['index']})" if root.get("index") else "")
+            reason = f"{reason}: {where}" if reason else where
+        if buckets and cause.get("reason"):
+            reason = f"{reason}: {cause['reason']}" if reason else str(cause["reason"])
         named = []  # each failed index whose own reason has a repair, with it
         shards = err.get("failed_shards") if isinstance(err, dict) else None
         for f in shards if isinstance(shards, list) else ():
@@ -396,6 +409,8 @@ def _os_call(fn, *args, **kwargs):
         if named:
             more = f"; and {len(named) - 5} more indices" if len(named) > 5 else ""
             reason += f" ({'; '.join(i + fix for i, fix in named[:5])}{more})"
+        if buckets:
+            reason += _BUCKETS
         raise ValueError(f"Query error: {reason}") from e
 
 
@@ -1097,13 +1112,31 @@ _PARTIAL_LOW = (
     "answered, and 0 is not 'no match'."
 )
 _TEXT_FIELD = re.compile(r"fielddata=true on \[([^\]]+)\]")
+_UNFIELDED = (
+    (
+        "matches too many fields",
+        "; a term with no field named, or a field pattern, expanded to more fields "
+        "than that index allows: name one field (field:value; in evtx, "
+        "winlog.event_data.<Name>:<value>)",
+    ),
+    (
+        "too many nested clauses",
+        "; the query expanded past OpenSearch's clause limit: name the fields, or "
+        "quote a path or URL (a /.../ is read as a regular expression)",
+    ),
+)
+_BUCKETS = "; use a larger interval or a shorter time window (time_from/time_to)"
 
 
 def _repair(reason: str, case: str, index: str) -> str:
-    """What repairs a shard failure: a field that is text where a keyword was
+    """What repairs a shard failure: a term with no field named that expands
+    past OpenSearch's limits, or a field that is text where a keyword was
     meant. A vhir.* field is text only in an index made without its template;
     any other is aggregated through a keyword form, in that index alone (a
     case-wide aggregation leaves out every index without it)."""
+    for text, fix in _UNFIELDED:
+        if text in reason:
+            return fix
     m = _TEXT_FIELD.search(reason)
     if not m:
         return ""
@@ -1457,6 +1490,9 @@ def idx_search(
     (source.ip on most indices) return nothing for wildcards: use CIDR,
     source.ip:"10.1.2.0/24". Across a case with older indices, OR the two:
     source.ip:10.1.2.* OR source.ip:"10.1.2.0/24".
+    A comparison (>, <, >=, <=) needs a field: '@timestamp:>2024-01-25'. On
+    evtx indices an unfielded one ('>2024-01-25') compares no dates: any hits
+    come from other fields' text.
 
     Args:
         query: OpenSearch query_string (e.g., 'event.code:4624 AND user.name:admin').
@@ -1480,7 +1516,10 @@ def idx_search(
     sort_field, _, sort_order = sort.partition(":")
     if sort_order not in ("asc", "desc", ""):
         sort_order = "desc"
-    sort_body = [{sort_field: {"order": sort_order or "desc", "unmapped_type": "date"}}]
+    sort_spec = {"order": sort_order or "desc"}
+    if sort_field not in ("_score", "_doc"):  # not fields: no unmapped_type
+        sort_spec["unmapped_type"] = "date"
+    sort_body = [{sort_field: sort_spec}]
 
     query_body: dict = {"query_string": {"query": query}}
     if time_from or time_to:

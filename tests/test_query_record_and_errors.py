@@ -149,6 +149,12 @@ ALL_FAILED = {  # OpenSearch 3.5.0's 400, measured on an index over 1,024 fields
 }  # fmt: skip
 
 
+FIX = (  # the expansion's repair (W3)
+    "; a term with no field named, or a field pattern, expanded to more fields than that "
+    "index allows: name one field (field:value; in evtx, winlog.event_data.<Name>:<value>)"
+)
+
+
 class AllShardsFailed(Cluster):
     def search(self, index=None, body=None, **kw):
         raise RequestError(400, "search_phase_execution_exception", ALL_FAILED)
@@ -160,7 +166,7 @@ class AllShardsFailed(Cluster):
 def test_all_shards_failed_names_the_cause_and_the_index(monkeypatch, tool):
     with pytest.raises(ValueError) as e:
         ask(monkeypatch, tool, cluster=AllShardsFailed(OK), index=BRAVO)
-    assert str(e.value) == f"Query error: all shards failed: {CAUSE} ({BRAVO})"
+    assert str(e.value) == f"Query error: all shards failed: {CAUSE} ({BRAVO}) ({BRAVO}{FIX})"
 
 
 # --- every shard failed on a field that is text: the failed index and its repair ---
@@ -259,6 +265,10 @@ def test_a_malformed_failed_shards_entry_leaves_the_error_as_it_was(monkeypatch,
 
 
 def test_a_failure_with_no_repair_leaves_the_error_as_it_was(monkeypatch):
-    """Every shard failed, for a reason no field repair answers."""
-    got = refused(monkeypatch, "idx_count", ALL_FAILED)
-    assert got == f"Query error: all shards failed: {CAUSE} ({BRAVO})"
+    """Every shard failed, for a reason no repair answers."""
+    cause = "failed to create query: Cannot parse 'a AND': Encountered \"<EOF>\" at line 1"
+    info = json.loads(json.dumps(ALL_FAILED))
+    info["error"]["root_cause"][0]["reason"] = cause
+    info["error"]["failed_shards"][0]["reason"]["reason"] = cause
+    got = refused(monkeypatch, "idx_count", info)
+    assert got == f"Query error: all shards failed: {cause} ({BRAVO})"

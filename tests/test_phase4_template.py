@@ -27,6 +27,13 @@ def properties(mappings):
     return mappings["properties"]
 
 
+def _strings_rule(mappings):
+    """The event-data strings rule, by its name (the dates rule comes first)."""
+    (rule,) = [e["winlog_event_data_strings"] for e in mappings["dynamic_templates"]
+               if "winlog_event_data_strings" in e]  # fmt: skip
+    return rule
+
+
 @pytest.fixture
 def settings(template):
     return template["template"]["settings"]
@@ -88,29 +95,29 @@ class TestDynamicTemplates:
         assert "winlog_event_data_strings" in names
 
     def test_path_match(self, mappings):
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert dt["path_match"] == "winlog.event_data.*"
 
     def test_match_mapping_type_string(self, mappings):
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert dt["match_mapping_type"] == "string"
 
     def test_mapping_type_keyword(self, mappings):
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert dt["mapping"]["type"] == "keyword"
 
     def test_ignore_above_8191(self, mappings):
         """EventData keyword fields are indexed up to 8,191 characters, the
         JSON catch-all's limit: a 4103 Payload or a Sysmon 13 Details longer
         than 1,024 is found by its field."""
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert dt["mapping"]["ignore_above"] == 8191
 
     def test_not_text_type(self, mappings):
         """Dynamic template must map to keyword, NOT text.
         Default dynamic mapping creates text+keyword multi-field.
         Pure keyword is needed for Sigma rule wildcard matching."""
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert dt["mapping"]["type"] != "text"
 
 
@@ -266,7 +273,7 @@ class TestSigmaCompatibility:
     def test_dynamic_template_enables_wildcard_on_event_data(self, mappings):
         """With keyword type, wildcard queries like Image|endswith work.
         This is the key fix from the Phase 1 errata."""
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         # keyword type supports wildcard, prefix, and term queries
         assert dt["mapping"]["type"] == "keyword"
 
@@ -275,5 +282,5 @@ class TestSigmaCompatibility:
         Sigma rules query the bare path (winlog.event_data.Image), which would hit
         the text field. Text fields tokenize values, breaking exact/wildcard matches.
         The dynamic template MUST override this to pure keyword."""
-        dt = mappings["dynamic_templates"][0]["winlog_event_data_strings"]
+        dt = _strings_rule(mappings)
         assert "fields" not in dt["mapping"]  # no multi-field, pure keyword
