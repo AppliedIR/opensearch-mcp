@@ -185,6 +185,7 @@ def test_beside_an_unwritable_audit_folder_the_query_says_so(pointer, tmp_path, 
 # The first sift-common version carrying each name the source imports from it
 FIRST = {
     "sift_common.SYSTEM_DIRS": "0.6.4",
+    "sift_common.close_tool_arguments": "0.6.5.2",
     "sift_common.resolve_case_dir": "0.5.1",
     "sift_common.file_identity": "0.6.4",
     "sift_common.file_place": "0.6.4",
