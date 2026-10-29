@@ -64,6 +64,8 @@ def run_windows_tool(
     try:
         return call_tool("run_windows_command", arguments, timeout=timeout + 30)
     except Exception as e:
+        if "connection" in str(e).lower() or "timeout" in str(e).lower():
+            mark_wintools_down()  # the call failed; a reply's own text never marks it down
         raise RuntimeError(f"wintools-mcp call failed: {e}") from e
 
 

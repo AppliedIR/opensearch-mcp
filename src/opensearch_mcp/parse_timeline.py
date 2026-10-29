@@ -54,11 +54,7 @@ def parse_timeline(
 
     from opensearch_mcp import ops
     from opensearch_mcp.parse_csv import ingest_csv
-    from opensearch_mcp.wintools import (
-        mark_wintools_down,
-        run_tool_and_get_csv,
-        wintools_available,
-    )
+    from opensearch_mcp.wintools import run_tool_and_get_csv, wintools_available
 
     if not wintools_available():
         raise RuntimeError(NO_WINTOOLS)
@@ -80,19 +76,14 @@ def parse_timeline(
             shutil.copy2(f, workdir / f.name)
             copied.append((f, workdir / f.name))
     produced = [ops.staging_step(copied, "WxTCmd.exe")]
-    try:
-        csv_files = run_tool_and_get_csv(
-            tool_binary="WxTCmd.exe",
-            input_flag="-f",
-            evidence_path=str(workdir / db_path.name),
-            purpose="Parse the Windows 10 Timeline (ActivitiesCache.db)",
-            hostname=hostname,
-            produced_by=produced,
-        )
-    except Exception as e:
-        if "connection" in str(e).lower() or "timeout" in str(e).lower():
-            mark_wintools_down()
-        raise
+    csv_files = run_tool_and_get_csv(
+        tool_binary="WxTCmd.exe",
+        input_flag="-f",
+        evidence_path=str(workdir / db_path.name),
+        purpose="Parse the Windows 10 Timeline (ActivitiesCache.db)",
+        hostname=hostname,
+        produced_by=produced,
+    )
     if not csv_files:
         raise RuntimeError("WxTCmd produced no CSV output")
 

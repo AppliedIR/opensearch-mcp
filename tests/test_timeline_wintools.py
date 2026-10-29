@@ -107,14 +107,14 @@ def test_a_connection_error_marks_wintools_down_and_is_raised(case, monkeypatch,
     down = []
     monkeypatch.setattr(wintools, "mark_wintools_down", lambda: down.append(1))
 
-    def refused(**kw):
+    def refused(*a, **kw):
         raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(wintools, "run_tool_and_get_csv", refused)
+    monkeypatch.setattr(wintools, "call_tool", refused)
     from opensearch_mcp import ops, parse_timeline
 
     with ops.recording(AuditWriter(mcp_name="opensearch-ingest-1"), case, "ingest_timeline", {}):
-        with pytest.raises(ConnectionError):
+        with pytest.raises(RuntimeError, match="connection refused"):
             parse_timeline.parse_timeline(db, MagicMock(), "idx", "RD01")
     assert down == [1]
 

@@ -36,7 +36,7 @@ def parse_srum(
     handles this (built-in repair), Plaso's esedb parser does not.
     """
     from opensearch_mcp.paths import StagingRefused
-    from opensearch_mcp.wintools import mark_wintools_down, wintools_available
+    from opensearch_mcp.wintools import wintools_available
 
     _fallback_note = (
         "srum: parsed with Plaso fallback (reduced fidelity). "
@@ -64,8 +64,6 @@ def parse_srum(
             print(f"  srum: SrumECmd failed ({e}), trying Plaso...", file=sys.stderr)
             if isinstance(e, StagingRefused):  # the cause, not a missing SrumECmd
                 _fallback_note = f"srum: {e} Parsed with Plaso fallback (reduced fidelity)."
-            if "connection" in str(e).lower() or "timeout" in str(e).lower():
-                mark_wintools_down()
 
     try:
         with counting_present() as kept:  # this attempt's records already in the case
