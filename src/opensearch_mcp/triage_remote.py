@@ -390,7 +390,6 @@ def _enrich_file_artifact(
                     consecutive_failures += 1  # no verdict: a failed call
                     continue
                 consecutive_failures, succeeded = 0, True
-                result = _reference_mismatch(result)
                 if note:
                     result = dict(result, reasons=[*result.get("reasons", []), note])
                 answers[str(h["key"])] = result
@@ -830,11 +829,6 @@ def _flags_only(result: dict) -> dict:
     return dict(result, verdict="UNKNOWN", confidence="low", reasons=reasons)
 
 
-_REFERENCE_MISMATCH = (
-    "hash differs from every reference build; may be a patch level not in the reference"
-)
-
-
 def _amcache_args(path: str, sha1: str, size: str) -> tuple[dict, str | None]:
     """check_file's arguments for one Amcache path and SHA1, and a note when
     the hash isn't passed (none recorded, or past what Amcache hashes)."""
@@ -843,16 +837,6 @@ def _amcache_args(path: str, sha1: str, size: str) -> tuple[dict, str | None]:
     if size.isdigit() and int(size) > _AMCACHE_HASH_LIMIT:
         return {"path": path}, "Hash not compared: Amcache hashes only the first 30 MiB of a file"
     return {"path": path, "hash": sha1}, None
-
-
-def _reference_mismatch(result: dict) -> dict:
-    """A hash that matches no reference build of the path, with nothing else
-    critical, is most often a patch level the reference doesn't hold: UNKNOWN
-    here, never SUSPICIOUS and never EXPECTED."""
-    critical = [f for f in result.get("findings", []) if f.get("severity") == "critical"]
-    if [f.get("type") for f in critical] != ["hash_mismatch"]:
-        return result
-    return dict(result, verdict="UNKNOWN", confidence="low", reasons=[_REFERENCE_MISMATCH])
 
 
 def _stamp_by_hash(

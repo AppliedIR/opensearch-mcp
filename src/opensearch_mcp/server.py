@@ -3892,8 +3892,8 @@ def idx_enrich_triage(
     - a service needs its name and its executable (the ImagePath, the 7045
       event's, or svcscan's registry binary) to match; only the docs carrying
       that pair get the verdict;
-    - Amcache entries are checked with their SHA1; a SHA1 that matches no
-      reference build reads UNKNOWN (often a patch level), never EXPECTED;
+    - Amcache entries are checked with their SHA1; windows-triage reads a SHA1
+      that matches no reference build as UNKNOWN (often a patch level);
     - process-creation events (4688, Sysmon 1) carry their image's verdict;
       other events get no stamp;
     - tasks, Run, Active Setup and NetSh entries only flag (SUSPICIOUS, or

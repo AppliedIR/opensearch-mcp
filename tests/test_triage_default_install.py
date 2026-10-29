@@ -83,15 +83,14 @@ def check_file(args):
             "confidence": "high",
             "reasons": ["Hash matches a baseline build of this file"],
         }
-    if sha1 in (SHA1_OTHER, SHA1_BAD):
-        findings = [{"type": "hash_mismatch", "severity": "critical"}]
-        if sha1 == SHA1_BAD:
-            findings.append({"type": "unicode_evasion", "severity": "critical"})
+    if sha1 == SHA1_OTHER:
+        return {"verdict": "UNKNOWN", "confidence": "low", "reasons": [OTHER_BUILD]}
+    if sha1 == SHA1_BAD:
         return {
             "verdict": "SUSPICIOUS",
             "confidence": "high",
-            "findings": findings,
-            "reasons": ["Hash does not match baseline - possible trojanized binary"],
+            "findings": [{"type": "unicode_evasion", "severity": "critical"}],
+            "reasons": ["Critical filename issues detected", OTHER_BUILD],
         }
     return {"verdict": "EXPECTED", "confidence": "high", "reasons": ["path"]}
 
@@ -343,6 +342,11 @@ def test_persistence_entries_only_flag(triage):
 
 
 AMCACHE = "FullPath,SHA1,Size,Name"
+OTHER_BUILD = (
+    "Hash matches none of the 3 SHA1 values the baseline holds for this path."
+    " A patch level the baseline lacks often causes this."
+    " Changed content can also cause it. Check the file's signature."
+)
 
 
 def test_amcache_entries_are_checked_with_their_sha1(triage):
@@ -367,9 +371,7 @@ def test_amcache_entries_are_checked_with_their_sha1(triage):
     assert "Hash matches" in by("match")["reason"]
     other = by("other build")
     assert (other["verdict"], other["confidence"]) == ("UNKNOWN", "low")
-    assert other["reason"] == (
-        "hash differs from every reference build; may be a patch level not in the reference"
-    )
+    assert other["reason"] == OTHER_BUILD
     assert by("mismatch and more")["verdict"] == "SUSPICIOUS"
     big = by("too big to hash")
     assert big["verdict"] == "EXPECTED" and "first 30 MiB" in big["reason"]
