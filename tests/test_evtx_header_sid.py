@@ -631,7 +631,7 @@ class _FieldLimit:
 def test_a_new_childs_clean_install_names_its_own_refusal_not_an_earlier_read_error(
     acme, monkeypatch
 ):
-    """W5-11(c) in one process, each drop by an ingest() run. Install 1
+    """In one process, each drop by an ingest() run. Install 1
     (ensure_installed_once) can't read the evtx mappings, and run 1's drop
     names that. A new ingest child then starts: its install record, drop
     record and keyword cache start empty (reset here as a new child's are).

@@ -278,7 +278,7 @@ def test_the_reading_quoted_is_the_level_that_fired_with_field_expansions_collap
 
 
 def test_an_unfielded_query_quotes_its_trap_from_the_tail_of_a_long_reading():
-    """W3: an unfielded term expands to every default field, so the reading is
+    """An unfielded term expands to every default field, so the reading is
     about 29 KB and the clauses that make the trap come last."""
     row = {r["row"]: r for r in SETS["real0"]["rows"]}[23]
     assert row["query"] == "mimikatz AND event.code:4624 OR event.code:4672"

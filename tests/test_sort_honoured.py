@@ -1,4 +1,4 @@
-"""idx_search's sort is honoured or refused (W2b, B054): checked through
+"""idx_search's sort is honoured or refused: checked through
 _field_holders, refused before any search, and a field only some indices
 hold sorts with a note naming the indices whose documents come after."""
 
@@ -68,7 +68,7 @@ def _mapped(c, extra: dict) -> None:
     serve(c, {**CASE, **extra})
 
 
-# --- SPEC-001: one reader ----------------------------------------------------
+# --- One reader ----------------------------------------------------
 
 
 def test_the_sort_is_checked_through_field_holders_only():
@@ -79,7 +79,7 @@ def test_the_sort_is_checked_through_field_holders_only():
     assert "_sort_check(" in inspect.getsource(srv.idx_search)
 
 
-# --- SPEC-002: rule 1, the order word ------------------------------------------
+# --- Rule 1, the order word ------------------------------------------
 
 
 @pytest.mark.parametrize("word", ["ascending", "up"])
@@ -102,7 +102,7 @@ def test_no_order_word_is_desc(client):
     assert _sort(client) == [{"Created0x10": {"order": "desc", "unmapped_type": "date"}}]
 
 
-# --- SPEC-003: rule 2, one field -----------------------------------------------
+# --- Rule 2, one field -----------------------------------------------
 
 
 @pytest.mark.parametrize("sort", ["a,b:asc", "*:asc", "Created*:asc", "File Name:asc", ":asc", ""])
@@ -112,7 +112,7 @@ def test_not_one_field_is_refused(client, sort):
 
 
 def test_a_second_sort_after_the_order_is_refused(client):
-    """R17: split at the last ':' (R13), the field is 'Created0x10:asc,EntryNumber':
+    """Split at the last ':', the field is 'Created0x10:asc,EntryNumber':
     rule 2 refuses it, with no search and no read."""
     r = srv.idx_search(query="*", index=MFT, sort="Created0x10:asc,EntryNumber:desc")
     assert _refused(client, r) == ONE_FIELD
@@ -124,7 +124,7 @@ def test_a_field_name_with_a_colon_is_split_at_the_last_one(client):
     assert _refused(client, r) == f"a:b is in no searched index's mapping ({MFT}): {SEE}"
 
 
-# --- SPEC-004: rule 4, held by no searched index -----------------------------------
+# --- Rule 4, held by no searched index -----------------------------------
 
 
 def test_a_keyword_form_no_index_holds_names_its_parent(client):
@@ -137,7 +137,7 @@ def test_a_keyword_form_no_index_holds_names_its_parent(client):
 
 @pytest.mark.parametrize("sort", ["Created0x10.keyword:asc", "FileName:asc"])
 def test_a_field_and_its_parent_or_keyword_are_one_read(client, sort):
-    """R15 (SPEC-012): the parent hint and the .keyword hint reuse the field's
+    """The parent hint and the .keyword hint reuse the field's
     own reads: one field-mapping read, one index list."""
     _refused(client, srv.idx_search(query="*", index=MFT, sort=sort))
     assert _holder_reads(client) == [f"*.mappings.properties.{sort.split('.')[0].split(':')[0]}"]
@@ -149,7 +149,7 @@ def test_a_field_no_index_holds_is_refused(client):
     assert _refused(client, r) == f"NoSuchField is in no searched index's mapping ({MFT}): {SEE}"
 
 
-# --- SPEC-005: rule 4's exception, no @timestamp ----------------------------------
+# --- Rule 4's exception, no @timestamp ----------------------------------
 
 
 @pytest.mark.parametrize("index, use", [
@@ -168,7 +168,7 @@ def test_the_default_sort_with_no_timestamp_searches_with_a_note(client, index, 
     assert r["total"] == 1
 
 
-# --- SPEC-006: rule 5, text ---------------------------------------------------------
+# --- Rule 5, text ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("index", [MFT, None])
@@ -186,7 +186,7 @@ def test_a_text_field_with_no_keyword_is_refused(client, index):
 
 
 def test_text_in_one_index_and_keyword_in_another_is_refused(client):
-    """R12: today OpenSearch sorts the keyword index and fails the text one."""
+    """Today OpenSearch sorts the keyword index and fails the text one."""
     _mapped(client, {f"{C}-delim-1": {"FileName": "keyword"}})
     r = srv.idx_search(query="*", sort="FileName:asc")
     assert _refused(client, r) == (
@@ -196,28 +196,28 @@ def test_text_in_one_index_and_keyword_in_another_is_refused(client):
 
 @pytest.mark.parametrize("order", ["asc", "desc"])
 def test_the_keyword_hint_fed_back_sorts_in_the_asked_order(client, order):
-    """R18: the hint keeps the order the call asked for, as rule 4's does."""
+    """The hint keeps the order the call asked for, as rule 4's does."""
     err = _refused(client, srv.idx_search(query="*", index=MFT, sort=f"FileName:{order}"))
     r = srv.idx_search(query="*", index=MFT, sort=re.search(r"sort by (\S+)$", err)[1])
     assert "error" not in r and r["total"] == 1
     assert _sort(client) == [{"FileName.keyword": {"order": order, "unmapped_type": "keyword"}}]
 
 
-# --- SPEC-007: the sort Args text -----------------------------------------------------
+# --- The sort Args text -----------------------------------------------------
 
 
 @pytest.mark.parametrize("sentence", [
-    "sort: Sort field:order, order asc or desc (default @timestamp:desc).",  # SPEC-002, 005
-    "One field.",  # SPEC-003
-    "A text field sorts only by its .keyword sub-field.",  # SPEC-006
+    "sort: Sort field:order, order asc or desc (default @timestamp:desc).",
+    "One field.",
+    "A text field sorts only by its .keyword sub-field.",
     "EZ-tool CSV indices have no @timestamp: sort them by their own date field "
-    "(e.g. Created0x10:asc).",  # SPEC-005, 008
+    "(e.g. Created0x10:asc).",
 ])  # fmt: skip
 def test_the_sort_args_text(sentence):
     assert sentence in " ".join(srv.idx_search.__doc__.split())
 
 
-# --- SPEC-008 and SPEC-014: rule 8, some indices hold it ---------------------------------
+# --- Rule 8, some indices hold it ---------------------------------
 
 
 def test_a_field_some_indices_hold_sorts_with_a_note(client):
@@ -235,7 +235,7 @@ def test_the_default_sort_over_some_untimed_indices_has_no_note(client):
 
 
 def test_a_keyword_some_indices_hold_is_sent_as_keyword(client):
-    """R4: unmapped_type date on a keyword sort crashes the search (500,
+    """An unmapped_type of date on a keyword sort crashes the search (500,
     class_cast_exception); the holders' type doesn't."""
     r = srv.idx_search(query="*", sort="winlog.channel:asc")
     assert _sort(client) == [{"winlog.channel": {"order": "asc", "unmapped_type": "keyword"}}]
@@ -251,13 +251,13 @@ def test_the_note_names_five_and_counts_the_rest(client):
     assert note.endswith(f"{C}-delim-4, and 3 more, {AFTER}")
 
 
-# --- SPEC-009: rules 6 and 7, measured ---------------------------------------------------
+# --- Rules 6 and 7, measured ---------------------------------------------------
 
 
 @pytest.mark.parametrize("other", ["keyword", "long"])
 def test_holders_of_more_than_one_type_are_refused(client, other):
-    """R2: date in one index and keyword in another is a 500 for the whole
-    search; integer and long are refused too (V5)."""
+    """Date in one index and keyword in another is a 500 for the whole
+    search; integer and long are refused too."""
     _mapped(client, {f"{C}-delim-1": {"event.code": other}})
     r = srv.idx_search(query="*", sort="event.code:asc")
     assert _refused(client, r) == (
@@ -270,7 +270,7 @@ def test_holders_of_more_than_one_type_are_refused(client, other):
 def test_these_metadata_fields_sort_unchecked(client, field):
     srv.idx_search(query="*", sort=f"{field}:asc")
     spec = {"order": "asc"}
-    if field in ("_id", "_index"):  # fields: unmapped_type as at fd2bd78
+    if field in ("_id", "_index"):  # fields: unmapped_type as before
         spec["unmapped_type"] = "date"
     assert _sort(client) == [{field: spec}]
     assert _holder_reads(client) == []
@@ -285,7 +285,7 @@ def test_other_metadata_fields_are_refused(client, field):
     )
 
 
-# --- SPEC-010 (guard): accepted sorts send the W3 tip's body -------------------------------
+# --- Accepted sorts send the same body as before -------------------------------
 
 
 @pytest.mark.parametrize("index, sort, spec", [
@@ -296,7 +296,7 @@ def test_other_metadata_fields_are_refused(client, field):
     (EVTX, "@timestamp:desc", {"@timestamp": {"order": "desc", "unmapped_type": "date"}}),
 ])  # fmt: skip
 def test_an_accepted_sort_sends_the_same_body(client, index, sort, spec):
-    """Byte-equal to fd2bd78's body except the unmapped_type value (R4)."""
+    """Byte-equal to the body before sorts were checked, except the unmapped_type value."""
     srv.idx_search(query="*", index=index, sort=sort)
     body = client.search.call_args.kwargs["body"]
     for got in [*body["sort"][0].values(), *spec.values()]:
@@ -310,12 +310,12 @@ def test_a_numeric_field_is_sent_as_its_type(client):
     assert _sort(client) == [{"event.code": {"order": "desc", "unmapped_type": "integer"}}]
 
 
-# --- SPEC-015: R6, R7, R9, R10, R11 -------------------------------------------------
+# --- No index, the default sort, a time range, hints and closed indices -------------
 
 
 @pytest.mark.parametrize("sort", ["Created0x10:asc", "@timestamp:desc"])
 def test_no_index_matched_gives_the_no_index_error(client, sort):
-    """R6: no check; the search runs and says no open index matched."""
+    """No check; the search runs and says no open index matched."""
     serve(client, {})
     client.search.return_value = NO_INDEX
     r = srv.idx_search(query="*", sort=sort)
@@ -324,7 +324,7 @@ def test_no_index_matched_gives_the_no_index_error(client, sort):
 
 
 def test_an_empty_index_list_makes_no_timestamp_claim(client):
-    """R6: the reads found no index, yet the search answers (an index made since):
+    """The reads found no index, yet the search answers (an index made since):
     no note that no searched index has @timestamp."""
     serve(client, {})
     r = srv.idx_search(query="*")
@@ -341,7 +341,7 @@ def test_the_no_timestamp_note_names_three_own_date_fields(client):
 
 
 def test_a_failed_read_of_timestamp_searches_with_a_note(client):
-    """R7: the default sort is never refused; it searches as today."""
+    """The default sort is never refused; it searches as today."""
     client.indices.get_mapping.side_effect = ConnectionTimeout("TIMEOUT", "read timed out", None)
     r = srv.idx_search(query="*")
     assert r["total"] == 1 and r["sort_note"] == (
@@ -374,7 +374,7 @@ def test_a_window_reads_the_timestamp_holders_once(client, sort):
 
 @pytest.mark.parametrize("other", ["text", "keyword"])
 def test_timestamp_of_another_type_is_never_refused(client, other):
-    """R7: the shard that can't sort fails as today, and partial_warning names it."""
+    """The shard that can't sort fails as today, and partial_warning names it."""
     _mapped(client, {f"{C}-delim-1": {"@timestamp": other}})
     r = srv.idx_search(query="*")
     assert r["total"] == 1 and "sort_note" not in r
@@ -382,7 +382,7 @@ def test_timestamp_of_another_type_is_never_refused(client, other):
 
 
 def test_a_window_leaves_the_untimed_indices_out_of_the_note(client):
-    """R9: the range leaves out the indices with no @timestamp."""
+    """The range leaves out the indices with no @timestamp."""
     _mapped(client, {LNK: {"TargetModified": "date"}})
     r = srv.idx_search(query="*", sort="winlog.channel:asc", time_from="2024-01-01T00:00:00Z")
     assert r["sort_note"] == (
@@ -401,7 +401,7 @@ def test_no_note_when_the_window_leaves_out_every_index_lacking_it(client):
 
 @pytest.mark.parametrize("more", [0, 6])
 def test_a_window_that_leaves_out_every_holder_says_so(client, more):
-    """R16: Created0x10 is only in untimed mft indices, which the range leaves out;
+    """Created0x10 is only in untimed mft indices, which the range leaves out;
     the names take rule 8's form."""
     extra = {f"{C}-mft-{i}": {"Created0x10": "date"} for i in range(1, more + 1)}
     _mapped(client, extra)
@@ -435,7 +435,7 @@ def test_a_window_that_leaves_out_every_keyword_holder_sends_keyword(client):
     ("_routing.keyword:asc", "", {}, None),
 ])  # fmt: skip
 def test_a_hint_names_a_sort_that_is_accepted(client, sort, index, extra, hint):
-    """R10: a refusal's hint, fed back to idx_search, is accepted; a form the
+    """A refusal's hint, fed back to idx_search, is accepted; a form the
     rules refuse is never named."""
     _mapped(client, extra)
     got = re.search(
@@ -448,7 +448,7 @@ def test_a_hint_names_a_sort_that_is_accepted(client, sort, index, extra, hint):
 
 
 def test_a_text_only_parent_is_not_named(client):
-    """R10: Ftxt:asc would be refused too, so Ftxt.keyword gets the generic text."""
+    """Ftxt:asc would be refused too, so Ftxt.keyword gets the generic text."""
     _mapped(client, {f"{C}-delim-1": {"Ftxt": "text"}})
     r = srv.idx_search(query="*", sort="Ftxt.keyword:asc")
     assert _refused(client, r) == f"Ftxt.keyword is in no searched index's mapping ({C}-*): {SEE}"
@@ -470,7 +470,7 @@ def test_a_keyword_of_two_types_is_not_named(client):
 
 
 def test_a_closed_index_named_explicitly_is_not_said_to_lack_it(client):
-    """R11: cat lists an explicitly named closed index; _mapping leaves it out."""
+    """The cat API lists an explicitly named closed index; _mapping leaves it out."""
     closed = f"{C}-mft-9"
     client.cat.indices = MagicMock(return_value=[{"index": closed}])
     r = srv.idx_search(query="*", index=closed, sort="Created0x10:asc")

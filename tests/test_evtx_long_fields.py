@@ -101,7 +101,7 @@ def test_only_the_two_event_data_limits_the_unfielded_set_and_the_header_sid_cha
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
     assert m["properties"].pop("winlog.user.identifier") == {"type": "keyword"}
-    # the unfielded set (W3): the dates rule, copy_to, both catch-alls, lenient
+    # the unfielded set: the dates rule, copy_to, both catch-alls, lenient
     del m["dynamic_templates"][0], m["dynamic_templates"][0][RULE]["mapping"]["copy_to"]
     del m["properties"][ALL], t["template"]["settings"]["index.query_string.lenient"]
     del m["properties"]["winlog.event_data_dates_all"]

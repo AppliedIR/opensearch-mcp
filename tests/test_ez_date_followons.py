@@ -142,7 +142,7 @@ def test_a_query_naming_no_ez_date_reads_only_the_sort_check(two_indices):
     srv.idx_count(query="FileName:evil.exe", index="case-*")
     srv.idx_search(query="Created0x10_note:x", index="case-*")  # not the field itself
     reads = [c.kwargs["filter_path"] for c in two_indices.indices.get_mapping.call_args_list]
-    assert reads == ["*.mappings.properties.@timestamp"]  # the default sort's own check (W2b)
+    assert reads == ["*.mappings.properties.@timestamp"]  # the default sort's own check
 
 
 # --- every measured EZ date column is typed ------------------------------------

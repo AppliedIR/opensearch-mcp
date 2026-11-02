@@ -406,7 +406,7 @@ def _write(files, records=None):
     """parse_and_index over `files` (or `records`) in a new case, every bulk
     request captured, its first batch sent twice. Returns (key set, id_scheme
     seen, the first batch's _ids each time, records sent)."""
-    name = f"w3e-{uuid.uuid4().hex[:6]}"
+    name = f"unf-{uuid.uuid4().hex[:6]}"
     case = wc.case_dir_for(name)
     (case / "CASE.yaml").write_text(
         f"case_id: {name}\ncase_uuid: {uuid.uuid4().hex}\nnaming_version: 2\n"

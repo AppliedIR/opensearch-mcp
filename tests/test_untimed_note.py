@@ -101,7 +101,7 @@ def test_search_without_a_window_reads_only_the_sort_check(client):
     r = srv.idx_search(query="*")
     assert "time_note" not in r and r["hint"].startswith("No results. A keyword field")
     reads = [c.kwargs["filter_path"] for c in client.indices.get_mapping.call_args_list]
-    assert reads.count("*.mappings.properties.@timestamp") == 1  # the sort's check only (W2b)
+    assert reads.count("*.mappings.properties.@timestamp") == 1  # the sort's check only
 
 
 @pytest.mark.parametrize("field, window, why", [
