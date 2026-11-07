@@ -30,7 +30,7 @@ from opensearch_mcp.ingest import ingest
 from opensearch_mcp.ingest_cli import _rebuilt_status_host
 from opensearch_mcp.normalize import normalize_event
 
-SID = "S-1-5-21-2838623409-1327563992-2591358621-1220"
+SID = "S-1-5-21-1111111111-2222222222-3333333333-1220"  # synthetic SID
 FIELD = "winlog.user.identifier"
 
 
@@ -38,7 +38,7 @@ def _record(security=..., event_data=None):
     system = {
         "EventID": 1040,
         "Channel": "Application",
-        "Computer": "RD01",
+        "Computer": "HOST01",  # synthetic host
         "TimeCreated": {"#attributes": {"SystemTime": "2024-01-15T10:30:00Z"}},
         "Provider": {"#attributes": {"Name": "MsiInstaller"}},
     }
@@ -69,8 +69,8 @@ def test_no_header_shape_raises_and_a_missing_sid_writes_no_key(security):
 
 
 def test_the_user_name_still_comes_from_the_event_data():
-    doc = normalize_event(_record({"#attributes": {"UserID": SID}}, {"TargetUserName": "tdungan"}))
-    assert (doc["user.name"], doc[FIELD]) == ("tdungan", SID)
+    doc = normalize_event(_record({"#attributes": {"UserID": SID}}, {"TargetUserName": "user01"}))
+    assert (doc["user.name"], doc[FIELD]) == ("user01", SID)  # synthetic user
     assert "user.name" not in normalize_event(_record({"#attributes": {"UserID": SID}}))
 
 
@@ -155,7 +155,8 @@ def write(request, tmp_path, monkeypatch):
     monkeypatch.setattr(wc, "prepare_index", lambda c, i: calls.append(("prepare", i)))
     monkeypatch.setattr(wc, "note_second_copy", lambda *a: "")
     case = make_case(tmp_path / "cases", "sid")
-    ctx = wc.open_unit(case, "evidence/RD01", "RD01", source="evidence folder")
+    # HOST01: a synthetic host
+    ctx = wc.open_unit(case, "evidence/HOST01", "HOST01", source="evidence folder")
     monkeypatch.setattr(wc, "_imported", {ctx.case_dir})
     index = f"case-{ctx.c12}-evtx-0"
     kinds: dict[str, object] = {}
@@ -174,8 +175,10 @@ def write(request, tmp_path, monkeypatch):
     def run(*sids, kind="keyword", header=True, extra=None):
         kinds[index] = kind
         marks = header if isinstance(header, (list, tuple)) else [header] * len(sids)
+        # host.name HOST01: a synthetic host
         actions = [
-            {"_index": index, "_id": f"r{n}", "_source": {"event.code": 1040, "host.name": "RD01",
+            {"_index": index, "_id": f"r{n}", "_source": {"event.code": 1040,
+                                                          "host.name": "HOST01",
                                                           **({FIELD: s} if s else {}),
                                                           **(extra or {})},
              **({wc.HEADER_SID_KEY: True} if marks[n] else {})}
