@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from test_evtx_fields_table import TARGETS, USER_PUT
 
 from opensearch_mcp import ingest_status, mappings
 from opensearch_mcp import server as srv
@@ -225,6 +226,7 @@ class _Cluster:
 def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     cluster = _Cluster({IDX: _index_064()})
     result = mappings.ensure_winlog_pipeline(cluster.client())
+    # the raise, the header SID's own put, then the table's fields' own put
     assert cluster.to(IDX) == [{
         "dynamic_templates": [rule(8191)],
         "properties": {"winlog": {"properties": {"event_data": {"properties": {
@@ -233,7 +235,7 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     }, {  # the header SID's own put, after the raise
         "properties": {"winlog": {"properties": {
             "user": {"properties": {"identifier": {"type": "keyword"}}}}}},
-    }]  # fmt: skip
+    }, USER_PUT]  # fmt: skip
     assert cluster.limits(IDX) == {
         "Payload": 8191, "Details": 8191, "ContextInfo": 8191, "ScriptBlockText": 32766,
         "Data.#text": 8191, "Data_raw.keyword": 10000, "rule": 8191,
@@ -242,7 +244,7 @@ def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     assert result["evtx_patched"] == {IDX: [
         "winlog.event_data.ContextInfo", "winlog.event_data.Data.#text",
         "winlog.event_data.Details", "winlog.event_data.Payload", RULE,
-        "winlog.user.identifier"]}  # fmt: skip
+        "winlog.user.identifier", *TARGETS]}  # fmt: skip
 
 
 def test_a_second_install_sends_the_patched_index_nothing():
@@ -284,7 +286,7 @@ def test_a_refused_patch_is_reported_and_the_other_indices_are_patched():
     assert result["status"] == "partial"
     assert [f["index"] for f in result["evtx_failed"]] == [IDX]
     assert sorted(result["evtx_patched"]) == [IDX, other] and cluster.limits(other)["rule"] == 8191
-    assert result["evtx_patched"][IDX] == ["winlog.user.identifier"]
+    assert result["evtx_patched"][IDX] == ["winlog.user.identifier", *TARGETS]
     assert cluster.limits(IDX)["rule"] == 1024
 
 

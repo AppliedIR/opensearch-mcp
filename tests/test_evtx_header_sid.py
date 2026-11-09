@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from record_ids_cluster import make_case
+from test_evtx_fields_table import TARGETS, USER_PUT
 
 from opensearch_mcp import ingest_status, mappings, ops
 from opensearch_mcp import server as srv
@@ -82,10 +83,12 @@ def test_the_template_maps_it_keyword_without_a_text_form():
 # --- the install's forward map ----------------------------------------------
 
 
-def _mapping(sid=None):
+def _mapping(sid=None, table=False):
     props = {"event": {"properties": {"code": {"type": "integer"}}}}
     if sid:
         props["winlog"] = {"properties": {"user": {"properties": {"identifier": sid}}}}
+    if table:  # the user and group fields the table maps
+        props.update(USER_PUT["properties"])
     return {"mappings": {"properties": props}}
 
 
@@ -113,15 +116,15 @@ def _patch(indices, refuse=(), low=({}, {})):
 
 def test_an_old_index_is_given_the_field_and_one_that_has_it_is_sent_nothing():
     result, sent = _patch({"case-a-evtx-0": _mapping(), "case-b-evtx-0": _mapping(
-        {"type": "keyword"})})  # fmt: skip
-    assert sent == [("case-a-evtx-0", SID_PUT)]
-    assert result["patched"] == {"case-a-evtx-0": [FIELD]}
+        {"type": "keyword"}, table=True)})  # fmt: skip
+    assert sent == [("case-a-evtx-0", SID_PUT), ("case-a-evtx-0", USER_PUT)]
+    assert result["patched"] == {"case-a-evtx-0": [FIELD, *TARGETS]}
     assert result["unchanged"] == ["case-b-evtx-0"]
 
 
 def test_a_refused_put_is_named_with_its_error_and_its_field():
     result, _ = _patch({"case-a-evtx-0": _mapping()}, refuse={"case-a-evtx-0"})
-    assert result["patched"] == {}
+    assert result["patched"] == {"case-a-evtx-0": TARGETS}
     assert result["failed"] == [{"index": "case-a-evtx-0", "error": LIMIT, "field": FIELD}]
 
 
@@ -132,8 +135,9 @@ def test_a_refused_sid_put_never_costs_the_raise_which_goes_first_as_base_sent_i
     low = ({"winlog.event_data.Payload"}, props)
     result, sent = _patch({"case-a-evtx-0": _mapping()}, refuse={"case-a-evtx-0"}, low=low)
     raise_put = {"properties": {"winlog": {"properties": {"event_data": {"properties": props}}}}}
-    assert sent == [("case-a-evtx-0", raise_put), ("case-a-evtx-0", SID_PUT)]
-    assert result["patched"] == {"case-a-evtx-0": ["winlog.event_data.Payload"]}
+    assert sent == [("case-a-evtx-0", raise_put), ("case-a-evtx-0", SID_PUT),
+                    ("case-a-evtx-0", USER_PUT)]  # fmt: skip
+    assert result["patched"] == {"case-a-evtx-0": ["winlog.event_data.Payload", *TARGETS]}
     assert result["failed"] == [{"index": "case-a-evtx-0", "error": LIMIT, "field": FIELD}]
 
 
