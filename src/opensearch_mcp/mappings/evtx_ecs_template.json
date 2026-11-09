@@ -77,6 +77,27 @@
         "user.effective.name": {
           "type": "keyword"
         },
+        "user.domain": {
+          "type": "keyword"
+        },
+        "user.id": {
+          "type": "keyword"
+        },
+        "user.effective.domain": {
+          "type": "keyword"
+        },
+        "user.effective.id": {
+          "type": "keyword"
+        },
+        "group.name": {
+          "type": "keyword"
+        },
+        "group.domain": {
+          "type": "keyword"
+        },
+        "group.id": {
+          "type": "keyword"
+        },
         "winlog.user.identifier": {
           "type": "keyword"
         },

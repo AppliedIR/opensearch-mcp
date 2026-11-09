@@ -2,7 +2,49 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 _INVALID_IPS = {"", "-", "LOCAL", "::"}
+_FIELDS_HEADER = [
+    "channel",
+    "provider",
+    "event_id",
+    "target",
+    "sources",
+    "skip",
+    "transform",
+    "cite",
+]
+
+
+def load_fields_table(path) -> dict[tuple, list[tuple]]:
+    """The evtx fields table: for each (channel, provider, event id), its rows
+    (target, sources, values to skip) in file order. Raises ValueError on a
+    table it can't trust, never returning an empty one: an empty table would
+    silently give every event the generic fields again."""
+    lines = [line for line in Path(path).read_text(encoding="utf-8").splitlines() if line]
+    if not lines or lines[0].split("\t") != _FIELDS_HEADER:
+        raise ValueError(f"{path}: the header isn't {_FIELDS_HEADER}")
+    table: dict[tuple, list[tuple]] = {}
+    for n, line in enumerate(lines[1:], 2):
+        cells = line.split("\t")
+        if len(cells) != len(_FIELDS_HEADER):
+            raise ValueError(f"{path}:{n}: {len(cells)} cells, not {len(_FIELDS_HEADER)}")
+        channel, provider, eid, target, sources, skip, transform, cite = cells
+        if transform != "none" or not cite.strip() or not eid.isdigit():
+            raise ValueError(f"{path}:{n}: transform, cite or event id not valid: {cells}")
+        rows = table.setdefault((channel, provider, int(eid)), [])
+        if any(row[0] == target for row in rows):
+            raise ValueError(f"{path}:{n}: {target} repeated for its key")
+        rows.append((target, sources.split(","), set(skip.split(",")) | {""}))
+    if not table:
+        raise ValueError(f"{path}: no rows")
+    return table
+
+
+_FIELDS = load_fields_table(Path(__file__).resolve().parent / "mappings" / "evtx_fields.tsv")
+# every field the table names, in the order it first names them
+FIELDS_TARGETS = list(dict.fromkeys(row[0] for rows in _FIELDS.values() for row in rows))
 
 
 def _coerce_list_item(item):
@@ -130,6 +172,19 @@ def normalize_event(data: dict) -> dict:
         "file.path": payload.get("TargetFilename"),
         "script_block_text": payload.get("ScriptBlockText"),
     }
+
+    # A key the table has rows for takes every field the table names only from
+    # its rows: the first source present, not None and not a value to skip.
+    rows = _FIELDS.get((system.get("Channel"), provider_name, eid))
+    if rows:
+        for target in FIELDS_TARGETS:
+            doc.pop(target, None)
+        for target, sources, skip in rows:
+            for source in sources:
+                value = payload.get(source)
+                if value is not None and str(value) not in skip:
+                    doc[target] = value
+                    break
 
     # Coerce EventData/UserData scalar values to strings for consistent dynamic
     # mapping. Prevents type conflicts across Event IDs (e.g., LogonType: "3" vs 3).
