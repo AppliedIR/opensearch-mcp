@@ -98,10 +98,14 @@ def test_the_other_limits_are_unchanged():
     assert p["process.command_line"]["fields"]["keyword"] == kw(2048)
 
 
-def test_only_the_two_event_data_limits_the_unfielded_set_and_the_header_sid_changed():
+def test_only_the_event_data_limits_unfielded_set_header_sid_and_table_fields_changed():
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
     assert m["properties"].pop("winlog.user.identifier") == {"type": "keyword"}
+    # the fields table's targets, each keyword (0.6.4 had user.name and user.effective.name)
+    for field in TARGETS:
+        if field not in ("user.name", "user.effective.name"):
+            assert m["properties"].pop(field) == {"type": "keyword"}
     # the unfielded set: the dates rule, copy_to, both catch-alls, lenient
     del m["dynamic_templates"][0], m["dynamic_templates"][0][RULE]["mapping"]["copy_to"]
     del m["properties"][ALL], t["template"]["settings"]["index.query_string.lenient"]
