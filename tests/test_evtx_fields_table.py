@@ -87,6 +87,8 @@ PAYLOADS = {
     "R799": {**_799, **ALICE, **GROUP},
     "R799S": {**_799, **GROUP, "SubjectUserSid": "-", "SubjectUserName": "-",
               "SubjectDomainName": ""},
+    # a 4799 record without SubjectUserSid: the field it fills is absent
+    "R799N": {**_799, **GROUP, "SubjectUserName": "alice", "SubjectDomainName": "WS01"},
     "RG24": {"TargetUserName": "jsmith", "SubjectUserName": "SYSTEM",
              "SubjectDomainName": "NT AUTHORITY", "LogonType": "3"},
     "RGFW": {**_799, **ALICE, **GROUP},
@@ -96,6 +98,7 @@ RECORDS = {
     "R688T": _record(4688, PAYLOADS["R688T"]),
     "R799": _record(4799, PAYLOADS["R799"]),
     "R799S": _record(4799, PAYLOADS["R799S"]),
+    "R799N": _record(4799, PAYLOADS["R799N"]),
     "RG24": _record(4624, PAYLOADS["RG24"]),
     "RGFW": _record(4799, PAYLOADS["RGFW"], channel="ForwardedEvents"),
 }
@@ -122,6 +125,8 @@ ROWS = [
     ("s-name-absent", "R799S", ("user.name",), ABSENT),
     ("s-domain-absent", "R799S", ("user.domain",), ABSENT),
     ("s-group", "R799S", "group.name", "Administrators"),
+    ("n-id-absent", "R799N", ("user.id",), ABSENT),
+    ("n-name", "R799N", "user.name", "alice"),
     ("u-name", "RG24", "user.name", "jsmith"),
     ("u-eff", "RG24", "user.effective.name", "SYSTEM"),
     ("u-no-new", "RG24", ("user.domain", "user.id", "group.name", "group.domain", "group.id"),
