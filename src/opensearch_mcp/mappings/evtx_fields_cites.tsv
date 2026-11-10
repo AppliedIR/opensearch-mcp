@@ -1,0 +1,6 @@
+key	source	url
+MSL4688	Microsoft Learn	https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4688
+MSL4799	Microsoft Learn	https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4799
+ECS-U	ECS	https://www.elastic.co/guide/en/ecs/current/ecs-user.html
+ECS-UU	ECS	https://www.elastic.co/guide/en/ecs/current/ecs-user-usage.html
+ECS-G	ECS	https://www.elastic.co/guide/en/ecs/current/ecs-group.html
