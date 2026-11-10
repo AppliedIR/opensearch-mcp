@@ -105,7 +105,7 @@ def test_only_the_event_data_limits_unfielded_set_header_sid_and_table_fields_ch
     # the fields table's targets, each keyword (0.6.4 had user.name and user.effective.name)
     for field in TARGETS:
         if field not in ("user.name", "user.effective.name"):
-            assert m["properties"].pop(field) == {"type": "keyword"}
+            assert m["properties"].pop(field, None) == {"type": "keyword"}
     # the unfielded set: the dates rule, copy_to, both catch-alls, lenient
     del m["dynamic_templates"][0], m["dynamic_templates"][0][RULE]["mapping"]["copy_to"]
     del m["properties"][ALL], t["template"]["settings"]["index.query_string.lenient"]
