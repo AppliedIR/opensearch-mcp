@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from opensearchpy.exceptions import RequestError, TransportError
+from test_evtx_fields_table import TARGETS, USER_PUT
 from test_evtx_long_fields import _Cluster, _index_064, kw, rule
 from test_partial_shard_answers import Cluster, failures, run, tools  # noqa: F401 (fixture)
 
@@ -343,17 +344,20 @@ def _current() -> dict:
     ],
     ids=["1024 index", "current index", "after the upgrade", "after the upgrade, rule lowered"],
 )
-def test_the_patch_raises_an_indexs_own_rule_then_maps_the_header_sid_and_nothing_else(
+def test_the_patch_raises_an_indexs_own_rule_then_maps_the_header_sid_and_table_fields(
     index, rules
 ):
     cluster = _Cluster({IDX: copy.deepcopy(index)})
     client = cluster.client()
     result = mappings.patch_evtx_indices(client)
-    # these indices predate the header SID, so its own put comes last, and only it
-    *puts, sid = cluster.to(IDX)
-    assert sid == SID_PUT
+    # these indices predate the header SID and the table's fields: their own
+    # puts come last, the SID's then the fields'
+    sent = cluster.to(IDX)
+    assert sent[-2:] == [SID_PUT, USER_PUT]
+    puts = sent[:-2]
     if rules is None:
-        assert puts == [] and result == {"patched": {IDX: [SID]}, "unchanged": [], "failed": []}
+        want = {"patched": {IDX: [SID, *TARGETS]}, "unchanged": [], "failed": []}
+        assert puts == [] and result == want
         return
     (put,) = puts
     assert put["dynamic_templates"] == rules
@@ -361,7 +365,7 @@ def test_the_patch_raises_an_indexs_own_rule_then_maps_the_header_sid_and_nothin
         assert ALL not in json.dumps(put) and "event_data_all" not in json.dumps(put)
         assert "event_data_dates_all" not in json.dumps(put)
     client.indices.put_settings.assert_not_called()
-    assert result["patched"][IDX][-2:] == [STRINGS, SID]
+    assert result["patched"][IDX][-11:] == [STRINGS, SID, *TARGETS]
 
 
 # --- (e) What parse_evtx writes ------------------------------------------------

@@ -1,0 +1,13 @@
+channel	provider	event_id	target	sources	skip	transform	cite
+Security	Microsoft-Windows-Security-Auditing	4688	user.name	SubjectUserName	-	none	MSL4688 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4688	user.domain	SubjectDomainName	-	none	MSL4688 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4688	user.id	SubjectUserSid	-	none	MSL4688 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4688	user.effective.name	TargetUserName	-	none	MSL4688 ECS-U
+Security	Microsoft-Windows-Security-Auditing	4688	user.effective.domain	TargetDomainName	-	none	MSL4688 ECS-U
+Security	Microsoft-Windows-Security-Auditing	4688	user.effective.id	TargetUserSid	-,S-1-0-0	none	MSL4688 ECS-U
+Security	Microsoft-Windows-Security-Auditing	4799	user.name	SubjectUserName	-	none	MSL4799 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4799	user.domain	SubjectDomainName	-	none	MSL4799 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4799	user.id	SubjectUserSid	-	none	MSL4799 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4799	group.name	TargetUserName	-	none	MSL4799 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4799	group.domain	TargetDomainName	-	none	MSL4799 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4799	group.id	TargetSid	-	none	MSL4799 ECS-G

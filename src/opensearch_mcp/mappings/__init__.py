@@ -563,6 +563,29 @@ def _low_event_data(
     return low, body
 
 
+def _mapped(mapping: dict, field: str) -> bool:
+    """Whether an index's mapping maps the dotted `field`, of any type."""
+    node: Any = mapping
+    for part in field.split("."):
+        props = node.get("properties") if isinstance(node, dict) else None
+        node = props.get(part) if isinstance(props, dict) else None
+        if not isinstance(node, dict):
+            return False
+    return True
+
+
+def _keyword_props(fields: list[str]) -> dict:
+    """put_mapping properties mapping each dotted field `keyword`."""
+    out: dict = {}
+    for field in fields:
+        node = out
+        *parents, leaf = field.split(".")
+        for parent in parents:
+            node = node.setdefault(parent, {"properties": {}})["properties"]
+        node[leaf] = {"type": "keyword"}
+    return out
+
+
 def _low_rule(rules: list, rule: int) -> int | None:
     """The index's own event-data rule's limit, when below the template's."""
     for entry in rules:
@@ -590,10 +613,15 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
     below the template's limit for its path. A second put of its own maps
     the header SID (`winlog.user.identifier`) `keyword` where it isn't
     mapped, so an old index never maps it by guess, and its refusal (one
-    field over an index's field limit) never costs the raise. A refused SID
-    put is named with its field. A limit is never lowered, and an index
-    already at the template's limits is sent nothing. Records already stored
-    keep the limit they were indexed with."""
+    field over an index's field limit) never costs the raise. A third maps
+    the fields the evtx fields table names `keyword` where they aren't mapped
+    yet, after the SID's, so its refusal never costs the SID. A refused SID put
+    is named with its field, a refused table put with its fields. A limit is
+    never lowered, and an index already at the template's limits with every
+    field mapped is sent nothing. Records already stored keep the limit they
+    were indexed with and the fields they were indexed with."""
+    from opensearch_mcp.normalize import FIELDS_TARGETS
+
     results: dict[str, Any] = {"patched": {}, "unchanged": [], "failed": []}
     explicit, rule = _evtx_limits()
     try:
@@ -617,7 +645,8 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
         if _low_rule(rules, rule) is not None:  # the index's own rule, only its limit raised
             raised = [_raised_rule(e, rule) if _EVTX_RULE in e else e for e in rules]
         sid_missing = _SID not in _event_data(mapping, "user")
-        if not props and raised == rules and not sid_missing:
+        missing = [f for f in FIELDS_TARGETS if not _mapped(mapping, f)]
+        if not props and raised == rules and not sid_missing and not missing:
             results["unchanged"].append(index)
             continue
         patched: list[str] = []
@@ -644,6 +673,15 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
                 results["failed"].append(
                     {"index": index, "error": str(e), "field": "winlog.user.identifier"}
                 )
+        if missing:
+            try:
+                client.indices.put_mapping(
+                    index=index, body={"properties": _keyword_props(missing)}
+                )
+                patched += missing
+            except Exception as e:
+                logger.warning("patch_evtx_indices: %s's table fields failed: %s", index, e)
+                results["failed"].append({"index": index, "error": str(e), "fields": missing})
         if patched:
             results["patched"][index] = patched
     if audit is not None and (results["patched"] or results["failed"]):
