@@ -506,6 +506,12 @@ def test_patch_a_parent_mapped_as_a_leaf_is_given_no_sub_field():
     assert [f for f in result["patched"][IDX] if f.startswith("user.target.")] == []
 
 
+def test_a_field_under_a_parent_mapped_as_a_leaf_counts_as_mapped():
+    leaf = {"properties": {"user": {"properties": {"target": {"type": "keyword"}}}}}
+    assert mappings._mapped(leaf, "user.target.name")
+    assert not mappings._mapped({"properties": {"user": {"properties": {}}}}, "user.target.name")
+
+
 def test_patch_an_index_with_every_field_and_rule_is_sent_nothing():
     result, sent = _patch({IDX: _index(*NEW, rules=[_own(8191), UD])})
     assert (sent, result["unchanged"]) == ([], [IDX])

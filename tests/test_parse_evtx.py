@@ -218,3 +218,24 @@ class TestParseAndIndex:
         assert "pipeline_version" in doc
         assert "vhir.source_file" not in doc
         assert "vhir.ingest_audit_id" not in doc
+
+    @patch("opensearch_mcp.parse_evtx.PyEvtxParser")
+    @patch("opensearch_mcp.bulk.helpers")
+    def test_a_name_that_is_an_object_names_no_related_user(self, mock_helpers, mock_parser_cls):
+        """A TargetUserName pyevtx-rs gives as an object is left out of related.user,
+        and the record after it still indexes with its own related.user."""
+        odd = json.loads(_make_record(4624)["data"])
+        odd["Event"]["EventData"]["TargetUserName"] = {"#text": "x", "#attributes": {"a": "1"}}
+        mock_parser = MagicMock()
+        mock_parser.records_json.return_value = [{"data": json.dumps(odd)}, _make_record(4625)]
+        mock_parser_cls.return_value = mock_parser
+        mock_helpers.bulk.side_effect = _mock_bulk
+
+        count, skipped, _bf = parse_and_index(
+            evtx_path="test.evtx", client=MagicMock(), index_name="test"
+        )
+
+        assert (count, skipped) == (2, 0)
+        first, second = (a["_source"] for a in mock_helpers.bulk.call_args[0][1])
+        assert "related.user" not in first
+        assert second["related.user"] == ["testuser"]

@@ -268,7 +268,9 @@ def _derive(doc: dict) -> None:
         "related.hash": hashes,
     }
     for field, values in related.items():
-        values = list(dict.fromkeys(v for v in values if v not in (None, "", "-")))
+        values = list(
+            dict.fromkeys(v for v in values if isinstance(v, str) and v not in ("", "-"))
+        )
         if values:
             doc[field] = values
 
