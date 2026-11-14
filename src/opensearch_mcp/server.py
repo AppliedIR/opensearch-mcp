@@ -1813,7 +1813,9 @@ def idx_search(
     IMPORTANT: a keyword field (most of winlog.event_data.*) holds the whole value as
     one case-sensitive term, so a wildcard covers the rest of the value:
     winlog.event_data.NewProcessName:*lsass.exe finds C:\\Windows\\System32\\lsass.exe;
-    lsass.exe or *LSASS.EXE there finds nothing. A text field
+    lsass.exe or *LSASS.EXE there finds nothing. On evtx, process.name is the file
+    name (process.name:cmd.exe) and process.executable its path; records ingested
+    before 0.6.6.2 hold the path in process.name. A text field
     (script_block_text) is split into words: quote a phrase,
     script_block_text:"Set-Alias"; a wildcard matches within one word
     (script_block_text:set*), so script_block_text:*Set?Alias* finds nothing. IP-typed fields
