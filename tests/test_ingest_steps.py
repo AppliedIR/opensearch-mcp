@@ -834,7 +834,9 @@ def test_a_non_object_evtx_data_goes_to_data_raw_as_the_pipeline_writes_it():
         assert doc == {"winlog.event_data": {"Data_raw": raw, "User": "bob"}}
     obj = {"winlog.event_data": {"Data": {"Name": "a"}}}
     _normalise_data(obj)
-    assert obj == {"winlog.event_data": {"Data": {"Name": "a"}}}  # an object stays
+    assert obj == {
+        "winlog.event_data": {"Data": {"Name": "a"}, "Data_raw": "{Name=a}"}
+    }  # kept, mirrored
 
 
 def test_every_template_maps_the_original_and_content_hash_as_keywords():

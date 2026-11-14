@@ -67,16 +67,19 @@ def _java_text(value) -> str:
         return "true" if value else "false"
     if isinstance(value, list):
         return "[" + ", ".join(_java_text(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{k}={_java_text(v)}" for k, v in value.items()) + "}"
     return str(value)
 
 
 def _normalise_data(doc: dict) -> None:
-    """A non-object `winlog.event_data.Data` goes to `Data_raw` as the bound
-    pipeline would put it, so the pipeline leaves the record as sent and its
-    content hash holds for the stored record."""
+    """`winlog.event_data.Data` goes to `Data_raw` as the bound pipeline would
+    put it (an object stays as `Data` too), so the pipeline leaves the record
+    as sent and its content hash holds for the stored record."""
     ed = doc.get("winlog.event_data")
-    if isinstance(ed, dict) and "Data" in ed and not isinstance(ed["Data"], dict):
-        ed["Data_raw"] = _java_text(ed.pop("Data"))
+    if isinstance(ed, dict) and "Data" in ed:
+        data = ed["Data"] if isinstance(ed["Data"], dict) else ed.pop("Data")
+        ed["Data_raw"] = _java_text(data)
 
 
 def parse_and_index(

@@ -1,0 +1,17 @@
+opensearch-mcp
+Copyright (c) 2026 AppliedIncidentResponse.com
+Licensed under the MIT License (LICENSE), except as noted below.
+
+src/opensearch_mcp/normalize.py ports from OSS Winlogbeat (Elastic Beats, outside x-pack)
+the Windows keyword, level and opcode names (sys/winevent/winmeta.go), the record-header
+fields it keeps (sys/winevent/event.go) and its paramN rule (sys/winevent/maputil.go).
+Those parts are licensed under the Apache License 2.0 (LICENSE-APACHE):
+
+  Elastic Beats
+  Copyright 2014-2026 Elasticsearch BV
+
+The evtx field names and their meanings follow the Elastic Common Schema, licensed under
+the Apache License 2.0 (LICENSE-APACHE):
+
+  Elastic Common Schema
+  Copyright 2018-2021 Elasticsearch B.V.

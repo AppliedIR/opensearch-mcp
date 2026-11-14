@@ -26,7 +26,7 @@ opensearch-mcp solves this by **parsing evidence programmatically and indexing i
 
 | Parser | Artifacts | Source |
 |--------|-----------|--------|
-| evtx | Windows Event Logs | pyevtx-rs (ECS-normalized) |
+| evtx | Windows Event Logs | pyevtx-rs (ECS-aligned) |
 | EZ Tools | Shimcache, Amcache, MFT, USN, Registry (system hives, and each user's NTUSER.DAT and UsrClass.dat), Shellbags, Jumplists, LNK, Recyclebin, Timeline | Eric Zimmerman tools via wintools-mcp |
 | Volatility 3 | Memory forensics (26 plugins, 3 tiers) | vol3 subprocess |
 | JSON/JSONL | Suricata EVE, tshark, Velociraptor, any JSON | Auto-detect format |
@@ -45,6 +45,14 @@ Every parser produces:
 - Deterministic content-based document IDs (re-ingest = zero duplicates)
 - Full provenance: `host.name`, `host.id`, `vhir.source_file`, `vhir.ingest_audit_id`, `vhir.content_hash`, `vhir.parse_method`, `pipeline_version`, and `vhir.original.path` and `vhir.original.sha256` when the ingest started from registered evidence
 - Proper `@timestamp` with timezone handling (local-time artifacts require `--source-timezone`)
+
+Evtx records are ECS-aligned. The record header gives `event.provider`, `event.action`, `event.outcome`, `log.level`,
+`winlog.keywords`, `winlog.task` and `winlog.opcode`. Each Security event with rows in
+`mappings/evtx_fields.tsv` takes its `user.*`, `user.target.*`, `user.effective.*`, `group.*`, `process.*` and
+`source.*` fields from those rows only: `user.*` is the account that acted, `user.target.*` the account acted on.
+`process.name` and `process.parent.name` are file names (`cmd.exe`); the paths are in `process.executable` and
+`process.parent.executable`. An index made before 0.6.6.2 keeps its older records' meanings. Tell them apart by
+exact `pipeline_version` values (a terms aggregation, never a range: it is a keyword).
 
 ### Query (MCP Tools)
 

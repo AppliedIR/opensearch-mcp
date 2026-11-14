@@ -16,6 +16,7 @@ GW = [
     "shimcache",
     "amcache",
     "evtx_proc",
+    "evtx_proc_path",
     "tasks",
     "vol_dlls",
     "evtx_svc",

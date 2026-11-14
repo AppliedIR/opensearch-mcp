@@ -56,7 +56,7 @@ class TestNormalizeEvent:
         assert doc["@timestamp"] == "2024-01-15T10:30:00Z"
         assert doc["winlog.provider_name"] == "Microsoft-Windows-Security-Auditing"
         assert doc["user.name"] == "jsmith"
-        assert doc["user.effective.name"] == "SYSTEM"
+        assert "user.effective.name" not in doc  # 4624 has rows; none names it
         assert doc["source.ip"] == "10.0.0.50"
         assert doc["winlog.logon.type"] == "3"
 
@@ -168,9 +168,11 @@ class TestNormalizeEvent:
             }
         }
         doc = normalize_event(data)
-        assert doc["process.name"] == "C:\\Windows\\System32\\cmd.exe"
+        assert doc["process.executable"] == "C:\\Windows\\System32\\cmd.exe"
+        assert doc["process.name"] == "cmd.exe"
         assert doc["process.command_line"] == "cmd.exe /c whoami"
-        assert doc["process.parent.name"] == "C:\\Windows\\explorer.exe"
+        assert doc["process.parent.executable"] == "C:\\Windows\\explorer.exe"
+        assert doc["process.parent.name"] == "explorer.exe"
 
     def test_event_data_preserved_in_winlog(self):
         """All EventData fields must be preserved in winlog.event_data."""

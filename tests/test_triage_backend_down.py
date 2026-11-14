@@ -18,6 +18,7 @@ GW = [
     "shimcache",
     "amcache",
     "evtx_proc",
+    "evtx_proc_path",
     "tasks",
     "vol_dlls",
     "evtx_svc",
@@ -117,7 +118,7 @@ def test_a_working_backend_is_complete_with_the_same_counts():
         assert res[name]["status"] == "complete" and "reason" not in res[name]
     got = {k: (res[k]["checked"], res[k]["enriched"]) for k in GW}
     # File artifacts stamp one update per verdict group (2); the others, 2 per value.
-    assert got == {k: (N, 2) for k in GW[:5]} | {k: (N, 2 * N) for k in GW[5:]}
+    assert got == {k: (N, 2) for k in GW[:6]} | {k: (N, 2 * N) for k in GW[6:]}
     resp = _tool(_ok)
     assert resp["status"] == "complete" and "failed_artifacts" not in resp
 
@@ -145,7 +146,7 @@ def test_a_backend_lost_mid_run_fails_after_stamping_what_it_got():
         raise RuntimeError(f"Tool not found: {name}")
 
     res = _enrich(dies)
-    for name in GW[:5]:  # file artifacts: one verdict stamped (2 updates)
+    for name in GW[:6]:  # file artifacts: one verdict stamped (2 updates)
         assert res[name]["status"] == "failed", (name, res[name])
         assert res[name]["enriched"] == 2, (name, res[name])
 

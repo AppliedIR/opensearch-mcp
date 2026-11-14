@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from record_ids_cluster import make_case
-from test_evtx_fields_table import TARGETS, USER_PUT
+from test_evtx_fields_table import FIELDS, UD, UD_RULE, _nested, fields_put
 
 from opensearch_mcp import ingest_status, mappings, ops
 from opensearch_mcp import server as srv
@@ -84,12 +84,15 @@ def test_the_template_maps_it_keyword_without_a_text_form():
 
 
 def _mapping(sid=None, table=False):
-    props = {"event": {"properties": {"code": {"type": "integer"}}}}
+    props = _nested(FIELDS if table else ["event.code"])  # table: every template field
     if sid:
-        props["winlog"] = {"properties": {"user": {"properties": {"identifier": sid}}}}
-    if table:  # the user and group fields the table maps
-        props.update(USER_PUT["properties"])
-    return {"mappings": {"properties": props}}
+        winlog = props.setdefault("winlog", {}).setdefault("properties", {})
+        winlog["user"] = {"properties": {"identifier": sid}}
+    return {"mappings": {"properties": props, **({"dynamic_templates": [UD]} if table else {})}}
+
+
+MISSING, FIELDS_PUT = fields_put(_mapping())
+UD_PUT = {"dynamic_templates": [UD]}
 
 
 LIMIT = "illegal_argument_exception: Limit of total fields [61] exceeded"
@@ -117,27 +120,28 @@ def _patch(indices, refuse=(), low=({}, {})):
 def test_an_old_index_is_given_the_field_and_one_that_has_it_is_sent_nothing():
     result, sent = _patch({"case-a-evtx-0": _mapping(), "case-b-evtx-0": _mapping(
         {"type": "keyword"}, table=True)})  # fmt: skip
-    assert sent == [("case-a-evtx-0", SID_PUT), ("case-a-evtx-0", USER_PUT)]
-    assert result["patched"] == {"case-a-evtx-0": [FIELD, *TARGETS]}
+    assert sent == [("case-a-evtx-0", put) for put in (UD_PUT, SID_PUT, FIELDS_PUT)]
+    assert result["patched"] == {"case-a-evtx-0": [UD_RULE, FIELD, *MISSING]}
     assert result["unchanged"] == ["case-b-evtx-0"]
 
 
 def test_a_refused_put_is_named_with_its_error_and_its_field():
     result, _ = _patch({"case-a-evtx-0": _mapping()}, refuse={"case-a-evtx-0"})
-    assert result["patched"] == {"case-a-evtx-0": TARGETS}
+    assert result["patched"] == {"case-a-evtx-0": [UD_RULE, *MISSING]}
     assert result["failed"] == [{"index": "case-a-evtx-0", "error": LIMIT, "field": FIELD}]
 
 
 def test_a_refused_sid_put_never_costs_the_raise_which_goes_first_as_base_sent_it():
-    """The event-data raise is its own put, the body base sent, before the
-    SID's: the SID's refusal leaves it applied."""
+    """The event-data raise is its own put (the user-data rule with it), before
+    the SID's: the SID's refusal leaves it applied."""
     props = {"Payload": {"type": "keyword", "ignore_above": 8191}}
     low = ({"winlog.event_data.Payload"}, props)
     result, sent = _patch({"case-a-evtx-0": _mapping()}, refuse={"case-a-evtx-0"}, low=low)
-    raise_put = {"properties": {"winlog": {"properties": {"event_data": {"properties": props}}}}}
-    assert sent == [("case-a-evtx-0", raise_put), ("case-a-evtx-0", SID_PUT),
-                    ("case-a-evtx-0", USER_PUT)]  # fmt: skip
-    assert result["patched"] == {"case-a-evtx-0": ["winlog.event_data.Payload", *TARGETS]}
+    raise_put = {**UD_PUT, "properties": {"winlog": {"properties": {
+        "event_data": {"properties": props}}}}}  # fmt: skip
+    assert sent == [("case-a-evtx-0", put) for put in (raise_put, SID_PUT, FIELDS_PUT)]
+    assert result["patched"] == {"case-a-evtx-0": ["winlog.event_data.Payload", UD_RULE,
+                                                   *MISSING]}  # fmt: skip
     assert result["failed"] == [{"index": "case-a-evtx-0", "error": LIMIT, "field": FIELD}]
 
 

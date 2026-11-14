@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from test_evtx_fields_table import TARGETS, USER_PUT
+from test_evtx_fields_table import ECS_NEW, TARGETS, UD, UD_RULE, fields_put
 
 from opensearch_mcp import ingest_status, mappings
 from opensearch_mcp import server as srv
@@ -85,7 +85,11 @@ def test_an_event_data_string_is_indexed_up_to_8191(field):
     m = _template()
     assert _resolve(m, f"winlog.event_data.{field}") == {**kw(8191), "copy_to": ALL}
     # the dates rule first (a date-detected value is never a string), then this one
-    assert [list(e)[0] for e in m["dynamic_templates"]] == ["winlog_event_data_dates", RULE]
+    assert [list(e)[0] for e in m["dynamic_templates"]] == [
+        "winlog_event_data_dates",
+        RULE,
+        UD_RULE,
+    ]
 
 
 def test_the_other_limits_are_unchanged():
@@ -102,6 +106,10 @@ def test_only_the_event_data_limits_unfielded_set_header_sid_and_table_fields_ch
     t = json.loads(TEMPLATE.read_text())
     m = t["template"]["mappings"]
     assert m["properties"].pop("winlog.user.identifier") == {"type": "keyword"}
+    # the ECS fields and the user-data rule added with the table's ECS rows
+    for field in ECS_NEW:
+        m["properties"].pop(field)
+    assert m["dynamic_templates"].pop() == UD
     # the fields table's targets, each keyword (0.6.4 had user.name and user.effective.name)
     for field in TARGETS:
         if field not in ("user.name", "user.effective.name"):
@@ -229,26 +237,27 @@ class _Cluster:
 
 def test_installing_raises_an_existing_indexs_limits_from_its_full_mapping():
     cluster = _Cluster({IDX: _index_064()})
+    missing, fields = fields_put(_index_064())
     result = mappings.ensure_winlog_pipeline(cluster.client())
-    # the raise, the header SID's own put, then the table's fields' own put
+    # the raise, the header SID's own put, then the template's fields' own put
     assert cluster.to(IDX) == [{
-        "dynamic_templates": [rule(8191)],
+        "dynamic_templates": [rule(8191), UD],
         "properties": {"winlog": {"properties": {"event_data": {"properties": {
             "ContextInfo": kw(8191), "Details": kw(8191), "Payload": kw(8191),
             "Data": {"properties": {"#text": kw(8191)}}}}}}},
     }, {  # the header SID's own put, after the raise
         "properties": {"winlog": {"properties": {
             "user": {"properties": {"identifier": {"type": "keyword"}}}}}},
-    }, USER_PUT]  # fmt: skip
+    }, fields]  # fmt: skip
     assert cluster.limits(IDX) == {
         "Payload": 8191, "Details": 8191, "ContextInfo": 8191, "ScriptBlockText": 32766,
-        "Data.#text": 8191, "Data_raw.keyword": 10000, "rule": 8191,
+        "Data.#text": 8191, "Data_raw.keyword": 10000, "rule": 8191, "_pipeline_error": 512,
     }  # fmt: skip
     assert result["status"] == "ok" and result["evtx_failed"] == []
     assert result["evtx_patched"] == {IDX: [
         "winlog.event_data.ContextInfo", "winlog.event_data.Data.#text",
-        "winlog.event_data.Details", "winlog.event_data.Payload", RULE,
-        "winlog.user.identifier", *TARGETS]}  # fmt: skip
+        "winlog.event_data.Details", "winlog.event_data.Payload", RULE, UD_RULE,
+        "winlog.user.identifier", *missing]}  # fmt: skip
 
 
 def test_a_second_install_sends_the_patched_index_nothing():
@@ -290,7 +299,7 @@ def test_a_refused_patch_is_reported_and_the_other_indices_are_patched():
     assert result["status"] == "partial"
     assert [f["index"] for f in result["evtx_failed"]] == [IDX]
     assert sorted(result["evtx_patched"]) == [IDX, other] and cluster.limits(other)["rule"] == 8191
-    assert result["evtx_patched"][IDX] == ["winlog.user.identifier", *TARGETS]
+    assert result["evtx_patched"][IDX] == ["winlog.user.identifier", *fields_put(_index_064())[0]]
     assert cluster.limits(IDX)["rule"] == 1024
 
 

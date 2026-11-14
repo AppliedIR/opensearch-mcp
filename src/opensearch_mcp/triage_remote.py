@@ -165,10 +165,18 @@ def enrich_remote(
     # Vol3 pslist/pstree/psscan excluded: ImageFileName is a bare 14-char name
     # (no path) — check_file gives wrong is_system_path, all system procs → SUSPICIOUS.
     # Vol3 dlllist uses Path (full Windows path), not Name (bare DLL name).
+    # An evtx process's path is process.executable; a record ingested before
+    # that field has it in process.name, so those are read there, once.
     for name, suffix, field, query in [
         ("shimcache", "shimcache", "Path.keyword", "*"),
         ("amcache", "amcache", "FullPath.keyword", "*"),
-        ("evtx_proc", "evtx", "process.name", "event.code:(4688 OR 1)"),
+        ("evtx_proc", "evtx", "process.executable", "event.code:(4688 OR 1)"),
+        (
+            "evtx_proc_path",
+            "evtx",
+            "process.name",
+            "event.code:(4688 OR 1) AND NOT _exists_:process.executable",
+        ),
         ("tasks", "tasks", "task.command", "*"),
         ("vol_dlls", "vol-dlllist", "Path.keyword", "*"),
     ]:
@@ -1137,7 +1145,7 @@ def _enrich_registry_run_keys(client, case_ix, on_progress=None):
             unchecked,
             checked=len(buckets),
             enriched=enriched,
-        ),  # fmt: skip
+        ),
         too_long,
     )
 

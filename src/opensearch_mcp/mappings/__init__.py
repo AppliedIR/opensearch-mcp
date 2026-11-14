@@ -506,6 +506,7 @@ def patch_flattened_indices(client, index_patterns: list[str]) -> dict[str, Any]
 
 _EVENT_DATA = "winlog.event_data"
 _EVTX_RULE = "winlog_event_data_strings"
+_UD_RULE = "winlog_user_data_strings"
 
 
 def _evtx_limits() -> tuple[dict[str, int], int]:
@@ -564,9 +565,12 @@ def _low_event_data(
 
 
 def _mapped(mapping: dict, field: str) -> bool:
-    """Whether an index's mapping maps the dotted `field`, of any type."""
+    """Whether an index's mapping maps the dotted `field`, of any type, or
+    maps one of its parents as a leaf, which no put can give a sub-field."""
     node: Any = mapping
     for part in field.split("."):
+        if node.get("type") not in (None, "object", "nested"):
+            return True
         props = node.get("properties") if isinstance(node, dict) else None
         node = props.get(part) if isinstance(props, dict) else None
         if not isinstance(node, dict):
@@ -574,15 +578,15 @@ def _mapped(mapping: dict, field: str) -> bool:
     return True
 
 
-def _keyword_props(fields: list[str]) -> dict:
-    """put_mapping properties mapping each dotted field `keyword`."""
+def _template_props(fields: list[str], template: dict) -> dict:
+    """put_mapping properties mapping each dotted field as the template does."""
     out: dict = {}
     for field in fields:
         node = out
         *parents, leaf = field.split(".")
         for parent in parents:
-            node = node.setdefault(parent, {"properties": {}})["properties"]
-        node[leaf] = {"type": "keyword"}
+            node = node.setdefault(parent, {}).setdefault("properties", {})
+        node.setdefault(leaf, {}).update(template[field])
     return out
 
 
@@ -614,16 +618,19 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
     the header SID (`winlog.user.identifier`) `keyword` where it isn't
     mapped, so an old index never maps it by guess, and its refusal (one
     field over an index's field limit) never costs the raise. A third maps
-    the fields the evtx fields table names `keyword` where they aren't mapped
-    yet, after the SID's, so its refusal never costs the SID. A refused SID put
-    is named with its field, a refused table put with its fields. A limit is
-    never lowered, and an index already at the template's limits with every
-    field mapped is sent nothing. Records already stored keep the limit they
-    were indexed with and the fields they were indexed with."""
-    from opensearch_mcp.normalize import FIELDS_TARGETS
-
+    every other field the template declares, as the template maps it, where
+    the index doesn't map it yet, after the SID's, so its refusal never costs
+    the SID. The first put also adds the template's user-data rule to an index
+    whose rules lack it. A refused SID put is named with its field, a refused
+    field put with its fields. A limit is never lowered, and an index already
+    at the template's limits with every rule and field is sent nothing.
+    Records already stored keep the limit they were indexed with and the
+    fields they were indexed with."""
     results: dict[str, Any] = {"patched": {}, "unchanged": [], "failed": []}
     explicit, rule = _evtx_limits()
+    template = _load_json(_EVTX_TEMPLATE_FILE)["template"]["mappings"]
+    fields = template["properties"]
+    ud = next(e for e in template["dynamic_templates"] if _UD_RULE in e)
     try:
         current = client.indices.get_mapping(
             index=_TEMPLATE_PATTERN,
@@ -642,10 +649,14 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
         low, props = _low_event_data(_event_data(mapping), _EVENT_DATA, explicit, rule)
         rules = mapping.get("dynamic_templates") or []
         raised = rules
-        if _low_rule(rules, rule) is not None:  # the index's own rule, only its limit raised
+        rule_low = _low_rule(rules, rule) is not None
+        if rule_low:  # the index's own rule, only its limit raised
             raised = [_raised_rule(e, rule) if _EVTX_RULE in e else e for e in rules]
+        ud_missing = not any(isinstance(e, dict) and _UD_RULE in e for e in rules)
+        if ud_missing:
+            raised = [*raised, ud]
         sid_missing = _SID not in _event_data(mapping, "user")
-        missing = [f for f in FIELDS_TARGETS if not _mapped(mapping, f)]
+        missing = [f for f in fields if f != "winlog.user.identifier" and not _mapped(mapping, f)]
         if not props and raised == rules and not sid_missing and not missing:
             results["unchanged"].append(index)
             continue
@@ -659,7 +670,8 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
                 put["properties"] = {"winlog": {"properties": event_data}}
             try:
                 client.indices.put_mapping(index=index, body=put)
-                patched += sorted(low) + ([_EVTX_RULE] if raised != rules else [])
+                patched += sorted(low) + ([_EVTX_RULE] if rule_low else [])
+                patched += [_UD_RULE] if ud_missing else []
             except Exception as e:  # one index's refusal doesn't stop the others
                 logger.warning("patch_evtx_indices: %s failed: %s", index, e)
                 results["failed"].append({"index": index, "error": str(e)})
@@ -676,11 +688,11 @@ def patch_evtx_indices(client, audit=None) -> dict[str, Any]:
         if missing:
             try:
                 client.indices.put_mapping(
-                    index=index, body={"properties": _keyword_props(missing)}
+                    index=index, body={"properties": _template_props(missing, fields)}
                 )
                 patched += missing
             except Exception as e:
-                logger.warning("patch_evtx_indices: %s's table fields failed: %s", index, e)
+                logger.warning("patch_evtx_indices: %s's template fields failed: %s", index, e)
                 results["failed"].append({"index": index, "error": str(e), "fields": missing})
         if patched:
             results["patched"][index] = patched

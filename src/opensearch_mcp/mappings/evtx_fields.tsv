@@ -11,3 +11,56 @@ Security	Microsoft-Windows-Security-Auditing	4799	user.id	SubjectUserSid	-	none	
 Security	Microsoft-Windows-Security-Auditing	4799	group.name	TargetUserName	-	none	MSL4799 ECS-G
 Security	Microsoft-Windows-Security-Auditing	4799	group.domain	TargetDomainName	-	none	MSL4799 ECS-G
 Security	Microsoft-Windows-Security-Auditing	4799	group.id	TargetSid	-	none	MSL4799 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4611,4616,4648,4672,4697,4719,4720,4722,4724,4725,4726,4728,4732,4738,4756,4798,4907,5140,5379	user.name	SubjectUserName	-	none	MSL4611 MSL4616 MSL4648 MSL4672 MSL4697 MSL4719 MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4732 MSL4738 MSL4798 MSL4907 MSL5140 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4611,4616,4648,4672,4697,4719,4720,4722,4724,4725,4726,4728,4732,4738,4756,4798,4907,5140,5379	user.domain	SubjectDomainName	-	none	MSL4611 MSL4616 MSL4648 MSL4672 MSL4697 MSL4719 MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4732 MSL4738 MSL4798 MSL4907 MSL5140 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4611,4616,4648,4672,4697,4719,4720,4722,4724,4725,4726,4728,4732,4738,4756,4798,4907,5140,5379	user.id	SubjectUserSid	-,S-1-0-0	none	MSL4611 MSL4616 MSL4648 MSL4672 MSL4697 MSL4719 MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4732 MSL4738 MSL4798 MSL4907 MSL5140 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4634,4647,4768,4769,4771,4776	user.name	TargetUserName	-	none	MSL4624 MSL4625 MSL4634 MSL4647 MSL4768 MSL4769 MSL4771 MSL4776 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4634,4647,4768,4769	user.domain	TargetDomainName	-	none	MSL4624 MSL4625 MSL4634 MSL4647 MSL4768 MSL4769 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4634,4647,4771	user.id	TargetUserSid,TargetSid	-,S-1-0-0	none	MSL4624 MSL4625 MSL4634 MSL4647 MSL4771 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4778,4779	user.name	AccountName	-	none	MSL4778 MSL4779 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4778,4779	user.domain	AccountDomain	-	none	MSL4778 MSL4779 ECS-UU
+Security	Microsoft-Windows-Eventlog	1102	user.name	SubjectUserName	-	none	MSL1102 ECS-UU
+Security	Microsoft-Windows-Eventlog	1102	user.domain	SubjectDomainName	-	none	MSL1102 ECS-UU
+Security	Microsoft-Windows-Eventlog	1102	user.id	SubjectUserSid	-,S-1-0-0	none	MSL1102 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4616,4624,4625,4648,4907	process.pid	ProcessId	-	hex	MSL4616 MSL4624 MSL4625 MSL4648 MSL4907 ECM
+Security	Microsoft-Windows-Security-Auditing	4616,4624,4625,4648,4907	process.executable	ProcessName	-	none	MSL4616 MSL4624 MSL4625 MSL4648 MSL4907 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	process.pid	NewProcessId	-	hex	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	process.executable	NewProcessName	-	none	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	process.command_line	CommandLine	-	none	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	process.parent.pid	ProcessId	-	hex	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	process.parent.executable	ParentProcessName	-	none	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	4798,4799	process.pid	CallerProcessId	-	hex	MSL4798 MSL4799 ECM
+Security	Microsoft-Windows-Security-Auditing	4798,4799	process.executable	CallerProcessName	-	none	MSL4798 MSL4799 ECM
+Security	Microsoft-Windows-Security-Auditing	5379	process.pid	ClientProcessId	-	int	ECM
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4648,4768,4769,4771,4778,4779,5140	source.ip	IpAddress,ClientAddress	-	ip	MSL4624 MSL4625 MSL4648 MSL4768 MSL4769 MSL4771 MSL4778 MSL4779 MSL5140 ECM
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4648,4768,4769,4771,5140	source.port	IpPort	-,0	int	MSL4624 MSL4625 MSL4648 MSL4768 MSL4769 MSL4771 MSL5140 ECM
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4776,4778,4779	source.domain	WorkstationName,Workstation,ClientName	-	none	MSL4624 MSL4625 MSL4776 MSL4778 MSL4779 ECM
+Security	Microsoft-Windows-Security-Auditing	4648	destination.domain	TargetServerName	-	none	MSL4648 ECM
+Security	Microsoft-Windows-Security-Auditing	4648	user.effective.name	TargetUserName	-	none	MSL4648 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4648	user.effective.domain	TargetDomainName	-	none	MSL4648 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4720,4722,4724,4725,4726,4738,4798	user.target.name	TargetUserName	-	none	MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4738 MSL4798 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4720,4722,4724,4725,4726,4738,4798	user.target.domain	TargetDomainName	-	none	MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4738 MSL4798 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4720,4722,4724,4725,4726,4738,4798	user.target.id	TargetSid	-,S-1-0-0	none	MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4738 MSL4798 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4728,4732,4756	group.name	TargetUserName	-	none	MSL4732 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4728,4732,4756	group.domain	TargetDomainName	-	none	MSL4732 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4728,4732,4756	group.id	TargetSid	-,S-1-0-0	none	MSL4732 ECS-G
+Security	Microsoft-Windows-Security-Auditing	4728,4732,4756	user.target.id	MemberSid	-,S-1-0-0	none	MSL4732 ECS-UU
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4634,4647,4648,4768,4769,4771,4776,4778,4779	event.category	authentication	-	const	MSL4624 MSL4625 MSL4634 MSL4647 MSL4648 MSL4768 MSL4769 MSL4771 MSL4776 MSL4778 MSL4779 ECM
+Security	Microsoft-Windows-Security-Auditing	4672,4720,4722,4724,4725,4726,4728,4732,4738,4756,4798,4799,5379	event.category	iam	-	const	MSL4672 MSL4720 MSL4722 MSL4724 MSL4725 MSL4726 MSL4732 MSL4738 MSL4798 MSL4799 ECM
+Security	Microsoft-Windows-Security-Auditing	4611,4616,4697,4719,4907	event.category	configuration	-	const	MSL4611 MSL4616 MSL4697 MSL4719 MSL4907 ECM
+Security	Microsoft-Windows-Security-Auditing	4688	event.category	process	-	const	MSL4688 ECM
+Security	Microsoft-Windows-Security-Auditing	5140	event.category	network,file	-	const	MSL5140 ECM
+Security	Microsoft-Windows-Eventlog	1102	event.category	configuration	-	const	MSL1102 ECM
+Security	Microsoft-Windows-Security-Auditing	4624,4625,4648,4688,4768,4769,4771,4776,4778	event.type	start	-	const	MSL4624 MSL4625 MSL4648 MSL4688 MSL4768 MSL4769 MSL4771 MSL4776 MSL4778 ECM
+Security	Microsoft-Windows-Security-Auditing	4634,4647,4779	event.type	end	-	const	MSL4634 MSL4647 MSL4779 ECM
+Security	Microsoft-Windows-Security-Auditing	4672	event.type	admin	-	const	MSL4672 ECM
+Security	Microsoft-Windows-Security-Auditing	4611,4616,4719,4907	event.type	change	-	const	MSL4611 MSL4616 MSL4719 MSL4907 ECM
+Security	Microsoft-Windows-Security-Auditing	4697	event.type	installation	-	const	MSL4697 ECM
+Security	Microsoft-Windows-Security-Auditing	4720	event.type	user,creation	-	const	MSL4720 ECM
+Security	Microsoft-Windows-Security-Auditing	4722,4724,4725,4738	event.type	user,change	-	const	MSL4722 MSL4724 MSL4725 MSL4738 ECM
+Security	Microsoft-Windows-Security-Auditing	4726	event.type	user,deletion	-	const	MSL4726 ECM
+Security	Microsoft-Windows-Security-Auditing	4728,4732,4756	event.type	group,change	-	const	MSL4732 ECM
+Security	Microsoft-Windows-Security-Auditing	4798	event.type	user,info	-	const	MSL4798 ECM
+Security	Microsoft-Windows-Security-Auditing	4799	event.type	group,info	-	const	MSL4799 ECM
+Security	Microsoft-Windows-Security-Auditing	5140,5379	event.type	access	-	const	MSL5140 ECM
+Security	Microsoft-Windows-Eventlog	1102	event.type	deletion	-	const	MSL1102 ECM

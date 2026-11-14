@@ -35,7 +35,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from opensearchpy.exceptions import RequestError, TransportError
-from test_evtx_fields_table import TARGETS, USER_PUT
+from test_evtx_fields_table import UD, UD_RULE, fields_put
 from test_evtx_long_fields import _Cluster, _index_064, kw, rule
 from test_partial_shard_answers import Cluster, failures, run, tools  # noqa: F401 (fixture)
 
@@ -88,7 +88,7 @@ def test_an_unfielded_term_searches_every_declared_field_and_the_catch_all():
 
 def test_the_dates_rule_comes_before_the_strings_rule_and_both_copy():
     rules = _installed()["mappings"]["dynamic_templates"]
-    assert [list(e)[0] for e in rules] == [DATES, STRINGS]
+    assert [list(e)[0] for e in rules] == [DATES, STRINGS, "winlog_user_data_strings"]
     dates, strings = rules[0][DATES], rules[1][STRINGS]
     assert dates["match_mapping_type"] == "date"
     assert dates["mapping"] == {"type": "date", "copy_to": [ALL, DATES_ALL]}
@@ -353,19 +353,21 @@ def test_the_patch_raises_an_indexs_own_rule_then_maps_the_header_sid_and_table_
     # these indices predate the header SID and the table's fields: their own
     # puts come last, the SID's then the fields'
     sent = cluster.to(IDX)
-    assert sent[-2:] == [SID_PUT, USER_PUT]
-    puts = sent[:-2]
+    missing, fields = fields_put(index)
+    assert sent[-2:] == [SID_PUT, fields]
+    (put,) = sent[:-2]  # the user-data rule reaches every one of them
+    tail = [UD_RULE, SID, *missing]
     if rules is None:
-        want = {"patched": {IDX: [SID, *TARGETS]}, "unchanged": [], "failed": []}
-        assert puts == [] and result == want
+        want = {"patched": {IDX: tail}, "unchanged": [], "failed": []}
+        assert put == {"dynamic_templates": [*index["mappings"]["dynamic_templates"], UD]}
+        assert result == want
         return
-    (put,) = puts
-    assert put["dynamic_templates"] == rules
+    assert put["dynamic_templates"] == [*rules, UD]
     if not any(DATES in e for e in index["mappings"]["dynamic_templates"]):
         assert ALL not in json.dumps(put) and "event_data_all" not in json.dumps(put)
         assert "event_data_dates_all" not in json.dumps(put)
     client.indices.put_settings.assert_not_called()
-    assert result["patched"][IDX][-11:] == [STRINGS, SID, *TARGETS]
+    assert result["patched"][IDX][-len(tail) - 1 :] == [STRINGS, *tail]
 
 
 # --- (e) What parse_evtx writes ------------------------------------------------
@@ -458,7 +460,8 @@ def _write(files, records=None):
 def _check(keys, seen, batches):
     tpl = mappings.with_host_key_fields(json.loads(TEMPLATE.read_text()))["template"]
     declared = set(_paths(tpl["mappings"]["properties"]))
-    stray = sorted(k for k in keys if k not in declared and not k.startswith("winlog.event_data."))
+    ruled = ("winlog.event_data.", "winlog.user_data.")  # the strings rules map these
+    stray = sorted(k for k in keys if k not in declared and not k.startswith(ruled))
     assert seen["sent"] and not stray, stray[:20]
     assert seen["id_scheme"] == 0 and seen["extra"] == set()
     assert len(batches) >= 2 and batches[1] == batches[0]  # sent again under the same ids

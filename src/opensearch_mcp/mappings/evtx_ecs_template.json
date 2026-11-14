@@ -37,6 +37,16 @@
               "copy_to": "winlog.event_data_all"
             }
           }
+        },
+        {
+          "winlog_user_data_strings": {
+            "path_match": "winlog.user_data.*",
+            "match_mapping_type": "string",
+            "mapping": {
+              "type": "keyword",
+              "ignore_above": 8191
+            }
+          }
         }
       ],
       "properties": {
@@ -230,7 +240,42 @@
         },
         "threat_intel.iocs.outcome": {"type": "keyword"},
         "threat_intel.iocs.ioc_value": {"type": "keyword"},
-        "threat_intel.iocs.ioc_type": {"type": "keyword"}
+        "threat_intel.iocs.ioc_type": {"type": "keyword"},
+        "event.provider": {"type": "keyword"},
+        "winlog.provider_guid": {"type": "keyword"},
+        "winlog.record_id": {"type": "keyword"},
+        "winlog.computer_name": {"type": "keyword"},
+        "winlog.version": {"type": "long"},
+        "winlog.task": {"type": "keyword"},
+        "event.action": {"type": "keyword"},
+        "winlog.opcode": {"type": "keyword"},
+        "winlog.keywords": {"type": "keyword"},
+        "event.outcome": {"type": "keyword"},
+        "log.level": {"type": "keyword"},
+        "event.kind": {"type": "keyword"},
+        "winlog.activity_id": {"type": "keyword"},
+        "winlog.related_activity_id": {"type": "keyword"},
+        "winlog.process.pid": {"type": "long"},
+        "winlog.process.thread.id": {"type": "long"},
+        "winlog.user_data.xml_name": {"type": "keyword"},
+        "user.target.name": {"type": "keyword"},
+        "user.target.domain": {"type": "keyword"},
+        "user.target.id": {"type": "keyword"},
+        "process.pid": {"type": "long"},
+        "process.executable": {"type": "keyword"},
+        "process.parent.pid": {"type": "long"},
+        "process.parent.executable": {"type": "keyword"},
+        "source.port": {"type": "long"},
+        "source.domain": {"type": "keyword"},
+        "destination.domain": {"type": "keyword"},
+        "event.category": {"type": "keyword"},
+        "event.type": {"type": "keyword"},
+        "related.user": {"type": "keyword"},
+        "related.ip": {"type": "ip", "ignore_malformed": true},
+        "related.hash": {"type": "keyword"},
+        "file.name": {"type": "keyword"},
+        "file.directory": {"type": "keyword"},
+        "file.extension": {"type": "keyword"}
       }
     }
   },
