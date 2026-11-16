@@ -329,14 +329,15 @@ def normalize_event(data: dict) -> dict:
     flat_user_data = {}
     ud_name = None
     if user_data and not event_data:
-        for key, val in user_data.items() if isinstance(user_data, dict) else [(None, user_data)]:
-            if isinstance(val, dict):
-                flat_user_data = {k: v for k, v in val.items() if k != "#attributes"}
-                ud_name = key
-                break
-            # If it's not a dict, store as-is
+        if isinstance(user_data, dict):
+            key, val = next(iter(user_data.items()))  # truthy, so it has a first item
+        else:
+            key, val = None, user_data
+        if isinstance(val, dict):
+            flat_user_data = {k: v for k, v in val.items() if k != "#attributes"}
+            ud_name = key
+        else:  # If it's not a dict, store as-is
             flat_user_data = user_data
-            break
 
     # Use EventData if available, otherwise flattened UserData
     payload = event_data if event_data else flat_user_data
