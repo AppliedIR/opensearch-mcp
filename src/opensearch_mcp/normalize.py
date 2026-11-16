@@ -85,15 +85,12 @@ def _num(value) -> int | None:
         return None
 
 
-_LONG = range(-(2**63), 2**63)  # what an OpenSearch long field holds
-
-
 def _long(value) -> int | None:
     """_num's integer when a long field holds it, else None: the field is left
     unwritten and the raw value stays in the event data (a larger number would
     cost its record at the long field, or every later record at serialisation)."""
     number = _num(value)
-    return number if number in _LONG else None
+    return number if number is not None and -(2**63) <= number < 2**63 else None
 
 
 def _split(value) -> tuple[str, str]:
