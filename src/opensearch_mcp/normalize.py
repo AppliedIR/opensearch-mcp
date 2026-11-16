@@ -85,6 +85,17 @@ def _num(value) -> int | None:
         return None
 
 
+_LONG = range(-(2**63), 2**63)  # what an OpenSearch long field holds
+
+
+def _long(value) -> int | None:
+    """_num's integer when a long field holds it, else None: the field is left
+    unwritten and the raw value stays in the event data (a larger number would
+    cost its record at the long field, or every later record at serialisation)."""
+    number = _num(value)
+    return number if number in _LONG else None
+
+
 def _split(value) -> tuple[str, str]:
     """DOMAIN\\name as (domain, name); a value without a backslash is a name."""
     domain, sep, name = str(value).partition("\\")
@@ -94,8 +105,8 @@ def _split(value) -> tuple[str, str]:
 # What a row's transform makes of a source value; None means no value
 _TRANSFORMS = {
     "none": lambda v: v,
-    "hex": lambda v: _num(v if str(v).lower().startswith("0x") else f"0x{v}"),
-    "int": _num,
+    "hex": lambda v: _long(v if str(v).lower().startswith("0x") else f"0x{v}"),
+    "int": _long,
     "bool": lambda v: {"true": True, "false": False}.get(str(v).strip().lower()),
     "lower": lambda v: str(v).lower(),
     "ip": lambda v: _clean_ip(str(v)),

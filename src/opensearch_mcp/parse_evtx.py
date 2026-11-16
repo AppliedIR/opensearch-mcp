@@ -82,6 +82,18 @@ def _normalise_data(doc: dict) -> None:
         ed["Data_raw"] = _java_text(data)
 
 
+def _visible_surrogates(value):
+    """value with each lone surrogate written as visible text (\\ud800), which
+    UTF-8 can carry: a raw one stops the bulk write and every record after it."""
+    if isinstance(value, str):
+        return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(value, dict):
+        return {_visible_surrogates(k): _visible_surrogates(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_visible_surrogates(v) for v in value]
+    return value
+
+
 def parse_and_index(
     evtx_path: Path,
     client: OpenSearch,
@@ -115,6 +127,8 @@ def parse_and_index(
         except (json.JSONDecodeError, KeyError, RuntimeError):
             skipped += 1
             continue
+        if "\\u" in record["data"]:  # json.loads makes a lone surrogate only from a \u escape
+            data = _visible_surrogates(data)
 
         doc = normalize_event(data)
         _normalise_data(doc)
