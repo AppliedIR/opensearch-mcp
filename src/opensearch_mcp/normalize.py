@@ -227,14 +227,14 @@ def _header(system: dict, provider_name: str) -> dict:
         "winlog.provider_guid": _attrs(system.get("Provider")).get("Guid") or None,
         "winlog.record_id": str(record_id) if record_id else None,
         "winlog.computer_name": system.get("Computer"),
-        "winlog.version": _num(system.get("Version")) or None,
+        "winlog.version": _long(system.get("Version")) or None,
         "winlog.opcode": None if opcode is None else _OPCODES.get(_num(opcode)),
         "winlog.keywords": [name for bit, name in _KEYWORDS.items() if keywords & bit] or None,
         "log.level": _LEVELS.get(_num(system.get("Level")) or 0),
         "winlog.activity_id": correlation.get("ActivityID") or None,
         "winlog.related_activity_id": correlation.get("RelatedActivityID") or None,
-        "winlog.process.pid": _num(execution.get("ProcessID")) or None,
-        "winlog.process.thread.id": _num(execution.get("ThreadID")) or None,
+        "winlog.process.pid": _long(execution.get("ProcessID")) or None,
+        "winlog.process.thread.id": _long(execution.get("ThreadID")) or None,
     }
 
 
