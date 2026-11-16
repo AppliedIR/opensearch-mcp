@@ -250,6 +250,13 @@ def test_an_empty_command_line_is_absent_where_a_row_writes_it():
     assert "process.command_line" not in doc
 
 
+def test_a_source_its_transform_makes_nothing_of_gives_way_to_the_next():
+    """IpAddress "::" is not a skip value, but no address: source.ip is the
+    row's next source, ClientAddress."""
+    doc = normalize_event(_record(4778, {**PAYLOADS["C4778"], "IpAddress": "::"}))
+    assert doc["source.ip"] == "198.51.100.20"
+
+
 @pytest.mark.parametrize("rec", list(ALL))
 def test_every_field_written_is_in_the_template(rec):
     doc = normalize_event(ALL[rec])

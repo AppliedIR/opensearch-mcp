@@ -129,6 +129,14 @@ def test_user_data_keeps_its_strings_and_its_element_name():
     assert normalize_event(rec)["winlog.user_data"] == want
 
 
+def test_user_data_without_a_string_value_gives_no_user_data():
+    rec = _record(1102, provider="Microsoft-Windows-Eventlog")
+    rec["Event"]["UserData"] = {"LogFileCleared": {
+        "#attributes": {}, "Empty": "", "Null": None, "Nested": {"a": "b"},
+        "List": ["c"]}}  # fmt: skip
+    assert "winlog.user_data" not in normalize_event(rec)
+
+
 def test_event_data_gives_no_user_data():
     assert "winlog.user_data" not in normalize_event(_record(data={"A": "b"}))
 
