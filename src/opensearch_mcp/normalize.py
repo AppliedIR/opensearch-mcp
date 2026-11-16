@@ -329,7 +329,7 @@ def normalize_event(data: dict) -> dict:
     flat_user_data = {}
     ud_name = None
     if user_data and not event_data:
-        for key, val in user_data.items():
+        for key, val in user_data.items() if isinstance(user_data, dict) else [(None, user_data)]:
             if isinstance(val, dict):
                 flat_user_data = {k: v for k, v in val.items() if k != "#attributes"}
                 ud_name = key
@@ -340,6 +340,8 @@ def normalize_event(data: dict) -> dict:
 
     # Use EventData if available, otherwise flattened UserData
     payload = event_data if event_data else flat_user_data
+    if not isinstance(payload, dict):  # a value of another type has no named fields
+        payload = {}
     # Store both for searchability
     stored_data = event_data if event_data else (flat_user_data if flat_user_data else {})
 
@@ -403,7 +405,7 @@ def normalize_event(data: dict) -> dict:
     # mapping. Prevents type conflicts across Event IDs (e.g., LogonType: "3" vs 3).
     # Top-level ECS fields above keep their proper types (int, ip, keyword).
     # Nested dicts/lists are left as-is (UserData wrappers, Data elements).
-    if stored_data:
+    if isinstance(stored_data, dict) and stored_data:
         doc["winlog.event_data"] = _coerce_scalars(stored_data)
     else:
         doc["winlog.event_data"] = stored_data
