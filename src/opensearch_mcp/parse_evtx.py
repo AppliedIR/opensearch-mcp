@@ -124,11 +124,11 @@ def parse_and_index(
     for record in parser.records_json():
         try:
             data = json.loads(record["data"])
+            if "\\u" in record["data"]:  # json.loads makes a lone surrogate only from a \u escape
+                data = _visible_surrogates(data)
         except (json.JSONDecodeError, KeyError, RuntimeError):
             skipped += 1
             continue
-        if "\\u" in record["data"]:  # json.loads makes a lone surrogate only from a \u escape
-            data = _visible_surrogates(data)
 
         doc = normalize_event(data)
         _normalise_data(doc)
